@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::identifiers::ObjectId;
 use super::mana::ManaPool;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -10,6 +11,15 @@ pub struct Player {
     pub id: PlayerId,
     pub life: i32,
     pub mana_pool: ManaPool,
+
+    // Per-player zones
+    pub library: Vec<ObjectId>,
+    pub hand: Vec<ObjectId>,
+    pub graveyard: Vec<ObjectId>,
+
+    // Tracking
+    pub has_drawn_this_turn: bool,
+    pub lands_played_this_turn: u8,
 }
 
 impl Default for Player {
@@ -18,6 +28,11 @@ impl Default for Player {
             id: PlayerId(0),
             life: 20,
             mana_pool: ManaPool::default(),
+            library: Vec::new(),
+            hand: Vec::new(),
+            graveyard: Vec::new(),
+            has_drawn_this_turn: false,
+            lands_played_this_turn: 0,
         }
     }
 }

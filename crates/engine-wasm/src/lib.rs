@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
-use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, Phase, Zone};
+use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
 
 /// Verify WASM integration works.
 #[wasm_bindgen]
@@ -91,6 +91,7 @@ const _: () = {
         let _ = std::any::type_name::<GameState>();
         let _ = std::any::type_name::<ManaColor>();
         let _ = std::any::type_name::<ManaPool>();
+        let _ = std::any::type_name::<ManaType>();
         let _ = std::any::type_name::<Phase>();
         let _ = std::any::type_name::<Zone>();
     }

@@ -2,6 +2,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::identifiers::ObjectId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
     White,
@@ -9,6 +11,29 @@ pub enum ManaColor {
     Black,
     Red,
     Green,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ManaType {
+    White,
+    Blue,
+    Black,
+    Red,
+    Green,
+    Colorless,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaRestriction {
+    OnlyForSpellType(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaUnit {
+    pub color: ManaType,
+    pub source_id: ObjectId,
+    pub snow: bool,
+    pub restrictions: Vec<ManaRestriction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -149,33 +174,47 @@ impl Default for ManaCost {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaPool {
-    pub white: u32,
-    pub blue: u32,
-    pub black: u32,
-    pub red: u32,
-    pub green: u32,
-    pub colorless: u32,
+    pub mana: Vec<ManaUnit>,
 }
 
 impl ManaPool {
-    pub fn add(&mut self, color: ManaColor, amount: u32) {
-        match color {
-            ManaColor::White => self.white += amount,
-            ManaColor::Blue => self.blue += amount,
-            ManaColor::Black => self.black += amount,
-            ManaColor::Red => self.red += amount,
-            ManaColor::Green => self.green += amount,
-        }
+    pub fn add(&mut self, unit: ManaUnit) {
+        self.mana.push(unit);
     }
 
-    pub fn total(&self) -> u32 {
-        self.white + self.blue + self.black + self.red + self.green + self.colorless
+    pub fn count_color(&self, color: ManaType) -> usize {
+        self.mana.iter().filter(|m| m.color == color).count()
+    }
+
+    pub fn total(&self) -> usize {
+        self.mana.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.mana.clear();
+    }
+
+    pub fn spend(&mut self, color: ManaType) -> Option<ManaUnit> {
+        if let Some(pos) = self.mana.iter().position(|m| m.color == color) {
+            Some(self.mana.swap_remove(pos))
+        } else {
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_unit(color: ManaType) -> ManaUnit {
+        ManaUnit {
+            color,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: Vec::new(),
+        }
+    }
 
     #[test]
     fn mana_color_serializes_as_string() {
@@ -206,31 +245,101 @@ mod tests {
     }
 
     #[test]
-    fn mana_pool_add_increases_correct_color() {
+    fn mana_pool_add_increases_count() {
         let mut pool = ManaPool::default();
-        pool.add(ManaColor::Blue, 3);
-        assert_eq!(pool.blue, 3);
+        pool.add(make_unit(ManaType::Blue));
+        pool.add(make_unit(ManaType::Blue));
+        pool.add(make_unit(ManaType::Blue));
+        assert_eq!(pool.count_color(ManaType::Blue), 3);
         assert_eq!(pool.total(), 3);
     }
 
     #[test]
     fn mana_pool_add_multiple_colors() {
         let mut pool = ManaPool::default();
-        pool.add(ManaColor::White, 2);
-        pool.add(ManaColor::Red, 1);
-        pool.add(ManaColor::Green, 3);
+        pool.add(make_unit(ManaType::White));
+        pool.add(make_unit(ManaType::White));
+        pool.add(make_unit(ManaType::Red));
+        pool.add(make_unit(ManaType::Green));
+        pool.add(make_unit(ManaType::Green));
+        pool.add(make_unit(ManaType::Green));
         assert_eq!(pool.total(), 6);
-        assert_eq!(pool.white, 2);
-        assert_eq!(pool.red, 1);
-        assert_eq!(pool.green, 3);
+        assert_eq!(pool.count_color(ManaType::White), 2);
+        assert_eq!(pool.count_color(ManaType::Red), 1);
+        assert_eq!(pool.count_color(ManaType::Green), 3);
     }
 
     #[test]
     fn mana_pool_total_includes_colorless() {
-        let pool = ManaPool {
-            colorless: 5,
-            ..Default::default()
-        };
+        let mut pool = ManaPool::default();
+        pool.add(make_unit(ManaType::Colorless));
+        pool.add(make_unit(ManaType::Colorless));
+        pool.add(make_unit(ManaType::Colorless));
+        pool.add(make_unit(ManaType::Colorless));
+        pool.add(make_unit(ManaType::Colorless));
         assert_eq!(pool.total(), 5);
+    }
+
+    #[test]
+    fn mana_pool_spend_removes_unit() {
+        let mut pool = ManaPool::default();
+        pool.add(make_unit(ManaType::Blue));
+        pool.add(make_unit(ManaType::Red));
+
+        let spent = pool.spend(ManaType::Blue);
+        assert!(spent.is_some());
+        assert_eq!(spent.unwrap().color, ManaType::Blue);
+        assert_eq!(pool.total(), 1);
+        assert_eq!(pool.count_color(ManaType::Blue), 0);
+    }
+
+    #[test]
+    fn mana_pool_spend_returns_none_when_empty() {
+        let mut pool = ManaPool::default();
+        assert!(pool.spend(ManaType::Black).is_none());
+    }
+
+    #[test]
+    fn mana_pool_clear_empties_pool() {
+        let mut pool = ManaPool::default();
+        pool.add(make_unit(ManaType::White));
+        pool.add(make_unit(ManaType::Blue));
+        pool.clear();
+        assert_eq!(pool.total(), 0);
+    }
+
+    #[test]
+    fn mana_type_includes_colorless() {
+        let types = [
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+            ManaType::Colorless,
+        ];
+        assert_eq!(types.len(), 6);
+    }
+
+    #[test]
+    fn mana_unit_tracks_source_and_snow() {
+        let unit = ManaUnit {
+            color: ManaType::Green,
+            source_id: ObjectId(42),
+            snow: true,
+            restrictions: vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
+        };
+        assert_eq!(unit.source_id, ObjectId(42));
+        assert!(unit.snow);
+        assert_eq!(unit.restrictions.len(), 1);
+    }
+
+    #[test]
+    fn mana_pool_serializes_and_roundtrips() {
+        let mut pool = ManaPool::default();
+        pool.add(make_unit(ManaType::Blue));
+        let json = serde_json::to_string(&pool).unwrap();
+        let deserialized: ManaPool = serde_json::from_str(&json).unwrap();
+        assert_eq!(pool, deserialized);
     }
 }
