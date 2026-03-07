@@ -71,6 +71,7 @@ pub struct GameState {
     pub waiting_for: WaitingFor,
     pub lands_played_this_turn: u8,
     pub max_lands_per_turn: u8,
+    pub priority_pass_count: u8,
 }
 
 impl GameState {
@@ -104,6 +105,7 @@ impl GameState {
             },
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
+            priority_pass_count: 0,
         }
     }
 }
@@ -131,6 +133,7 @@ impl PartialEq for GameState {
             && self.waiting_for == other.waiting_for
             && self.lands_played_this_turn == other.lands_played_this_turn
             && self.max_lands_per_turn == other.max_lands_per_turn
+            && self.priority_pass_count == other.priority_pass_count
     }
 }
 

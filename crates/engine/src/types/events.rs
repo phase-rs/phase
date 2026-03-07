@@ -41,6 +41,30 @@ pub enum GameEvent {
         color: ManaColor,
         amount: u32,
     },
+    CardDrawn {
+        player_id: PlayerId,
+        object_id: ObjectId,
+    },
+    PermanentUntapped {
+        object_id: ObjectId,
+    },
+    LandPlayed {
+        object_id: ObjectId,
+        player_id: PlayerId,
+    },
+    StackPushed {
+        object_id: ObjectId,
+    },
+    StackResolved {
+        object_id: ObjectId,
+    },
+    Discarded {
+        player_id: PlayerId,
+        object_id: ObjectId,
+    },
+    DamageCleared {
+        object_id: ObjectId,
+    },
     GameOver {
         winner: Option<PlayerId>,
     },
