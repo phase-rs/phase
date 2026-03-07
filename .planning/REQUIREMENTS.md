@@ -159,78 +159,78 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ENG-01 | TBD | Pending |
-| ENG-02 | TBD | Pending |
-| ENG-03 | TBD | Pending |
-| ENG-04 | TBD | Pending |
-| ENG-05 | TBD | Pending |
-| ENG-06 | TBD | Pending |
-| PARSE-01 | TBD | Pending |
-| PARSE-02 | TBD | Pending |
-| PARSE-03 | TBD | Pending |
-| PARSE-04 | TBD | Pending |
-| ABIL-01 | TBD | Pending |
-| ABIL-02 | TBD | Pending |
-| ABIL-03 | TBD | Pending |
-| ABIL-04 | TBD | Pending |
-| ABIL-05 | TBD | Pending |
-| ABIL-06 | TBD | Pending |
-| ABIL-07 | TBD | Pending |
-| TRIG-01 | TBD | Pending |
-| TRIG-02 | TBD | Pending |
-| TRIG-03 | TBD | Pending |
-| TRIG-04 | TBD | Pending |
-| REPL-01 | TBD | Pending |
-| REPL-02 | TBD | Pending |
-| REPL-03 | TBD | Pending |
-| REPL-04 | TBD | Pending |
-| STAT-01 | TBD | Pending |
-| STAT-02 | TBD | Pending |
-| STAT-03 | TBD | Pending |
-| STAT-04 | TBD | Pending |
-| COMB-01 | TBD | Pending |
-| COMB-02 | TBD | Pending |
-| COMB-03 | TBD | Pending |
-| COMB-04 | TBD | Pending |
-| KWRD-01 | TBD | Pending |
-| KWRD-02 | TBD | Pending |
-| UI-01 | TBD | Pending |
-| UI-02 | TBD | Pending |
-| UI-03 | TBD | Pending |
-| UI-04 | TBD | Pending |
-| UI-05 | TBD | Pending |
-| UI-06 | TBD | Pending |
-| UI-07 | TBD | Pending |
-| UI-08 | TBD | Pending |
-| UI-09 | TBD | Pending |
-| UI-10 | TBD | Pending |
-| UI-11 | TBD | Pending |
-| DECK-01 | TBD | Pending |
-| DECK-02 | TBD | Pending |
-| DECK-03 | TBD | Pending |
-| AI-01 | TBD | Pending |
-| AI-02 | TBD | Pending |
-| AI-03 | TBD | Pending |
-| AI-04 | TBD | Pending |
-| AI-05 | TBD | Pending |
-| MP-01 | TBD | Pending |
-| MP-02 | TBD | Pending |
-| MP-03 | TBD | Pending |
-| MP-04 | TBD | Pending |
-| PLAT-01 | TBD | Pending |
-| PLAT-02 | TBD | Pending |
-| PLAT-03 | TBD | Pending |
-| PLAT-04 | TBD | Pending |
-| PLAT-05 | TBD | Pending |
-| QOL-01 | TBD | Pending |
-| QOL-02 | TBD | Pending |
-| QOL-03 | TBD | Pending |
+| ENG-01 | Phase 3 | Pending |
+| ENG-02 | Phase 3 | Pending |
+| ENG-03 | Phase 3 | Pending |
+| ENG-04 | Phase 3 | Pending |
+| ENG-05 | Phase 3 | Pending |
+| ENG-06 | Phase 3 | Pending |
+| PARSE-01 | Phase 2 | Pending |
+| PARSE-02 | Phase 2 | Pending |
+| PARSE-03 | Phase 2 | Pending |
+| PARSE-04 | Phase 2 | Pending |
+| ABIL-01 | Phase 2 | Pending |
+| ABIL-02 | Phase 4 | Pending |
+| ABIL-03 | Phase 4 | Pending |
+| ABIL-04 | Phase 4 | Pending |
+| ABIL-05 | Phase 4 | Pending |
+| ABIL-06 | Phase 4 | Pending |
+| ABIL-07 | Phase 4 | Pending |
+| TRIG-01 | Phase 5 | Pending |
+| TRIG-02 | Phase 5 | Pending |
+| TRIG-03 | Phase 5 | Pending |
+| TRIG-04 | Phase 5 | Pending |
+| REPL-01 | Phase 6 | Pending |
+| REPL-02 | Phase 6 | Pending |
+| REPL-03 | Phase 6 | Pending |
+| REPL-04 | Phase 6 | Pending |
+| STAT-01 | Phase 6 | Pending |
+| STAT-02 | Phase 6 | Pending |
+| STAT-03 | Phase 6 | Pending |
+| STAT-04 | Phase 6 | Pending |
+| COMB-01 | Phase 5 | Pending |
+| COMB-02 | Phase 5 | Pending |
+| COMB-03 | Phase 5 | Pending |
+| COMB-04 | Phase 5 | Pending |
+| KWRD-01 | Phase 5 | Pending |
+| KWRD-02 | Phase 5 | Pending |
+| UI-01 | Phase 7 | Pending |
+| UI-02 | Phase 7 | Pending |
+| UI-03 | Phase 7 | Pending |
+| UI-04 | Phase 7 | Pending |
+| UI-05 | Phase 7 | Pending |
+| UI-06 | Phase 7 | Pending |
+| UI-07 | Phase 7 | Pending |
+| UI-08 | Phase 7 | Pending |
+| UI-09 | Phase 7 | Pending |
+| UI-10 | Phase 7 | Pending |
+| UI-11 | Phase 7 | Pending |
+| DECK-01 | Phase 7 | Pending |
+| DECK-02 | Phase 7 | Pending |
+| DECK-03 | Phase 7 | Pending |
+| AI-01 | Phase 8 | Pending |
+| AI-02 | Phase 8 | Pending |
+| AI-03 | Phase 8 | Pending |
+| AI-04 | Phase 8 | Pending |
+| AI-05 | Phase 8 | Pending |
+| MP-01 | Phase 8 | Pending |
+| MP-02 | Phase 8 | Pending |
+| MP-03 | Phase 8 | Pending |
+| MP-04 | Phase 8 | Pending |
+| PLAT-01 | Phase 7 | Pending |
+| PLAT-02 | Phase 7 | Pending |
+| PLAT-03 | Phase 1 | Pending |
+| PLAT-04 | Phase 7 | Pending |
+| PLAT-05 | Phase 8 | Pending |
+| QOL-01 | Phase 7 | Pending |
+| QOL-02 | Phase 7 | Pending |
+| QOL-03 | Phase 7 | Pending |
 
 **Coverage:**
 - v1 requirements: 57 total
-- Mapped to phases: 0
-- Unmapped: 57
+- Mapped to phases: 57
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-07*
-*Last updated: 2026-03-07 after initial definition*
+*Last updated: 2026-03-07 after roadmap creation*
