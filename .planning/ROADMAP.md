@@ -64,12 +64,12 @@ Plans:
   3. Spells placed on the stack resolve in LIFO order with both players receiving priority between each resolution
   4. State-based actions fire automatically (creature with 0 toughness dies, player at 0 life loses, legend rule enforced)
   5. London mulligan works correctly (draw 7, choose to mulligan, draw 7 again, put N cards on bottom)
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 03-01: TBD
-- [ ] 03-02: TBD
-- [ ] 03-03: TBD
+- [ ] 03-01-PLAN.md — Foundation types (GameObject, expanded GameState/Player, ManaPool restructure) and zone operations
+- [ ] 03-02-PLAN.md — Turn progression, priority system, stack resolution, and apply() engine entry point
+- [ ] 03-03-PLAN.md — Mana payment system, state-based actions, London mulligan, and full integration
 
 ### Phase 4: Ability System & Effects
 **Goal**: Cards can be cast with costs paid, targets chosen, and effects resolved -- a player can cast Lightning Bolt targeting a creature, Counterspell targeting a spell, and Giant Growth on their own creature
