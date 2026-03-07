@@ -3,6 +3,8 @@ pub mod card_parser;
 pub mod card_type;
 pub mod mana_cost;
 
+pub use card_parser::parse_card_file;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

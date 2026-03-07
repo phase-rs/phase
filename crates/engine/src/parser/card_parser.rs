@@ -81,11 +81,150 @@ struct ParseState {
 }
 
 pub fn parse_card_file(content: &str) -> Result<CardRules, ParseError> {
-    todo!("implement parse_card_file")
+    let mut faces = [CardFaceBuilder::new(), CardFaceBuilder::new()];
+    let mut state = ParseState {
+        cur_face: 0,
+        alt_mode: None,
+        meld_with: None,
+        partner_with: None,
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        parse_line(trimmed, &mut faces, &mut state);
+    }
+
+    let [face0, face1] = faces;
+    let layout = match state.alt_mode.as_deref() {
+        None => CardLayout::Single(face0.build()?),
+        Some(mode) => {
+            let f0 = face0.build()?;
+            let f1 = face1.build()?;
+            match mode {
+                "Split" => CardLayout::Split(f0, f1),
+                "Flip" => CardLayout::Flip(f0, f1),
+                "Transform" | "DoubleFaced" => CardLayout::Transform(f0, f1),
+                "Meld" => CardLayout::Meld(f0, f1),
+                "Adventure" => CardLayout::Adventure(f0, f1),
+                "Modal" => CardLayout::Modal(f0, f1),
+                "Omen" => CardLayout::Omen(f0, f1),
+                _ => CardLayout::Single(f0), // Unknown mode falls back to single
+            }
+        }
+    };
+
+    Ok(CardRules {
+        layout,
+        meld_with: state.meld_with,
+        partner_with: state.partner_with,
+    })
 }
 
-fn parse_line(_line: &str, _face: &mut CardFaceBuilder, _state: &mut ParseState) {
-    todo!("implement parse_line")
+fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseState) {
+    // Handle bare keywords (no colon)
+    let Some((key, value)) = line.split_once(':') else {
+        if line == "ALTERNATE" {
+            state.cur_face = 1;
+        }
+        return;
+    };
+
+    let value = value.trim();
+    let face = &mut faces[state.cur_face];
+
+    match key.as_bytes().first() {
+        Some(b'A') => match key {
+            "A" => face.abilities.push(value.to_string()),
+            "AlternateMode" => state.alt_mode = Some(value.to_string()),
+            _ => {} // skip unknown
+        },
+        Some(b'C') => match key {
+            "Colors" => {
+                let colors: Vec<ManaColor> = value
+                    .split(',')
+                    .filter_map(|s| parse_color(s))
+                    .collect();
+                if !colors.is_empty() {
+                    face.color_override = Some(colors);
+                }
+            }
+            _ => {}
+        },
+        Some(b'D') => match key {
+            "Defense" => face.defense = Some(value.to_string()),
+            "DeckHints" | "DeckNeeds" | "DeckHas" => {} // deferred
+            _ => {}
+        },
+        Some(b'F') => match key {
+            "FlavorName" => face.flavor_name = Some(value.to_string()),
+            _ => {}
+        },
+        Some(b'K') => match key {
+            "K" => {
+                for kw in value.split(',') {
+                    let kw = kw.trim();
+                    if !kw.is_empty() {
+                        face.keywords.push(kw.to_string());
+                    }
+                }
+            }
+            _ => {}
+        },
+        Some(b'L') => match key {
+            "Loyalty" => face.loyalty = Some(value.to_string()),
+            _ => {}
+        },
+        Some(b'M') => match key {
+            "ManaCost" => {
+                if let Ok(cost) = mana_cost::parse(value) {
+                    face.mana_cost = Some(cost);
+                }
+            }
+            "MeldPair" => state.meld_with = Some(value.to_string()),
+            _ => {}
+        },
+        Some(b'N') => match key {
+            "Name" => face.name = Some(value.to_string()),
+            _ => {}
+        },
+        Some(b'O') => match key {
+            "Oracle" => face.oracle_text = Some(value.to_string()),
+            _ => {}
+        },
+        Some(b'P') => match key {
+            "PT" => {
+                if let Some((p, t)) = value.split_once('/') {
+                    face.power = Some(p.to_string());
+                    face.toughness = Some(t.to_string());
+                }
+            }
+            "PartnerWith" => state.partner_with = Some(value.to_string()),
+            _ => {}
+        },
+        Some(b'R') => match key {
+            "R" => face.replacements.push(value.to_string()),
+            _ => {}
+        },
+        Some(b'S') => match key {
+            "S" => face.static_abilities.push(value.to_string()),
+            "SVar" => {
+                if let Some((var_name, var_value)) = value.split_once(':') {
+                    face.svars.insert(var_name.to_string(), var_value.to_string());
+                }
+            }
+            _ => {}
+        },
+        Some(b'T') => match key {
+            "T" => face.triggers.push(value.to_string()),
+            "Types" => face.card_type = Some(card_type::parse(value)),
+            "Text" => face.non_ability_text = Some(value.to_string()),
+            _ => {}
+        },
+        _ => {} // silently skip unknown keys
+    }
 }
 
 fn parse_color(s: &str) -> Option<ManaColor> {
