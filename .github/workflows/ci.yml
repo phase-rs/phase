@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust:
+    name: Rust (test, clippy, fmt, WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all
+
+      - name: Build WASM (release)
+        run: cargo build --package engine-wasm --target wasm32-unknown-unknown --release
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli@0.2.114 --locked
+
+      - name: Generate WASM bindings
+        run: |
+          wasm-bindgen \
+            --target web \
+            --out-dir wasm-out \
+            target/wasm32-unknown-unknown/release/engine_wasm.wasm
+
+      - name: Install binaryen
+        run: sudo apt-get install -y binaryen
+
+      - name: Optimize WASM
+        run: wasm-opt -Oz wasm-out/engine_wasm_bg.wasm -o wasm-out/engine_wasm_bg.wasm
+
+      - name: Report WASM binary size
+        run: |
+          RAW_SIZE=$(stat -c%s wasm-out/engine_wasm_bg.wasm)
+          RAW_KB=$(echo "scale=1; $RAW_SIZE / 1024" | bc)
+          GZIP_SIZE=$(gzip -c wasm-out/engine_wasm_bg.wasm | wc -c)
+          GZIP_KB=$(echo "scale=1; $GZIP_SIZE / 1024" | bc)
+          echo "## WASM Binary Size" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Raw | ${RAW_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Gzipped | ${GZIP_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: Frontend (lint, type-check, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: cd client && pnpm run lint
+
+      - name: Type check
+        run: cd client && pnpm run type-check
+
+      - name: Run tests
+        run: cd client && pnpm test -- --run
