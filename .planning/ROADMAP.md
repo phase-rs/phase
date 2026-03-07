@@ -81,12 +81,12 @@ Plans:
   3. Sub-ability chains resolve correctly (e.g., a spell that deals damage AND draws a card executes both in sequence)
   4. SVar resolution works for conditional ability references (SubAbility$, Execute$, ReplaceWith$)
   5. The top 15 effect types (Draw, DealDamage, ChangeZone, Pump, Destroy, Counter, Token, GainLife, LoseLife, Tap, Untap, AddCounter, RemoveCounter, Sacrifice, DiscardCard) all resolve correctly
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 04-01: TBD
-- [ ] 04-02: TBD
-- [ ] 04-03: TBD
+- [ ] 04-01-PLAN.md — Runtime ability types (ResolvedAbility, TargetRef) and effect handler registry with 15 top effect handlers
+- [ ] 04-02-PLAN.md — Casting flow, targeting system, cost payment, and engine integration (CastSpell/ActivateAbility)
+- [ ] 04-03-PLAN.md — SVar resolution, condition system, sub-ability chaining, and integration tests (Lightning Bolt, Counterspell, Giant Growth)
 
 ### Phase 5: Triggers & Combat
 **Goal**: Creatures can attack, block, deal damage, and die -- triggering abilities fire automatically in correct order, enabling creature-based gameplay
