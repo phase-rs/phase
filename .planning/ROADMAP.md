@@ -30,13 +30,13 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Success Criteria** (what must be TRUE):
   1. `cargo build` produces a native binary and `cargo build --target wasm32-unknown-unknown` produces a WASM module from the same source
   2. The React app renders a placeholder screen that successfully imports and calls a WASM function
-  3. Core type definitions (GameState, GameAction, GameEvent, Zone, Phase, ManaColor) exist as Rust enums/structs with TypeScript types auto-generated via tsify-next
+  3. Core type definitions (GameState, GameAction, GameEvent, Zone, Phase, ManaColor) exist as Rust enums/structs with TypeScript types auto-generated via tsify
   4. CI pipeline runs tests and reports WASM binary size on every commit
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md — Cargo workspace, WASM build pipeline, and core Rust type definitions
+- [ ] 01-02-PLAN.md — React frontend with EngineAdapter (PLAT-03), WASM integration, and CI pipeline
 
 ### Phase 2: Card Parser & Database
 **Goal**: Forge's 32,300+ card definition files can be parsed into typed Rust structures, indexed, and queried by name
