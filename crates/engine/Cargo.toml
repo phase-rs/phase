@@ -7,6 +7,8 @@ edition = "2021"
 serde = { workspace = true }
 rpds = { workspace = true }
 thiserror = "2"
+walkdir = "2"
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"
