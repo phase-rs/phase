@@ -1,9 +1,28 @@
-use crate::types::mana::ManaCost;
+use std::str::FromStr;
+
+use crate::types::mana::{ManaCost, ManaCostShard};
 
 use super::ParseError;
 
-pub fn parse(_input: &str) -> Result<ManaCost, ParseError> {
-    todo!("mana cost parser not yet implemented")
+pub fn parse(input: &str) -> Result<ManaCost, ParseError> {
+    if input == "no cost" {
+        return Ok(ManaCost::NoCost);
+    }
+
+    let mut shards = Vec::new();
+    let mut generic: u32 = 0;
+
+    for token in input.split_whitespace() {
+        if let Ok(n) = token.parse::<u32>() {
+            generic += n;
+        } else {
+            let shard = ManaCostShard::from_str(token)
+                .map_err(|_| ParseError::InvalidManaCostShard(token.to_string()))?;
+            shards.push(shard);
+        }
+    }
+
+    Ok(ManaCost::Cost { shards, generic })
 }
 
 #[cfg(test)]

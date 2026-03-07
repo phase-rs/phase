@@ -1,7 +1,63 @@
-use crate::types::card_type::CardType;
+use std::str::FromStr;
 
-pub fn parse(_input: &str) -> CardType {
-    todo!("card type parser not yet implemented")
+use crate::types::card_type::{CardType, CoreType, Supertype};
+
+/// Known multi-word subtypes (from Forge's getMultiwordType()).
+const MULTIWORD_TYPES: &[&str] = &[
+    "Time Lord",
+    "Serra's Realm",
+    "Bolas's Meditation Realm",
+    "Power Plant",
+    "Urza's",
+    "New Phyrexia",
+];
+
+pub fn parse(input: &str) -> CardType {
+    let mut supertypes = Vec::new();
+    let mut core_types = Vec::new();
+    let mut subtypes = Vec::new();
+
+    let mut remaining = input.trim();
+    while !remaining.is_empty() {
+        // Check multi-word types first
+        let token = match check_multiword_type(remaining) {
+            Some(mw) => mw,
+            None => remaining.split_whitespace().next().unwrap_or(""),
+        };
+
+        if token.is_empty() {
+            break;
+        }
+
+        if let Ok(st) = Supertype::from_str(token) {
+            supertypes.push(st);
+        } else if let Ok(ct) = CoreType::from_str(token) {
+            core_types.push(ct);
+        } else {
+            subtypes.push(token.to_string());
+        }
+
+        remaining = remaining[token.len()..].trim_start();
+    }
+
+    CardType {
+        supertypes,
+        core_types,
+        subtypes,
+    }
+}
+
+fn check_multiword_type(input: &str) -> Option<&'static str> {
+    for &mw in MULTIWORD_TYPES {
+        if input.starts_with(mw) {
+            // Ensure it's a complete match (followed by space or end)
+            let rest = &input[mw.len()..];
+            if rest.is_empty() || rest.starts_with(' ') {
+                return Some(mw);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
