@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod card_parser;
 pub mod card_type;
 pub mod mana_cost;
 
