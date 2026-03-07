@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::{CardId, ObjectId};
-use super::mana::ManaColor;
+use super::mana::{ManaColor, ManaType};
 use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
@@ -38,8 +38,19 @@ pub enum GameEvent {
     },
     ManaAdded {
         player_id: PlayerId,
-        color: ManaColor,
-        amount: u32,
+        mana_type: ManaType,
+        source_id: ObjectId,
+    },
+    PermanentTapped {
+        object_id: ObjectId,
+    },
+    PlayerLost {
+        player_id: PlayerId,
+    },
+    MulliganStarted,
+    CardsDrawn {
+        player_id: PlayerId,
+        count: u32,
     },
     CardDrawn {
         player_id: PlayerId,

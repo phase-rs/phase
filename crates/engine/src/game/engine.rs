@@ -3,11 +3,12 @@ use thiserror::Error;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
-use crate::types::identifiers::CardId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::mana_payment;
 use super::priority;
 use super::turns;
 use super::zones;
@@ -36,6 +37,7 @@ pub fn apply(
             let expected_player = match &action {
                 GameAction::PassPriority => state.priority_player,
                 GameAction::PlayLand { .. } => state.priority_player,
+                GameAction::TapLandForMana { .. } => state.priority_player,
                 _ => {
                     return Err(EngineError::ActionNotAllowed(format!(
                         "{:?} not implemented yet",
@@ -62,6 +64,9 @@ pub fn apply(
         }
         GameAction::PlayLand { card_id } => {
             handle_play_land(state, card_id, &mut events)?
+        }
+        GameAction::TapLandForMana { object_id } => {
+            handle_tap_land_for_mana(state, object_id, &mut events)?
         }
         _ => {
             return Err(EngineError::ActionNotAllowed(format!(
@@ -150,6 +155,71 @@ fn handle_play_land(
     });
 
     // Player retains priority after playing a land
+    Ok(WaitingFor::Priority {
+        player: state.priority_player,
+    })
+}
+
+fn handle_tap_land_for_mana(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let obj = state.objects.get(&object_id).ok_or_else(|| {
+        EngineError::InvalidAction("Object not found".to_string())
+    })?;
+
+    // Validate: on battlefield, controlled by acting player, is a land, not tapped
+    if obj.zone != Zone::Battlefield {
+        return Err(EngineError::InvalidAction(
+            "Object is not on the battlefield".to_string(),
+        ));
+    }
+    if obj.controller != state.priority_player {
+        return Err(EngineError::NotYourPriority);
+    }
+    if !obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return Err(EngineError::InvalidAction(
+            "Object is not a land".to_string(),
+        ));
+    }
+    if obj.tapped {
+        return Err(EngineError::InvalidAction(
+            "Land is already tapped".to_string(),
+        ));
+    }
+
+    // Determine mana color from subtypes
+    let mana_type = obj
+        .card_types
+        .subtypes
+        .iter()
+        .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
+        .ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Land has no recognized basic land subtype".to_string(),
+            )
+        })?;
+
+    // Tap the permanent
+    let obj = state.objects.get_mut(&object_id).unwrap();
+    obj.tapped = true;
+
+    events.push(GameEvent::PermanentTapped { object_id });
+
+    // Produce mana
+    mana_payment::produce_mana(
+        state,
+        object_id,
+        mana_type,
+        state.priority_player,
+        events,
+    );
+
     Ok(WaitingFor::Priority {
         player: state.priority_player,
     })

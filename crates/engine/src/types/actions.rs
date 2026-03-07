@@ -26,6 +26,12 @@ pub enum GameAction {
     MulliganDecision {
         keep: bool,
     },
+    TapLandForMana {
+        object_id: ObjectId,
+    },
+    SelectCards {
+        cards: Vec<ObjectId>,
+    },
 }
 
 #[cfg(test)]
