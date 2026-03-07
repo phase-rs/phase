@@ -1,5 +1,7 @@
+pub mod ability;
 pub mod actions;
 pub mod card;
+pub mod card_type;
 pub mod events;
 pub mod game_state;
 pub mod identifiers;
@@ -8,12 +10,14 @@ pub mod phase;
 pub mod player;
 pub mod zones;
 
+pub use ability::{AbilityDefinition, AbilityKind, ReplacementDefinition, StaticDefinition, TriggerDefinition};
+pub use card::{CardFace, CardLayout, CardRules};
+pub use card_type::{CardType, CoreType, Supertype};
 pub use actions::GameAction;
-pub use card::CardDefinition;
 pub use events::GameEvent;
 pub use game_state::GameState;
 pub use identifiers::{CardId, ObjectId};
-pub use mana::{ManaColor, ManaPool};
+pub use mana::{ManaCost, ManaCostShard, ManaColor, ManaPool};
 pub use phase::Phase;
 pub use player::{Player, PlayerId};
 pub use zones::Zone;
