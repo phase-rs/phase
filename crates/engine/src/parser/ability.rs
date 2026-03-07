@@ -1,29 +1,73 @@
+use std::collections::HashMap;
+
 use crate::types::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, AbilityKind, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 
 use super::ParseError;
 
-pub fn parse_ability(_raw: &str) -> Result<AbilityDefinition, ParseError> {
-    todo!("ability parser not yet implemented")
+/// Splits a pipe-delimited string into key-value pairs separated by `$`.
+fn parse_params(raw: &str) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+    for part in raw.split('|') {
+        let part = part.trim();
+        if let Some((key, value)) = part.split_once('$') {
+            params.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    params
 }
 
-pub fn parse_trigger(_raw: &str) -> Result<TriggerDefinition, ParseError> {
-    todo!("trigger parser not yet implemented")
+pub fn parse_ability(raw: &str) -> Result<AbilityDefinition, ParseError> {
+    let mut params = parse_params(raw);
+    let mut kind = None;
+    let mut api_type = String::new();
+
+    for key in ["SP", "AB", "DB"] {
+        if let Some(value) = params.remove(key) {
+            kind = Some(match key {
+                "SP" => AbilityKind::Spell,
+                "AB" => AbilityKind::Activated,
+                _ => AbilityKind::Database,
+            });
+            api_type = value;
+            break;
+        }
+    }
+
+    Ok(AbilityDefinition {
+        kind: kind.ok_or(ParseError::MissingAbilityKind)?,
+        api_type,
+        params,
+    })
 }
 
-pub fn parse_static(_raw: &str) -> Result<StaticDefinition, ParseError> {
-    todo!("static parser not yet implemented")
+pub fn parse_trigger(raw: &str) -> Result<TriggerDefinition, ParseError> {
+    let mut params = parse_params(raw);
+    let mode = params
+        .remove("Mode")
+        .ok_or_else(|| ParseError::MissingField("Mode".to_string()))?;
+    Ok(TriggerDefinition { mode, params })
 }
 
-pub fn parse_replacement(_raw: &str) -> Result<ReplacementDefinition, ParseError> {
-    todo!("replacement parser not yet implemented")
+pub fn parse_static(raw: &str) -> Result<StaticDefinition, ParseError> {
+    let mut params = parse_params(raw);
+    let mode = params
+        .remove("Mode")
+        .ok_or_else(|| ParseError::MissingField("Mode".to_string()))?;
+    Ok(StaticDefinition { mode, params })
+}
+
+pub fn parse_replacement(raw: &str) -> Result<ReplacementDefinition, ParseError> {
+    let mut params = parse_params(raw);
+    let event = params
+        .remove("Event")
+        .ok_or_else(|| ParseError::MissingField("Event".to_string()))?;
+    Ok(ReplacementDefinition { event, params })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::types::ability::AbilityKind;
 
     use super::*;
