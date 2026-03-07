@@ -11,10 +11,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **ENG-01**: Full turn structure (untap, upkeep, draw, main1, combat phases, main2, end, cleanup)
 - [x] **ENG-02**: Priority system with LIFO stack resolution
-- [ ] **ENG-03**: State-based actions with fixpoint loop checking
+- [x] **ENG-03**: State-based actions with fixpoint loop checking
 - [x] **ENG-04**: Zone management (library, hand, battlefield, graveyard, stack, exile, command)
 - [x] **ENG-05**: Mana system (5 colors, colorless, generic, hybrid, phyrexian, X costs, snow)
-- [ ] **ENG-06**: London mulligan
+- [x] **ENG-06**: London mulligan
 
 ### Card Parser
 
@@ -161,10 +161,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | ENG-01 | Phase 3 | Complete |
 | ENG-02 | Phase 3 | Complete |
-| ENG-03 | Phase 3 | Pending |
+| ENG-03 | Phase 3 | Complete |
 | ENG-04 | Phase 3 | Complete |
 | ENG-05 | Phase 3 | Complete |
-| ENG-06 | Phase 3 | Pending |
+| ENG-06 | Phase 3 | Complete |
 | PARSE-01 | Phase 2 | Complete |
 | PARSE-02 | Phase 2 | Complete |
 | PARSE-03 | Phase 2 | Complete |
