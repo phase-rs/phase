@@ -1,0 +1,407 @@
+use crate::types::card_type::{CoreType, Supertype};
+use crate::types::events::GameEvent;
+use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
+
+use super::zones;
+
+const MAX_SBA_ITERATIONS: u32 = 9;
+
+/// Run state-based actions in a fixpoint loop until no more actions are performed,
+/// capped at MAX_SBA_ITERATIONS per Forge's convention.
+pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    for _ in 0..MAX_SBA_ITERATIONS {
+        let mut any_performed = false;
+
+        // 704.5a: Player at 0 or less life loses the game
+        check_player_life(state, events, &mut any_performed);
+
+        // If game is over, stop immediately
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return;
+        }
+
+        // 704.5f: Creature with 0 or less toughness goes to graveyard
+        check_zero_toughness(state, events, &mut any_performed);
+
+        // 704.5g: Creature with lethal damage marked is destroyed
+        check_lethal_damage(state, events, &mut any_performed);
+
+        // 704.5j: Legend rule
+        check_legend_rule(state, events, &mut any_performed);
+
+        // 704.5n: Unattached aura goes to graveyard
+        check_unattached_auras(state, events, &mut any_performed);
+
+        if !any_performed {
+            break;
+        }
+    }
+}
+
+fn check_player_life(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    for i in 0..state.players.len() {
+        if state.players[i].life <= 0 {
+            let loser = state.players[i].id;
+            let winner_id = PlayerId(1 - loser.0);
+            events.push(GameEvent::PlayerLost {
+                player_id: loser,
+            });
+            events.push(GameEvent::GameOver {
+                winner: Some(winner_id),
+            });
+            state.waiting_for = WaitingFor::GameOver {
+                winner: Some(winner_id),
+            };
+            *any_performed = true;
+            return;
+        }
+    }
+}
+
+fn check_zero_toughness(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    let to_destroy: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    obj.card_types.core_types.contains(&CoreType::Creature)
+                        && obj.toughness.map_or(false, |t| t <= 0)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for id in to_destroy {
+        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        *any_performed = true;
+    }
+}
+
+fn check_lethal_damage(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    let to_destroy: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    obj.card_types.core_types.contains(&CoreType::Creature)
+                        && obj.toughness.map_or(false, |t| obj.damage_marked >= t as u32 && t > 0)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for id in to_destroy {
+        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        *any_performed = true;
+    }
+}
+
+fn check_legend_rule(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    for player_idx in 0..state.players.len() {
+        let player_id = state.players[player_idx].id;
+
+        // Group legendaries by name
+        let legendaries: Vec<_> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| {
+                        obj.controller == player_id
+                            && obj.card_types.supertypes.contains(&Supertype::Legendary)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        // Group by name
+        let mut by_name: std::collections::HashMap<String, Vec<_>> =
+            std::collections::HashMap::new();
+        for id in legendaries {
+            if let Some(obj) = state.objects.get(&id) {
+                by_name
+                    .entry(obj.name.clone())
+                    .or_default()
+                    .push(id);
+            }
+        }
+
+        // For names with 2+, keep newest (highest entered_battlefield_turn), remove rest
+        for (_name, mut ids) in by_name {
+            if ids.len() < 2 {
+                continue;
+            }
+
+            // Sort by entered_battlefield_turn descending (newest first)
+            ids.sort_by(|a, b| {
+                let turn_a = state
+                    .objects
+                    .get(a)
+                    .and_then(|o| o.entered_battlefield_turn)
+                    .unwrap_or(0);
+                let turn_b = state
+                    .objects
+                    .get(b)
+                    .and_then(|o| o.entered_battlefield_turn)
+                    .unwrap_or(0);
+                turn_b.cmp(&turn_a)
+            });
+
+            // Skip the first (newest), remove the rest
+            for &id in &ids[1..] {
+                zones::move_to_zone(state, id, Zone::Graveyard, events);
+                *any_performed = true;
+            }
+        }
+    }
+}
+
+fn check_unattached_auras(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    let to_remove: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    // Check if it's an aura (Enchantment with attached_to)
+                    obj.card_types.core_types.contains(&CoreType::Enchantment)
+                        && obj.attached_to.is_some()
+                        && !is_valid_attachment_target(state, obj.attached_to.unwrap())
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for id in to_remove {
+        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        *any_performed = true;
+    }
+}
+
+fn is_valid_attachment_target(state: &GameState, target_id: crate::types::identifiers::ObjectId) -> bool {
+    state
+        .objects
+        .get(&target_id)
+        .map(|obj| obj.zone == Zone::Battlefield)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::CardType;
+    use crate::types::identifiers::{CardId, ObjectId};
+
+    fn setup() -> GameState {
+        GameState::new_two_player(42)
+    }
+
+    fn create_creature(
+        state: &mut GameState,
+        card_id: CardId,
+        owner: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.entered_battlefield_turn = Some(state.turn_number);
+        id
+    }
+
+    #[test]
+    fn sba_zero_life_player_loses() {
+        let mut state = setup();
+        state.players[0].life = 0;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::PlayerLost { player_id: PlayerId(0) })));
+    }
+
+    #[test]
+    fn sba_negative_life_player_loses() {
+        let mut state = setup();
+        state.players[1].life = -5;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_zero_toughness_creature_dies() {
+        let mut state = setup();
+        let id = create_creature(&mut state, CardId(1), PlayerId(0), "Weakling", 1, 0);
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.battlefield.contains(&id));
+        assert!(state.players[0].graveyard.contains(&id));
+    }
+
+    #[test]
+    fn sba_lethal_damage_creature_dies() {
+        let mut state = setup();
+        let id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&id).unwrap().damage_marked = 2;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.battlefield.contains(&id));
+        assert!(state.players[0].graveyard.contains(&id));
+    }
+
+    #[test]
+    fn sba_healthy_creature_survives() {
+        let mut state = setup();
+        let id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&id).unwrap().damage_marked = 1;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.battlefield.contains(&id));
+    }
+
+    #[test]
+    fn sba_legend_rule_keeps_newest() {
+        let mut state = setup();
+        state.turn_number = 1;
+        let id1 = create_creature(&mut state, CardId(1), PlayerId(0), "Thalia", 2, 1);
+        state.objects.get_mut(&id1).unwrap().card_types.supertypes.push(Supertype::Legendary);
+        state.objects.get_mut(&id1).unwrap().entered_battlefield_turn = Some(1);
+
+        state.turn_number = 2;
+        let id2 = create_creature(&mut state, CardId(2), PlayerId(0), "Thalia", 2, 1);
+        state.objects.get_mut(&id2).unwrap().card_types.supertypes.push(Supertype::Legendary);
+        state.objects.get_mut(&id2).unwrap().entered_battlefield_turn = Some(2);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Newest (id2, turn 2) should survive, oldest (id1, turn 1) should die
+        assert!(state.battlefield.contains(&id2));
+        assert!(!state.battlefield.contains(&id1));
+        assert!(state.players[0].graveyard.contains(&id1));
+    }
+
+    #[test]
+    fn sba_unattached_aura_goes_to_graveyard() {
+        let mut state = setup();
+        // Create an enchantment attached to a nonexistent object
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pacifism".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&aura_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.attached_to = Some(ObjectId(999)); // nonexistent target
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.battlefield.contains(&aura_id));
+        assert!(state.players[0].graveyard.contains(&aura_id));
+    }
+
+    #[test]
+    fn sba_fixpoint_handles_cascading_deaths() {
+        let mut state = setup();
+        // Create a creature that will die from lethal damage
+        let id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&id).unwrap().damage_marked = 3;
+
+        // Create an aura attached to that creature
+        let aura_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&aura_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.attached_to = Some(id);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Both should be in graveyard (creature dies, then aura detaches and dies)
+        assert!(!state.battlefield.contains(&id));
+        assert!(!state.battlefield.contains(&aura_id));
+    }
+
+    #[test]
+    fn sba_no_actions_when_nothing_to_do() {
+        let mut state = setup();
+        create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // No zone change events should have been generated
+        assert!(events.is_empty());
+    }
+}

@@ -9,7 +9,9 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::mana_payment;
+use super::mulligan;
 use super::priority;
+use super::sba;
 use super::turns;
 use super::zones;
 
@@ -31,50 +33,66 @@ pub fn apply(
 ) -> Result<ActionResult, EngineError> {
     let mut events = Vec::new();
 
-    // Validate action against current WaitingFor
-    match &state.waiting_for {
-        WaitingFor::Priority { player } => {
-            let expected_player = match &action {
-                GameAction::PassPriority => state.priority_player,
-                GameAction::PlayLand { .. } => state.priority_player,
-                GameAction::TapLandForMana { .. } => state.priority_player,
-                _ => {
-                    return Err(EngineError::ActionNotAllowed(format!(
-                        "{:?} not implemented yet",
-                        action
-                    )));
-                }
-            };
-
-            if expected_player != *player {
+    // Validate and process action against current WaitingFor
+    let waiting_for = match (&state.waiting_for.clone(), action) {
+        (WaitingFor::Priority { player }, GameAction::PassPriority) => {
+            if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
             }
-        }
-        _ => {
-            return Err(EngineError::ActionNotAllowed(format!(
-                "Cannot perform {:?} while waiting for {:?}",
-                action, state.waiting_for
-            )));
-        }
-    }
-
-    let waiting_for = match action {
-        GameAction::PassPriority => {
             priority::handle_priority_pass(state, &mut events)
         }
-        GameAction::PlayLand { card_id } => {
+        (WaitingFor::Priority { player }, GameAction::PlayLand { card_id }) => {
+            if state.priority_player != *player {
+                return Err(EngineError::NotYourPriority);
+            }
             handle_play_land(state, card_id, &mut events)?
         }
-        GameAction::TapLandForMana { object_id } => {
+        (WaitingFor::Priority { player }, GameAction::TapLandForMana { object_id }) => {
+            if state.priority_player != *player {
+                return Err(EngineError::NotYourPriority);
+            }
             handle_tap_land_for_mana(state, object_id, &mut events)?
         }
-        _ => {
+        (
+            WaitingFor::MulliganDecision {
+                player,
+                mulligan_count,
+            },
+            GameAction::MulliganDecision { keep },
+        ) => {
+            let p = *player;
+            let mc = *mulligan_count;
+            mulligan::handle_mulligan_decision(state, p, keep, mc, &mut events)
+        }
+        (
+            WaitingFor::MulliganBottomCards { player, count },
+            GameAction::SelectCards { cards },
+        ) => {
+            let p = *player;
+            let c = *count;
+            mulligan::handle_mulligan_bottom(state, p, cards, c, &mut events)
+                .map_err(|e| EngineError::InvalidAction(e))?
+        }
+        (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
-                "{:?} not implemented yet",
-                action
+                "Cannot perform {:?} while waiting for {:?}",
+                action, waiting
             )));
         }
     };
+
+    // Run state-based actions after every action (except during mulligan/game over)
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        sba::check_state_based_actions(state, &mut events);
+        // SBA might have set game over
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            let wf = state.waiting_for.clone();
+            return Ok(ActionResult {
+                events,
+                waiting_for: wf,
+            });
+        }
+    }
 
     state.waiting_for = waiting_for.clone();
 
@@ -229,6 +247,7 @@ pub fn new_game(seed: u64) -> GameState {
     GameState::new_two_player(seed)
 }
 
+/// Start game with mulligan flow. If no cards in libraries, skips mulligan.
 pub fn start_game(state: &mut GameState) -> ActionResult {
     let mut events = Vec::new();
 
@@ -238,16 +257,47 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
     state.turn_number = 1;
     state.active_player = PlayerId(0);
     state.priority_player = PlayerId(0);
+    state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
         player_id: PlayerId(0),
         turn_number: 1,
     });
 
-    // Set phase to Untap and auto-advance to first main phase
-    state.phase = Phase::Untap;
-    let waiting_for = turns::auto_advance(state, &mut events);
+    // If players have cards in their libraries, start mulligan flow
+    let has_libraries = state.players.iter().any(|p| !p.library.is_empty());
+    let waiting_for = if has_libraries {
+        mulligan::start_mulligan(state, &mut events)
+    } else {
+        // No cards to mulligan with, skip straight to game
+        turns::auto_advance(state, &mut events)
+    };
 
+    state.waiting_for = waiting_for.clone();
+
+    ActionResult {
+        events,
+        waiting_for,
+    }
+}
+
+/// Start game without mulligan (for backward compatibility with existing tests).
+pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
+    let mut events = Vec::new();
+
+    events.push(GameEvent::GameStarted);
+
+    state.turn_number = 1;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.phase = Phase::Untap;
+
+    events.push(GameEvent::TurnStarted {
+        player_id: PlayerId(0),
+        turn_number: 1,
+    });
+
+    let waiting_for = turns::auto_advance(state, &mut events);
     state.waiting_for = waiting_for.clone();
 
     ActionResult {
@@ -453,7 +503,7 @@ mod tests {
             Zone::Library,
         );
 
-        start_game(&mut state);
+        start_game_skip_mulligan(&mut state);
 
         // Card should still be in library (draw skipped on turn 1)
         assert!(state.players[0].library.contains(&id));
@@ -648,5 +698,192 @@ mod tests {
 
         let err = EngineError::InvalidAction("test".to_string());
         assert_eq!(err.to_string(), "Invalid action: test");
+    }
+
+    #[test]
+    fn tap_land_for_mana_produces_correct_color() {
+        let mut state = setup_game_at_main_phase();
+
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let result = apply(
+            &mut state,
+            GameAction::TapLandForMana { object_id: land_id },
+        )
+        .unwrap();
+
+        assert!(state.objects[&land_id].tapped);
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            1
+        );
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn tap_land_rejects_already_tapped() {
+        let mut state = setup_game_at_main_phase();
+
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.tapped = true;
+        }
+
+        let result = apply(
+            &mut state,
+            GameAction::TapLandForMana { object_id: land_id },
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn full_turn_integration_with_mulligan() {
+        let mut state = new_game(42);
+
+        // Add 20 basic lands to each player's library
+        for player_idx in 0..2u8 {
+            for i in 0..20 {
+                let id = create_object(
+                    &mut state,
+                    CardId((player_idx as u64) * 100 + i),
+                    PlayerId(player_idx),
+                    "Forest".to_string(),
+                    Zone::Library,
+                );
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push("Forest".to_string());
+            }
+        }
+
+        // Start game -> mulligan prompt
+        let result = start_game(&mut state);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::MulliganDecision {
+                player: PlayerId(0),
+                mulligan_count: 0,
+            }
+        ));
+
+        // Both players have 7 cards in hand
+        assert_eq!(state.players[0].hand.len(), 7);
+        assert_eq!(state.players[1].hand.len(), 7);
+
+        // Player 0 keeps
+        let result = apply(
+            &mut state,
+            GameAction::MulliganDecision { keep: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::MulliganDecision {
+                player: PlayerId(1),
+                mulligan_count: 0,
+            }
+        ));
+
+        // Player 1 keeps -> game starts, auto-advances to PreCombatMain
+        let result = apply(
+            &mut state,
+            GameAction::MulliganDecision { keep: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0),
+            }
+        ));
+        assert_eq!(state.phase, Phase::PreCombatMain);
+
+        // Play a land from hand
+        let land_card_id = state.objects[&state.players[0].hand[0]].card_id;
+        let result = apply(
+            &mut state,
+            GameAction::PlayLand {
+                card_id: land_card_id,
+            },
+        )
+        .unwrap();
+        assert_eq!(state.lands_played_this_turn, 1);
+
+        // Find the land on battlefield to tap it
+        let land_on_bf = state
+            .battlefield
+            .iter()
+            .find(|&&id| {
+                state
+                    .objects
+                    .get(&id)
+                    .map(|o| o.controller == PlayerId(0) && !o.tapped)
+                    .unwrap_or(false)
+            })
+            .copied()
+            .unwrap();
+
+        // Tap land for mana
+        let result = apply(
+            &mut state,
+            GameAction::TapLandForMana {
+                object_id: land_on_bf,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            1
+        );
+
+        // Pass priority through the rest of the turn
+        // PreCombatMain: P0 passes
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        // PreCombatMain: P1 passes -> advances to PostCombatMain
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PostCombatMain);
+
+        // PostCombatMain: both pass -> End
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::End);
+
+        // End: both pass -> Cleanup -> next turn
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.turn_number, 2);
+        assert_eq!(state.active_player, PlayerId(1));
     }
 }
