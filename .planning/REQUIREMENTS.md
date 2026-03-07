@@ -105,7 +105,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **PLAT-01**: Tauri desktop app (Windows, macOS, Linux)
 - [ ] **PLAT-02**: PWA + WASM build for tablet/browser
-- [ ] **PLAT-03**: EngineAdapter abstraction (Tauri IPC and WASM bindings)
+- [x] **PLAT-03**: EngineAdapter abstraction (Tauri IPC and WASM bindings)
 - [ ] **PLAT-04**: Scryfall card image caching (on-demand with local cache)
 - [ ] **PLAT-05**: Standard format card coverage (60-70%+ of current Standard-legal cards)
 
@@ -219,7 +219,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MP-04 | Phase 8 | Pending |
 | PLAT-01 | Phase 7 | Pending |
 | PLAT-02 | Phase 7 | Pending |
-| PLAT-03 | Phase 1 | Pending |
+| PLAT-03 | Phase 1 | Complete |
 | PLAT-04 | Phase 7 | Pending |
 | PLAT-05 | Phase 8 | Pending |
 | QOL-01 | Phase 7 | Pending |
