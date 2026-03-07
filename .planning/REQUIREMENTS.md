@@ -9,8 +9,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Engine Core
 
-- [ ] **ENG-01**: Full turn structure (untap, upkeep, draw, main1, combat phases, main2, end, cleanup)
-- [ ] **ENG-02**: Priority system with LIFO stack resolution
+- [x] **ENG-01**: Full turn structure (untap, upkeep, draw, main1, combat phases, main2, end, cleanup)
+- [x] **ENG-02**: Priority system with LIFO stack resolution
 - [ ] **ENG-03**: State-based actions with fixpoint loop checking
 - [x] **ENG-04**: Zone management (library, hand, battlefield, graveyard, stack, exile, command)
 - [x] **ENG-05**: Mana system (5 colors, colorless, generic, hybrid, phyrexian, X costs, snow)
@@ -159,8 +159,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ENG-01 | Phase 3 | Pending |
-| ENG-02 | Phase 3 | Pending |
+| ENG-01 | Phase 3 | Complete |
+| ENG-02 | Phase 3 | Complete |
 | ENG-03 | Phase 3 | Pending |
 | ENG-04 | Phase 3 | Complete |
 | ENG-05 | Phase 3 | Complete |

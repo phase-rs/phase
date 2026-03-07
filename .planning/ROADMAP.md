@@ -165,7 +165,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 |-------|----------------|--------|-----------|
 | 1. Project Scaffold & Core Types | 2/2 | Complete | 2026-03-07 |
 | 2. Card Parser & Database | 3/3 | Complete   | 2026-03-07 |
-| 3. Game State Engine | 1/3 | In Progress|  |
+| 3. Game State Engine | 2/3 | In Progress|  |
 | 4. Ability System & Effects | 0/3 | Not started | - |
 | 5. Triggers & Combat | 0/3 | Not started | - |
 | 6. Advanced Rules | 0/2 | Not started | - |
