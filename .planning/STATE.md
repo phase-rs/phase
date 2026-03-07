@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in-progress
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-03-07T21:40:16Z"
-last_activity: 2026-03-07 -- Completed 02-02 (Card File Parser)
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-03-07T21:44:16Z"
+last_activity: 2026-03-07 -- Completed 02-03 (Card Database)
 progress:
   total_phases: 8
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 3
-  completed_plans: 4
-  percent: 50
+  completed_plans: 5
+  percent: 63
 ---
 
 # Project State
@@ -25,18 +25,18 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 
 ## Current Position
 
-Phase: 2 of 8 (Card Parser & Database)
-Plan: 2 of 3 in current phase
-Status: In Progress
-Last activity: 2026-03-07 -- Completed 02-02 (Card File Parser)
+Phase: 2 of 8 (Card Parser & Database) -- COMPLETE
+Plan: 3 of 3 in current phase
+Status: Phase Complete
+Last activity: 2026-03-07 -- Completed 02-03 (Card Database)
 
-Progress: [█████-----] 50% (4/8 plans across phases)
+Progress: [██████----] 63% (5/8 plans across phases)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Average duration: 7min
+- Total plans completed: 5
+- Average duration: 6min
 - Total execution time: 0.5 hours
 
 **By Phase:**
@@ -44,17 +44,18 @@ Progress: [█████-----] 50% (4/8 plans across phases)
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 2 | 18min | 9min |
-| 02 | 2 | 9min | 4.5min |
+| 02 | 3 | 12min | 4min |
 
 **Recent Trend:**
-- Last 5 plans: 4min, 14min, 5min, 4min
-- Trend: stable
+- Last 5 plans: 4min, 14min, 5min, 4min, 3min
+- Trend: stable/improving
 
 *Updated after each plan completion*
 | Phase 01 P01 | 4min | 2 tasks | 19 files |
 | Phase 01 P02 | 14min | 3 tasks | 18 files |
 | Phase 02 P01 | 5min | 2 tasks | 11 files |
 | Phase 02 P02 | 4min | 1 tasks | 2 files |
+| Phase 02 P03 | 3min | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,8 @@ Recent decisions affecting current work:
 - [Phase 02]: First-byte dispatch on key character then exact match for card parser line processing
 - [Phase 02]: CardFaceBuilder with build() validation -- requires name, defaults ManaCost to zero
 - [Phase 02]: Lenient parsing: unknown keys silently skipped matching Forge behavior
+- [Phase 02]: Clone CardFace for face_index -- simpler than lifetime references, CardFace structs are small
+- [Phase 02]: filter_entry depth==0 bypass for root directory dotfile check
 
 ### Pending Todos
 
@@ -91,6 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-07T21:40:16Z
-Stopped at: Completed 02-02-PLAN.md
-Resume file: .planning/phases/02-card-parser-database/02-02-SUMMARY.md
+Last session: 2026-03-07T21:44:16Z
+Stopped at: Completed 02-03-PLAN.md
+Resume file: .planning/phases/02-card-parser-database/02-03-SUMMARY.md

@@ -13,7 +13,7 @@ Forge.ts delivers a playable MTG game engine by building bottom-up through the r
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: Project Scaffold & Core Types** - Cargo workspace, dual-target build (native + WASM), React skeleton, CI, and core enum/struct definitions
-- [ ] **Phase 2: Card Parser & Database** - Parse Forge's .txt card format into typed structures with indexing and lazy loading
+- [x] **Phase 2: Card Parser & Database** - Parse Forge's .txt card format into typed structures with indexing and lazy loading (completed 2026-03-07)
 - [ ] **Phase 3: Game State Engine** - Turn structure, priority, stack, zones, mana system, and state-based actions
 - [ ] **Phase 4: Ability System & Effects** - Ability parsing, effect handler registry, targeting, conditions, and top effect types
 - [ ] **Phase 5: Triggers & Combat** - Event bus, trigger matching, full combat system with keyword abilities
@@ -164,7 +164,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Project Scaffold & Core Types | 2/2 | Complete | 2026-03-07 |
-| 2. Card Parser & Database | 2/3 | In Progress|  |
+| 2. Card Parser & Database | 3/3 | Complete   | 2026-03-07 |
 | 3. Game State Engine | 0/3 | Not started | - |
 | 4. Ability System & Effects | 0/3 | Not started | - |
 | 5. Triggers & Combat | 0/3 | Not started | - |

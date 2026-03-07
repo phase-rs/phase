@@ -20,7 +20,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **PARSE-01**: Parse Forge's .txt card definition format (Name, ManaCost, Types, PT, K, A, T, S, R, SVar, Oracle)
 - [x] **PARSE-02**: Support all multi-face card types (Split, Flip, Transform, Meld, Adventure, MDFC)
-- [ ] **PARSE-03**: Card database indexing by name with lazy loading
+- [x] **PARSE-03**: Card database indexing by name with lazy loading
 - [x] **PARSE-04**: ManaCost and CardType sub-parsers
 
 ### Abilities & Effects
@@ -167,7 +167,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ENG-06 | Phase 3 | Pending |
 | PARSE-01 | Phase 2 | Complete |
 | PARSE-02 | Phase 2 | Complete |
-| PARSE-03 | Phase 2 | Pending |
+| PARSE-03 | Phase 2 | Complete |
 | PARSE-04 | Phase 2 | Pending |
 | ABIL-01 | Phase 2 | Pending |
 | ABIL-02 | Phase 4 | Pending |
