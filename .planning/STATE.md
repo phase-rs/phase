@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in-progress
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-03-07T21:33:16Z"
-last_activity: 2026-03-07 -- Completed 02-01 (Card Types & Sub-Parsers)
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-03-07T21:40:16Z"
+last_activity: 2026-03-07 -- Completed 02-02 (Card File Parser)
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 3
-  completed_plans: 3
-  percent: 37
+  completed_plans: 4
+  percent: 50
 ---
 
 # Project State
@@ -26,34 +26,35 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 ## Current Position
 
 Phase: 2 of 8 (Card Parser & Database)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: In Progress
-Last activity: 2026-03-07 -- Completed 02-01 (Card Types & Sub-Parsers)
+Last activity: 2026-03-07 -- Completed 02-02 (Card File Parser)
 
-Progress: [████------] 37% (3/8 plans across phases)
+Progress: [█████-----] 50% (4/8 plans across phases)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 8min
-- Total execution time: 0.4 hours
+- Total plans completed: 4
+- Average duration: 7min
+- Total execution time: 0.5 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 2 | 18min | 9min |
-| 02 | 1 | 5min | 5min |
+| 02 | 2 | 9min | 4.5min |
 
 **Recent Trend:**
-- Last 5 plans: 4min, 14min, 5min
+- Last 5 plans: 4min, 14min, 5min, 4min
 - Trend: stable
 
 *Updated after each plan completion*
 | Phase 01 P01 | 4min | 2 tasks | 19 files |
 | Phase 01 P02 | 14min | 3 tasks | 18 files |
 | Phase 02 P01 | 5min | 2 tasks | 11 files |
+| Phase 02 P02 | 4min | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Shared parse_params helper for pipe-delimited Key$ Value format
 - [Phase 02]: CardType parser uses FromStr on Supertype/CoreType enums for classification
 - [Phase 02]: ManaCostShard::from_str for all 40+ shard token mappings
+- [Phase 02]: First-byte dispatch on key character then exact match for card parser line processing
+- [Phase 02]: CardFaceBuilder with build() validation -- requires name, defaults ManaCost to zero
+- [Phase 02]: Lenient parsing: unknown keys silently skipped matching Forge behavior
 
 ### Pending Todos
 
@@ -87,6 +91,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-07T21:33:16Z
-Stopped at: Completed 02-01-PLAN.md
-Resume file: .planning/phases/02-card-parser-database/02-01-SUMMARY.md
+Last session: 2026-03-07T21:40:16Z
+Stopped at: Completed 02-02-PLAN.md
+Resume file: .planning/phases/02-card-parser-database/02-02-SUMMARY.md
