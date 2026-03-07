@@ -77,6 +77,7 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 - **Testing**: Rust unit tests + property-based tests for rules engine, Vitest for frontend, Cypress for E2E
 - **Layer system**: Functional evaluation per MTG Rule 613 (no OOP dependency graphs)
 - **License**: Open source
+- **Code quality**: Clean architecture is paramount — idiomatic Rust/TypeScript, extensible patterns, no shortcuts that compromise maintainability. Every abstraction must earn its place.
 
 ## Key Decisions
 
