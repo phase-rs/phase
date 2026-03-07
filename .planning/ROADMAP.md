@@ -47,11 +47,12 @@ Plans:
   2. Multi-face cards (Split, Transform, MDFC, Adventure) parse correctly into their respective face structures
   3. Card database loads and indexes cards by name, returning results in under 10ms for single-card lookup
   4. Ability strings (A:, T:, S:, R: lines) parse into typed AbilityDefinition structures with identified ApiType, cost, and parameters
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: TBD
-- [ ] 02-02: TBD
+- [ ] 02-01-PLAN.md — Card types (CardFace, CardRules, CardLayout, ManaCost, CardType) and sub-parsers (ManaCost, CardType, Ability)
+- [ ] 02-02-PLAN.md — Card file parser with single-card and multi-face support (ALTERNATE, all layout types)
+- [ ] 02-03-PLAN.md — Card database with directory loading, name indexing, and face-level lookup
 
 ### Phase 3: Game State Engine
 **Goal**: Two players can take turns through a full MTG turn cycle -- untap, draw, play lands, tap for mana, pass priority, and have state-based actions enforced
@@ -163,7 +164,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Project Scaffold & Core Types | 0/2 | Not started | - |
-| 2. Card Parser & Database | 0/2 | Not started | - |
+| 2. Card Parser & Database | 0/3 | Not started | - |
 | 3. Game State Engine | 0/3 | Not started | - |
 | 4. Ability System & Effects | 0/3 | Not started | - |
 | 5. Triggers & Combat | 0/3 | Not started | - |
