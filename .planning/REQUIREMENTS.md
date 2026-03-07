@@ -21,11 +21,11 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **PARSE-01**: Parse Forge's .txt card definition format (Name, ManaCost, Types, PT, K, A, T, S, R, SVar, Oracle)
 - [ ] **PARSE-02**: Support all multi-face card types (Split, Flip, Transform, Meld, Adventure, MDFC)
 - [ ] **PARSE-03**: Card database indexing by name with lazy loading
-- [ ] **PARSE-04**: ManaCost and CardType sub-parsers
+- [x] **PARSE-04**: ManaCost and CardType sub-parsers
 
 ### Abilities & Effects
 
-- [ ] **ABIL-01**: Ability parser for A:, T:, S:, R: strings into typed structures
+- [x] **ABIL-01**: Ability parser for A:, T:, S:, R: strings into typed structures
 - [ ] **ABIL-02**: SVar resolution (SubAbility$, Execute$, ReplaceWith$)
 - [ ] **ABIL-03**: Cost parser (mana costs, tap, sacrifice, discard, life payment)
 - [ ] **ABIL-04**: Target system with legality validation and rechecks on resolution
