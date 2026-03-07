@@ -13,24 +13,83 @@ pub struct CardDatabase {
 }
 
 impl CardDatabase {
-    pub fn load(_root: &Path) -> Result<Self, ParseError> {
-        todo!()
+    pub fn load(root: &Path) -> Result<Self, ParseError> {
+        let mut cards = HashMap::new();
+        let mut face_index = HashMap::new();
+        let mut errors = Vec::new();
+
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| {
+                e.depth() == 0
+                    || !e.file_name().to_str().is_some_and(|s| s.starts_with('.'))
+            })
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push((path.to_path_buf(), e.to_string()));
+                    continue;
+                }
+            };
+
+            match parse_card_file(&content) {
+                Ok(card_rules) => {
+                    // Index each face
+                    for face in layout_faces(&card_rules.layout) {
+                        face_index.insert(face.name.to_lowercase(), face.clone());
+                    }
+                    // Index the card by primary name
+                    let name_key = card_rules.name().to_lowercase();
+                    cards.insert(name_key, card_rules);
+                }
+                Err(e) => {
+                    errors.push((path.to_path_buf(), e.to_string()));
+                }
+            }
+        }
+
+        Ok(Self { cards, face_index, errors })
     }
 
-    pub fn get_by_name(&self, _name: &str) -> Option<&CardRules> {
-        todo!()
+    pub fn get_by_name(&self, name: &str) -> Option<&CardRules> {
+        self.cards.get(&name.to_lowercase())
     }
 
-    pub fn get_face_by_name(&self, _name: &str) -> Option<&CardFace> {
-        todo!()
+    pub fn get_face_by_name(&self, name: &str) -> Option<&CardFace> {
+        self.face_index.get(&name.to_lowercase())
     }
 
     pub fn card_count(&self) -> usize {
-        todo!()
+        self.cards.len()
     }
 
     pub fn errors(&self) -> &[(PathBuf, String)] {
-        todo!()
+        &self.errors
+    }
+}
+
+fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
+    match layout {
+        CardLayout::Single(face) => vec![face],
+        CardLayout::Split(a, b)
+        | CardLayout::Flip(a, b)
+        | CardLayout::Transform(a, b)
+        | CardLayout::Meld(a, b)
+        | CardLayout::Adventure(a, b)
+        | CardLayout::Modal(a, b)
+        | CardLayout::Omen(a, b) => vec![a, b],
+        CardLayout::Specialize(base, variants) => {
+            let mut faces = vec![base];
+            faces.extend(variants);
+            faces
+        }
     }
 }
 
