@@ -45,3 +45,57 @@ pub enum GameEvent {
         winner: Option<PlayerId>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn game_started_serializes_as_tagged_union() {
+        let event = GameEvent::GameStarted;
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "GameStarted");
+    }
+
+    #[test]
+    fn turn_started_serializes_with_data() {
+        let event = GameEvent::TurnStarted {
+            player_id: PlayerId(0),
+            turn_number: 1,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "TurnStarted");
+        assert_eq!(json["data"]["turn_number"], 1);
+    }
+
+    #[test]
+    fn zone_changed_serializes_all_fields() {
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(5),
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "ZoneChanged");
+        assert_eq!(json["data"]["from"], "Hand");
+        assert_eq!(json["data"]["to"], "Battlefield");
+    }
+
+    #[test]
+    fn game_over_with_winner_roundtrips() {
+        let event = GameEvent::GameOver {
+            winner: Some(PlayerId(1)),
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn game_over_without_winner_roundtrips() {
+        let event = GameEvent::GameOver { winner: None };
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(event, deserialized);
+    }
+}

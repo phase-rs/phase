@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 serde = { workspace = true }
 rpds = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"

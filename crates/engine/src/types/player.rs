@@ -2,14 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use super::mana::ManaPool;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PlayerId(pub u8);
-
-impl Default for PlayerId {
-    fn default() -> Self {
-        PlayerId(0)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Player {
