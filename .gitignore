@@ -1,0 +1,18 @@
+# Rust
+/target/
+
+# Node
+node_modules/
+
+# WASM output (generated)
+client/src/wasm/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
