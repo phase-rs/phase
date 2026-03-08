@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-07)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 10 -- Fix Undo/WASM State Sync
+**Current focus:** Phase 11 -- Tech Debt Cleanup
 
 ## Current Position
 
-Phase: 10 of 10 (Fix Undo/WASM State Sync)
-Plan: 1 of 1 in current phase (10-01 complete)
-Status: Complete
-Last activity: 2026-03-08 -- Completed 10-01 (Fix Undo/WASM State Sync)
+Phase: 11 of 11 (Tech Debt Cleanup)
+Plan: 1 of 3 in current phase (11-01 complete)
+Status: In Progress
+Last activity: 2026-03-08 -- Completed 11-01 (Constants Consolidation & CardDataMissingModal)
 
 Progress: [██████████] 100% (35/35 plans across phases)
 
@@ -87,6 +87,7 @@ Progress: [██████████] 100% (35/35 plans across phases)
 | Phase 09 P02 | 2min | 2 tasks | 4 files |
 | Phase 09 P03 | 4min | 2 tasks | 9 files |
 | Phase 10 P01 | 3min | 2 tasks | 8 files |
+| Phase 11 P01 | 2min | 2 tasks | 7 files |
 | Phase 11 P02 | 3min | 2 tasks | 7 files |
 
 ## Accumulated Context
@@ -207,6 +208,8 @@ Recent decisions affecting current work:
 - [Phase 09]: card-data.json fetch with graceful 404 fallback for empty game
 - [Phase 09]: Import button opens paste modal with From File option inside
 - [Phase 10]: RNG reconstructed from rng_seed after deserialization for WASM state restore
+- [Phase 11]: AI constants use _MS suffix for clarity (AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS)
+- [Phase 11]: Centralized constants pattern: game logic in constants/game.ts, UI in constants/ui.ts
 - [Phase 11]: Combat click delegation via combatClickHandler fn on uiStore
 
 ### Roadmap Evolution
@@ -224,6 +227,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T18:41:05.826Z
-Stopped at: Completed 11-02-PLAN.md
+Last session: 2026-03-08T18:39:50Z
+Stopped at: Completed 11-01-PLAN.md and 11-02-PLAN.md
 Resume file: None
