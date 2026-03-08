@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-stopped_at: Phase 6 context updated via structured discussion
-last_updated: "2026-03-08T04:05:24.787Z"
-last_activity: 2026-03-08 -- Completed 05-03 (Combat System)
+status: in_progress
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-03-08T04:42:51Z"
+last_activity: 2026-03-08 -- Completed 06-01 (Replacement Effects)
 progress:
   total_phases: 8
   completed_phases: 5
-  total_plans: 14
-  completed_plans: 14
-  percent: 100
+  total_plans: 17
+  completed_plans: 15
+  percent: 88
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-07)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 5 -- Triggers & Combat
+**Current focus:** Phase 6 -- Advanced Rules (Replacement Effects & Layers)
 
 ## Current Position
 
-Phase: 5 of 8 (Triggers & Combat) -- COMPLETE
-Plan: 3 of 3 in current phase -- COMPLETE
-Status: Phase 05 Complete
-Last activity: 2026-03-08 -- Completed 05-03 (Combat System)
+Phase: 6 of 8 (Advanced Rules) -- IN PROGRESS
+Plan: 1 of 3 in current phase -- COMPLETE
+Status: Phase 06 In Progress
+Last activity: 2026-03-08 -- Completed 06-01 (Replacement Effects)
 
-Progress: [██████████] 100% (14/14 plans across phases)
+Progress: [████████░░] 88% (15/17 plans across phases)
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Progress: [██████████] 100% (14/14 plans across phases)
 | Phase 05 P01 | 5min | 2 tasks | 9 files |
 | Phase 05 P02 | 5min | 2 tasks | 7 files |
 | Phase 05 P03 | 5min | 2 tasks | 7 files |
+| Phase 06 P01 | 5min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,10 @@ Recent decisions affecting current work:
 - [Phase 05]: CombatState as Option on GameState -- None outside combat, Some during combat phases
 - [Phase 05]: SBA: deathtouch flag + damage > 0 = lethal; indestructible prevents destruction
 - [Phase 05]: Combat phases auto-skip via has_potential_attackers check
+- [Phase 06]: indexmap for deterministic replacement ordering in player choice scenarios
+- [Phase 06]: Flat replacement.rs file -- all 14 handlers inline until file grows unwieldy
+- [Phase 06]: ReplacementMatcher/ReplacementApplier fn pointer pair per handler type
+- [Phase 06]: ProposedEvent carries HashSet<ReplacementId> for once-per-event tracking
 
 ### Pending Todos
 
@@ -139,6 +144,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T04:05:24.784Z
-Stopped at: Phase 6 context updated via structured discussion
-Resume file: .planning/phases/06-advanced-rules/06-CONTEXT.md
+Last session: 2026-03-08T04:42:51Z
+Stopped at: Completed 06-01-PLAN.md
+Resume file: .planning/phases/06-advanced-rules/06-01-SUMMARY.md

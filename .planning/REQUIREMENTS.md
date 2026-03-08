@@ -42,10 +42,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Replacement Effects
 
-- [ ] **REPL-01**: Replacement effect pipeline intercepting events before they resolve
-- [ ] **REPL-02**: Per-event application tracking (each replacement modifies an event only once)
-- [ ] **REPL-03**: Player choice when multiple replacements apply
-- [ ] **REPL-04**: All 45 replacement effect handlers
+- [x] **REPL-01**: Replacement effect pipeline intercepting events before they resolve
+- [x] **REPL-02**: Per-event application tracking (each replacement modifies an event only once)
+- [x] **REPL-03**: Player choice when multiple replacements apply
+- [x] **REPL-04**: All 45 replacement effect handlers
 
 ### Static Abilities & Layers
 
@@ -180,10 +180,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TRIG-02 | Phase 5 | Complete |
 | TRIG-03 | Phase 5 | Complete |
 | TRIG-04 | Phase 5 | Complete |
-| REPL-01 | Phase 6 | Pending |
-| REPL-02 | Phase 6 | Pending |
-| REPL-03 | Phase 6 | Pending |
-| REPL-04 | Phase 6 | Pending |
+| REPL-01 | Phase 6 | Complete |
+| REPL-02 | Phase 6 | Complete |
+| REPL-03 | Phase 6 | Complete |
+| REPL-04 | Phase 6 | Complete |
 | STAT-01 | Phase 6 | Pending |
 | STAT-02 | Phase 6 | Pending |
 | STAT-03 | Phase 6 | Pending |
