@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 8 context gathered
-last_updated: "2026-03-08T12:49:42.032Z"
-last_activity: 2026-03-08 -- Completed 07-08 (QoL & Platform Bridges)
+stopped_at: Completed 08-01 (AI Foundation Crate)
+last_updated: "2026-03-08T13:12:58.000Z"
+last_activity: 2026-03-08 -- Completed 08-01 (AI Foundation Crate)
 progress:
   total_phases: 8
   completed_phases: 7
-  total_plans: 26
-  completed_plans: 26
-  percent: 100
+  total_plans: 29
+  completed_plans: 27
+  percent: 93
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-07)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 7 -- Platform Bridges & UI
+**Current focus:** Phase 8 -- AI & Multiplayer
 
 ## Current Position
 
-Phase: 7 of 8 (Platform Bridges & UI)
-Plan: 9 of 9 in current phase (07-08 complete)
-Status: Executing Phase 07
-Last activity: 2026-03-08 -- Completed 07-08 (QoL & Platform Bridges)
+Phase: 8 of 8 (AI & Multiplayer)
+Plan: 1 of 3 in current phase (08-01 complete)
+Status: Executing Phase 08
+Last activity: 2026-03-08 -- Completed 08-01 (AI Foundation Crate)
 
-Progress: [██████████] 100% (26/26 plans across phases)
+Progress: [█████████▒] 93% (27/29 plans across phases)
 
 ## Performance Metrics
 
@@ -78,6 +78,7 @@ Progress: [██████████] 100% (26/26 plans across phases)
 | Phase 07 P05 | 4min | 2 tasks | 9 files |
 | Phase 07 P06 | 2min | 2 tasks | 6 files |
 | Phase 07 P08 | 4min | 2 tasks | 13 files |
+| Phase 08 P01 | 5min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -174,6 +175,10 @@ Recent decisions affecting current work:
 - [Phase 07]: AnimationOverlay processes effects sequentially via processingRef guard
 - [Phase 07]: useGameDispatch enqueues effects without blocking (fire-and-forget)
 - [Phase 07]: Dynamic Function() import for TauriAdapter to avoid tsc bundling @tauri-apps/api in web builds
+- [Phase 08]: Simplified can_afford for AI action filtering (engine validates exact mana payment)
+- [Phase 08]: Legal actions returns individual attacker candidates, combat_ai selects optimal subset
+- [Phase 08]: evaluate_creature keyword-weighted scoring for combat value decisions
+- [Phase 08]: 5 AiDifficulty presets with Platform-based WASM budget scaling
 
 ### Pending Todos
 
@@ -186,6 +191,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T12:49:42.029Z
-Stopped at: Phase 8 context gathered
-Resume file: .planning/phases/08-ai-multiplayer/08-CONTEXT.md
+Last session: 2026-03-08T13:12:58.000Z
+Stopped at: Completed 08-01 (AI Foundation Crate)
+Resume file: .planning/phases/08-ai-multiplayer/08-01-SUMMARY.md
