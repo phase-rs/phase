@@ -1,7 +1,9 @@
+import { DeckBuilder } from "../components/deck-builder/DeckBuilder";
+
 export function DeckBuilderPage() {
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <h2 className="text-2xl text-gray-400">Deck Builder</h2>
+    <div className="h-screen bg-gray-950">
+      <DeckBuilder />
     </div>
   );
 }
