@@ -115,11 +115,12 @@ Plans:
   3. Continuous effects are evaluated through all seven layers in correct order (copy, control, text, type, color, ability, P/T)
   4. Within a layer, timestamp ordering is respected, and intra-layer dependencies are detected and resolved correctly
   5. Static abilities that grant keywords or modify characteristics (e.g., "All creatures you control get +1/+1") apply and unapply correctly as permanents enter and leave the battlefield
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 06-01: TBD
-- [ ] 06-02: TBD
+- [ ] 06-01-PLAN.md — Replacement pipeline: ProposedEvent types, replace_event() with once-per-event tracking and player choice, 14 replacement handlers
+- [ ] 06-02-PLAN.md — Layer system: seven-layer evaluate_layers() with petgraph dependency ordering, static ability handler registry (61+ modes)
+- [ ] 06-03-PLAN.md — Integration: replacement hooks at all 14 mutation sites, layer evaluation in SBA/engine checkpoint, end-to-end tests
 
 ### Phase 7: Platform Bridges & UI
 **Goal**: A player can launch the app (desktop or browser), see the game board with card images, interact with all game elements through a responsive UI, build decks, and play a full game visually
@@ -168,6 +169,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 3. Game State Engine | 2/3 | In Progress|  |
 | 4. Ability System & Effects | 3/3 | Complete   | 2026-03-08 |
 | 5. Triggers & Combat | 3/3 | Complete   | 2026-03-08 |
-| 6. Advanced Rules | 0/2 | Not started | - |
+| 6. Advanced Rules | 0/3 | Not started | - |
 | 7. Platform Bridges & UI | 0/4 | Not started | - |
 | 8. AI & Multiplayer | 0/3 | Not started | - |
