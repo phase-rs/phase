@@ -96,10 +96,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Multiplayer
 
-- [ ] **MP-01**: WebSocket server for authoritative game state
-- [ ] **MP-02**: Hidden information handling (library order, opponent's hand)
-- [ ] **MP-03**: Action synchronization (send actions, not full state)
-- [ ] **MP-04**: Reconnection support
+- [x] **MP-01**: WebSocket server for authoritative game state
+- [x] **MP-02**: Hidden information handling (library order, opponent's hand)
+- [x] **MP-03**: Action synchronization (send actions, not full state)
+- [x] **MP-04**: Reconnection support
 
 ### Platform
 
@@ -213,10 +213,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AI-03 | Phase 8 | Complete |
 | AI-04 | Phase 8 | Pending |
 | AI-05 | Phase 8 | Complete |
-| MP-01 | Phase 8 | Pending |
-| MP-02 | Phase 8 | Pending |
-| MP-03 | Phase 8 | Pending |
-| MP-04 | Phase 8 | Pending |
+| MP-01 | Phase 8 | Complete |
+| MP-02 | Phase 8 | Complete |
+| MP-03 | Phase 8 | Complete |
+| MP-04 | Phase 8 | Complete |
 | PLAT-01 | Phase 7 | Complete |
 | PLAT-02 | Phase 7 | Complete |
 | PLAT-03 | Phase 1 | Complete |

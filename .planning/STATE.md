@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 08-01 (AI Foundation Crate)
+stopped_at: Completed 08-03 (Server Core & WebSocket Server)
 last_updated: "2026-03-08T13:12:58.000Z"
 last_activity: 2026-03-08 -- Completed 08-01 (AI Foundation Crate)
 progress:
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 ## Current Position
 
 Phase: 8 of 8 (AI & Multiplayer)
-Plan: 1 of 3 in current phase (08-01 complete)
+Plan: 3 of 3 in current phase (08-03 complete)
 Status: Executing Phase 08
-Last activity: 2026-03-08 -- Completed 08-01 (AI Foundation Crate)
+Last activity: 2026-03-08 -- Completed 08-03 (Server Core & WebSocket Server)
 
-Progress: [█████████▒] 93% (27/29 plans across phases)
+Progress: [██████████] 100% (29/29 plans across phases)
 
 ## Performance Metrics
 
@@ -79,6 +79,7 @@ Progress: [█████████▒] 93% (27/29 plans across phases)
 | Phase 07 P06 | 2min | 2 tasks | 6 files |
 | Phase 07 P08 | 4min | 2 tasks | 13 files |
 | Phase 08 P01 | 5min | 2 tasks | 8 files |
+| Phase 08 P03 | 5min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -179,6 +180,9 @@ Recent decisions affecting current work:
 - [Phase 08]: Legal actions returns individual attacker candidates, combat_ai selects optimal subset
 - [Phase 08]: evaluate_creature keyword-weighted scoring for combat value decisions
 - [Phase 08]: 5 AiDifficulty presets with Platform-based WASM budget scaling
+- [Phase 08]: tokio::select loop for WebSocket bidirectional handling (simpler than futures_util split)
+- [Phase 08]: filter_state_for_player hides both players' libraries to prevent ordering info leaks
+- [Phase 08]: ReconnectManager composite key (game_code:player_id) for per-player disconnect tracking
 
 ### Pending Todos
 
@@ -192,5 +196,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-08T13:12:58.000Z
-Stopped at: Completed 08-01 (AI Foundation Crate)
-Resume file: .planning/phases/08-ai-multiplayer/08-01-SUMMARY.md
+Stopped at: Completed 08-03 (Server Core & WebSocket Server)
+Resume file: .planning/phases/08-ai-multiplayer/08-03-SUMMARY.md
