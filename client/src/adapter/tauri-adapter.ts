@@ -18,7 +18,12 @@ export class TauriAdapter implements EngineAdapter {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const tauriCore = await (Function('return import("@tauri-apps/api/core")')() as Promise<any>);
     this.invoke = tauriCore.invoke as InvokeFn;
-    await this.invoke!("initialize_game");
+  }
+
+  async initializeGame(deckData?: unknown): Promise<GameEvent[]> {
+    this.assertInitialized();
+    const result = await this.invoke!("initialize_game", { deckData: deckData ?? null });
+    return (result as GameEvent[]) ?? [];
   }
 
   async submitAction(action: GameAction): Promise<GameEvent[]> {

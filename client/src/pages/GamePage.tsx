@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
@@ -16,9 +16,11 @@ import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
+import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage.ts";
 import { WasmAdapter } from "../adapter/wasm-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter.ts";
+import type { ParsedDeck } from "../services/deckParser.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
@@ -32,19 +34,72 @@ function getWsUrl(): string {
   return import.meta.env.VITE_WS_URL ?? DEFAULT_WS_URL;
 }
 
-function loadDeckFromSession(): DeckData {
-  const raw = sessionStorage.getItem("forge-deck");
-  if (raw) {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return { main_deck: parsed, sideboard: [] };
+/** Load active deck from localStorage using shared storage constants. */
+function loadActiveDeck(): ParsedDeck | null {
+  const activeName = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!activeName) return null;
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + activeName);
+  if (!raw) return null;
+  return JSON.parse(raw) as ParsedDeck;
+}
+
+/** Convert ParsedDeck to DeckData format for WebSocket adapter. */
+function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
+  const names: string[] = [];
+  for (const entry of deck.main) {
+    for (let i = 0; i < entry.count; i++) {
+      names.push(entry.name);
     }
-    return parsed as DeckData;
   }
-  return { main_deck: [], sideboard: [] };
+  const sbNames: string[] = [];
+  for (const entry of deck.sideboard) {
+    for (let i = 0; i < entry.count; i++) {
+      sbNames.push(entry.name);
+    }
+  }
+  return { main_deck: names, sideboard: sbNames };
+}
+
+interface CardFace {
+  name: string;
+  [key: string]: unknown;
+}
+
+interface DeckPayload {
+  player_deck: Array<{ card: CardFace; count: number }>;
+  opponent_deck: Array<{ card: CardFace; count: number }>;
+}
+
+/** Fetch card-data.json and build DeckPayload for WASM. */
+async function buildDeckPayload(deck: ParsedDeck): Promise<DeckPayload | null> {
+  try {
+    const resp = await fetch("/card-data.json");
+    if (!resp.ok) {
+      console.warn("card-data.json not available (HTTP", resp.status, "). Starting with empty game.");
+      return null;
+    }
+    const cardDb = (await resp.json()) as Record<string, CardFace>;
+
+    const entries: Array<{ card: CardFace; count: number }> = [];
+    for (const entry of deck.main) {
+      const card = cardDb[entry.name];
+      if (card) {
+        entries.push({ card, count: entry.count });
+      } else {
+        console.warn(`Card not found in card-data.json: ${entry.name}`);
+      }
+    }
+
+    // Mirror match: opponent uses the same deck
+    return { player_deck: entries, opponent_deck: entries };
+  } catch (err) {
+    console.warn("Failed to load card-data.json:", err);
+    return null;
+  }
 }
 
 export function GamePage() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const mode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
@@ -77,7 +132,10 @@ export function GamePage() {
     const isOnline = mode === "host" || mode === "join";
 
     if (isOnline) {
-      const deck = loadDeckFromSession();
+      const parsedDeck = loadActiveDeck();
+      const deck = parsedDeck
+        ? parsedDeckToDeckData(parsedDeck)
+        : { main_deck: [], sideboard: [] };
       const wsAdapter = new WebSocketAdapter(
         getWsUrl(),
         mode as "host" | "join",
@@ -113,30 +171,45 @@ export function GamePage() {
       };
     }
 
-    // AI or default mode
-    const adapter = new WasmAdapter();
-    initGame(adapter);
-
-    if (mode === "ai") {
-      const controller = createAIController(
-        () => useGameStore.getState().gameState,
-        async (action) => {
-          await useGameStore.getState().dispatch(action);
-        },
-        { difficulty },
-      );
-      aiControllerRef.current = controller;
-      controller.start();
+    // AI or default mode: require active deck
+    const parsedDeck = loadActiveDeck();
+    if (!parsedDeck) {
+      navigate("/");
+      return;
     }
 
+    let cancelled = false;
+    const adapter = new WasmAdapter();
+
+    buildDeckPayload(parsedDeck).then((deckPayload) => {
+      if (cancelled) return;
+
+      initGame(adapter, deckPayload).then(() => {
+        if (cancelled) return;
+
+        if (mode === "ai") {
+          const controller = createAIController(
+            () => useGameStore.getState().gameState,
+            async (action) => {
+              await useGameStore.getState().dispatch(action);
+            },
+            { difficulty },
+          );
+          aiControllerRef.current = controller;
+          controller.start();
+        }
+      });
+    });
+
     return () => {
+      cancelled = true;
       if (aiControllerRef.current) {
         aiControllerRef.current.dispose();
         aiControllerRef.current = null;
       }
       reset();
     };
-  }, [initGame, reset, mode, difficulty, joinCode]);
+  }, [initGame, reset, mode, difficulty, joinCode, navigate]);
 
   const handleMulliganChoice = useCallback(
     (id: string) => {

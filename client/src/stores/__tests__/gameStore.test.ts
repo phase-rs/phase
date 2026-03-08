@@ -32,6 +32,7 @@ function createMockState(overrides: Partial<GameState> = {}): GameState {
 function createMockAdapter(state: GameState): EngineAdapter {
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
+    initializeGame: vi.fn().mockResolvedValue([]),
     submitAction: vi.fn().mockResolvedValue([]),
     getState: vi.fn().mockResolvedValue(state),
     dispose: vi.fn(),

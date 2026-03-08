@@ -42,8 +42,9 @@ export const useGameStore = create<GameStore>()(
   subscribeWithSelector((set, get) => ({
     ...initialState,
 
-    initGame: async (adapter, _deckData) => {
+    initGame: async (adapter, deckData) => {
       await adapter.initialize();
+      await adapter.initializeGame(deckData);
       const state = await adapter.getState();
       set({
         adapter,
