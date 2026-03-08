@@ -1,10 +1,10 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: completed
-stopped_at: Completed quick-1-01-PLAN.md
-last_updated: "2026-03-08T20:45:26.125Z"
+milestone: v1.1
+milestone_name: Arena UI
+status: active
+stopped_at: null
+last_updated: "2026-03-08T21:00:00.000Z"
 progress:
   total_phases: 0
   completed_phases: 0
@@ -19,13 +19,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Planning next milestone
+**Current focus:** v1.1 Arena UI — port Alchemy UI to Forge.rs
 
 ## Current Position
 
-Milestone: v1.0 MVP — SHIPPED 2026-03-08
-Status: Complete (12 phases, 40 plans, 63/63 requirements)
-Next: `/gsd:new-milestone` to define v1.1
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-08 — Milestone v1.1 started
 
 ## Accumulated Context
 

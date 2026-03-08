@@ -40,7 +40,24 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 
 <!-- Current scope. Building toward these. -->
 
-(None — next milestone requirements TBD via `/gsd:new-milestone`)
+- [ ] Port Alchemy UI to replace current Forge.rs frontend
+- [ ] Wire Alchemy UI components through EngineAdapter to Rust/WASM engine
+- [ ] Responsive game board with CSS custom property card sizing
+- [ ] Canvas particle VFX and Framer Motion animations
+- [ ] Audio system with sound synthesis and ambient music
+- [ ] MTG-specific UI additions (stack, mana payment, instant-speed interaction)
+
+## Current Milestone: v1.1 Arena UI
+
+**Goal:** Replace the current frontend with a polished Arena-style UI ported from the Alchemy project, wired to the Rust/WASM engine via the existing EngineAdapter interface.
+
+**Target features:**
+- Port Alchemy's game board, hand, card, combat, and animation components
+- Canvas particle VFX, floating damage numbers, combat math bubbles
+- Responsive card sizing via CSS custom properties (mobile → desktop)
+- Audio system (sound synthesis, ambient music)
+- Preserve EngineAdapter abstraction (WASM, Tauri, WebSocket)
+- Build MTG-specific UI for stack visualization, mana payment, and priority interaction
 
 ### Out of Scope
 
@@ -54,6 +71,9 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 - React Native — web technologies (CSS Grid, transforms, Framer Motion) better suited for card game layouts
 - Mobile-first — desktop + tablet via PWA; native mobile app via Tauri v2 mobile deferred
 - Alchemy/digital-only mechanics — support paper MTG rules only
+- Learning challenges / educational system — not relevant to MTG gameplay
+- Campaign / adventure mode — narrative framework not core to gameplay
+- Tutorial system — defer to future milestone
 
 ## Context
 
@@ -99,6 +119,8 @@ Shipped v1.0 with ~29,700 LOC (22.5k Rust + 7.2k TypeScript) across 5 Rust crate
 | ChaCha20Rng for cross-platform determinism | StdRng not guaranteed same across platforms | ✓ Good — WASM and native produce identical sequences from same seed |
 | fn pointer effect/trigger/static registries | Built per apply() call, cheap HashMap | ✓ Good — simple, no trait objects or global state |
 | petgraph for layer dependency ordering | Seven-layer system needs topological sort | ✓ Good — handles cycles with fallback to timestamp ordering |
+| Port Alchemy UI as Arena-style frontend | Alchemy has polished game UI with clean architecture matching Forge.rs patterns (Zustand, discriminated unions, event-driven) | — Pending |
+| Preserve EngineAdapter abstraction during UI port | Keeps WASM + Tauri + WebSocket support without coupling to specific transport | — Pending |
 
 ---
-*Last updated: 2026-03-08 after v1.0 milestone*
+*Last updated: 2026-03-08 after v1.1 milestone started*
