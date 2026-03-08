@@ -82,7 +82,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Deck Management
 
-- [ ] **DECK-01**: Deck builder with card search and filtering
+- [x] **DECK-01**: Deck builder with card search and filtering
 - [x] **DECK-02**: Import .dck/.dec files from Forge
 - [ ] **DECK-03**: Mana curve and color distribution display
 
@@ -205,7 +205,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UI-09 | Phase 7 | Complete |
 | UI-10 | Phase 7 | Complete |
 | UI-11 | Phase 7 | Complete |
-| DECK-01 | Phase 9 | Pending |
+| DECK-01 | Phase 9 | Complete |
 | DECK-02 | Phase 7 | Complete |
 | DECK-03 | Phase 9 | Pending |
 | AI-01 | Phase 8 | Complete |
