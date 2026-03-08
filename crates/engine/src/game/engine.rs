@@ -8,6 +8,8 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::casting;
+use super::effects;
 use super::mana_payment;
 use super::mulligan;
 use super::priority;
@@ -32,6 +34,7 @@ pub fn apply(
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
     let mut events = Vec::new();
+    let registry = effects::build_registry();
 
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
@@ -39,7 +42,7 @@ pub fn apply(
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
             }
-            priority::handle_priority_pass(state, &mut events)
+            priority::handle_priority_pass(state, &mut events, &registry)
         }
         (WaitingFor::Priority { player }, GameAction::PlayLand { card_id }) => {
             if state.priority_player != *player {
@@ -52,6 +55,21 @@ pub fn apply(
                 return Err(EngineError::NotYourPriority);
             }
             handle_tap_land_for_mana(state, object_id, &mut events)?
+        }
+        (WaitingFor::Priority { player }, GameAction::CastSpell { card_id, .. }) => {
+            if state.priority_player != *player {
+                return Err(EngineError::NotYourPriority);
+            }
+            casting::handle_cast_spell(state, *player, card_id, &mut events)?
+        }
+        (WaitingFor::Priority { player }, GameAction::ActivateAbility { source_id, ability_index }) => {
+            if state.priority_player != *player {
+                return Err(EngineError::NotYourPriority);
+            }
+            casting::handle_activate_ability(state, *player, source_id, ability_index, &mut events)?
+        }
+        (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
+            casting::handle_select_targets(state, *player, targets, &mut events)?
         }
         (
             WaitingFor::MulliganDecision {
@@ -456,21 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_unsupported_actions() {
-        let mut state = setup_game_at_main_phase();
-
-        let result = apply(
-            &mut state,
-            GameAction::CastSpell {
-                card_id: CardId(1),
-                targets: vec![],
-            },
-        );
-
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn new_game_creates_two_player_state() {
         let state = new_game(42);
         assert_eq!(state.players.len(), 2);
@@ -689,13 +692,15 @@ mod tests {
 
         assert_eq!(state.stack.len(), 2);
 
+        let registry = crate::game::effects::build_registry();
+
         // Resolve top (LIFO) -- should be id2 (Bear, creature -> battlefield)
-        stack::resolve_top(&mut state, &mut events);
+        stack::resolve_top(&mut state, &mut events, &registry);
         assert_eq!(state.stack.len(), 1);
         assert!(state.battlefield.contains(&id2)); // Creature goes to battlefield
 
         // Resolve next -- should be id1 (Bolt, instant -> graveyard)
-        stack::resolve_top(&mut state, &mut events);
+        stack::resolve_top(&mut state, &mut events, &registry);
         assert_eq!(state.stack.len(), 0);
         assert!(state.players[0].graveyard.contains(&id1)); // Instant goes to graveyard
     }
@@ -905,5 +910,198 @@ mod tests {
         assert_eq!(state.phase, Phase::PreCombatMain);
         assert_eq!(state.turn_number, 2);
         assert_eq!(state.active_player, PlayerId(1));
+    }
+
+    #[test]
+    fn cast_spell_moves_card_from_hand_to_stack_and_returns_priority() {
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+
+        let mut state = setup_game_at_main_phase();
+
+        // Create a sorcery in hand
+        let obj_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Divination".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.abilities.push("SP$ Draw | NumCards$ 2".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            };
+        }
+
+        // Add mana
+        let player = state.players.iter_mut().find(|p| p.id == PlayerId(0)).unwrap();
+        for _ in 0..3 {
+            player.mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: Vec::new(),
+            });
+        }
+
+        let result = apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { player: PlayerId(0) }));
+        assert_eq!(state.stack.len(), 1);
+        assert!(!state.players[0].hand.contains(&obj_id));
+    }
+
+    #[test]
+    fn both_pass_with_spell_on_stack_resolves_spell() {
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+
+        let mut state = setup_game_at_main_phase();
+
+        // Create a sorcery and cast it
+        let obj_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Divination".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.abilities.push("SP$ Draw | NumCards$ 2".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            };
+        }
+
+        // Add some cards to draw
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        let player = state.players.iter_mut().find(|p| p.id == PlayerId(0)).unwrap();
+        for _ in 0..3 {
+            player.mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: Vec::new(),
+            });
+        }
+
+        // Cast the spell
+        apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(state.stack.len(), 1);
+
+        let hand_before = state.players[0].hand.len();
+
+        // Both pass -> resolve
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+
+        // Stack should be empty
+        assert!(state.stack.is_empty());
+        // Card should be in graveyard (sorcery)
+        assert!(state.players[0].graveyard.contains(&obj_id));
+        // Draw 2 effect should have fired
+        assert_eq!(state.players[0].hand.len(), hand_before + 2);
+    }
+
+    #[test]
+    fn fizzle_target_removed_before_resolution() {
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+
+        let mut state = setup_game_at_main_phase();
+
+        // Create a creature target
+        let creature_id = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Create Lightning Bolt targeting the creature
+        let bolt_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&bolt_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities
+                .push("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+        }
+
+        let player = state.players.iter_mut().find(|p| p.id == PlayerId(0)).unwrap();
+        player.mana_pool.add(ManaUnit {
+            color: ManaType::Red,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: Vec::new(),
+        });
+
+        // Cast bolt (auto-targets the single creature)
+        apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(state.stack.len(), 1);
+
+        // Remove the creature from battlefield before resolution (simulating it was destroyed)
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, creature_id, Zone::Graveyard, &mut events);
+
+        // Both pass -> resolve -- should fizzle
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+
+        // Stack should be empty, bolt should be in graveyard (fizzled)
+        assert!(state.stack.is_empty());
+        assert!(state.players[0].graveyard.contains(&bolt_id));
+        // Creature was already in graveyard, life should be unchanged
+        assert_eq!(state.players[1].life, 20);
     }
 }

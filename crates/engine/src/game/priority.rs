@@ -1,12 +1,16 @@
+use std::collections::HashMap;
+
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
 
+use super::effects::EffectHandler;
 use super::turns;
 
 pub fn handle_priority_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    registry: &HashMap<String, EffectHandler>,
 ) -> WaitingFor {
     state.priority_pass_count += 1;
 
@@ -18,7 +22,7 @@ pub fn handle_priority_pass(
             turns::auto_advance(state, events)
         } else {
             // Non-empty stack: resolve top of stack
-            super::stack::resolve_top(state, events);
+            super::stack::resolve_top(state, events, registry);
             reset_priority(state);
             WaitingFor::Priority {
                 player: state.active_player,
@@ -69,7 +73,8 @@ mod tests {
         let mut state = setup();
         let mut events = Vec::new();
 
-        let result = handle_priority_pass(&mut state, &mut events);
+        let registry = crate::game::effects::build_registry();
+        let result = handle_priority_pass(&mut state, &mut events, &registry);
 
         assert!(matches!(
             result,
@@ -88,7 +93,8 @@ mod tests {
         state.priority_player = PlayerId(1);
 
         let mut events = Vec::new();
-        let result = handle_priority_pass(&mut state, &mut events);
+        let registry = crate::game::effects::build_registry();
+        let result = handle_priority_pass(&mut state, &mut events, &registry);
 
         // Should advance past combat to PostCombatMain
         assert!(matches!(result, WaitingFor::Priority { .. }));
@@ -161,7 +167,8 @@ mod tests {
             .push(crate::types::card_type::CoreType::Instant);
 
         let mut events = Vec::new();
-        let result = handle_priority_pass(&mut state, &mut events);
+        let registry = crate::game::effects::build_registry();
+        let result = handle_priority_pass(&mut state, &mut events, &registry);
 
         // Priority should reset to active player
         assert!(matches!(

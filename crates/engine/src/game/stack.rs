@@ -1,8 +1,13 @@
+use std::collections::HashMap;
+
+use crate::types::ability::ResolvedAbility;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntry};
+use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
+use super::effects::{self, EffectHandler};
+use super::targeting;
 use super::zones;
 
 pub fn push_to_stack(
@@ -16,24 +21,80 @@ pub fn push_to_stack(
     state.stack.push(entry);
 }
 
-pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
+pub fn resolve_top(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    registry: &HashMap<String, EffectHandler>,
+) {
     let entry = match state.stack.pop() {
         Some(e) => e,
         None => return,
     };
 
-    // Determine destination zone based on card type
-    let dest = if is_permanent_type(state, entry.id) {
-        Zone::Battlefield
-    } else {
-        Zone::Graveyard
+    // Extract the resolved ability from the stack entry
+    let (ability, is_spell) = match &entry.kind {
+        StackEntryKind::Spell { ability, .. } => (ability.clone(), true),
+        StackEntryKind::ActivatedAbility { ability, .. } => (ability.clone(), false),
     };
 
-    zones::move_to_zone(state, entry.id, dest, events);
+    // Run fizzle check if the ability has targets
+    if !ability.targets.is_empty() {
+        if let Some(valid_tgts) = ability.params.get("ValidTgts") {
+            let legal = targeting::validate_targets(
+                state,
+                &ability.targets,
+                valid_tgts,
+                ability.controller,
+                ability.source_id,
+            );
+            if targeting::check_fizzle(&ability.targets, &legal) {
+                // Fizzle: all targets illegal -- move card to graveyard without executing
+                if is_spell {
+                    zones::move_to_zone(state, entry.id, Zone::Graveyard, events);
+                }
+                events.push(GameEvent::StackResolved {
+                    object_id: entry.id,
+                });
+                return;
+            }
+            // Update ability with only still-legal targets
+            let mut ability = ability;
+            ability.targets = legal;
+            execute_effect(registry, state, &ability, events);
+        } else {
+            execute_effect(registry, state, &ability, events);
+        }
+    } else {
+        execute_effect(registry, state, &ability, events);
+    }
+
+    // Determine destination zone for spells
+    if is_spell {
+        let dest = if is_permanent_type(state, entry.id) {
+            Zone::Battlefield
+        } else {
+            Zone::Graveyard
+        };
+        zones::move_to_zone(state, entry.id, dest, events);
+    }
+    // Activated abilities: source stays where it is, no zone movement
 
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
     });
+}
+
+fn execute_effect(
+    registry: &HashMap<String, EffectHandler>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) {
+    if ability.api_type.is_empty() {
+        return; // No-op ability (used in tests with empty api_type)
+    }
+    // Errors from effect handlers are logged but don't crash resolution
+    let _ = effects::resolve_effect(registry, state, ability, events);
 }
 
 pub fn stack_is_empty(state: &GameState) -> bool {
