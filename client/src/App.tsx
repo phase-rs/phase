@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { WasmAdapter } from "./adapter";
 import type { GameState } from "./adapter";
-import "./App.css";
 
 export function App() {
   const [status, setStatus] = useState<"loading" | "ready" | "error">(

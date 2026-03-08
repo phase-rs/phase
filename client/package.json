@@ -12,10 +12,16 @@
     "test": "vitest"
   },
   "dependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "framer-motion": "^12.35.1",
+    "idb-keyval": "^6.2.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-router": "^7.13.1",
+    "tailwindcss": "^4.2.1",
     "vite-plugin-top-level-await": "^1.5.0",
-    "vite-plugin-wasm": "^3.4.1"
+    "vite-plugin-wasm": "^3.4.1",
+    "zustand": "^5.0.11"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",

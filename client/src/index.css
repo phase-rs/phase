@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+:root {
+  --card-w: 90px;
+  --card-h: 130px;
+}
+
+@media (min-width: 768px) and (min-height: 500px) {
+  :root {
+    --card-w: 115px;
+    --card-h: 165px;
+  }
+}
+
+@media (min-width: 1200px) {
+  :root {
+    --card-w: 140px;
+    --card-h: 200px;
+  }
+}
