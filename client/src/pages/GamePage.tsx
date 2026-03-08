@@ -16,6 +16,7 @@ import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.t
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
+import { CombatOverlay } from "../components/combat/CombatOverlay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage.ts";
 import { WasmAdapter } from "../adapter/wasm-adapter.ts";
@@ -343,6 +344,8 @@ export function GamePage() {
 
       {/* WaitingFor-driven prompt overlays */}
       {waitingFor?.type === "TargetSelection" && <TargetingOverlay />}
+      {waitingFor?.type === "DeclareAttackers" && <CombatOverlay mode="attackers" />}
+      {waitingFor?.type === "DeclareBlockers" && <CombatOverlay mode="blockers" />}
       {waitingFor?.type === "ManaPayment" && <ManaPaymentUI />}
       {waitingFor?.type === "ReplacementChoice" && <ReplacementModal />}
 

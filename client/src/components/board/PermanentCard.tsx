@@ -26,6 +26,11 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const addTarget = useUiStore((s) => s.addTarget);
   const hoverObject = useUiStore((s) => s.hoverObject);
   const inspectObject = useUiStore((s) => s.inspectObject);
+  const combatMode = useUiStore((s) => s.combatMode);
+  const selectedAttackers = useUiStore((s) => s.selectedAttackers);
+  const toggleAttacker = useUiStore((s) => s.toggleAttacker);
+  const blockerAssignments = useUiStore((s) => s.blockerAssignments);
+  const combatClickHandler = useUiStore((s) => s.combatClickHandler);
 
   const longPressHandlers = useLongPress(
     useCallback(() => {
@@ -46,14 +51,29 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const isTarget = selectedTargets.includes(objectId);
   const isValidTarget = targetingMode && validTargetIds.includes(objectId);
 
-  // Glow ring styles
+  // Combat state
+  const isAttacking =
+    combatMode === "attackers" && selectedAttackers.includes(objectId);
+  const isBlocking =
+    combatMode === "blockers" && blockerAssignments.has(objectId);
+
+  // Glow ring styles (combat takes priority)
   let glowClass = "";
-  if (isTarget) {
-    glowClass = "ring-2 ring-cyan-400 shadow-[0_0_10px_2px_rgba(34,211,238,0.5)]";
+  if (isAttacking) {
+    glowClass =
+      "ring-2 ring-orange-500 shadow-[0_0_12px_3px_rgba(249,115,22,0.7)]";
+  } else if (isBlocking) {
+    glowClass =
+      "ring-2 ring-blue-400 shadow-[0_0_12px_3px_rgba(96,165,250,0.7)]";
+  } else if (isTarget) {
+    glowClass =
+      "ring-2 ring-cyan-400 shadow-[0_0_10px_2px_rgba(34,211,238,0.5)]";
   } else if (isValidTarget) {
-    glowClass = "ring-2 ring-cyan-400/60 shadow-[0_0_12px_3px_rgba(0,229,255,0.8)]";
+    glowClass =
+      "ring-2 ring-cyan-400/60 shadow-[0_0_12px_3px_rgba(0,229,255,0.8)]";
   } else if (isSelected) {
-    glowClass = "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
+    glowClass =
+      "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
   }
 
   const sicknessFilter = hasSummoningSickness ? "saturate(50%)" : undefined;
@@ -64,7 +84,11 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const counters = Object.entries(obj.counters);
 
   const handleClick = () => {
-    if (targetingMode) {
+    if (combatMode === "attackers") {
+      toggleAttacker(objectId);
+    } else if (combatMode === "blockers" && combatClickHandler) {
+      combatClickHandler(objectId);
+    } else if (targetingMode) {
       addTarget(objectId);
     } else {
       selectObject(isSelected ? null : objectId);
@@ -80,6 +104,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
       }}
+      animate={{ rotate: isAttacking ? 15 : 0 }}
+      transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
       onMouseEnter={() => hoverObject(objectId)}
       onMouseLeave={() => hoverObject(null)}
