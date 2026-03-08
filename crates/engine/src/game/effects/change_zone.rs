@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Parse a zone string to Zone enum.
@@ -33,7 +37,43 @@ pub fn resolve(
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
-            zones::move_to_zone(state, *obj_id, dest_zone, events);
+            let from_zone = state
+                .objects
+                .get(obj_id)
+                .map(|o| o.zone)
+                .unwrap_or(Zone::Battlefield);
+
+            let proposed = ProposedEvent::ZoneChange {
+                object_id: *obj_id,
+                from: from_zone,
+                to: dest_zone,
+                cause: Some(ability.source_id),
+                applied: HashSet::new(),
+            };
+
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    if let ProposedEvent::ZoneChange { object_id, to, .. } = event {
+                        zones::move_to_zone(state, object_id, to, events);
+                        if to == Zone::Battlefield || from_zone == Zone::Battlefield {
+                            state.layers_dirty = true;
+                        }
+                    }
+                }
+                ReplacementResult::Prevented => {}
+                ReplacementResult::NeedsChoice(player) => {
+                    let candidate_count = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|p| p.candidates.len())
+                        .unwrap_or(0);
+                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                        player,
+                        candidate_count,
+                    };
+                    return Ok(());
+                }
+            }
         }
     }
 

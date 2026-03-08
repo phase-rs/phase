@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Draw cards for the ability's controller.
@@ -17,21 +21,47 @@ pub fn resolve(
         .map(|v| v.parse().unwrap_or(1))
         .unwrap_or(1);
 
-    let player = state
-        .players
-        .iter()
-        .find(|p| p.id == ability.controller)
-        .ok_or(EffectError::PlayerNotFound)?;
+    let proposed = ProposedEvent::Draw {
+        player_id: ability.controller,
+        count: num_cards,
+        applied: HashSet::new(),
+    };
 
-    // Collect card ids from top of library
-    let cards_to_draw: Vec<_> = player.library.iter().take(num_cards as usize).copied().collect();
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::Draw { player_id, count, .. } = event {
+                let player = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == player_id)
+                    .ok_or(EffectError::PlayerNotFound)?;
 
-    for obj_id in cards_to_draw {
-        zones::move_to_zone(state, obj_id, Zone::Hand, events);
-        events.push(GameEvent::CardDrawn {
-            player_id: ability.controller,
-            object_id: obj_id,
-        });
+                let cards_to_draw: Vec<_> = player.library.iter().take(count as usize).copied().collect();
+
+                for obj_id in cards_to_draw {
+                    zones::move_to_zone(state, obj_id, Zone::Hand, events);
+                    events.push(GameEvent::CardDrawn {
+                        player_id,
+                        object_id: obj_id,
+                    });
+                }
+            }
+        }
+        ReplacementResult::Prevented => {
+            // Draw was prevented, skip
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            let candidate_count = state
+                .pending_replacement
+                .as_ref()
+                .map(|p| p.candidates.len())
+                .unwrap_or(0);
+            state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+            };
+            return Ok(());
+        }
     }
 
     events.push(GameEvent::EffectResolved {

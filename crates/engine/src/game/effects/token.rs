@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Create a token creature on the battlefield.
@@ -18,35 +22,63 @@ pub fn resolve(
         .cloned()
         .unwrap_or_else(|| "Token".to_string());
 
-    let power: Option<i32> = ability
-        .params
-        .get("Power")
-        .and_then(|v| v.parse().ok());
+    let proposed = ProposedEvent::CreateToken {
+        owner: ability.controller,
+        name: name.clone(),
+        applied: HashSet::new(),
+    };
 
-    let toughness: Option<i32> = ability
-        .params
-        .get("Toughness")
-        .and_then(|v| v.parse().ok());
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::CreateToken { owner, name: token_name, .. } = event {
+                let power: Option<i32> = ability
+                    .params
+                    .get("Power")
+                    .and_then(|v| v.parse().ok());
 
-    // Use CardId(0) for tokens
-    let obj_id = zones::create_object(
-        state,
-        CardId(0),
-        ability.controller,
-        name.clone(),
-        Zone::Battlefield,
-    );
+                let toughness: Option<i32> = ability
+                    .params
+                    .get("Toughness")
+                    .and_then(|v| v.parse().ok());
 
-    // Set power and toughness
-    if let Some(obj) = state.objects.get_mut(&obj_id) {
-        obj.power = power;
-        obj.toughness = toughness;
+                // Use CardId(0) for tokens
+                let obj_id = zones::create_object(
+                    state,
+                    CardId(0),
+                    owner,
+                    token_name.clone(),
+                    Zone::Battlefield,
+                );
+
+                // Set power and toughness
+                if let Some(obj) = state.objects.get_mut(&obj_id) {
+                    obj.power = power;
+                    obj.toughness = toughness;
+                }
+
+                state.layers_dirty = true;
+
+                events.push(GameEvent::TokenCreated {
+                    object_id: obj_id,
+                    name: token_name,
+                });
+            }
+        }
+        ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            let candidate_count = state
+                .pending_replacement
+                .as_ref()
+                .map(|p| p.candidates.len())
+                .unwrap_or(0);
+            state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+            };
+            return Ok(());
+        }
     }
 
-    events.push(GameEvent::TokenCreated {
-        object_id: obj_id,
-        name,
-    });
     events.push(GameEvent::EffectResolved {
         api_type: ability.api_type.clone(),
         source_id: ability.source_id,

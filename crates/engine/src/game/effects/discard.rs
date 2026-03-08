@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Discard cards from the controller's hand.
@@ -42,11 +46,44 @@ pub fn resolve(
                 continue;
             }
             let player_id = obj.owner;
-            zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-            events.push(GameEvent::Discarded {
+
+            let proposed = ProposedEvent::Discard {
                 player_id,
                 object_id: obj_id,
-            });
+                applied: HashSet::new(),
+            };
+
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    match event {
+                        ProposedEvent::Discard { player_id: pid, object_id: oid, .. } => {
+                            zones::move_to_zone(state, oid, Zone::Graveyard, events);
+                            events.push(GameEvent::Discarded {
+                                player_id: pid,
+                                object_id: oid,
+                            });
+                        }
+                        ProposedEvent::ZoneChange { object_id: oid, to, .. } => {
+                            // Replacement redirected (e.g., exile instead of graveyard)
+                            zones::move_to_zone(state, oid, to, events);
+                        }
+                        _ => {}
+                    }
+                }
+                ReplacementResult::Prevented => {}
+                ReplacementResult::NeedsChoice(player) => {
+                    let candidate_count = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|p| p.candidates.len())
+                        .unwrap_or(0);
+                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                        player,
+                        candidate_count,
+                    };
+                    return Ok(());
+                }
+            }
         }
     } else {
         // Discard from end of hand (random selection deferred)
@@ -65,11 +102,42 @@ pub fn resolve(
             .collect();
 
         for obj_id in cards_to_discard {
-            zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-            events.push(GameEvent::Discarded {
+            let proposed = ProposedEvent::Discard {
                 player_id: ability.controller,
                 object_id: obj_id,
-            });
+                applied: HashSet::new(),
+            };
+
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    match event {
+                        ProposedEvent::Discard { player_id, object_id, .. } => {
+                            zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+                            events.push(GameEvent::Discarded {
+                                player_id,
+                                object_id,
+                            });
+                        }
+                        ProposedEvent::ZoneChange { object_id, to, .. } => {
+                            zones::move_to_zone(state, object_id, to, events);
+                        }
+                        _ => {}
+                    }
+                }
+                ReplacementResult::Prevented => {}
+                ReplacementResult::NeedsChoice(player) => {
+                    let candidate_count = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|p| p.candidates.len())
+                        .unwrap_or(0);
+                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                        player,
+                        candidate_count,
+                    };
+                    return Ok(());
+                }
+            }
         }
     }
 

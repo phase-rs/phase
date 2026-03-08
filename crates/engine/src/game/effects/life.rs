@@ -1,6 +1,10 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 
 /// Gain life for the controller.
 /// Reads `LifeAmount` param.
@@ -16,17 +20,43 @@ pub fn resolve_gain(
         .parse()
         .map_err(|_| EffectError::InvalidParam("LifeAmount must be a number".to_string()))?;
 
-    let player = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == ability.controller)
-        .ok_or(EffectError::PlayerNotFound)?;
-    player.life += amount;
-
-    events.push(GameEvent::LifeChanged {
+    let proposed = ProposedEvent::LifeGain {
         player_id: ability.controller,
-        amount,
-    });
+        amount: amount as u32,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::LifeGain { player_id, amount: gain_amount, .. } = event {
+                let player = state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == player_id)
+                    .ok_or(EffectError::PlayerNotFound)?;
+                player.life += gain_amount as i32;
+
+                events.push(GameEvent::LifeChanged {
+                    player_id,
+                    amount: gain_amount as i32,
+                });
+            }
+        }
+        ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            let candidate_count = state
+                .pending_replacement
+                .as_ref()
+                .map(|p| p.candidates.len())
+                .unwrap_or(0);
+            state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+            };
+            return Ok(());
+        }
+    }
+
     events.push(GameEvent::EffectResolved {
         api_type: ability.api_type.clone(),
         source_id: ability.source_id,
@@ -64,17 +94,43 @@ pub fn resolve_lose(
         })
         .unwrap_or(ability.controller);
 
-    let player = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == target_player_id)
-        .ok_or(EffectError::PlayerNotFound)?;
-    player.life -= amount;
-
-    events.push(GameEvent::LifeChanged {
+    let proposed = ProposedEvent::LifeLoss {
         player_id: target_player_id,
-        amount: -amount,
-    });
+        amount: amount as u32,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::LifeLoss { player_id, amount: loss_amount, .. } = event {
+                let player = state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == player_id)
+                    .ok_or(EffectError::PlayerNotFound)?;
+                player.life -= loss_amount as i32;
+
+                events.push(GameEvent::LifeChanged {
+                    player_id,
+                    amount: -(loss_amount as i32),
+                });
+            }
+        }
+        ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            let candidate_count = state
+                .pending_replacement
+                .as_ref()
+                .map(|p| p.candidates.len())
+                .unwrap_or(0);
+            state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+            };
+            return Ok(());
+        }
+    }
+
     events.push(GameEvent::EffectResolved {
         api_type: ability.api_type.clone(),
         source_id: ability.source_id,

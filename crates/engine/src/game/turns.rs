@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 use super::combat;
@@ -89,9 +93,26 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .collect();
 
     for id in to_untap {
-        if let Some(obj) = state.objects.get_mut(&id) {
-            obj.tapped = false;
-            events.push(GameEvent::PermanentUntapped { object_id: id });
+        let proposed = ProposedEvent::Untap {
+            object_id: id,
+            applied: HashSet::new(),
+        };
+
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::Untap { object_id, .. } = event {
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        obj.tapped = false;
+                        events.push(GameEvent::PermanentUntapped { object_id });
+                    }
+                }
+            }
+            ReplacementResult::Prevented => {
+                // "Doesn't untap during untap step" effects
+            }
+            ReplacementResult::NeedsChoice(_) => {
+                // Edge case for untap step; skip for now
+            }
         }
     }
 }

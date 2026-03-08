@@ -40,6 +40,11 @@ pub fn move_to_zone(
 
     state.objects.get_mut(&object_id).unwrap().zone = to;
 
+    // Mark layers dirty when objects enter or leave the battlefield
+    if from == Zone::Battlefield || to == Zone::Battlefield {
+        state.layers_dirty = true;
+    }
+
     events.push(GameEvent::ZoneChanged {
         object_id,
         from,

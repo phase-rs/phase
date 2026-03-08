@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Destroy target creatures/permanents on the battlefield.
@@ -29,8 +33,42 @@ pub fn resolve(
                 continue;
             }
 
-            zones::move_to_zone(state, *obj_id, Zone::Graveyard, events);
-            events.push(GameEvent::CreatureDestroyed { object_id: *obj_id });
+            let proposed = ProposedEvent::Destroy {
+                object_id: *obj_id,
+                source: Some(ability.source_id),
+                applied: HashSet::new(),
+            };
+
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    match event {
+                        ProposedEvent::Destroy { object_id, .. } => {
+                            zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+                            state.layers_dirty = true;
+                            events.push(GameEvent::CreatureDestroyed { object_id });
+                        }
+                        ProposedEvent::ZoneChange { object_id, to, .. } => {
+                            // Replacement redirected (e.g., exile instead of destroy)
+                            zones::move_to_zone(state, object_id, to, events);
+                            state.layers_dirty = true;
+                        }
+                        _ => {}
+                    }
+                }
+                ReplacementResult::Prevented => {}
+                ReplacementResult::NeedsChoice(player) => {
+                    let candidate_count = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|p| p.candidates.len())
+                        .unwrap_or(0);
+                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                        player,
+                        candidate_count,
+                    };
+                    return Ok(());
+                }
+            }
         }
     }
 

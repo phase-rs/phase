@@ -1,4 +1,7 @@
+use std::collections::HashSet;
+
 use crate::game::combat::{CombatState, DamageAssignment, DamageTarget};
+use crate::game::replacement::{self, ReplacementResult};
 use crate::game::sba;
 use crate::game::triggers;
 use crate::types::ability::TargetRef;
@@ -7,6 +10,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::proposed_event::ProposedEvent;
 
 /// Resolve combat damage with first strike / double strike support.
 /// If any creature in combat has FirstStrike or DoubleStrike, two damage sub-steps run.
@@ -313,6 +317,7 @@ fn lethal_damage_needed(state: &GameState, object_id: ObjectId, source_has_death
 }
 
 /// Apply combat damage assignments: mark damage on creatures, reduce player life, handle lifelink.
+/// All damage goes through replace_event for replacement effect interception.
 fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],
@@ -335,48 +340,75 @@ fn apply_combat_damage(
             .map(|o| o.controller)
             .unwrap_or(crate::types::player::PlayerId(0));
 
-        match &assignment.target {
-            DamageTarget::Object(target_id) => {
-                if let Some(target_obj) = state.objects.get_mut(target_id) {
-                    target_obj.damage_marked += assignment.amount;
-                    if source_has_deathtouch {
-                        target_obj.dealt_deathtouch_damage = true;
+        let target_ref = match &assignment.target {
+            DamageTarget::Object(id) => TargetRef::Object(*id),
+            DamageTarget::Player(id) => TargetRef::Player(*id),
+        };
+
+        let proposed = ProposedEvent::Damage {
+            source_id: *source_id,
+            target: target_ref,
+            amount: assignment.amount,
+            is_combat: true,
+            applied: HashSet::new(),
+        };
+
+        let actual_amount = match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::Damage { target: ref t, amount, .. } = event {
+                    match t {
+                        TargetRef::Object(target_id) => {
+                            if let Some(target_obj) = state.objects.get_mut(target_id) {
+                                target_obj.damage_marked += amount;
+                                if source_has_deathtouch {
+                                    target_obj.dealt_deathtouch_damage = true;
+                                }
+                            }
+                            events.push(GameEvent::DamageDealt {
+                                source_id: *source_id,
+                                target: TargetRef::Object(*target_id),
+                                amount,
+                            });
+                        }
+                        TargetRef::Player(player_id) => {
+                            if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
+                                player.life -= amount as i32;
+                            }
+                            events.push(GameEvent::DamageDealt {
+                                source_id: *source_id,
+                                target: TargetRef::Player(*player_id),
+                                amount,
+                            });
+                            events.push(GameEvent::LifeChanged {
+                                player_id: *player_id,
+                                amount: -(amount as i32),
+                            });
+                        }
                     }
+                    amount
+                } else {
+                    0
                 }
-                events.push(GameEvent::DamageDealt {
-                    source_id: *source_id,
-                    target: TargetRef::Object(*target_id),
-                    amount: assignment.amount,
-                });
             }
-            DamageTarget::Player(player_id) => {
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
-                    player.life -= assignment.amount as i32;
-                }
-                events.push(GameEvent::DamageDealt {
-                    source_id: *source_id,
-                    target: TargetRef::Player(*player_id),
-                    amount: assignment.amount,
-                });
-                events.push(GameEvent::LifeChanged {
-                    player_id: *player_id,
-                    amount: -(assignment.amount as i32),
-                });
+            ReplacementResult::Prevented => 0,
+            ReplacementResult::NeedsChoice(_) => {
+                // Combat damage NeedsChoice is an edge case; for now, skip
+                0
             }
-        }
+        };
 
         // Lifelink: source's controller gains life equal to damage dealt
-        if source_has_lifelink && assignment.amount > 0 {
+        if source_has_lifelink && actual_amount > 0 {
             if let Some(player) = state
                 .players
                 .iter_mut()
                 .find(|p| p.id == source_controller)
             {
-                player.life += assignment.amount as i32;
+                player.life += actual_amount as i32;
             }
             events.push(GameEvent::LifeChanged {
                 player_id: source_controller,
-                amount: assignment.amount as i32,
+                amount: actual_amount as i32,
             });
         }
     }

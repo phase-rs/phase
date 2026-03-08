@@ -1,6 +1,10 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 
 /// Tap target permanents.
 pub fn resolve_tap(
@@ -10,12 +14,36 @@ pub fn resolve_tap(
 ) -> Result<(), EffectError> {
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
-            let obj = state
-                .objects
-                .get_mut(obj_id)
-                .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-            obj.tapped = true;
-            events.push(GameEvent::PermanentTapped { object_id: *obj_id });
+            let proposed = ProposedEvent::Tap {
+                object_id: *obj_id,
+                applied: HashSet::new(),
+            };
+
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    if let ProposedEvent::Tap { object_id, .. } = event {
+                        let obj = state
+                            .objects
+                            .get_mut(&object_id)
+                            .ok_or(EffectError::ObjectNotFound(object_id))?;
+                        obj.tapped = true;
+                        events.push(GameEvent::PermanentTapped { object_id });
+                    }
+                }
+                ReplacementResult::Prevented => {}
+                ReplacementResult::NeedsChoice(player) => {
+                    let candidate_count = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|p| p.candidates.len())
+                        .unwrap_or(0);
+                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                        player,
+                        candidate_count,
+                    };
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -35,12 +63,36 @@ pub fn resolve_untap(
 ) -> Result<(), EffectError> {
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
-            let obj = state
-                .objects
-                .get_mut(obj_id)
-                .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-            obj.tapped = false;
-            events.push(GameEvent::PermanentUntapped { object_id: *obj_id });
+            let proposed = ProposedEvent::Untap {
+                object_id: *obj_id,
+                applied: HashSet::new(),
+            };
+
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    if let ProposedEvent::Untap { object_id, .. } = event {
+                        let obj = state
+                            .objects
+                            .get_mut(&object_id)
+                            .ok_or(EffectError::ObjectNotFound(object_id))?;
+                        obj.tapped = false;
+                        events.push(GameEvent::PermanentUntapped { object_id });
+                    }
+                }
+                ReplacementResult::Prevented => {}
+                ReplacementResult::NeedsChoice(player) => {
+                    let candidate_count = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|p| p.candidates.len())
+                        .unwrap_or(0);
+                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                        player,
+                        candidate_count,
+                    };
+                    return Ok(());
+                }
+            }
         }
     }
 

@@ -1,6 +1,10 @@
+use std::collections::HashSet;
+
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 
 /// Deal damage to each target.
 /// Reads `NumDmg` param for the amount.
@@ -17,28 +21,57 @@ pub fn resolve(
         .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?;
 
     for target in &ability.targets {
-        match target {
-            TargetRef::Object(obj_id) => {
-                let obj = state
-                    .objects
-                    .get_mut(obj_id)
-                    .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-                obj.damage_marked += num_dmg;
-            }
-            TargetRef::Player(player_id) => {
-                let player = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == *player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
-                player.life -= num_dmg as i32;
-            }
-        }
-        events.push(GameEvent::DamageDealt {
+        let proposed = ProposedEvent::Damage {
             source_id: ability.source_id,
             target: target.clone(),
             amount: num_dmg,
-        });
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::Damage { target: ref t, amount, .. } = event {
+                    match t {
+                        TargetRef::Object(obj_id) => {
+                            let obj = state
+                                .objects
+                                .get_mut(obj_id)
+                                .ok_or(EffectError::ObjectNotFound(*obj_id))?;
+                            obj.damage_marked += amount;
+                        }
+                        TargetRef::Player(player_id) => {
+                            let player = state
+                                .players
+                                .iter_mut()
+                                .find(|p| p.id == *player_id)
+                                .ok_or(EffectError::PlayerNotFound)?;
+                            player.life -= amount as i32;
+                        }
+                    }
+                    events.push(GameEvent::DamageDealt {
+                        source_id: ability.source_id,
+                        target: t.clone(),
+                        amount,
+                    });
+                }
+            }
+            ReplacementResult::Prevented => {
+                // Damage was prevented, skip
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                let candidate_count = state
+                    .pending_replacement
+                    .as_ref()
+                    .map(|p| p.candidates.len())
+                    .unwrap_or(0);
+                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                };
+                return Ok(());
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {
