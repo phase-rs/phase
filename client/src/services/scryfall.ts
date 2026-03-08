@@ -101,3 +101,64 @@ export async function fetchCardImageUrl(
   const card = await fetchCardData(cardName);
   return getImageUrl(card, size, faceIndex);
 }
+
+/**
+ * Search Scryfall for cards matching query. Uses rate limiting and handles 429s.
+ */
+export async function searchScryfall(
+  query: string,
+  signal?: AbortSignal,
+): Promise<{ cards: ScryfallCard[]; total: number }> {
+  const url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}`;
+  const response = await rateLimitedFetch(url);
+
+  if (signal?.aborted) {
+    return { cards: [], total: 0 };
+  }
+
+  if (response.status === 429) {
+    const retryAfter = parseInt(response.headers.get("Retry-After") ?? "1", 10);
+    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+    return searchScryfall(query, signal);
+  }
+
+  if (response.status === 404) {
+    return { cards: [], total: 0 };
+  }
+
+  if (!response.ok) {
+    throw new Error(`Scryfall search error: ${response.status}`);
+  }
+
+  const data: ScryfallSearchResponse = await response.json();
+  return { cards: data.data, total: data.total_cards };
+}
+
+/** Build Scryfall query string from filter options. */
+export function buildScryfallQuery(options: {
+  text?: string;
+  colors?: string[];
+  type?: string;
+  cmcMax?: number;
+  cmcMin?: number;
+  format?: string;
+}): string {
+  const parts: string[] = [];
+
+  if (options.text) parts.push(options.text);
+  if (options.colors?.length) parts.push(`c:${options.colors.join("")}`);
+  if (options.type) parts.push(`t:${options.type}`);
+  if (options.cmcMin !== undefined) parts.push(`cmc>=${options.cmcMin}`);
+  if (options.cmcMax !== undefined) parts.push(`cmc<=${options.cmcMax}`);
+  if (options.format) parts.push(`f:${options.format}`);
+
+  return parts.join(" ");
+}
+
+/** Get the best image URI for a card (handles double-faced cards). */
+export function getCardImageSmall(card: ScryfallCard): string {
+  return card.image_uris?.small
+    ?? card.card_faces?.[0]?.image_uris?.small
+    ?? "";
+}
+
