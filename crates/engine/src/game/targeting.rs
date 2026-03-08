@@ -182,19 +182,11 @@ fn can_target(
     _source_id: ObjectId,
 ) -> bool {
     // Shroud: can't be targeted by anyone
-    if obj
-        .keywords
-        .iter()
-        .any(|k| k.eq_ignore_ascii_case("Shroud"))
-    {
+    if obj.has_keyword(&crate::types::keywords::Keyword::Shroud) {
         return false;
     }
     // Hexproof: can't be targeted by opponents
-    if obj
-        .keywords
-        .iter()
-        .any(|k| k.eq_ignore_ascii_case("Hexproof"))
-    {
+    if obj.has_keyword(&crate::types::keywords::Keyword::Hexproof) {
         if obj.controller != source_controller {
             return false;
         }
@@ -218,6 +210,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
 
     fn setup_with_creatures() -> (GameState, ObjectId, ObjectId) {
         let mut state = GameState::new_two_player(42);
@@ -279,7 +272,7 @@ mod tests {
             .get_mut(&c1)
             .unwrap()
             .keywords
-            .push("Hexproof".to_string());
+            .push(Keyword::Hexproof);
 
         // Player 0 tries to target player 1's hexproof creature
         let targets = find_legal_targets(&state, "Creature", PlayerId(0), ObjectId(99));
@@ -294,7 +287,7 @@ mod tests {
             .get_mut(&c1)
             .unwrap()
             .keywords
-            .push("Hexproof".to_string());
+            .push(Keyword::Hexproof);
 
         // Player 1 (controller) can target their own hexproof creature
         let targets = find_legal_targets(&state, "Creature", PlayerId(1), ObjectId(99));
@@ -309,7 +302,7 @@ mod tests {
             .get_mut(&c1)
             .unwrap()
             .keywords
-            .push("Shroud".to_string());
+            .push(Keyword::Shroud);
 
         // Neither player can target a shroud creature
         let targets_p0 = find_legal_targets(&state, "Creature", PlayerId(0), ObjectId(99));

@@ -25,7 +25,7 @@ pub fn resolve(
             }
 
             // Check for indestructible
-            if obj.keywords.iter().any(|k| k.eq_ignore_ascii_case("indestructible")) {
+            if obj.has_keyword(&crate::types::keywords::Keyword::Indestructible) {
                 continue;
             }
 
@@ -75,7 +75,7 @@ mod tests {
     fn destroy_skips_indestructible() {
         let mut state = GameState::new_two_player(42);
         let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "God".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&obj_id).unwrap().keywords.push("Indestructible".to_string());
+        state.objects.get_mut(&obj_id).unwrap().keywords.push(crate::types::keywords::Keyword::Indestructible);
 
         let ability = ResolvedAbility {
             api_type: "Destroy".to_string(),

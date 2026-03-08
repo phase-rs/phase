@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaColor};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -48,7 +49,7 @@ pub struct GameObject {
     pub loyalty: Option<u32>,
     pub card_types: CardType,
     pub mana_cost: ManaCost,
-    pub keywords: Vec<String>,
+    pub keywords: Vec<Keyword>,
     pub abilities: Vec<String>,
     pub svars: HashMap<String, String>,
     pub color: Vec<ManaColor>,
@@ -92,6 +93,11 @@ impl GameObject {
             color: Vec::new(),
             entered_battlefield_turn: None,
         }
+    }
+
+    /// Check if this object has a specific keyword, using discriminant-based matching.
+    pub fn has_keyword(&self, keyword: &Keyword) -> bool {
+        super::keywords::has_keyword(self, keyword)
     }
 }
 

@@ -60,7 +60,7 @@ pub fn handle_cast_spell(
 
     // 3. Validate timing
     let is_instant_speed = obj.card_types.core_types.contains(&CoreType::Instant)
-        || obj.keywords.iter().any(|k| k.eq_ignore_ascii_case("Flash"));
+        || obj.has_keyword(&crate::types::keywords::Keyword::Flash);
 
     if !is_instant_speed && ability_def.kind == AbilityKind::Spell {
         // Sorcery-speed: main phase + empty stack + active player

@@ -2,6 +2,7 @@ pub mod casting;
 pub mod effects;
 pub mod engine;
 pub mod game_object;
+pub mod keywords;
 pub mod mana_payment;
 pub mod mulligan;
 pub mod priority;
@@ -13,5 +14,6 @@ pub mod zones;
 
 pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineError};
 pub use game_object::{CounterType, GameObject};
+pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
 pub use zones::{add_to_zone, create_object, move_to_library_position, move_to_zone, remove_from_zone};
