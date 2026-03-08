@@ -12,6 +12,7 @@ import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLog } from "../components/log/GameLog.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
+import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -114,6 +115,7 @@ export function GamePage() {
   const objects = gameState?.objects;
   const aiControllerRef = useRef<AIController | null>(null);
   const [showAiHand, setShowAiHand] = useState(false);
+  const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
   // Online multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
@@ -183,6 +185,10 @@ export function GamePage() {
 
     buildDeckPayload(parsedDeck).then((deckPayload) => {
       if (cancelled) return;
+
+      if (deckPayload === null) {
+        setShowCardDataMissing(true);
+      }
 
       initGame(adapter, deckPayload).then(() => {
         if (cancelled) return;
@@ -322,6 +328,11 @@ export function GamePage() {
             </p>
           </div>
         </div>
+      )}
+
+      {/* Card data missing modal */}
+      {showCardDataMissing && (
+        <CardDataMissingModal onContinue={() => setShowCardDataMissing(false)} />
       )}
 
       {/* Animation overlay (above board, below modals) */}
