@@ -17,6 +17,7 @@ import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { WasmAdapter } from "../adapter/wasm-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
+import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 
@@ -33,6 +34,8 @@ export function GamePage() {
     inspectedObjectId != null && objects
       ? (objects[inspectedObjectId]?.name ?? null)
       : null;
+
+  useKeyboardShortcuts();
 
   useEffect(() => {
     const adapter = new WasmAdapter();

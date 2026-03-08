@@ -1,7 +1,11 @@
+import { useState } from "react";
 import { useNavigate } from "react-router";
+
+import { CardCoverageDashboard } from "../components/controls/CardCoverageDashboard";
 
 export function MenuPage() {
   const navigate = useNavigate();
+  const [showCoverage, setShowCoverage] = useState(false);
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-8">
@@ -20,7 +24,17 @@ export function MenuPage() {
         >
           Deck Builder
         </button>
+        <button
+          onClick={() => setShowCoverage(true)}
+          className="rounded-lg border border-gray-600 px-8 py-3 text-lg font-semibold transition-colors hover:border-gray-400"
+        >
+          Card Coverage
+        </button>
       </div>
+
+      {showCoverage && (
+        <CardCoverageDashboard onClose={() => setShowCoverage(false)} />
+      )}
     </div>
   );
 }

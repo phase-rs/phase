@@ -2,6 +2,17 @@ import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { EngineAdapter, GameAction, GameEvent, GameState, WaitingFor } from "../adapter/types";
 
+/** Action types that don't reveal hidden information and are safe to undo. */
+const UNDOABLE_ACTIONS = new Set([
+  "PassPriority",
+  "DeclareAttackers",
+  "DeclareBlockers",
+  "ActivateAbility",
+]);
+
+/** Maximum number of undo history entries. */
+const MAX_UNDO_HISTORY = 5;
+
 interface GameStoreState {
   gameState: GameState | null;
   events: GameEvent[];
@@ -49,16 +60,24 @@ export const useGameStore = create<GameStore>()(
         throw new Error("Game not initialized");
       }
 
-      // Save current state for undo
+      // Save current state for undo (only for unrevealed-information actions)
+      const shouldSaveHistory = UNDOABLE_ACTIONS.has(action.type);
+
       const events = await adapter.submitAction(action);
       const newState = await adapter.getState();
 
-      set((prev) => ({
-        gameState: newState,
-        events,
-        waitingFor: newState.waiting_for,
-        stateHistory: [...prev.stateHistory, gameState],
-      }));
+      set((prev) => {
+        const newHistory = shouldSaveHistory
+          ? [...prev.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
+          : prev.stateHistory;
+
+        return {
+          gameState: newState,
+          events,
+          waitingFor: newState.waiting_for,
+          stateHistory: newHistory,
+        };
+      });
 
       return events;
     },
@@ -71,6 +90,7 @@ export const useGameStore = create<GameStore>()(
       set({
         gameState: previous,
         waitingFor: previous.waiting_for,
+        events: [],
         stateHistory: stateHistory.slice(0, -1),
       });
     },
