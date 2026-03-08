@@ -20,6 +20,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: Advanced Rules** - Replacement effects, seven-layer continuous effects, static abilities (completed 2026-03-08)
 - [x] **Phase 7: Platform Bridges & UI** - Tauri/WASM adapters, full React game UI, deck builder, Scryfall images, QoL features (completed 2026-03-08)
 - [ ] **Phase 8: AI & Multiplayer** - AI opponent with game tree search, WebSocket multiplayer, Standard card coverage target
+- [ ] **Phase 9: Wire DeckBuilder to Game Engine** - Fix sessionStorage handoff, mode parameter, and WASM deck loading (gap closure)
+- [ ] **Phase 10: Fix Undo/WASM State Sync** - Add WASM state restoration binding for undo (gap closure)
 
 ## Phase Details
 
@@ -164,10 +166,33 @@ Plans:
 - [ ] 08-04-PLAN.md — Multiplayer client + coverage: WebSocketAdapter, online game flow, Standard card coverage analysis
 - [ ] 08-05-PLAN.md — Gap closure: per-card Standard coverage dashboard with build-time pre-computation
 
+### Phase 9: Wire DeckBuilder to Game Engine
+**Goal**: The DeckBuilder → Start Game flow works end-to-end: deck data passes correctly through sessionStorage, the game launches with the correct mode (AI/solo), and the WASM engine instantiates cards from the deck
+**Depends on**: Phase 7, Phase 8
+**Requirements**: DECK-01, DECK-03, AI-04, PLAT-03
+**Gap Closure:** Closes integration gaps DECK-01, DECK-03 and flows "DeckBuilder → Start Game → Play with Deck", "DeckBuilder → Start Game (mode)" from v1.0 audit
+**Success Criteria** (what must be TRUE):
+  1. DeckBuilder and GamePage use the same sessionStorage key for deck data
+  2. DeckBuilder navigates to `/game?mode=ai` (or `solo`) so the game starts with an AI opponent
+  3. `gameStore.initGame()` reads and passes deck data to WASM `initialize_game`
+  4. WASM engine instantiates cards from deck names into the starting GameState (library zone)
+**Plans**: 0 plans (pending `/gsd:plan-phase 9`)
+
+### Phase 10: Fix Undo/WASM State Sync
+**Goal**: Undo correctly synchronizes client-side state with the WASM engine so gameplay continues seamlessly after reverting an action
+**Depends on**: Phase 7
+**Requirements**: QOL-02
+**Gap Closure:** Closes integration gap QOL-02 and flow "Undo → Continue Playing" from v1.0 audit
+**Success Criteria** (what must be TRUE):
+  1. A WASM binding exists to restore/inject a previous GameState into the thread-local GAME_STATE
+  2. `gameStore.undo()` calls the WASM state restoration binding after reverting client-side state
+  3. After undo, the next `submitAction` operates on the restored state (no desync)
+**Plans**: 0 plans (pending `/gsd:plan-phase 10`)
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -179,3 +204,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 6. Advanced Rules | 3/3 | Complete   | 2026-03-08 |
 | 7. Platform Bridges & UI | 9/9 | Complete   | 2026-03-08 |
 | 8. AI & Multiplayer | 4/5 | In Progress|  |
+| 9. Wire DeckBuilder to Game Engine | 0/0 | Not Started |  |
+| 10. Fix Undo/WASM State Sync | 0/0 | Not Started |  |

@@ -82,9 +82,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Deck Management
 
-- [x] **DECK-01**: Deck builder with card search and filtering
+- [ ] **DECK-01**: Deck builder with card search and filtering
 - [x] **DECK-02**: Import .dck/.dec files from Forge
-- [x] **DECK-03**: Mana curve and color distribution display
+- [ ] **DECK-03**: Mana curve and color distribution display
 
 ### AI
 
@@ -112,7 +112,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Quality of Life
 
 - [x] **QOL-01**: Undo for unrevealed-information actions
-- [x] **QOL-02**: Keyboard shortcuts (pass turn, full control, tap all lands)
+- [ ] **QOL-02**: Keyboard shortcuts (pass turn, full control, tap all lands)
 - [x] **QOL-03**: Card coverage dashboard (which cards/effects are supported)
 
 ## v2 Requirements
@@ -205,9 +205,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UI-09 | Phase 7 | Complete |
 | UI-10 | Phase 7 | Complete |
 | UI-11 | Phase 7 | Complete |
-| DECK-01 | Phase 7 | Complete |
+| DECK-01 | Phase 9 | Pending |
 | DECK-02 | Phase 7 | Complete |
-| DECK-03 | Phase 7 | Complete |
+| DECK-03 | Phase 9 | Pending |
 | AI-01 | Phase 8 | Complete |
 | AI-02 | Phase 8 | Complete |
 | AI-03 | Phase 8 | Complete |
@@ -223,13 +223,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-04 | Phase 7 | Complete |
 | PLAT-05 | Phase 8 | Complete |
 | QOL-01 | Phase 7 | Complete |
-| QOL-02 | Phase 7 | Complete |
+| QOL-02 | Phase 10 | Pending |
 | QOL-03 | Phase 7 | Complete |
 
 **Coverage:**
 - v1 requirements: 57 total
 - Mapped to phases: 57
 - Unmapped: 0
+- Pending (gap closure): 3 (DECK-01, DECK-03, QOL-02)
 
 ---
 *Requirements defined: 2026-03-07*
