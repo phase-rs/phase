@@ -4,8 +4,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
+use super::ability::ResolvedAbility;
 use super::events::GameEvent;
 use super::identifiers::{CardId, ObjectId};
+use super::mana::ManaCost;
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
 
@@ -16,12 +18,21 @@ fn default_rng() -> ChaCha20Rng {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCast {
+    pub object_id: ObjectId,
+    pub card_id: CardId,
+    pub ability: ResolvedAbility,
+    pub cost: ManaCost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
     Priority { player: PlayerId },
     MulliganDecision { player: PlayerId, mulligan_count: u8 },
     MulliganBottomCards { player: PlayerId, count: u8 },
     ManaPayment { player: PlayerId },
+    TargetSelection { player: PlayerId, pending_cast: PendingCast },
     GameOver { winner: Option<PlayerId> },
 }
 
@@ -42,7 +53,8 @@ pub struct StackEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StackEntryKind {
-    Spell { card_id: CardId },
+    Spell { card_id: CardId, ability: ResolvedAbility },
+    ActivatedAbility { source_id: ObjectId, ability: ResolvedAbility },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,12 +271,23 @@ mod tests {
 
     #[test]
     fn stack_entry_kind_spell() {
+        use crate::types::ability::ResolvedAbility;
+        use std::collections::HashMap;
         let entry = StackEntry {
             id: ObjectId(1),
             source_id: ObjectId(2),
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
+                ability: ResolvedAbility {
+                    api_type: String::new(),
+                    params: HashMap::new(),
+                    targets: vec![],
+                    source_id: ObjectId(2),
+                    controller: PlayerId(0),
+                    sub_ability: None,
+                    svars: HashMap::new(),
+                },
             },
         };
         assert_eq!(entry.id, ObjectId(1));

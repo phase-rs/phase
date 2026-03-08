@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::ability::TargetRef;
 use super::identifiers::{CardId, ObjectId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +32,9 @@ pub enum GameAction {
     },
     SelectCards {
         cards: Vec<ObjectId>,
+    },
+    SelectTargets {
+        targets: Vec<TargetRef>,
     },
 }
 

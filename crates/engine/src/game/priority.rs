@@ -49,8 +49,10 @@ pub fn opponent(player: PlayerId, _state: &GameState) -> PlayerId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::ResolvedAbility;
     use crate::types::game_state::StackEntry;
     use crate::types::identifiers::{CardId, ObjectId};
+    use std::collections::HashMap;
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -106,6 +108,15 @@ mod tests {
             controller: PlayerId(0),
             kind: crate::types::game_state::StackEntryKind::Spell {
                 card_id: CardId(1),
+                ability: ResolvedAbility {
+                    api_type: String::new(),
+                    params: HashMap::new(),
+                    targets: vec![],
+                    source_id: obj_id,
+                    controller: PlayerId(0),
+                    sub_ability: None,
+                    svars: HashMap::new(),
+                },
             },
         });
 
@@ -128,6 +139,15 @@ mod tests {
             controller: PlayerId(0),
             kind: crate::types::game_state::StackEntryKind::Spell {
                 card_id: CardId(1),
+                ability: ResolvedAbility {
+                    api_type: String::new(),
+                    params: HashMap::new(),
+                    targets: vec![],
+                    source_id: created_id,
+                    controller: PlayerId(0),
+                    sub_ability: None,
+                    svars: HashMap::new(),
+                },
             },
         });
 

@@ -310,8 +310,10 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::ResolvedAbility;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::{CardId, ObjectId};
+    use std::collections::HashMap;
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = new_game(42);
@@ -650,6 +652,15 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(1),
+                    ability: ResolvedAbility {
+                        api_type: String::new(),
+                        params: HashMap::new(),
+                        targets: vec![],
+                        source_id: id1,
+                        controller: PlayerId(0),
+                        sub_ability: None,
+                        svars: HashMap::new(),
+                    },
                 },
             },
             &mut events,
@@ -662,6 +673,15 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(2),
+                    ability: ResolvedAbility {
+                        api_type: String::new(),
+                        params: HashMap::new(),
+                        targets: vec![],
+                        source_id: id2,
+                        controller: PlayerId(0),
+                        sub_ability: None,
+                        svars: HashMap::new(),
+                    },
                 },
             },
             &mut events,

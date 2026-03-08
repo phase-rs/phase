@@ -52,7 +52,15 @@ mod tests {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(1),
-            kind: StackEntryKind::Spell { card_id: CardId(1) },
+            kind: StackEntryKind::Spell { card_id: CardId(1), ability: ResolvedAbility {
+                api_type: String::new(),
+                params: HashMap::new(),
+                targets: vec![],
+                source_id: obj_id,
+                controller: PlayerId(1),
+                sub_ability: None,
+                svars: HashMap::new(),
+            } },
         });
 
         let ability = ResolvedAbility {

@@ -1,3 +1,4 @@
+pub mod casting;
 pub mod effects;
 pub mod engine;
 pub mod game_object;
@@ -6,6 +7,7 @@ pub mod mulligan;
 pub mod priority;
 pub mod sba;
 pub mod stack;
+pub mod targeting;
 pub mod turns;
 pub mod zones;
 
