@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from "react";
 
+import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
@@ -15,6 +16,7 @@ import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { WasmAdapter } from "../adapter/wasm-adapter.ts";
+import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 
@@ -22,7 +24,7 @@ export function GamePage() {
   const initGame = useGameStore((s) => s.initGame);
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameDispatch();
   const reset = useGameStore((s) => s.reset);
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = gameState?.objects;
@@ -90,6 +92,9 @@ export function GamePage() {
           <FullControlToggle />
         </div>
       </div>
+
+      {/* Animation overlay (above board, below modals) */}
+      <AnimationOverlay />
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} />
