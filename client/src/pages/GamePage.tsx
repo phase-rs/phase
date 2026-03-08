@@ -115,6 +115,7 @@ export function GamePage() {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = gameState?.objects;
   const aiControllerRef = useRef<AIController | null>(null);
+  const wsAdapterRef = useRef<WebSocketAdapter | null>(null);
   const [showAiHand, setShowAiHand] = useState(false);
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -123,6 +124,11 @@ export function GamePage() {
   const [waitingForOpponent, setWaitingForOpponent] = useState(false);
   const [opponentDisconnected, setOpponentDisconnected] = useState(false);
   const [disconnectGrace, setDisconnectGrace] = useState(0);
+  const [reconnectState, setReconnectState] = useState<
+    | { status: "idle" }
+    | { status: "reconnecting"; attempt: number; maxAttempts: number }
+    | { status: "failed" }
+  >({ status: "idle" });
 
   const inspectedCardName =
     inspectedObjectId != null && objects
@@ -134,17 +140,22 @@ export function GamePage() {
   useEffect(() => {
     const isOnline = mode === "host" || mode === "join";
 
-    if (isOnline) {
+    // Page-reload reconnection: no mode param but session exists in storage
+    const hasSession = sessionStorage.getItem("forge-ws-session") !== null;
+    const isReconnect = !mode && hasSession;
+
+    if (isOnline || isReconnect) {
       const parsedDeck = loadActiveDeck();
       const deck = parsedDeck
         ? parsedDeckToDeckData(parsedDeck)
         : { main_deck: [], sideboard: [] };
       const wsAdapter = new WebSocketAdapter(
         getWsUrl(),
-        mode as "host" | "join",
+        (mode as "host" | "join") ?? "host",
         deck,
         mode === "join" ? joinCode : undefined,
       );
+      wsAdapterRef.current = wsAdapter;
 
       const unsubscribe = wsAdapter.onEvent((event: WsAdapterEvent) => {
         switch (event.type) {
@@ -161,15 +172,34 @@ export function GamePage() {
           case "opponentReconnected":
             setOpponentDisconnected(false);
             break;
+          case "reconnecting":
+            setReconnectState({
+              status: "reconnecting",
+              attempt: event.attempt,
+              maxAttempts: event.maxAttempts,
+            });
+            break;
+          case "reconnected":
+            setReconnectState({ status: "idle" });
+            break;
+          case "reconnectFailed":
+            setReconnectState({ status: "failed" });
+            break;
         }
       });
 
-      initGame(wsAdapter).then(() => {
-        setWaitingForOpponent(false);
-      });
+      if (isReconnect) {
+        // Attempt to restore session from storage
+        wsAdapter.tryReconnect();
+      } else {
+        initGame(wsAdapter).then(() => {
+          setWaitingForOpponent(false);
+        });
+      }
 
       return () => {
         unsubscribe();
+        wsAdapterRef.current = null;
         reset();
       };
     }
@@ -236,10 +266,46 @@ export function GamePage() {
     [dispatch],
   );
 
+  const isReconnecting = reconnectState.status !== "idle";
+
+  const handleRetry = useCallback(() => {
+    if (wsAdapterRef.current) {
+      setReconnectState({ status: "idle" });
+      // Reset internal attempt counter by accessing attemptReconnect indirectly through tryReconnect
+      wsAdapterRef.current.tryReconnect();
+    }
+  }, []);
+
   return (
     <div className="flex h-screen bg-gray-950">
+      {/* Reconnecting banner */}
+      {reconnectState.status === "reconnecting" && (
+        <div className="fixed left-0 right-0 top-0 z-40 bg-amber-600 px-4 py-2 text-center text-sm font-semibold text-white">
+          Reconnecting... (attempt {reconnectState.attempt}/{reconnectState.maxAttempts})
+        </div>
+      )}
+
+      {/* Connection lost banner */}
+      {reconnectState.status === "failed" && (
+        <div className="fixed left-0 right-0 top-0 z-40 flex items-center justify-center gap-4 bg-red-700 px-4 py-2 text-sm font-semibold text-white">
+          <span>Connection lost</span>
+          <button
+            onClick={handleRetry}
+            className="rounded bg-white/20 px-3 py-1 text-xs font-semibold hover:bg-white/30"
+          >
+            Retry
+          </button>
+          <button
+            onClick={() => navigate("/")}
+            className="rounded bg-white/20 px-3 py-1 text-xs font-semibold hover:bg-white/30"
+          >
+            Return to Menu
+          </button>
+        </div>
+      )}
+
       {/* Main board area */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className={`flex flex-1 flex-col overflow-hidden${isReconnecting ? " pointer-events-none" : ""}`}>
         <OpponentHand />
         <GameBoard />
         <PlayerHand />
