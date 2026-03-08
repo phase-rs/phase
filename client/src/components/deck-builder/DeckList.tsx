@@ -1,6 +1,6 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { parseDeckFile, exportDeckFile } from "../../services/deckParser";
+import { parseDeckFile, detectAndParseDeck, exportDeckFile } from "../../services/deckParser";
 
 interface DeckListProps {
   deck: ParsedDeck;
@@ -98,6 +98,8 @@ function SectionList({
 
 export function DeckList({ deck, onRemoveCard, onImport, onExport }: DeckListProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showPasteModal, setShowPasteModal] = useState(false);
+  const [pasteText, setPasteText] = useState("");
   const mainTotal = totalCards(deck.main);
   const sideTotal = totalCards(deck.sideboard);
   const mainGroups = groupByType(deck.main);
@@ -124,6 +126,14 @@ export function DeckList({ deck, onRemoveCard, onImport, onExport }: DeckListPro
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  const handlePasteImport = () => {
+    if (!pasteText.trim()) return;
+    const parsed = detectAndParseDeck(pasteText);
+    onImport(parsed);
+    setPasteText("");
+    setShowPasteModal(false);
+  };
+
   const handleExport = () => {
     const content = exportDeckFile(deck);
     const blob = new Blob([content], { type: "text/plain" });
@@ -145,9 +155,9 @@ export function DeckList({ deck, onRemoveCard, onImport, onExport }: DeckListPro
         </h3>
         <div className="flex gap-1">
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => setShowPasteModal(true)}
             className="rounded bg-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-600"
-            title="Import .dck/.dec file"
+            title="Import deck from text (MTGA or .dck format)"
           >
             Import
           </button>
@@ -207,6 +217,53 @@ export function DeckList({ deck, onRemoveCard, onImport, onExport }: DeckListPro
           </div>
         )}
       </div>
+
+      {/* Paste import modal */}
+      {showPasteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60"
+            onClick={() => setShowPasteModal(false)}
+          />
+          <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+            <h3 className="mb-3 text-sm font-bold text-white">Import Deck</h3>
+            <textarea
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
+              placeholder="Paste deck list (MTGA or .dck format)..."
+              rows={10}
+              className="mb-3 w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              autoFocus
+            />
+            <div className="flex justify-between">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
+              >
+                From File
+              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setPasteText("");
+                    setShowPasteModal(false);
+                  }}
+                  className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handlePasteImport}
+                  disabled={!pasteText.trim()}
+                  className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
+                >
+                  Parse
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

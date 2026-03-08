@@ -2,12 +2,11 @@ import { useState, useCallback } from "react";
 import { useNavigate } from "react-router";
 import type { ScryfallCard } from "../../services/scryfall";
 import type { ParsedDeck } from "../../services/deckParser";
+import { STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { CardSearch } from "./CardSearch";
 import { CardGrid } from "./CardGrid";
 import { DeckList } from "./DeckList";
 import { ManaCurve } from "./ManaCurve";
-
-const STORAGE_KEY_PREFIX = "forge-deck:";
 
 function listSavedDecks(): string[] {
   const keys: string[] = [];
@@ -127,12 +126,6 @@ export function DeckBuilder() {
     }
   };
 
-  const handleStartGame = () => {
-    // Store deck in sessionStorage for GamePage to read
-    sessionStorage.setItem("forge-active-deck", JSON.stringify(deck));
-    navigate("/game");
-  };
-
   // Compute CMC and color arrays for ManaCurve
   const cmcValues: number[] = [];
   const colorValues: string[] = [];
@@ -185,13 +178,6 @@ export function DeckBuilder() {
               ))}
             </select>
           )}
-          <button
-            onClick={handleStartGame}
-            disabled={deck.main.length === 0}
-            className="rounded bg-green-600 px-3 py-1 text-sm font-semibold text-white hover:bg-green-500 disabled:opacity-40"
-          >
-            Start Game
-          </button>
         </div>
       </div>
 
