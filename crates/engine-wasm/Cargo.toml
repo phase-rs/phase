@@ -14,6 +14,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 engine = { path = "../engine" }
+forge-ai = { path = "../forge-ai" }
+rand = "0.9"
 wasm-bindgen = "0.2.114"
 tsify = { version = "0.5", features = ["js"] }
 serde = { version = "1", features = ["derive"] }

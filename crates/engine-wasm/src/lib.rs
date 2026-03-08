@@ -6,6 +6,10 @@ use wasm_bindgen::prelude::*;
 
 use engine::game::engine::apply;
 use engine::types::{ActionResult, GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
+use engine::types::player::PlayerId;
+
+use forge_ai::config::{AiDifficulty, Platform, create_config};
+use forge_ai::choose_action;
 
 thread_local! {
     static GAME_STATE: RefCell<Option<GameState>> = const { RefCell::new(None) };
@@ -70,6 +74,39 @@ pub fn get_game_state() -> JsValue {
         match state_ref.as_ref() {
             Some(state) => serde_wasm_bindgen::to_value(state).unwrap(),
             None => JsValue::NULL,
+        }
+    })
+}
+
+/// Get the AI's chosen action for the current game state.
+/// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard".
+#[wasm_bindgen]
+pub fn get_ai_action(difficulty: &str) -> Result<JsValue, JsValue> {
+    let ai_difficulty = match difficulty {
+        "VeryEasy" => AiDifficulty::VeryEasy,
+        "Easy" => AiDifficulty::Easy,
+        "Medium" => AiDifficulty::Medium,
+        "Hard" => AiDifficulty::Hard,
+        "VeryHard" => AiDifficulty::VeryHard,
+        _ => AiDifficulty::Medium,
+    };
+
+    let config = create_config(ai_difficulty, Platform::Wasm);
+
+    GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
+        let state_ref = gs.borrow();
+        let state = state_ref
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Game not initialized"))?;
+
+        // AI is always player 1
+        let ai_player = PlayerId(1);
+        let mut rng = rand::rng();
+
+        match choose_action(state, ai_player, &config, &mut rng) {
+            Some(action) => serde_wasm_bindgen::to_value(&action)
+                .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e))),
+            None => Ok(JsValue::NULL),
         }
     })
 }
