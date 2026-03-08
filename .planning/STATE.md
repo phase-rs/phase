@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Phase 9 context gathered
-last_updated: "2026-03-08T16:01:53.984Z"
-last_activity: 2026-03-08 -- Completed 08-04 (Multiplayer Client & Card Coverage)
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-03-08T16:28:38Z"
+last_activity: 2026-03-08 -- Completed 09-01 (Deck Loading & WASM Integration)
 progress:
   total_phases: 10
   completed_phases: 8
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 ## Current Position
 
 Phase: 9 of 9 (Wire Deckbuilder & Game Engine)
-Plan: 2 of 5 in current phase (09-02 complete)
+Plan: 2 of 5 in current phase (09-01, 09-02 complete)
 Status: In Progress
-Last activity: 2026-03-08 -- Completed 09-02 (Deck Parser & Starter Decks)
+Last activity: 2026-03-08 -- Completed 09-01 (Deck Loading & WASM Integration)
 
-Progress: [██████████] 100% (32/35 plans across phases)
+Progress: [█████████▓] 94% (33/35 plans across phases)
 
 ## Performance Metrics
 
@@ -83,6 +83,7 @@ Progress: [██████████] 100% (32/35 plans across phases)
 | Phase 08 P02 | 6min | 2 tasks | 7 files |
 | Phase 08 P04 | 5min | 2 tasks | 7 files |
 | Phase 08 P05 | 2min | 2 tasks | 4 files |
+| Phase 09 P01 | 4min | 2 tasks | 5 files |
 | Phase 09 P02 | 2min | 2 tasks | 4 files |
 
 ## Accumulated Context
@@ -193,6 +194,10 @@ Recent decisions affecting current work:
 - [Phase 08]: Coverage analysis checks all 4 registries (effects, triggers, keywords, statics)
 - [Phase 08]: WASM coverage binding skipped -- CardDatabase requires filesystem unavailable in browser
 - [Phase 08]: Build-time pre-computation via CLI binary for browser-inaccessible CardDatabase data
+- [Phase 09]: Derive color from ManaCostShard mapping with color_override precedence
+- [Phase 09]: Variable P/T ("*") defaults to 0 via parse fallback
+- [Phase 09]: Skip unparseable trigger/static/replacement definitions gracefully
+- [Phase 09]: Clone libraries for shuffle to avoid conflicting mutable borrows on GameState
 - [Phase 09]: MTGA format auto-detection via line-level regex for (SET) NUM pattern
 - [Phase 09]: Deck header resets section to main for Companion flow handling
 
@@ -207,6 +212,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T16:25:14Z
-Stopped at: Completed 09-02-PLAN.md
-Resume file: .planning/phases/09-wire-deckbuilder-game-engine/09-02-SUMMARY.md
+Last session: 2026-03-08T16:28:38Z
+Stopped at: Completed 09-01-PLAN.md
+Resume file: .planning/phases/09-wire-deckbuilder-game-engine/09-01-SUMMARY.md
