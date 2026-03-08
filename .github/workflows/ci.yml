@@ -30,6 +30,12 @@ jobs:
       - name: Run tests
         run: cargo test --all
 
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+
+      - name: Run Rust coverage
+        run: cargo tarpaulin --workspace --out lcov --skip-clean --timeout 120
+
       - name: Build WASM (release)
         run: cargo build --package engine-wasm --target wasm32-unknown-unknown --release
 
@@ -87,5 +93,5 @@ jobs:
       - name: Type check
         run: cd client && pnpm run type-check
 
-      - name: Run tests
-        run: cd client && pnpm test -- --run
+      - name: Run tests with coverage
+        run: cd client && pnpm test -- --run --coverage
