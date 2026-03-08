@@ -13,6 +13,9 @@ client/dist/
 # Coverage
 client/coverage/
 
+# Downloaded card data
+data/
+
 # OS
 .DS_Store
 Thumbs.db
