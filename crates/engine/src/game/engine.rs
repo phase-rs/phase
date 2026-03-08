@@ -1104,4 +1104,427 @@ mod tests {
         // Creature was already in graveyard, life should be unchanged
         assert_eq!(state.players[1].life, 20);
     }
+
+    // === Phase 04 Plan 03 Integration Tests ===
+
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::ability::TargetRef;
+
+    fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
+        let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        for _ in 0..count {
+            player_data.mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: Vec::new(),
+            });
+        }
+    }
+
+    #[test]
+    fn lightning_bolt_deals_3_damage_to_creature() {
+        let mut state = setup_game_at_main_phase();
+
+        // Create a 2/3 creature controlled by P1
+        let creature_id = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(3);
+        }
+
+        // Create Lightning Bolt in P0's hand
+        let bolt_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&bolt_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities
+                .push("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        // Cast Lightning Bolt (auto-targets the single creature)
+        let result = apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+
+        // Both pass -> resolve
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+
+        // Creature should have 3 damage, which equals toughness -> SBA destroys it
+        assert!(state.stack.is_empty());
+        assert!(!state.battlefield.contains(&creature_id));
+        assert!(state.players[1].graveyard.contains(&creature_id));
+        // Bolt is instant -> goes to graveyard
+        assert!(state.players[0].graveyard.contains(&bolt_id));
+    }
+
+    #[test]
+    fn lightning_bolt_deals_3_damage_to_player() {
+        let mut state = setup_game_at_main_phase();
+
+        // Create Lightning Bolt in P0's hand with Any target
+        let bolt_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&bolt_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities
+                .push("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 3".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        // Two players as targets, need manual selection
+        // Use Player filter -> 2 targets -> need SelectTargets
+        let result = apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+
+        // Should need target selection (2 players)
+        assert!(matches!(result.waiting_for, WaitingFor::TargetSelection { .. }));
+
+        // Select player 1 as target
+        let result = apply(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        )
+        .unwrap();
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+
+        // Both pass -> resolve
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.players[1].life, 17);
+        assert!(state.players[0].graveyard.contains(&bolt_id));
+    }
+
+    #[test]
+    fn counterspell_counters_a_spell_on_stack() {
+        let mut state = setup_game_at_main_phase();
+
+        // P0 casts a creature spell -- put it on the stack manually
+        let creature_id = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.abilities.push("SP$ ".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 2);
+
+        // Cast the creature
+        apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(30),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(state.stack.len(), 1);
+
+        // P1 gets priority, has Counterspell
+        // Pass priority from P0 to P1
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        // Now P1 has priority
+        assert_eq!(state.priority_player, PlayerId(1));
+
+        let counter_id = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(1),
+            "Counterspell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&counter_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities
+                .push("SP$ Counter | ValidTgts$ Card | TargetType$ Spell".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(1), ManaType::Blue, 2);
+
+        // Cast Counterspell (auto-targets the single spell on stack)
+        let result = apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(40),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 2); // creature + counterspell
+
+        // Both pass -> Counterspell resolves first (LIFO)
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+
+        // Counterspell resolved, creature spell should be countered (in graveyard)
+        // Counterspell should also be in graveyard
+        assert!(state.players[0].graveyard.contains(&creature_id));
+        assert!(state.players[1].graveyard.contains(&counter_id));
+        // Creature never reached battlefield
+        assert!(!state.battlefield.contains(&creature_id));
+    }
+
+    #[test]
+    fn giant_growth_gives_plus_3_3() {
+        let mut state = setup_game_at_main_phase();
+
+        // Create a 2/2 creature for P0
+        let creature_id = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Create Giant Growth in P0's hand
+        let growth_id = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Giant Growth".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&growth_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities
+                .push("SP$ Pump | ValidTgts$ Creature.YouCtrl | NumAtt$ 3 | NumDef$ 3".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        // Cast Giant Growth (auto-targets single own creature)
+        apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(60),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(state.stack.len(), 1);
+
+        // Both pass -> resolve
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&creature_id].power, Some(5));
+        assert_eq!(state.objects[&creature_id].toughness, Some(5));
+        assert!(state.players[0].graveyard.contains(&growth_id));
+    }
+
+    #[test]
+    fn fizzle_bolt_target_removed() {
+        let mut state = setup_game_at_main_phase();
+
+        // Create a creature
+        let creature_id = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Create Lightning Bolt
+        let bolt_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&bolt_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities
+                .push("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        // Cast bolt
+        apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+
+        // Remove creature before resolution
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, creature_id, Zone::Graveyard, &mut events);
+
+        // Both pass -> fizzle
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert!(state.players[0].graveyard.contains(&bolt_id));
+        // No DamageDealt event
+        assert!(!result.events.iter().any(|e| matches!(e, GameEvent::DamageDealt { .. })));
+    }
+
+    #[test]
+    fn sub_ability_chain_damage_then_draw() {
+        let mut state = setup_game_at_main_phase();
+
+        // Add cards to library for drawing
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Library Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        // Create a card with DealDamage + SubAbility$ DBDraw
+        let spell_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Zap".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities
+                .push("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 2 | SubAbility$ DBDraw".to_string());
+            obj.svars.insert("DBDraw".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        // Two players -> need target selection
+        let result = apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(result.waiting_for, WaitingFor::TargetSelection { .. }));
+
+        // Select P1 as target
+        apply(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        )
+        .unwrap();
+
+        let hand_before = state.players[0].hand.len();
+
+        // Both pass -> resolve
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(state.stack.is_empty());
+        // Damage dealt to P1
+        assert_eq!(state.players[1].life, 18);
+        // Controller drew 1 card
+        assert_eq!(state.players[0].hand.len(), hand_before + 1);
+        // Spell in graveyard
+        assert!(state.players[0].graveyard.contains(&spell_id));
+    }
 }

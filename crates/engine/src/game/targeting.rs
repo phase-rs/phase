@@ -45,6 +45,10 @@ pub fn find_legal_targets(
         "Player" => {
             add_players(state, &mut targets);
         }
+        "Card" => {
+            // Target spells on the stack (for Counterspell etc.)
+            add_stack_spells(state, &mut targets);
+        }
         _ if filter.starts_with("Creature.non") => {
             let color_str = &filter["Creature.non".len()..];
             let excluded = parse_color(color_str);
@@ -155,6 +159,14 @@ fn add_creatures_color_filter(
             continue;
         }
         targets.push(TargetRef::Object(obj_id));
+    }
+}
+
+fn add_stack_spells(state: &GameState, targets: &mut Vec<TargetRef>) {
+    for entry in &state.stack {
+        if matches!(entry.kind, crate::types::game_state::StackEntryKind::Spell { .. }) {
+            targets.push(TargetRef::Object(entry.id));
+        }
     }
 }
 
