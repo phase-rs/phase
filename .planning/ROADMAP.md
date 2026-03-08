@@ -217,20 +217,21 @@ Plans:
 - [ ] 11-03-PLAN.md — WASM adapter tests, component tests, coverage configuration, CI enforcement
 
 ### Phase 12: Multiplayer Wiring & Final Cleanup
-**Goal**: Wire the remaining multiplayer integration gaps so host→join→play and disconnect→reconnect flows work end-to-end, clean up orphaned endpoint and remaining tech debt items
+**Goal**: Wire the remaining multiplayer integration gaps so host->join->play and disconnect->reconnect flows work end-to-end, clean up orphaned endpoint and remaining tech debt items
 **Depends on**: Phase 8, Phase 11
 **Requirements**: MP-01, MP-03
-**Gap Closure:** Closes integration gaps MP-01, MP-03, orphaned /games endpoint, and flows "Multiplayer: Host → Join → Play with deck", "Multiplayer: Disconnect → Reconnect" from v1.0 audit. Also closes remaining tech debt (PermanentCard constant, TD requirements traceability).
+**Gap Closure:** Closes integration gaps MP-01, MP-03, orphaned /games endpoint, and flows "Multiplayer: Host -> Join -> Play with deck", "Multiplayer: Disconnect -> Reconnect" from v1.0 audit. Also closes remaining tech debt (PermanentCard constant, TD requirements traceability).
 **Success Criteria** (what must be TRUE):
   1. Server-side `DeckData` card names are resolved to `CardFace` objects via `CardDatabase` before game initialization (multiplayer games start with populated libraries)
   2. `GamePage` (or `WsAdapter`) calls `tryReconnect()` on WebSocket disconnect, enabling client-side reconnection flow
   3. Orphaned `/games` HTTP endpoint is either wired to a game-list UI or removed
   4. `PermanentCard.tsx` uses `COMBAT_TILT_DEGREES` constant instead of hardcoded `15`
   5. TD-01 through TD-06 requirements are added to REQUIREMENTS.md traceability table
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 12-01-PLAN.md — Server deck resolution, client reconnect wiring, orphaned endpoint cleanup, remaining tech debt fixes
+- [ ] 12-01-PLAN.md — Server deck resolution via CardDatabase, orphaned /games endpoint removal
+- [ ] 12-02-PLAN.md — Client WebSocket reconnect with exponential backoff and reconnection banner UI
 
 ## Progress
 
@@ -250,4 +251,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 9. Wire DeckBuilder to Game Engine | 3/3 | Complete   | 2026-03-08 |
 | 10. Fix Undo/WASM State Sync | 1/1 | Complete    | 2026-03-08 |
 | 11. Tech Debt Cleanup | 3/3 | Complete    | 2026-03-08 |
-| 12. Multiplayer Wiring & Final Cleanup | 0/1 | Planned | — |
+| 12. Multiplayer Wiring & Final Cleanup | 0/2 | Planned | -- |
