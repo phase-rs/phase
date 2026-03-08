@@ -10,6 +10,7 @@ use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaCost;
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
+use super::proposed_event::{ProposedEvent, ReplacementId};
 
 use crate::game::combat::CombatState;
 
@@ -38,6 +39,7 @@ pub enum WaitingFor {
     DeclareAttackers { player: PlayerId },
     DeclareBlockers { player: PlayerId },
     GameOver { winner: Option<PlayerId> },
+    ReplacementChoice { player: PlayerId, candidate_count: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,6 +94,16 @@ pub struct GameState {
     pub lands_played_this_turn: u8,
     pub max_lands_per_turn: u8,
     pub priority_pass_count: u8,
+
+    // Replacement effects
+    pub pending_replacement: Option<PendingReplacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingReplacement {
+    pub proposed: ProposedEvent,
+    pub candidates: Vec<ReplacementId>,
+    pub depth: u16,
 }
 
 impl GameState {
@@ -127,6 +139,7 @@ impl GameState {
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
             priority_pass_count: 0,
+            pending_replacement: None,
         }
     }
 }
@@ -156,6 +169,7 @@ impl PartialEq for GameState {
             && self.lands_played_this_turn == other.lands_played_this_turn
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
+            && self.pending_replacement == other.pending_replacement
     }
 }
 
@@ -275,8 +289,12 @@ mod tests {
             WaitingFor::GameOver {
                 winner: Some(PlayerId(0)),
             },
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                candidate_count: 2,
+            },
         ];
-        assert_eq!(variants.len(), 5);
+        assert_eq!(variants.len(), 6);
     }
 
     #[test]

@@ -125,6 +125,10 @@ pub enum GameEvent {
         object_id: ObjectId,
         source_id: ObjectId,
     },
+    ReplacementApplied {
+        source_id: ObjectId,
+        event_type: String,
+    },
 }
 
 #[cfg(test)]

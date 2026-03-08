@@ -132,6 +132,31 @@ pub fn apply(
             turns::advance_phase(state, &mut events);
             turns::auto_advance(state, &mut events)
         }
+        (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
+            match super::replacement::continue_replacement(state, index, &mut events) {
+                super::replacement::ReplacementResult::Execute(_) => {
+                    WaitingFor::Priority {
+                        player: state.active_player,
+                    }
+                }
+                super::replacement::ReplacementResult::NeedsChoice(player) => {
+                    let candidate_count = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|p| p.candidates.len())
+                        .unwrap_or(0);
+                    WaitingFor::ReplacementChoice {
+                        player,
+                        candidate_count,
+                    }
+                }
+                super::replacement::ReplacementResult::Prevented => {
+                    WaitingFor::Priority {
+                        player: state.active_player,
+                    }
+                }
+            }
+        }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",

@@ -8,6 +8,7 @@ pub mod keywords;
 pub mod mana_payment;
 pub mod mulligan;
 pub mod priority;
+pub mod replacement;
 pub mod sba;
 pub mod stack;
 pub mod targeting;

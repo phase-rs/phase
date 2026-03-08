@@ -36,6 +36,9 @@ pub enum GameAction {
     SelectTargets {
         targets: Vec<TargetRef>,
     },
+    ChooseReplacement {
+        index: usize,
+    },
 }
 
 #[cfg(test)]

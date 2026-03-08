@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::ability::TriggerDefinition;
+use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefinition};
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -53,8 +53,19 @@ pub struct GameObject {
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<String>,
     pub trigger_definitions: Vec<TriggerDefinition>,
+    pub replacement_definitions: Vec<ReplacementDefinition>,
+    pub static_definitions: Vec<StaticDefinition>,
     pub svars: HashMap<String, String>,
     pub color: Vec<ManaColor>,
+
+    // Base characteristics (for layer system)
+    pub base_power: Option<i32>,
+    pub base_toughness: Option<i32>,
+    pub base_keywords: Vec<Keyword>,
+    pub base_color: Vec<ManaColor>,
+
+    // Timestamp for layer ordering
+    pub timestamp: u64,
 
     // Summoning sickness
     pub entered_battlefield_turn: Option<u32>,
@@ -92,8 +103,15 @@ impl GameObject {
             keywords: Vec::new(),
             abilities: Vec::new(),
             trigger_definitions: Vec::new(),
+            replacement_definitions: Vec::new(),
+            static_definitions: Vec::new(),
             svars: HashMap::new(),
             color: Vec::new(),
+            base_power: None,
+            base_toughness: None,
+            base_keywords: Vec::new(),
+            base_color: Vec::new(),
+            timestamp: 0,
             entered_battlefield_turn: None,
         }
     }
