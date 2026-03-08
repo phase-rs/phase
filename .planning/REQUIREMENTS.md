@@ -35,10 +35,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Triggers
 
-- [ ] **TRIG-01**: Event bus for game events
-- [ ] **TRIG-02**: Trigger matching by mode against registered triggers
-- [ ] **TRIG-03**: APNAP ordering for simultaneous triggers
-- [ ] **TRIG-04**: All 137 trigger mode handlers
+- [x] **TRIG-01**: Event bus for game events
+- [x] **TRIG-02**: Trigger matching by mode against registered triggers
+- [x] **TRIG-03**: APNAP ordering for simultaneous triggers
+- [x] **TRIG-04**: All 137 trigger mode handlers
 
 ### Replacement Effects
 
@@ -176,10 +176,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ABIL-05 | Phase 4 | Complete |
 | ABIL-06 | Phase 4 | Complete |
 | ABIL-07 | Phase 4 | Complete |
-| TRIG-01 | Phase 5 | Pending |
-| TRIG-02 | Phase 5 | Pending |
-| TRIG-03 | Phase 5 | Pending |
-| TRIG-04 | Phase 5 | Pending |
+| TRIG-01 | Phase 5 | Complete |
+| TRIG-02 | Phase 5 | Complete |
+| TRIG-03 | Phase 5 | Complete |
+| TRIG-04 | Phase 5 | Complete |
 | REPL-01 | Phase 6 | Pending |
 | REPL-02 | Phase 6 | Pending |
 | REPL-03 | Phase 6 | Pending |

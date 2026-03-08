@@ -10,8 +10,8 @@ progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 14
-  completed_plans: 12
-  percent: 86
+  completed_plans: 13
+  percent: 93
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 ## Current Position
 
 Phase: 5 of 8 (Triggers & Combat)
-Plan: 1 of 3 in current phase -- COMPLETE
+Plan: 2 of 3 in current phase -- COMPLETE
 Status: Executing Phase 05
-Last activity: 2026-03-08 -- Completed 05-01 (Keyword & Trigger Type Enums)
+Last activity: 2026-03-08 -- Completed 05-02 (Trigger Pipeline & Engine Integration)
 
-Progress: [████████░░] 86% (12/14 plans across phases)
+Progress: [█████████░] 93% (13/14 plans across phases)
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Progress: [████████░░] 86% (12/14 plans across phases)
 | Phase 04 P02 | 7min | 2 tasks | 11 files |
 | Phase 04 P03 | 4min | 2 tasks | 6 files |
 | Phase 05 P01 | 5min | 2 tasks | 9 files |
+| Phase 05 P02 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -116,6 +117,11 @@ Recent decisions affecting current work:
 - [Phase 05]: TriggerMode FromStr case-sensitive matching Forge's CamelCase conventions
 - [Phase 05]: has_keyword uses std::mem::discriminant for parameterized keyword matching
 - [Phase 05]: CardFace.keywords stays Vec<String> in parser; conversion via parse_keywords at GameObject creation
+- [Phase 05]: Build trigger registry per call (cheap, same pattern as effect registry)
+- [Phase 05]: trigger_definitions stored on GameObject at creation time (avoid re-parsing)
+- [Phase 05]: APNAP ordering via sort-by-key then reverse for LIFO stack placement
+- [Phase 05]: Unimplemented trigger modes return false (recognized but don't fire)
+- [Phase 05]: Execute param resolves SVars via existing parse_ability
 
 ### Pending Todos
 
@@ -128,6 +134,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T01:06:30Z
-Stopped at: Completed 05-01-PLAN.md
-Resume file: .planning/phases/05-triggers-combat/05-01-SUMMARY.md
+Last session: 2026-03-08T01:14:39Z
+Stopped at: Completed 05-02-PLAN.md
+Resume file: .planning/phases/05-triggers-combat/05-02-SUMMARY.md

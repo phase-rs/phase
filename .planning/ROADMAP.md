@@ -167,7 +167,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 2. Card Parser & Database | 3/3 | Complete   | 2026-03-07 |
 | 3. Game State Engine | 2/3 | In Progress|  |
 | 4. Ability System & Effects | 3/3 | Complete   | 2026-03-08 |
-| 5. Triggers & Combat | 1/3 | In Progress|  |
+| 5. Triggers & Combat | 2/3 | In Progress|  |
 | 6. Advanced Rules | 0/2 | Not started | - |
 | 7. Platform Bridges & UI | 0/4 | Not started | - |
 | 8. AI & Multiplayer | 0/3 | Not started | - |
