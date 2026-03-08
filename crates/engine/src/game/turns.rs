@@ -4,6 +4,8 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::combat;
+use super::combat_damage;
 use super::zones;
 
 const PHASE_ORDER: [Phase; 12] = [
@@ -153,6 +155,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     for id in to_clear {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.damage_marked = 0;
+            obj.dealt_deathtouch_damage = false;
             events.push(GameEvent::DamageCleared { object_id: id });
         }
     }
@@ -185,13 +188,59 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     player: state.active_player,
                 };
             }
-            Phase::BeginCombat
-            | Phase::DeclareAttackers
-            | Phase::DeclareBlockers
-            | Phase::CombatDamage
-            | Phase::EndCombat => {
-                // Skip combat in Phase 3
+            Phase::BeginCombat => {
+                if combat::has_potential_attackers(state) {
+                    state.combat = Some(crate::game::combat::CombatState::default());
+                    advance_phase(state, events);
+                    // Continue to DeclareAttackers
+                } else {
+                    // Skip all combat phases
+                    state.combat = None;
+                    state.phase = Phase::PostCombatMain;
+                    state.priority_player = state.active_player;
+                    state.priority_pass_count = 0;
+                    events.push(GameEvent::PhaseChanged {
+                        phase: Phase::PostCombatMain,
+                    });
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
+            }
+            Phase::DeclareAttackers => {
+                return WaitingFor::DeclareAttackers {
+                    player: state.active_player,
+                };
+            }
+            Phase::DeclareBlockers => {
+                // Check if any attackers were declared
+                let has_attackers = state
+                    .combat
+                    .as_ref()
+                    .map_or(false, |c| !c.attackers.is_empty());
+                if has_attackers {
+                    let defending = PlayerId(1 - state.active_player.0);
+                    return WaitingFor::DeclareBlockers {
+                        player: defending,
+                    };
+                } else {
+                    // No attackers, skip to EndCombat
+                    state.phase = Phase::EndCombat;
+                    events.push(GameEvent::PhaseChanged {
+                        phase: Phase::EndCombat,
+                    });
+                    // Continue loop to process EndCombat
+                }
+            }
+            Phase::CombatDamage => {
+                combat_damage::resolve_combat_damage(state, events);
                 advance_phase(state, events);
+                // Continue to EndCombat
+            }
+            Phase::EndCombat => {
+                state.combat = None;
+                advance_phase(state, events);
+                // Continue to PostCombatMain
             }
             Phase::End => {
                 return WaitingFor::Priority {

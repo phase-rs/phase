@@ -92,6 +92,46 @@ pub fn apply(
             mulligan::handle_mulligan_bottom(state, p, cards, c, &mut events)
                 .map_err(|e| EngineError::InvalidAction(e))?
         }
+        (WaitingFor::DeclareAttackers { player }, GameAction::DeclareAttackers { attacker_ids }) => {
+            if state.active_player != *player {
+                return Err(EngineError::WrongPlayer);
+            }
+            super::combat::declare_attackers(state, &attacker_ids, &mut events)
+                .map_err(|e| EngineError::InvalidAction(e))?;
+
+            // Process triggers for AttackersDeclared
+            triggers::process_triggers(state, &events);
+
+            if attacker_ids.is_empty() {
+                // No attackers: skip to EndCombat
+                state.phase = Phase::EndCombat;
+                events.push(GameEvent::PhaseChanged {
+                    phase: Phase::EndCombat,
+                });
+                state.combat = None;
+                turns::advance_phase(state, &mut events);
+                turns::auto_advance(state, &mut events)
+            } else {
+                // Advance to DeclareBlockers
+                turns::advance_phase(state, &mut events);
+                turns::auto_advance(state, &mut events)
+            }
+        }
+        (WaitingFor::DeclareBlockers { player }, GameAction::DeclareBlockers { assignments }) => {
+            let defending = PlayerId(1 - state.active_player.0);
+            if defending != *player {
+                return Err(EngineError::WrongPlayer);
+            }
+            super::combat::declare_blockers(state, &assignments, &mut events)
+                .map_err(|e| EngineError::InvalidAction(e))?;
+
+            // Process triggers for BlockersDeclared
+            triggers::process_triggers(state, &events);
+
+            // Advance to CombatDamage
+            turns::advance_phase(state, &mut events);
+            turns::auto_advance(state, &mut events)
+        }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",

@@ -106,7 +106,14 @@ fn check_lethal_damage(
                 .get(id)
                 .map(|obj| {
                     obj.card_types.core_types.contains(&CoreType::Creature)
-                        && obj.toughness.map_or(false, |t| obj.damage_marked >= t as u32 && t > 0)
+                        && (
+                            // Normal lethal damage: damage >= toughness
+                            obj.toughness.map_or(false, |t| obj.damage_marked >= t as u32 && t > 0)
+                            // Deathtouch: any amount of damage from a deathtouch source is lethal
+                            || (obj.dealt_deathtouch_damage && obj.damage_marked > 0)
+                        )
+                        // Indestructible creatures are not destroyed by lethal damage
+                        && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
                 })
                 .unwrap_or(false)
         })
