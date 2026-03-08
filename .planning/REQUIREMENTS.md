@@ -68,8 +68,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### UI
 
-- [ ] **UI-01**: Battlefield layout with permanents, tap state, attachments, counters
-- [ ] **UI-02**: Hand display with legal-play highlighting
+- [x] **UI-01**: Battlefield layout with permanents, tap state, attachments, counters
+- [x] **UI-02**: Hand display with legal-play highlighting
 - [ ] **UI-03**: Stack visualization
 - [ ] **UI-04**: Phase/turn tracker
 - [ ] **UI-05**: Life total display
@@ -78,7 +78,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **UI-08**: Card preview/zoom with Scryfall images
 - [ ] **UI-09**: Choice prompts for modal effects
 - [ ] **UI-10**: Game log
-- [ ] **UI-11**: Touch-optimized responsive design (great on tablets)
+- [x] **UI-11**: Touch-optimized responsive design (great on tablets)
 
 ### Deck Management
 
@@ -194,8 +194,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COMB-04 | Phase 5 | Complete |
 | KWRD-01 | Phase 5 | Complete |
 | KWRD-02 | Phase 5 | Complete |
-| UI-01 | Phase 7 | Pending |
-| UI-02 | Phase 7 | Pending |
+| UI-01 | Phase 7 | Complete |
+| UI-02 | Phase 7 | Complete |
 | UI-03 | Phase 7 | Pending |
 | UI-04 | Phase 7 | Pending |
 | UI-05 | Phase 7 | Pending |
@@ -204,7 +204,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UI-08 | Phase 7 | Complete |
 | UI-09 | Phase 7 | Pending |
 | UI-10 | Phase 7 | Pending |
-| UI-11 | Phase 7 | Pending |
+| UI-11 | Phase 7 | Complete |
 | DECK-01 | Phase 7 | Complete |
 | DECK-02 | Phase 7 | Complete |
 | DECK-03 | Phase 7 | Complete |
