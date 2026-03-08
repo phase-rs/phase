@@ -17,6 +17,8 @@ import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { WasmAdapter } from "../adapter/wasm-adapter.ts";
+import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
+import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
@@ -24,10 +26,29 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { createAIController } from "../game/controllers/aiController.ts";
 import type { AIController } from "../game/controllers/aiController.ts";
 
+const DEFAULT_WS_URL = "ws://localhost:8080/ws";
+
+function getWsUrl(): string {
+  return import.meta.env.VITE_WS_URL ?? DEFAULT_WS_URL;
+}
+
+function loadDeckFromSession(): DeckData {
+  const raw = sessionStorage.getItem("forge-deck");
+  if (raw) {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return { main_deck: parsed, sideboard: [] };
+    }
+    return parsed as DeckData;
+  }
+  return { main_deck: [], sideboard: [] };
+}
+
 export function GamePage() {
   const [searchParams] = useSearchParams();
   const mode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
+  const joinCode = searchParams.get("code") ?? "";
 
   const initGame = useGameStore((s) => s.initGame);
   const gameState = useGameStore((s) => s.gameState);
@@ -39,6 +60,12 @@ export function GamePage() {
   const aiControllerRef = useRef<AIController | null>(null);
   const [showAiHand, setShowAiHand] = useState(false);
 
+  // Online multiplayer state
+  const [hostGameCode, setHostGameCode] = useState<string | null>(null);
+  const [waitingForOpponent, setWaitingForOpponent] = useState(false);
+  const [opponentDisconnected, setOpponentDisconnected] = useState(false);
+  const [disconnectGrace, setDisconnectGrace] = useState(0);
+
   const inspectedCardName =
     inspectedObjectId != null && objects
       ? (objects[inspectedObjectId]?.name ?? null)
@@ -47,6 +74,46 @@ export function GamePage() {
   useKeyboardShortcuts();
 
   useEffect(() => {
+    const isOnline = mode === "host" || mode === "join";
+
+    if (isOnline) {
+      const deck = loadDeckFromSession();
+      const wsAdapter = new WebSocketAdapter(
+        getWsUrl(),
+        mode as "host" | "join",
+        deck,
+        mode === "join" ? joinCode : undefined,
+      );
+
+      const unsubscribe = wsAdapter.onEvent((event: WsAdapterEvent) => {
+        switch (event.type) {
+          case "gameCreated":
+            setHostGameCode(event.gameCode);
+            break;
+          case "waitingForOpponent":
+            setWaitingForOpponent(true);
+            break;
+          case "opponentDisconnected":
+            setOpponentDisconnected(true);
+            setDisconnectGrace(event.graceSeconds);
+            break;
+          case "opponentReconnected":
+            setOpponentDisconnected(false);
+            break;
+        }
+      });
+
+      initGame(wsAdapter).then(() => {
+        setWaitingForOpponent(false);
+      });
+
+      return () => {
+        unsubscribe();
+        reset();
+      };
+    }
+
+    // AI or default mode
     const adapter = new WasmAdapter();
     initGame(adapter);
 
@@ -69,7 +136,7 @@ export function GamePage() {
       }
       reset();
     };
-  }, [initGame, reset, mode, difficulty]);
+  }, [initGame, reset, mode, difficulty, joinCode]);
 
   const handleMulliganChoice = useCallback(
     (id: string) => {
@@ -130,6 +197,58 @@ export function GamePage() {
         >
           {showAiHand ? "Hide AI Hand" : "Show AI Hand"}
         </button>
+      )}
+
+      {/* Host game: show game code while waiting */}
+      {waitingForOpponent && hostGameCode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/70" />
+          <div className="relative z-10 rounded-xl bg-gray-900 p-8 text-center shadow-2xl ring-1 ring-gray-700">
+            <h2 className="mb-2 text-xl font-bold text-white">
+              Waiting for Opponent
+            </h2>
+            <p className="mb-4 text-sm text-gray-400">
+              Share this code with your opponent:
+            </p>
+            <p className="mb-4 font-mono text-4xl font-bold tracking-widest text-emerald-400">
+              {hostGameCode}
+            </p>
+            <p className="text-xs text-gray-500">
+              The game will start when your opponent joins.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Join game: waiting overlay */}
+      {waitingForOpponent && !hostGameCode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/70" />
+          <div className="relative z-10 rounded-xl bg-gray-900 p-6 text-center shadow-2xl ring-1 ring-gray-700">
+            <h2 className="text-lg font-bold text-white">Joining Game...</h2>
+            <p className="mt-2 text-sm text-gray-400">
+              Connecting to game {joinCode}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Opponent disconnected overlay */}
+      {opponentDisconnected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60" />
+          <div className="relative z-10 rounded-xl bg-gray-900 p-6 text-center shadow-2xl ring-1 ring-yellow-700">
+            <h2 className="mb-2 text-lg font-bold text-yellow-400">
+              Opponent Disconnected
+            </h2>
+            <p className="text-sm text-gray-300">
+              Waiting for opponent to reconnect...
+            </p>
+            <p className="mt-2 text-xs text-gray-500">
+              Game will forfeit in {disconnectGrace}s
+            </p>
+          </div>
+        </div>
       )}
 
       {/* Animation overlay (above board, below modals) */}

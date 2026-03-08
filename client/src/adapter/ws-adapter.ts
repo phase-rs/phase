@@ -1,0 +1,285 @@
+import type {
+  EngineAdapter,
+  GameAction,
+  GameEvent,
+  GameState,
+  PlayerId,
+} from "./types";
+import { AdapterError } from "./types";
+
+/** Deck data format matching server protocol. */
+export interface DeckData {
+  main_deck: string[];
+  sideboard: string[];
+}
+
+/** Events emitted by the WebSocketAdapter for UI state updates. */
+export type WsAdapterEvent =
+  | { type: "gameCreated"; gameCode: string }
+  | { type: "waitingForOpponent" }
+  | { type: "opponentDisconnected"; graceSeconds: number }
+  | { type: "opponentReconnected" }
+  | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "error"; message: string };
+
+type WsAdapterEventListener = (event: WsAdapterEvent) => void;
+
+const WS_STORAGE_KEY = "forge-ws-session";
+
+interface SessionData {
+  gameCode: string;
+  playerToken: string;
+}
+
+/**
+ * WebSocket-backed implementation of EngineAdapter.
+ * Communicates with the forge-server via WebSocket protocol
+ * for multiplayer games.
+ */
+export class WebSocketAdapter implements EngineAdapter {
+  private ws: WebSocket | null = null;
+  private gameState: GameState | null = null;
+  private _playerId: PlayerId | null = null;
+  private playerToken: string | null = null;
+  private _gameCode: string | null = null;
+  private pendingResolve: ((events: GameEvent[]) => void) | null = null;
+  private pendingReject: ((error: Error) => void) | null = null;
+  private initResolve: (() => void) | null = null;
+  private initReject: ((error: Error) => void) | null = null;
+  private listeners: WsAdapterEventListener[] = [];
+
+  constructor(
+    private readonly serverUrl: string,
+    private readonly mode: "host" | "join",
+    private readonly deckData: DeckData,
+    private readonly joinGameCode?: string,
+  ) {}
+
+  get gameCode(): string | null {
+    return this._gameCode;
+  }
+
+  get playerId(): PlayerId | null {
+    return this._playerId;
+  }
+
+  onEvent(listener: WsAdapterEventListener): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    };
+  }
+
+  private emit(event: WsAdapterEvent): void {
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+
+  async initialize(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.initResolve = resolve;
+      this.initReject = reject;
+
+      this.ws = new WebSocket(this.serverUrl);
+
+      this.ws.onopen = () => {
+        if (this.mode === "host") {
+          this.send({
+            type: "CreateGame",
+            data: { deck: this.deckData },
+          });
+        } else {
+          this.send({
+            type: "JoinGame",
+            data: {
+              game_code: this.joinGameCode!,
+              deck: this.deckData,
+            },
+          });
+        }
+      };
+
+      this.ws.onmessage = (event) => {
+        this.handleMessage(JSON.parse(event.data as string));
+      };
+
+      this.ws.onerror = () => {
+        const err = new AdapterError(
+          "WS_ERROR",
+          "WebSocket connection failed",
+          true,
+        );
+        if (this.initReject) {
+          this.initReject(err);
+          this.initResolve = null;
+          this.initReject = null;
+        }
+      };
+
+      this.ws.onclose = () => {
+        if (this.initReject) {
+          this.initReject(
+            new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+          );
+          this.initResolve = null;
+          this.initReject = null;
+        }
+      };
+    });
+  }
+
+  async submitAction(action: GameAction): Promise<GameEvent[]> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    return new Promise<GameEvent[]>((resolve, reject) => {
+      this.pendingResolve = resolve;
+      this.pendingReject = reject;
+      this.send({ type: "Action", data: { action } });
+    });
+  }
+
+  async getState(): Promise<GameState> {
+    if (!this.gameState) {
+      throw new AdapterError("WS_ERROR", "No game state available", false);
+    }
+    return this.gameState;
+  }
+
+  dispose(): void {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.gameState = null;
+    this._playerId = null;
+    this.playerToken = null;
+    this._gameCode = null;
+    this.pendingResolve = null;
+    this.pendingReject = null;
+    this.initResolve = null;
+    this.initReject = null;
+    this.listeners = [];
+    sessionStorage.removeItem(WS_STORAGE_KEY);
+  }
+
+  /** Attempt reconnection using stored session data. */
+  tryReconnect(): boolean {
+    const raw = sessionStorage.getItem(WS_STORAGE_KEY);
+    if (!raw) return false;
+
+    const session: SessionData = JSON.parse(raw);
+    this._gameCode = session.gameCode;
+    this.playerToken = session.playerToken;
+
+    this.ws = new WebSocket(this.serverUrl);
+    this.ws.onopen = () => {
+      this.send({
+        type: "Reconnect",
+        data: {
+          game_code: session.gameCode,
+          player_token: session.playerToken,
+        },
+      });
+    };
+    this.ws.onmessage = (event) => {
+      this.handleMessage(JSON.parse(event.data as string));
+    };
+    return true;
+  }
+
+  private send(msg: unknown): void {
+    this.ws?.send(JSON.stringify(msg));
+  }
+
+  private handleMessage(msg: { type: string; data?: unknown }): void {
+    switch (msg.type) {
+      case "GameCreated": {
+        const data = msg.data as { game_code: string; player_token: string };
+        this._gameCode = data.game_code;
+        this.playerToken = data.player_token;
+        this.persistSession();
+        this.emit({ type: "gameCreated", gameCode: data.game_code });
+        this.emit({ type: "waitingForOpponent" });
+        break;
+      }
+
+      case "GameStarted": {
+        const data = msg.data as { state: GameState; your_player: PlayerId };
+        this.gameState = data.state;
+        this._playerId = data.your_player;
+        if (this.initResolve) {
+          this.initResolve();
+          this.initResolve = null;
+          this.initReject = null;
+        }
+        break;
+      }
+
+      case "StateUpdate": {
+        const data = msg.data as { state: GameState; events: GameEvent[] };
+        this.gameState = data.state;
+        if (this.pendingResolve) {
+          this.pendingResolve(data.events);
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        break;
+      }
+
+      case "ActionRejected": {
+        const data = msg.data as { reason: string };
+        if (this.pendingReject) {
+          this.pendingReject(
+            new AdapterError("ACTION_REJECTED", data.reason, true),
+          );
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        break;
+      }
+
+      case "OpponentDisconnected": {
+        const data = msg.data as { grace_seconds: number };
+        this.emit({
+          type: "opponentDisconnected",
+          graceSeconds: data.grace_seconds,
+        });
+        break;
+      }
+
+      case "OpponentReconnected": {
+        this.emit({ type: "opponentReconnected" });
+        break;
+      }
+
+      case "GameOver": {
+        const data = msg.data as { winner: PlayerId | null; reason: string };
+        this.emit({
+          type: "gameOver",
+          winner: data.winner,
+          reason: data.reason,
+        });
+        break;
+      }
+
+      case "Error": {
+        const data = msg.data as { message: string };
+        this.emit({ type: "error", message: data.message });
+        break;
+      }
+    }
+  }
+
+  private persistSession(): void {
+    if (this._gameCode && this.playerToken) {
+      const session: SessionData = {
+        gameCode: this._gameCode,
+        playerToken: this.playerToken,
+      };
+      sessionStorage.setItem(WS_STORAGE_KEY, JSON.stringify(session));
+    }
+  }
+}
