@@ -1,4 +1,10 @@
-import init, { ping, create_initial_state } from "../wasm/engine_wasm";
+import init, {
+  ping,
+  create_initial_state,
+  initialize_game,
+  submit_action,
+  get_game_state,
+} from "../wasm/engine_wasm";
 import type { EngineAdapter, GameAction, GameEvent, GameState } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
 
@@ -38,6 +44,13 @@ export class WasmAdapter implements EngineAdapter {
     return ping();
   }
 
+  /** Initialize a new game and return the initial events. */
+  initializeGame(deckData?: unknown): GameEvent[] {
+    this.assertInitialized();
+    const result = initialize_game(deckData ?? null);
+    return result.events ?? [];
+  }
+
   private assertInitialized(): void {
     if (!this.initialized) {
       throw new AdapterError(
@@ -68,14 +81,24 @@ export class WasmAdapter implements EngineAdapter {
     return result;
   }
 
-  private processAction(_action: GameAction): GameEvent[] {
-    // Placeholder: Phase 3 will add real action processing via WASM
-    // For now, return an empty event list
-    return [];
+  private processAction(action: GameAction): GameEvent[] {
+    const result = submit_action(action);
+    if (typeof result === "string") {
+      throw new AdapterError(
+        AdapterErrorCode.INVALID_ACTION,
+        result,
+        true,
+      );
+    }
+    return result.events ?? [];
   }
 
   private fetchState(): GameState {
-    return create_initial_state() as GameState;
+    const state = get_game_state();
+    if (state === null) {
+      return create_initial_state() as GameState;
+    }
+    return state as GameState;
   }
 
   private normalizeError(error: unknown): AdapterError {

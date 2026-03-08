@@ -1,8 +1,15 @@
+use std::cell::RefCell;
+
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
-use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
+use engine::game::engine::apply;
+use engine::types::{ActionResult, GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
+
+thread_local! {
+    static GAME_STATE: RefCell<Option<GameState>> = const { RefCell::new(None) };
+}
 
 /// Verify WASM integration works.
 #[wasm_bindgen]
@@ -15,6 +22,56 @@ pub fn ping() -> String {
 pub fn create_initial_state() -> JsValue {
     let state = GameState::default();
     serde_wasm_bindgen::to_value(&state).unwrap()
+}
+
+/// Initialize a new game with two players.
+/// Accepts deck_data as JSON (reserved for future deck loading).
+/// Returns the initial ActionResult (events + waiting_for).
+#[wasm_bindgen]
+pub fn initialize_game(_deck_data: JsValue) -> JsValue {
+    let state = GameState::new_two_player(42);
+    let waiting_for = state.waiting_for.clone();
+    GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
+        *gs.borrow_mut() = Some(state);
+    });
+    let result = ActionResult {
+        events: vec![GameEvent::GameStarted],
+        waiting_for,
+    };
+    serde_wasm_bindgen::to_value(&result).unwrap()
+}
+
+/// Submit a game action and return the ActionResult (events + waiting_for).
+#[wasm_bindgen]
+pub fn submit_action(action: JsValue) -> JsValue {
+    let action: GameAction = serde_wasm_bindgen::from_value(action)
+        .expect("Failed to deserialize GameAction");
+
+    GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
+        let mut state_ref = gs.borrow_mut();
+        let state = state_ref
+            .as_mut()
+            .expect("Game not initialized. Call initialize_game first.");
+        match apply(state, action) {
+            Ok(result) => serde_wasm_bindgen::to_value(&result).unwrap(),
+            Err(e) => {
+                let error_msg = format!("Engine error: {}", e);
+                JsValue::from_str(&error_msg)
+            }
+        }
+    })
+}
+
+/// Get the current game state as JSON.
+#[wasm_bindgen]
+pub fn get_game_state() -> JsValue {
+    GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
+        let state_ref = gs.borrow();
+        match state_ref.as_ref() {
+            Some(state) => serde_wasm_bindgen::to_value(state).unwrap(),
+            None => JsValue::NULL,
+        }
+    })
 }
 
 // Tsify re-exports for TypeScript type generation.
@@ -31,6 +88,9 @@ pub enum WasmGameAction {
     DeclareAttackers { attacker_ids: Vec<u64> },
     DeclareBlockers { assignments: Vec<(u64, u64)> },
     MulliganDecision { keep: bool },
+    TapLandForMana { object_id: u64 },
+    SelectCards { cards: Vec<u64> },
+    ChooseReplacement { index: usize },
 }
 
 #[derive(Tsify, Serialize, Deserialize)]

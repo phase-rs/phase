@@ -12,16 +12,28 @@ vi.mock("../../wasm/engine_wasm", () => {
     active_player: 0,
     phase: "Untap",
     players: [
-      { id: 0, life: 20, mana_pool: { white: 0, blue: 0, black: 0, red: 0, green: 0, colorless: 0 } },
-      { id: 1, life: 20, mana_pool: { white: 0, blue: 0, black: 0, red: 0, green: 0, colorless: 0 } },
+      { id: 0, life: 20, mana_pool: { mana: [] } },
+      { id: 1, life: 20, mana_pool: { mana: [] } },
     ],
     priority_player: 0,
   });
+  const mockInitializeGame = vi.fn().mockReturnValue({
+    events: [{ type: "GameStarted" }],
+    waiting_for: { type: "Priority", data: { player: 0 } },
+  });
+  const mockSubmitAction = vi.fn().mockReturnValue({
+    events: [],
+    waiting_for: { type: "Priority", data: { player: 0 } },
+  });
+  const mockGetGameState = vi.fn().mockReturnValue(null);
 
   return {
     default: mockInit,
     ping: mockPing,
     create_initial_state: mockCreateInitialState,
+    initialize_game: mockInitializeGame,
+    submit_action: mockSubmitAction,
+    get_game_state: mockGetGameState,
   };
 });
 
@@ -119,7 +131,8 @@ describe("WasmAdapter", () => {
 
   describe("error normalization", () => {
     it("wraps WASM errors into AdapterError with recoverable flag", async () => {
-      const { create_initial_state } = await import("../../wasm/engine_wasm");
+      const { create_initial_state, get_game_state } = await import("../../wasm/engine_wasm");
+      vi.mocked(get_game_state).mockReturnValue(null);
       vi.mocked(create_initial_state).mockImplementation(() => {
         throw new Error("WASM execution failed");
       });
