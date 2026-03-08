@@ -107,7 +107,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **PLAT-02**: PWA + WASM build for tablet/browser
 - [x] **PLAT-03**: EngineAdapter abstraction (Tauri IPC and WASM bindings)
 - [x] **PLAT-04**: Scryfall card image caching (on-demand with local cache)
-- [ ] **PLAT-05**: Standard format card coverage (60-70%+ of current Standard-legal cards)
+- [x] **PLAT-05**: Standard format card coverage (60-70%+ of current Standard-legal cards)
 
 ### Quality of Life
 
@@ -221,7 +221,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-02 | Phase 7 | Complete |
 | PLAT-03 | Phase 1 | Complete |
 | PLAT-04 | Phase 7 | Complete |
-| PLAT-05 | Phase 8 | Pending |
+| PLAT-05 | Phase 8 | Complete |
 | QOL-01 | Phase 7 | Complete |
 | QOL-02 | Phase 7 | Complete |
 | QOL-03 | Phase 7 | Complete |
