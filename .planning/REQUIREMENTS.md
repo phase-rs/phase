@@ -115,6 +115,15 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **QOL-02**: Keyboard shortcuts (pass turn, full control, tap all lands)
 - [x] **QOL-03**: Card coverage dashboard (which cards/effects are supported)
 
+### Tech Debt
+
+- [x] **TD-01**: Constants consolidation (zero duplicate definitions across client codebase)
+- [x] **TD-02**: Combat attacker selection UI (click-to-toggle with glow and tilt)
+- [x] **TD-03**: Combat blocker assignment UI (two-click assignment with arrows)
+- [x] **TD-04**: Missing card-data.json blocking modal with generation instructions
+- [x] **TD-05**: WASM adapter tests for 4 key bindings (initialize_game, submit_action, get_game_state, restore_game_state)
+- [x] **TD-06**: CI coverage enforcement (TypeScript thresholds, Rust reporting)
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -225,12 +234,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | QOL-01 | Phase 7 | Complete |
 | QOL-02 | Phase 10 | Complete |
 | QOL-03 | Phase 7 | Complete |
+| TD-01 | Phase 11 | Complete |
+| TD-02 | Phase 11 | Complete |
+| TD-03 | Phase 11 | Complete |
+| TD-04 | Phase 11 | Complete |
+| TD-05 | Phase 11 | Complete |
+| TD-06 | Phase 11 | Complete |
 
 **Coverage:**
-- v1 requirements: 57 total
-- Mapped to phases: 57
+- v1 requirements: 63 total
+- Mapped to phases: 63
 - Unmapped: 0
-- Complete: 57
+- Complete: 63
 
 ---
 *Requirements defined: 2026-03-07*
