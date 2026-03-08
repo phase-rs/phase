@@ -97,6 +97,10 @@ pub struct GameState {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+
+    // Layer system
+    pub layers_dirty: bool,
+    pub next_timestamp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,7 +144,16 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            layers_dirty: true,
+            next_timestamp: 1,
         }
+    }
+
+    /// Returns the current timestamp and increments for next use.
+    pub fn next_timestamp(&mut self) -> u64 {
+        let ts = self.next_timestamp;
+        self.next_timestamp += 1;
+        ts
     }
 }
 
@@ -170,6 +183,8 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
+            && self.layers_dirty == other.layers_dirty
+            && self.next_timestamp == other.next_timestamp
     }
 }
 

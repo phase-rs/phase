@@ -5,6 +5,7 @@ pub mod effects;
 pub mod engine;
 pub mod game_object;
 pub mod keywords;
+pub mod layers;
 pub mod mana_payment;
 pub mod mulligan;
 pub mod priority;
@@ -17,6 +18,7 @@ pub mod turns;
 pub mod zones;
 
 pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineError};
+pub use layers::evaluate_layers;
 pub use game_object::{CounterType, GameObject};
 pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
