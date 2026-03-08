@@ -17,6 +17,7 @@ interface AnimationStoreActions {
   enqueueEffects: (events: GameEvent[]) => void;
   playNext: () => AnimationEffect | undefined;
   registerPosition: (objectId: number, rect: DOMRect) => void;
+  getPosition: (objectId: number) => DOMRect | undefined;
   clearQueue: () => void;
 }
 
@@ -76,6 +77,8 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
       return { positionRegistry: newRegistry };
     });
   },
+
+  getPosition: (objectId) => get().positionRegistry.get(objectId),
 
   clearQueue: () => set({ queue: [], isPlaying: false }),
 }));
