@@ -63,8 +63,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Keywords
 
-- [ ] **KWRD-01**: Keyword registry mapping keywords to static abilities, triggers, replacements, and combat modifiers
-- [ ] **KWRD-02**: 50+ keyword ability implementations (flying, trample, haste, hexproof, ward, flashback, kicker, cycling, etc.)
+- [x] **KWRD-01**: Keyword registry mapping keywords to static abilities, triggers, replacements, and combat modifiers
+- [x] **KWRD-02**: 50+ keyword ability implementations (flying, trample, haste, hexproof, ward, flashback, kicker, cycling, etc.)
 
 ### UI
 
@@ -192,8 +192,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COMB-02 | Phase 5 | Pending |
 | COMB-03 | Phase 5 | Pending |
 | COMB-04 | Phase 5 | Pending |
-| KWRD-01 | Phase 5 | Pending |
-| KWRD-02 | Phase 5 | Pending |
+| KWRD-01 | Phase 5 | Complete |
+| KWRD-02 | Phase 5 | Complete |
 | UI-01 | Phase 7 | Pending |
 | UI-02 | Phase 7 | Pending |
 | UI-03 | Phase 7 | Pending |

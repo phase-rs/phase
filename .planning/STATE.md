@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-stopped_at: Phase 5 context gathered
-last_updated: "2026-03-08T00:40:01.178Z"
-last_activity: 2026-03-08 -- Completed 04-03 (Sub-ability Chaining & Integration Tests)
+status: in-progress
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-03-08T01:06:30.000Z"
+last_activity: 2026-03-08 -- Completed 05-01 (Keyword & Trigger Type Enums)
 progress:
   total_phases: 8
   completed_phases: 4
-  total_plans: 11
-  completed_plans: 11
-  percent: 100
+  total_plans: 14
+  completed_plans: 12
+  percent: 86
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-07)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 4 -- Ability System & Effects
+**Current focus:** Phase 5 -- Triggers & Combat
 
 ## Current Position
 
-Phase: 4 of 8 (Ability System & Effects) -- COMPLETE
-Plan: 3 of 3 in current phase -- COMPLETE
-Status: Phase 04 Complete
-Last activity: 2026-03-08 -- Completed 04-03 (Sub-ability Chaining & Integration Tests)
+Phase: 5 of 8 (Triggers & Combat)
+Plan: 1 of 3 in current phase -- COMPLETE
+Status: Executing Phase 05
+Last activity: 2026-03-08 -- Completed 05-01 (Keyword & Trigger Type Enums)
 
-Progress: [██████████] 100% (11/11 plans across phases)
+Progress: [████████░░] 86% (12/14 plans across phases)
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [██████████] 100% (11/11 plans across phases)
 | Phase 04 P01 | 5min | 2 tasks | 17 files |
 | Phase 04 P02 | 7min | 2 tasks | 11 files |
 | Phase 04 P03 | 4min | 2 tasks | 6 files |
+| Phase 05 P01 | 5min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -111,6 +112,10 @@ Recent decisions affecting current work:
 - [Phase 04]: Conditions default to true when not present or unrecognized (safe fallback)
 - [Phase 04]: Sub-ability inherits svars, source_id, controller from parent
 - [Phase 04]: Card filter added to targeting for stack spell targeting (Counterspell)
+- [Phase 05]: Keyword FromStr uses Infallible error type (never fails, unknown -> Keyword::Unknown)
+- [Phase 05]: TriggerMode FromStr case-sensitive matching Forge's CamelCase conventions
+- [Phase 05]: has_keyword uses std::mem::discriminant for parameterized keyword matching
+- [Phase 05]: CardFace.keywords stays Vec<String> in parser; conversion via parse_keywords at GameObject creation
 
 ### Pending Todos
 
@@ -123,6 +128,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T00:40:01.174Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-triggers-combat/05-CONTEXT.md
+Last session: 2026-03-08T01:06:30Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: .planning/phases/05-triggers-combat/05-01-SUMMARY.md
