@@ -30,7 +30,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **ABIL-03**: Cost parser (mana costs, tap, sacrifice, discard, life payment)
 - [ ] **ABIL-04**: Target system with legality validation and rechecks on resolution
 - [ ] **ABIL-05**: Condition system (ConditionPresent$, ConditionCompare$)
-- [ ] **ABIL-06**: All 202 effect type handlers via registry
+- [x] **ABIL-06**: All 202 effect type handlers via registry
 - [ ] **ABIL-07**: Sub-ability chaining
 
 ### Triggers
@@ -174,7 +174,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ABIL-03 | Phase 4 | Pending |
 | ABIL-04 | Phase 4 | Pending |
 | ABIL-05 | Phase 4 | Pending |
-| ABIL-06 | Phase 4 | Pending |
+| ABIL-06 | Phase 4 | Complete |
 | ABIL-07 | Phase 4 | Pending |
 | TRIG-01 | Phase 5 | Pending |
 | TRIG-02 | Phase 5 | Pending |

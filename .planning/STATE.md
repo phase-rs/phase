@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-stopped_at: Phase 4 context gathered
-last_updated: "2026-03-07T23:39:40.370Z"
-last_activity: 2026-03-07 -- Completed 03-03 (Mana Payment, SBAs, Mulligan)
+status: in-progress
+stopped_at: Completed 04-01 (Effect Handler Registry)
+last_updated: "2026-03-08T00:05:53Z"
+last_activity: 2026-03-08 -- Completed 04-01 (Effect Handler Registry)
 progress:
   total_phases: 8
   completed_phases: 3
-  total_plans: 8
-  completed_plans: 8
-  percent: 100
+  total_plans: 11
+  completed_plans: 9
+  percent: 82
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-07)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 3 -- Game State Engine
+**Current focus:** Phase 4 -- Ability System & Effects
 
 ## Current Position
 
-Phase: 3 of 8 (Game State Engine) -- COMPLETE
-Plan: 3 of 3 in current phase
-Status: Phase 03 complete
-Last activity: 2026-03-07 -- Completed 03-03 (Mana Payment, SBAs, Mulligan)
+Phase: 4 of 8 (Ability System & Effects)
+Plan: 1 of 3 in current phase -- COMPLETE
+Status: Executing Phase 04
+Last activity: 2026-03-08 -- Completed 04-01 (Effect Handler Registry)
 
-Progress: [██████████] 100% (8/8 plans across phases)
+Progress: [████████░░] 82% (9/11 plans across phases)
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [██████████] 100% (8/8 plans across phases)
 | Phase 03 P01 | 4min | 2 tasks | 10 files |
 | Phase 03 P02 | 4min | 2 tasks | 7 files |
 | Phase 03 P03 | 7min | 2 tasks | 7 files |
+| Phase 04 P01 | 5min | 2 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -97,6 +98,10 @@ Recent decisions affecting current work:
 - [Phase 03]: SBA fixpoint capped at 9 iterations per Forge convention
 - [Phase 03]: Action dispatch via (waiting_for, action) tuple match for clean validation
 - [Phase 03]: start_game auto-detects libraries for mulligan vs skip-mulligan
+- [Phase 04]: EffectHandler as fn pointer (not trait) for HashMap storage simplicity
+- [Phase 04]: Each handler emits EffectResolved event for tracking and trigger detection
+- [Phase 04]: Token objects use CardId(0) convention
+- [Phase 04]: Destroy checks indestructible keyword case-insensitively
 
 ### Pending Todos
 
@@ -109,6 +114,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-07T23:39:40.367Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-ability-system-effects/04-CONTEXT.md
+Last session: 2026-03-08T00:05:53Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: .planning/phases/04-ability-system-effects/04-01-SUMMARY.md
