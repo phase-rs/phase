@@ -1,337 +1,244 @@
 # Technology Stack
 
-**Project:** Forge.rs -- MTG Rules Engine & Game Client
-**Researched:** 2026-03-07
+**Project:** Forge.rs v1.1 -- Arena UI Port from Alchemy
+**Researched:** 2026-03-08
+
+## Stack Comparison: Alchemy vs Forge.rs
+
+### Shared Stack (Already Aligned)
+
+Both projects use the same core stack. These require NO changes:
+
+| Technology | Alchemy Version | Forge.rs Version | Status |
+|------------|----------------|-----------------|--------|
+| React | ^19.2.0 | ^19.0.0 | Aligned (minor semver bump fine) |
+| Zustand | ^5.0.11 | ^5.0.11 | Identical |
+| `subscribeWithSelector` | Used in 6 stores | Used in gameStore | Aligned -- Forge.rs already uses this middleware |
+| Framer Motion | ^12.34.3 | ^12.35.1 | Aligned (Forge.rs actually newer) |
+| Tailwind CSS v4 | ^4.2.1 | ^4.2.1 | Identical |
+| `@tailwindcss/vite` | ^4.2.1 | ^4.2.1 | Identical |
+| Vite | ^7.3.1 | ^6.2.0 | **Update needed** (see below) |
+| `vite-plugin-pwa` | ^1.2.0 | ^1.2.0 | Identical |
+| React Router | ^7.13.1 (`react-router-dom`) | ^7.13.1 (`react-router`) | Aligned (same package, different entry point) |
+| Vitest | ^4.0.18 | ^3.0.0 | **Update needed** (see below) |
+| TypeScript | ~5.9.3 | ~5.7.0 | **Update needed** (see below) |
+| `@vitejs/plugin-react` | ^5.1.1 | ^4.4.1 | **Update needed** (see below) |
+| ESLint | ^9.39.1 | ^9.21.0 | Minor update, not blocking |
+
+### Version Gaps to Close
+
+These are version bumps on existing dependencies. Update during port setup.
+
+| Package | Current | Target | Why |
+|---------|---------|--------|-----|
+| `vite` | ^6.2.0 | ^7.3.1 | Alchemy uses Vite 7; aligns build tooling, avoids plugin compat issues with `@vitejs/plugin-react` v5 |
+| `@vitejs/plugin-react` | ^4.4.1 | ^5.1.1 | Required by Vite 7 |
+| `typescript` | ~5.7.0 | ~5.9.3 | Alchemy targets 5.9; newer type inference helps with discriminated union patterns |
+| `vitest` | ^3.0.0 | ^4.0.18 | Alchemy uses Vitest 4; aligns test runner |
+| `jsdom` | ^26.0.0 | ^28.1.0 | Test environment alignment |
+| `@testing-library/react` | ^16.3.0 | ^16.3.2 | Trivial patch |
+
+**Confidence:** HIGH -- versions read directly from both package.json files.
+
+### New Dependencies to Add
+
+#### Required: Audio System
+
+Alchemy's audio system uses the **Web Audio API directly** -- no third-party audio library needed. The entire system is pure TypeScript:
+
+| Component | Implementation | New Dependency? |
+|-----------|---------------|-----------------|
+| AudioContext singleton | `audioContext.ts` -- lazy singleton with SFX/music gain buses | No -- browser API |
+| Sound synthesis | `sounds.ts` -- procedural SFX via OscillatorNode, BiquadFilter, noise buffers | No -- browser API |
+| Sample playback | `sounds.ts` -- decodeAudioData + BufferSource for .m4a samples | No -- browser API |
+| Ambient music | `ambientMusic.ts` -- OscillatorNode layering with gain envelopes | No -- browser API |
+| Audio store | `audioStore.ts` -- Zustand store for volume/mute preferences | No -- uses existing Zustand |
+
+**Key finding:** Alchemy has `howler` (^2.2.4) in package.json but NEVER imports it anywhere in src/. It is a dead dependency. DO NOT add Howler to Forge.rs. The Web Audio API approach is superior because:
+- Zero bundle size for audio (browser-native API)
+- Fine-grained control over synthesis parameters
+- Sample playback with pre-warming and lazy loading
+- Dual gain buses (SFX + music) with independent volume control
+- iOS/iPadOS warm-up pattern already implemented
+
+**Audio assets needed:** .m4a sample files in `public/audio/sfx/` organized by type (damage, death, heal, summon, spell, keyword, ui). These are static assets, not npm dependencies.
+
+#### Required: Canvas Particle VFX
+
+Alchemy's particle system is a custom `ParticleSystem` class using the **Canvas 2D API directly**. No dependency needed.
+
+Forge.rs already has a basic `ParticleCanvas.tsx` but Alchemy's implementation is significantly more capable:
+
+| Feature | Forge.rs Current | Alchemy |
+|---------|-----------------|---------|
+| Particle properties | x, y, vx, vy, alpha, color, decay | + size, gravity, drag, glow, style (circle/ring), start/end size |
+| Rendering | Single pass, basic circles | 3-pass batched: plain circles, glowing (pre-rendered sprites), rings |
+| Blending | Default compositing | Additive blending (`lighter`) for glow effects |
+| Effects system | None | `ActiveEffect` with update/draw/onComplete callbacks |
+| DPR handling | Uses raw window dimensions | Capped at 2x DPR with proper canvas scaling |
+| Texture sprites | None | LRU-cached HTMLImageElement sprites with async loading |
+| Performance | Always runs rAF loop | Auto-starts/stops loop when particles exist |
+
+**Action:** Replace Forge.rs's `ParticleCanvas.tsx` with Alchemy's `ParticleSystem` class. This is a pure code port, no new dependencies.
+
+#### Required: PWA Service Worker Registration
+
+Forge.rs uses `vite-plugin-pwa` (already installed) but has no service worker registration code in the client. Alchemy has a complete SW registration system:
+
+| File | Purpose | New Dependency? |
+|------|---------|-----------------|
+| `registerServiceWorker.ts` | Registers SW via `virtual:pwa-register`, handles updates | No -- uses existing `vite-plugin-pwa` |
+| `updateStatus.ts` | Reactive update status for UI (downloading/activating/idle) | No |
+
+**Note:** Alchemy uses `workbox-window` (^7.4.0) in package.json, but the actual registration code uses `virtual:pwa-register` from `vite-plugin-pwa` which wraps Workbox internally. The `workbox-window` direct dependency is NOT imported in src/. DO NOT add `workbox-window` as a direct dependency.
+
+**PWA config change:** Forge.rs currently uses `registerType: "autoUpdate"` and `manifest: false`. Port Alchemy's `registerType: "prompt"` pattern with inline manifest config for better update control. Keep Forge.rs's Scryfall runtime caching rules.
+
+#### Required: CSS Custom Properties for Card Sizing
+
+Alchemy uses CSS custom properties for responsive card dimensions. This is pure CSS, no dependencies:
+
+```css
+:root {
+  --_card-w: 90px;     /* mobile */
+  --_card-h: 130px;
+  --_board-w: 82px;    /* board creatures */
+  --_board-h: 115px;
+}
+/* Scales up via media queries at 768px and 1024px breakpoints */
+/* Uses dvh units with clamp() for viewport-adaptive sizing */
+```
+
+**Action:** Port these CSS custom properties into Forge.rs's `index.css`. Components reference `var(--card-width)` etc. No JS dependency.
+
+### Dependencies to NOT Add
+
+| Alchemy Dependency | Why NOT to Add |
+|--------------------|----------------|
+| `howler` ^2.2.4 | Dead dependency in Alchemy -- never imported. Web Audio API used directly instead |
+| `workbox-window` ^7.4.0 | Not directly imported. `vite-plugin-pwa` handles Workbox internally via `virtual:pwa-register` |
+| `peerjs` ^1.5.5 | P2P networking for Alchemy's multiplayer. Forge.rs uses WebSocket server (`forge-server`) instead -- architecturally different |
+| `uuid` ^13.0.0 | Only used in Alchemy's PeerJS networking layer. Forge.rs generates IDs in the Rust engine |
+| `cypress` ^15.11.0 | E2E testing framework. Forge.rs uses Vitest only. Can add later if needed |
+| `puppeteer` ^24.37.5 | Used for Alchemy's visual regression testing. Not needed for port |
+| `fast-check` ^4.5.3 | Property-based testing. Nice to have but not required for UI port |
+| `husky` ^9.1.7 | Git hooks. Forge.rs has its own CI setup |
+
+### Dependencies to Keep (Forge.rs Only)
+
+| Forge.rs Dependency | Purpose | Keep? |
+|---------------------|---------|-------|
+| `vite-plugin-wasm` ^3.4.1 | WASM module loading | YES -- required for Rust engine |
+| `vite-plugin-top-level-await` ^1.5.0 | Top-level await for WASM init | YES -- required for WASM |
+| `idb-keyval` ^6.2.2 | IndexedDB wrapper for Scryfall image caching | YES -- efficient, tiny (600B), works well |
+| `@vitest/coverage-v8` ^3.2.4 | Code coverage | YES -- update to match Vitest 4 |
 
 ## Recommended Stack
 
-### Core Engine (Rust)
+### Core Framework (No Changes)
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Rust (stable) | 1.85+ | Engine language | Compiles to both native (Tauri) and wasm32-unknown-unknown from single codebase. Ownership model prevents game state bugs. Pattern matching is ideal for MTG's 202 effect types. | HIGH |
-| serde + serde_json | 1.x | Serialization | Universal Rust serialization. Derive macros generate (de)serializers for game state, card definitions, IPC payloads. Required by Tauri commands. | HIGH |
-| serde-wasm-bindgen | 0.6.x | WASM serialization | Direct Rust-to-JS value conversion without JSON intermediary. Smaller code size and faster than JSON round-tripping for WASM builds. Officially preferred approach. | HIGH |
-| rpds | 1.85.x | Persistent data structures | Structural sharing for game state (critical for AI tree search -- cloning full MTG state is 10-50x larger than simple card games). Actively maintained (last release ~4 months ago). Thread-safe with Arc, or faster single-threaded with Rc. | MEDIUM |
-| wasm-bindgen | 0.2.114 | WASM-JS bridge | Generates JS bindings for exported Rust functions. Actively maintained under new wasm-bindgen org after rustwasm sunset. Required for PWA/WASM target. | HIGH |
-| tsify-next | 0.5.4 | TS type generation | Auto-generates TypeScript type definitions from Rust structs/enums via derive macros. Keeps frontend types in sync with engine types without manual maintenance. | MEDIUM |
-| proptest | 1.10.0 | Property-based testing | Hypothesis-like testing for rules engine. Auto-generates game states, validates invariants (e.g., "state-based actions never leave a creature with 0 toughness on battlefield"). Shrinking finds minimal failing cases. | HIGH |
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| React | ^19.2.0 | UI framework | Both projects aligned |
+| Zustand | ^5.0.11 | State management | Both use subscribeWithSelector middleware |
+| Framer Motion | ^12.35.1 | DOM animations | Both aligned, Forge.rs already newer |
+| Tailwind CSS v4 | ^4.2.1 | Styling | Both aligned |
+| React Router | ^7.13.1 | Routing | Both aligned |
 
-### Why NOT ECS
+### Build Tooling (Version Bumps)
 
-ECS (Bevy ECS, hecs, specs) is the dominant Rust game engine pattern, but it is **wrong for this project**:
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| Vite | ^7.3.1 | Build tool | Align with Alchemy, required for plugin-react v5 |
+| `@vitejs/plugin-react` | ^5.1.1 | React Fast Refresh | Required by Vite 7 |
+| TypeScript | ~5.9.3 | Type checking | Align with Alchemy |
+| `vite-plugin-pwa` | ^1.2.0 | PWA/Workbox integration | Already installed, needs config update |
 
-- **MTG is not an ECS problem.** ECS excels at thousands of homogeneous entities updated per frame (physics, rendering). MTG has ~50-200 heterogeneous permanents with complex, rule-defined interactions evaluated on discrete events, not per-frame ticks.
-- **Game tree search requires cheap state cloning.** AI needs to clone-and-explore thousands of game states. ECS world cloning is expensive and not designed for this. Persistent data structures with structural sharing are purpose-built for it.
-- **The port plan's functional architecture is correct.** Discriminated unions (Rust enums) + pure reducer functions + immutable state maps directly to MTG's rules structure. Effect handlers keyed by ApiType string are the right pattern.
+### Audio (Browser APIs, Zero Dependencies)
 
-### Why NOT `im` crate
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| Web Audio API | Browser native | Sound synthesis + sample playback | Zero bundle cost, full control, iOS warm-up pattern included |
 
-The `im` crate (v15.1.0) provides similar persistent data structures but has **not been updated since April 2022**. It is effectively unmaintained. `rpds` (v1.85.0, updated recently) provides the same structural sharing with active maintenance, `no_std` support, and configurable thread safety (Rc vs Arc).
+### VFX (Browser APIs, Zero Dependencies)
 
-### Desktop Shell (Tauri)
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| Canvas 2D API | Browser native | Particle effects, projectiles, shockwaves | Additive blending, glow sprites, auto-start/stop loop |
+| CSS Custom Properties | Browser native | Responsive card sizing | Media query breakpoints with dvh/clamp for viewport adaptation |
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Tauri | 2.10.x | Desktop wrapper | Native performance, small binary (~5-10MB vs Electron's 100MB+). v2 rewrote IPC layer for fast binary transfer. iOS/Android support for future. | HIGH |
-| tauri::ipc::Channel | (built-in) | Streaming IPC | For pushing game state updates from Rust to React without polling. Ordered message delivery. Used for game events, state diffs, AI thinking updates. | HIGH |
-| tauri::ipc::Response | (built-in) | Binary IPC | Raw byte transfer for large payloads (card database loading, image cache). Avoids JSON serialization overhead. | MEDIUM |
+### Forge.rs-Specific (Keep)
 
-#### Tauri v2 IPC Architecture
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| `vite-plugin-wasm` | ^3.4.1 | WASM loading | Required for Rust engine bridge |
+| `vite-plugin-top-level-await` | ^1.5.0 | WASM init | Required for async WASM bootstrap |
+| `idb-keyval` | ^6.2.2 | IndexedDB caching | Scryfall image cache, tiny footprint |
 
-Use **Commands** for request/response (cast spell, get legal actions, load deck) and **Events** for fire-and-forget notifications (game state changed, AI thinking, animation triggers). The v2 IPC uses custom protocols (not string serialization like v1), so performance is adequate for real-time game state updates.
+### Testing (Version Bumps)
 
-**Pattern for game state sync:**
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| Vitest | ^4.0.18 | Test runner | Align with Alchemy |
+| `@vitest/coverage-v8` | ^3.2.4 -> match v4 | Coverage | Must match Vitest major |
+| jsdom | ^28.1.0 | Test DOM | Align with Alchemy |
+| `@testing-library/react` | ^16.3.2 | Component testing | Minor patch bump |
 
-```rust
-// Rust side: Command returns current state, Channel pushes updates
-#[tauri::command]
-fn start_game(config: GameConfig, channel: Channel<GameStateUpdate>) -> Result<GameState, String> {
-    let state = engine::new_game(config);
-    // Channel pushes state diffs as game progresses
-    Ok(state)
-}
+## Vite Config Changes
 
-#[tauri::command]
-fn submit_action(action: GameAction, app: AppHandle) -> Result<GameState, String> {
-    // Process action, return new state, emit events for triggers/animations
-    let (new_state, events) = engine::process_action(action);
-    app.emit("game-events", &events)?;
-    Ok(new_state)
-}
-```
+Forge.rs's `vite.config.ts` needs these changes for the port:
 
-### Frontend (React + TypeScript)
+1. **Add path aliases** matching Alchemy's convention (`@components`, `@hooks`, `@audio`, etc.) -- or adapt to Forge.rs's existing structure
+2. **Update PWA config** from `registerType: "autoUpdate"` to `registerType: "prompt"` with inline manifest
+3. **Keep WASM plugins** (`vite-plugin-wasm`, `vite-plugin-top-level-await`) -- Alchemy doesn't need these but Forge.rs does
+4. **Keep Scryfall caching rules** in workbox config -- Alchemy doesn't have these
+5. **Add `includeAssets`** for audio files: `'**/*.{m4a,mp3,json}'`
+6. **Add build hash/version defines** (`__BUILD_HASH__`, `__APP_VERSION__`) for PWA update UI
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| React | 19.x | UI framework | Component model is natural for card game UI (cards, zones, stack). Large ecosystem. Team familiarity from Alchemy project. | HIGH |
-| TypeScript | 5.7+ | Type safety | Discriminated union actions from Rust map directly to TS types. tsify-next generates matching types. | HIGH |
-| Vite | 6.x | Build tool | Fast HMR, Tauri's official recommended bundler. Handles both dev server (Tauri webview) and production build (PWA). | HIGH |
-| pnpm | 9.x | Package manager | Fast, disk-efficient. Strict dependency resolution prevents phantom deps. | HIGH |
-| Zustand | 5.0.x | State management | Minimal API, works outside React (useful for WASM adapter layer). No provider boilerplate. Uses native useSyncExternalStore in v5. Proven pattern from Alchemy. | HIGH |
-| Tailwind CSS | 4.x | Styling | Utility-first is efficient for game UI layouts (grid-based battlefield, card overlays, responsive zones). Zero-runtime CSS. | MEDIUM |
-| Framer Motion | 12.x | Animation | Card movement between zones, combat arrows, damage numbers, stack resolution. Declarative animation model works with React's render cycle. | MEDIUM |
-
-#### State Management Pattern: Zustand + Adapter Layer
-
-The key architectural decision is a **thin adapter layer** between the engine and Zustand store. This adapter swaps between Tauri IPC (native) and direct WASM calls (PWA) without the React components knowing the difference:
-
-```typescript
-// adapter.ts -- swaps between Tauri IPC and WASM
-interface EngineAdapter {
-  startGame(config: GameConfig): Promise<GameState>;
-  submitAction(action: GameAction): Promise<GameState>;
-  getLegalActions(playerId: string): Promise<GameAction[]>;
-  onGameEvent(handler: (event: GameEvent) => void): void;
-}
-
-// Tauri adapter: uses @tauri-apps/api invoke + listen
-const tauriAdapter: EngineAdapter = { /* invoke('start_game', ...) */ };
-
-// WASM adapter: calls WASM module directly
-const wasmAdapter: EngineAdapter = { /* wasm.start_game(...) */ };
-
-// Zustand store consumes adapter
-const useGameStore = create<GameStore>((set) => ({
-  state: null,
-  adapter: detectPlatform() === 'tauri' ? tauriAdapter : wasmAdapter,
-  submitAction: async (action) => {
-    const newState = await get().adapter.submitAction(action);
-    set({ state: newState });
-  },
-}));
-```
-
-### WASM Tooling
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| wasm-bindgen-cli | 0.2.114 | WASM output processing | Generates JS glue code from cargo build output. Direct replacement for archived wasm-pack. Pin version to match wasm-bindgen crate version. | HIGH |
-| wasm-opt | latest | WASM optimization | Binaryen optimizer. Reduces WASM binary size 20-40%. Run in release builds only. | HIGH |
-| cargo build --target wasm32-unknown-unknown | (built-in) | WASM compilation | Standard Rust WASM target. No additional toolchain needed beyond `rustup target add wasm32-unknown-unknown`. | HIGH |
-
-#### Why NOT wasm-pack
-
-wasm-pack was **archived in July 2025** when the rustwasm GitHub org was sunset. It is no longer maintained. The recommended replacement is using the individual tools directly:
+## Installation
 
 ```bash
-# Build WASM
-cargo build --target wasm32-unknown-unknown --release -p forge-engine
+cd client
 
-# Generate JS bindings (replaces wasm-pack)
-wasm-bindgen --target web \
-  ./target/wasm32-unknown-unknown/release/forge_engine.wasm \
-  --out-dir ./src/wasm/
+# Update existing dependencies
+pnpm update vite@^7.3.1 @vitejs/plugin-react@^5.1.1 typescript@~5.9.3 \
+  vitest@^4.0.18 jsdom@^28.1.0 @testing-library/react@^16.3.2
 
-# Optimize (optional, release only)
-wasm-opt -Oz ./src/wasm/forge_engine_bg.wasm -o ./src/wasm/forge_engine_bg.wasm
+# Update coverage plugin to match Vitest 4
+pnpm update @vitest/coverage-v8
+
+# No new runtime dependencies needed!
+# Audio = Web Audio API (browser native)
+# Particles = Canvas 2D API (browser native)
+# Card sizing = CSS custom properties (browser native)
+# PWA registration = vite-plugin-pwa virtual module (already installed)
 ```
-
-#### Why NOT Trunk
-
-Trunk is a WASM web application bundler designed for pure-Rust frontends (Yew, Leptos). This project uses React for the frontend, so Trunk adds no value. Vite handles the frontend build; wasm-bindgen-cli handles the WASM output.
-
-### Testing
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| `cargo test` | (built-in) | Rust unit/integration tests | Standard Rust testing. Module-level unit tests for effect handlers, integration tests for full game sequences. | HIGH |
-| proptest | 1.10.0 | Property-based testing (Rust) | Generate random game states, validate invariants. Critical for rules engine correctness across 202 effect types and 137 trigger interactions. | HIGH |
-| Vitest | 4.x | Frontend unit tests | 2-10x faster than Jest. Native Vite integration. Use with React Testing Library for component tests. | HIGH |
-| React Testing Library | 16.x | Component testing | Test user behavior (click card, select target) not implementation details. | HIGH |
-| Playwright | 1.50+ | E2E testing | Cross-browser support (Chrome, Firefox, WebKit). Can test Tauri desktop apps via WebDriver. Better architecture for desktop app testing than Cypress (runs externally, not inside browser). | HIGH |
-
-#### Why NOT Cypress for E2E
-
-Cypress runs inside the browser's execution loop, which creates friction when testing Tauri desktop apps. Playwright runs externally via CDP, making it better suited for testing apps in a webview context. Playwright also supports parallel execution natively and has broader browser coverage (including WebKit/Safari).
-
-### Build & Project Structure
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Cargo workspace | (built-in) | Rust monorepo | Multiple crates: engine-core, card-parser, tauri-app, wasm-bridge. Shared dependencies, independent compilation targets. | HIGH |
-| Vite | 6.x | Frontend build | Dev server with HMR for Tauri webview. Production build for PWA. Handles WASM module loading. | HIGH |
-| pnpm workspace | 9.x | JS monorepo (if needed) | Only if frontend grows to multiple packages. Start with single package. | LOW |
-
-#### Cargo Workspace Layout
-
-```
-forge.rs/
-  Cargo.toml              # Workspace root
-  crates/
-    forge-core/           # Pure game engine (no platform deps)
-      Cargo.toml          # Targets: lib (native + wasm)
-      src/
-        lib.rs
-        state/            # GameState, zones, players
-        effects/          # 202 effect handlers
-        triggers/         # 137 trigger matchers
-        statics/          # Layer system (Rule 613)
-        combat/           # Combat resolution
-        parser/           # Card .txt file parser
-        ai/               # AI decision engine
-    forge-tauri/          # Tauri-specific: commands, state management
-      Cargo.toml          # Depends on forge-core, tauri
-      src/
-        main.rs
-        commands.rs       # #[tauri::command] functions
-    forge-wasm/           # WASM bindings: exports for JS
-      Cargo.toml          # Depends on forge-core, wasm-bindgen
-      src/
-        lib.rs            # #[wasm_bindgen] exports
-  src/                    # React frontend
-    adapter/              # Engine adapter (Tauri IPC vs WASM)
-    components/           # React game UI
-    store/                # Zustand stores
-    types/                # Generated from tsify-next
-  tauri.conf.json
-  vite.config.ts
-  package.json
-```
-
-**Key insight:** `forge-core` has zero platform dependencies. It compiles to both native (used by `forge-tauri` via direct Rust calls) and WASM (used by `forge-wasm` via wasm-bindgen exports). The React frontend talks to either through the adapter layer.
-
-### Infrastructure & Distribution
-
-| Technology | Purpose | Why | Confidence |
-|------------|---------|-----|------------|
-| Scryfall API | Card images | Free for non-commercial. Comprehensive. On-demand loading with local disk cache. | HIGH |
-| Service Worker (Workbox) | PWA offline | Cache WASM module + static assets. Card images cached on first load. | MEDIUM |
-| GitHub Releases | Distribution | Tauri bundles (.dmg, .msi, .AppImage) via `tauri build`. No app store needed. | HIGH |
-| GitHub Actions | CI/CD | Build + test on push. Cross-platform Tauri builds. WASM build + deploy to GitHub Pages for PWA. | HIGH |
 
 ## Alternatives Considered
 
 | Category | Recommended | Alternative | Why Not |
 |----------|-------------|-------------|---------|
-| Persistent data structures | rpds | im | im unmaintained since April 2022. rpds actively maintained, similar API. |
-| WASM tooling | wasm-bindgen-cli + wasm-opt | wasm-pack | wasm-pack archived July 2025. Dead project. |
-| WASM tooling | wasm-bindgen-cli | Trunk | Trunk is for pure-Rust frontends (Yew/Leptos). We use React. |
-| State management | Zustand | Redux Toolkit | RTK is heavier, more boilerplate. Zustand's minimal API suits adapter pattern better. |
-| State management | Zustand | Jotai | Jotai is bottom-up atomic state. Game state is a single large tree pushed from engine -- top-down store (Zustand) fits better. |
-| Game architecture | Functional reducers + rpds | ECS (Bevy/hecs) | MTG is discrete event-driven with complex rule interactions, not per-frame entity processing. AI tree search needs cheap state cloning. |
-| E2E testing | Playwright | Cypress | Playwright's external architecture works better with Tauri desktop apps. Broader browser support. |
-| Serialization (WASM) | serde-wasm-bindgen | serde_json round-trip | Direct JS value conversion avoids JSON intermediary. Smaller code, faster transfer. |
-| Animation | Framer Motion | React Spring | Framer Motion has better layout animation support for card repositioning between zones. |
-| CSS | Tailwind | CSS Modules | Utility-first is faster for iterating on game layout. No runtime cost. |
+| Audio | Web Audio API (native) | Howler.js | Alchemy already proved native API works; Howler adds 10KB for features not needed (spatial audio, audio sprites) |
+| Audio | Web Audio API (native) | Tone.js | Overkill for game SFX; designed for music production, 150KB+ |
+| Particles | Canvas 2D (native) | PixiJS | 300KB+ bundle for 2D rendering engine; overkill for particle effects only |
+| Particles | Canvas 2D (native) | Three.js | 600KB+; 3D renderer unnecessary for 2D particle effects |
+| Particles | Canvas 2D (native) | tsparticles | 50KB+; less control than custom system, Alchemy's implementation already tuned for card game VFX |
+| Card sizing | CSS custom properties | JS resize observer | CSS-only solution has zero JS overhead, works with Tailwind, no layout thrashing |
+| PWA updates | vite-plugin-pwa | Custom SW | Plugin already installed, battle-tested Workbox integration |
 
-## Installation
+## Key Insight
 
-### Rust
-
-```bash
-# Install Rust toolchain
-rustup default stable
-rustup target add wasm32-unknown-unknown
-
-# Install WASM tools
-cargo install wasm-bindgen-cli@0.2.114
-cargo install wasm-opt  # or install binaryen via package manager
-```
-
-### Cargo.toml (workspace root)
-
-```toml
-[workspace]
-members = ["crates/*"]
-resolver = "2"
-
-[workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-proptest = "1.10"
-```
-
-### Cargo.toml (forge-core)
-
-```toml
-[package]
-name = "forge-core"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-rpds = "1"
-
-[dev-dependencies]
-proptest = { workspace = true }
-```
-
-### Cargo.toml (forge-wasm)
-
-```toml
-[package]
-name = "forge-wasm"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-forge-core = { path = "../forge-core" }
-wasm-bindgen = "0.2.114"
-serde-wasm-bindgen = "0.6"
-tsify-next = { version = "0.5", features = ["js"] }
-serde = { workspace = true }
-```
-
-### Cargo.toml (forge-tauri)
-
-```toml
-[package]
-name = "forge-tauri"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-forge-core = { path = "../forge-core" }
-tauri = { version = "2", features = [] }
-tauri-build = { version = "2", features = [] }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-```
-
-### Frontend (package.json)
-
-```bash
-pnpm add react react-dom zustand framer-motion
-pnpm add -D typescript @types/react @types/react-dom \
-  vite @vitejs/plugin-react \
-  tailwindcss \
-  vitest @testing-library/react @testing-library/jest-dom \
-  playwright @playwright/test \
-  @tauri-apps/api @tauri-apps/cli
-```
-
-## Version Pinning Strategy
-
-- **wasm-bindgen** and **wasm-bindgen-cli** MUST be the same version. Pin both to 0.2.114. Mismatched versions cause cryptic build failures.
-- **Tauri** crate and **@tauri-apps/api** npm package should use compatible major versions (both v2).
-- **tsify-next** version must be compatible with your wasm-bindgen version. Test after any wasm-bindgen upgrade.
+The port requires **zero new npm dependencies**. All new capabilities (audio, particle VFX, responsive card sizing, PWA registration) use browser-native APIs. The only changes are version bumps on existing dependencies to align the two projects. This is by design -- Alchemy was built to minimize external dependencies, and that philosophy carries over cleanly.
 
 ## Sources
 
-- [Tauri v2 IPC Concepts](https://v2.tauri.app/concept/inter-process-communication/)
-- [Tauri v2 Calling Rust from Frontend](https://v2.tauri.app/develop/calling-rust/)
-- [Tauri v2 Calling Frontend from Rust](https://v2.tauri.app/develop/calling-frontend/)
-- [Tauri v2 Stable Release Blog](https://v2.tauri.app/blog/tauri-20/)
-- [wasm-bindgen Guide](https://rustwasm.github.io/docs/wasm-bindgen/)
-- [wasm-bindgen GitHub (new org)](https://github.com/wasm-bindgen/wasm-bindgen)
-- [Life after wasm-pack](https://nickb.dev/blog/life-after-wasm-pack-an-opinionated-deconstruction/)
-- [Sunsetting rustwasm GitHub Org](https://blog.rust-lang.org/inside-rust/2025/07/21/sunsetting-the-rustwasm-github-org/)
-- [serde-wasm-bindgen docs](https://docs.rs/serde-wasm-bindgen/latest/serde_wasm_bindgen/)
-- [rpds GitHub](https://github.com/orium/rpds)
-- [im-rs GitHub (unmaintained)](https://github.com/bodil/im-rs)
-- [proptest GitHub](https://github.com/proptest-rs/proptest)
-- [tsify-next GitHub](https://github.com/AmbientRun/tsify-next)
-- [Zustand v5 Announcement](https://pmnd.rs/blog/announcing-zustand-v5)
-- [Vitest](https://vitest.dev/)
-- [Tauri Project Structure](https://v2.tauri.app/start/project-structure/)
-- [Tauri State Management](https://v2.tauri.app/develop/state-management/)
+- Alchemy `package.json` -- direct file read (HIGH confidence)
+- Forge.rs `client/package.json` -- direct file read (HIGH confidence)
+- Alchemy `src/audio/audioContext.ts`, `src/audio/sounds.ts` -- direct file read confirming Web Audio API usage (HIGH confidence)
+- Alchemy `src/components/animation/particleSystem.ts` -- direct file read confirming Canvas 2D usage (HIGH confidence)
+- Alchemy `src/pwa/registerServiceWorker.ts` -- direct file read confirming `virtual:pwa-register` usage (HIGH confidence)
+- Alchemy `src/index.css` -- direct file read confirming CSS custom property card sizing (HIGH confidence)
+- Forge.rs `client/src/stores/gameStore.ts` -- confirmed `subscribeWithSelector` already in use (HIGH confidence)
+- Forge.rs `client/src/components/animation/ParticleCanvas.tsx` -- confirmed basic particle system exists (HIGH confidence)
+- Alchemy `src/` grep for `howler` -- zero imports, confirmed dead dependency (HIGH confidence)
+- Alchemy `src/` grep for `workbox-window` -- zero direct imports (HIGH confidence)

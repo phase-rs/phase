@@ -1,201 +1,184 @@
 # Project Research Summary
 
-**Project:** Forge.rs -- MTG Rules Engine & Game Client
-**Domain:** Game engine port (Java to Rust/TypeScript) with dual-target desktop/PWA delivery
-**Researched:** 2026-03-07
+**Project:** Forge.rs v1.1 -- Arena UI Port from Alchemy
+**Domain:** MTG game engine frontend -- porting a polished card game UI between engines of different complexity
+**Researched:** 2026-03-08
 **Confidence:** HIGH
 
 ## Executive Summary
 
-Forge.rs is a port of the Java-based Forge MTG client to a Rust rules engine with a React/TypeScript frontend, targeting both native desktop (Tauri) and browser/tablet (WASM PWA) from a single codebase. The expert approach for this domain is a platform-agnostic pure-function engine using persistent data structures for cheap state cloning (critical for AI tree search), wrapped by thin platform adapters. The Rust ecosystem is mature enough for this: `rpds` for structural sharing, `serde` + `wasm-bindgen` for cross-boundary serialization, and Tauri v2 for the desktop shell. The recommended architecture -- immutable state, enum-based dispatch, command-buffer mutations -- is both idiomatic Rust and a natural fit for MTG's discrete event-driven rules.
+Forge.rs v1.1 ports Alchemy's polished, Arena-style card game UI onto Forge.rs's Rust/WASM MTG engine. The two projects share an identical core stack (React 19, Zustand 5, Framer Motion 12, Tailwind v4) and the same architectural patterns (discriminated union types, event-driven dispatch, Zustand stores for game/UI/animation state). The port requires zero new npm dependencies -- all new capabilities (procedural audio via Web Audio API, Canvas 2D particle VFX, responsive card sizing via CSS custom properties, PWA service worker registration) use browser-native APIs. Only version bumps on existing dependencies are needed (Vite 6->7, TypeScript 5.7->5.9, Vitest 3->4).
 
-The primary risk is rules engine complexity, not technology. MTG has 202 effect types, 137 trigger modes, a 7-layer continuous effect system with intra-layer dependencies, and recursive state-based action checks. These are the systems that have wrecked previous MTG engine projects. The mitigation is to build bottom-up (types, then zones, then stack, then abilities, then triggers, then layers), validate each level with ported Forge tests, and defer the long tail of card coverage until the architecture proves sound. The secondary risk is WASM binary size -- without aggressive optimization from day one, the PWA target becomes unusable.
+The recommended approach is a layered port: build an event normalization layer first (bridging Forge.rs's async WASM events to Alchemy's animation pipeline), then port the animation infrastructure (step-based queue, position registry, board snapshots), then layer visual components on top. The critical architectural insight is that Alchemy's dispatch is synchronous while Forge.rs's is async across a WASM boundary -- every animation timing assumption must account for this gap. The `dispatchWithAnimations` function is the central integration point and must be ported as an async wrapper around the existing `EngineAdapter`.
 
-The recommended approach is: build the pure Rust engine first with no UI, prove correctness through property-based testing and ported Forge test cases, then add Tauri/WASM bridges and the React UI in parallel. The adapter pattern (Zustand store consuming an EngineAdapter interface) means the same React components work identically whether backed by Tauri IPC or direct WASM calls. Start with a Standard-format MVP (~500-1000 playable cards) to validate the architecture before scaling to full card coverage.
+The top risks are: (1) Alchemy's fixed 5-slot board layout breaking with MTG's unbounded permanent count (token decks create 15+ creatures), (2) async dispatch timing causing stale position snapshots for death animations, (3) Alchemy's `GameEvent` shapes not matching Forge.rs's events, requiring a translation layer before the animation pipeline can process them, and (4) MTG-specific UI (stack visualization, mana payment, priority controls) having no Alchemy equivalent to port -- these must be built from scratch. All four risks have clear prevention strategies documented in the research.
 
 ## Key Findings
 
 ### Recommended Stack
 
-The stack splits cleanly into three layers: a pure Rust engine crate with zero platform dependencies, thin platform adapter crates (Tauri binary and WASM cdylib), and a React/TypeScript frontend. See STACK.md for full details.
+The stack is already aligned between projects. No new runtime dependencies are needed. See `.planning/research/STACK.md` for full comparison.
 
-**Core technologies:**
-- **Rust (stable 1.85+):** Engine language -- compiles to native and WASM from single codebase, ownership model prevents state bugs, pattern matching ideal for MTG's closed type sets
-- **rpds:** Persistent data structures with structural sharing -- cheap cloning for AI game tree search (replaces unmaintained `im` crate)
-- **Tauri 2.x:** Desktop shell -- small binaries, fast IPC via channels, future mobile support
-- **wasm-bindgen + wasm-opt:** WASM toolchain -- replaces archived wasm-pack, generates JS bindings and optimizes binary size
-- **React 19 + Zustand 5 + Vite 6:** Frontend -- component model fits card game UI, Zustand's external-store pattern works with the adapter layer
-- **proptest:** Property-based testing -- generates random game states to validate engine invariants across effect/trigger combinations
-- **tsify-next:** Auto-generates TypeScript types from Rust structs -- keeps frontend types in sync without manual maintenance
+**Core technologies (no changes):**
+- React 19 + Zustand 5 + Framer Motion 12 -- identical across both projects
+- Tailwind CSS v4 -- identical across both projects
+- Web Audio API (browser native) -- zero-dependency audio system (synthesis + sample playback)
+- Canvas 2D API (browser native) -- particle VFX system replacing Forge.rs's basic `ParticleCanvas`
 
-**Critical version pins:** wasm-bindgen crate and wasm-bindgen-cli MUST match versions (0.2.114). Mismatches cause cryptic build failures.
+**Version bumps required:**
+- Vite ^6.2.0 -> ^7.3.1 (required for `@vitejs/plugin-react` v5)
+- TypeScript ~5.7.0 -> ~5.9.3 (better discriminated union inference)
+- Vitest ^3.0.0 -> ^4.0.18 (align with Alchemy)
+
+**Do NOT add:** Howler.js (dead dep in Alchemy), workbox-window (unused), PeerJS (Forge.rs uses WebSocket), Cypress/Puppeteer (not needed for UI port).
 
 ### Expected Features
 
-See FEATURES.md for full competitive analysis and dependency graph.
+See `.planning/research/FEATURES.md` for full analysis with complexity ratings.
 
 **Must have (table stakes):**
-- Correct rules engine (turns, priority, stack, zones, state-based actions, mana system)
-- Combat system with core keywords (flying, trample, first strike, deathtouch, lifelink, haste, vigilance, reach, menace)
-- Top 15 effect types covering ~60% of cards (Draw, DealDamage, ChangeZone, Pump, Destroy, Counter, Token, etc.)
-- Basic trigger system (ETB, dies, attacks, spell cast, damage dealt)
-- Card image display via Scryfall API with caching
-- Battlefield, hand, stack, phase tracker, life totals, targeting UI, mana payment UI
-- AI opponent (heuristic: play lands, cast best spell, attack when favorable)
-- Deck builder with card search and .dck import
-- Game log
+- Canvas particle VFX with WUBRG color mapping (9 effect types: explosion, projectile, spellImpact, etc.)
+- Floating damage/heal numbers with per-step intermediate values
+- Screen shake on combat damage (3 intensity levels)
+- Responsive card sizing via CSS custom properties with media query breakpoints
+- MTGA-style hand peek/expand with fan layout and drag-to-play
+- Hero/Player HUD with health bar, mana pool summary, phase indicator
+- Turn/phase banner overlay with animated entrance/exit
+- Block assignment visualization (SVG lines between attacker/blocker pairs)
+- Graveyard viewer modal
+- Card entry/exit animations with burst effects
 
 **Should have (differentiators):**
-- Native + WASM dual target from single codebase
-- Smart auto-tap (context-aware, better than Arena's)
-- Fast AI via Rust performance
-- Offline-first PWA
-- Touch-optimized UI (no MTG client does tablet well)
+- Combat math bubbles showing P/T trade outcomes before damage
+- Audio system: SFX on game events, ambient music with track rotation
+- Card reveal animation on spell/creature plays
+- Damage vignette (red screen flash)
+- Battlefield backgrounds with WUBRG-based auto-selection
+- VFX quality levels (full/reduced/minimal) and animation speed controls
+- Preferences store with display/audio settings
 
-**Defer to v2+:**
-- Draft/Sealed modes, Quest/Adventure mode, Commander/multiplayer
-- Advanced AI (deep tree search, per-card logic)
-- Animations, sound, custom UI layouts
-- Sideboard/best-of-3
+**Defer (v2+):**
+- Context-specific music (title screen, deck select)
+- Element card effects on permanents (subtle, vfxLevel=full only)
+- Custom UI layouts (default must be good first)
+- Tutorial/coach system (explicitly out of scope per PROJECT.md)
+
+**Anti-features (do NOT port):**
+- Learning challenges, tutorial, easy-read mode, TTS narration (Alchemy educational features)
+- Element theming as-is (remap to WUBRG instead)
+- Adventure map / campaign mode
+- Alchemy's game engine, network layer, energy crystal system
 
 ### Architecture Approach
 
-The architecture follows a strict separation: a pure-function engine crate that takes actions and returns new state plus events, wrapped by platform-specific adapter crates. The engine uses enum-based dispatch (not trait objects) for all closed type sets, persistent data structures for immutable state, and a command-buffer pattern where effect handlers return mutations rather than mutating state directly. See ARCHITECTURE.md for component boundaries, data flow diagrams, and the full Cargo workspace layout.
+The port preserves Forge.rs's async `EngineAdapter` abstraction while adopting Alchemy's superior animation pipeline. A new **event normalization layer** bridges the gap between Forge.rs's `GameEvent[]` (MTG-specific: `DamageDealt`, `ZoneChanged`, `LifeChanged`) and the animation system's expected format (`CREATURE_ENTERED`, `PLAYER_DAMAGED`, `CREATURE_DIED`). See `.planning/research/ARCHITECTURE.md` for full data flow diagrams and type mappings.
 
 **Major components:**
-1. **forge-engine** (lib crate) -- Pure rules engine: GameState, ActionDispatcher, ZoneManager, TurnManager, StackManager, ManaSystem, AbilitySystem, EffectHandlers (202 types), TriggerSystem, ReplacementSystem, StaticAbilitySystem (layers), CombatSystem, StateBasedActions, CardParser, AI
-2. **forge-tauri** (bin crate) -- Thin Tauri wrapper: holds engine state in Arc<Mutex<>>, exposes #[tauri::command] functions, emits events via channels, runs AI on background thread
-3. **forge-wasm** (cdylib crate) -- WASM bridge: #[wasm_bindgen] exports mirroring Tauri commands, holds state in WASM linear memory, calls JS callbacks for events
-4. **React frontend** -- EngineAdapter interface (TauriAdapter/WasmAdapter), Zustand GameStore, game UI components (Battlefield, HandDisplay, StackDisplay, PromptBar, CardPreview)
-
-**Key anti-patterns to avoid:** God-object GameState with methods, trait objects for effect dispatch, mutable in-place state updates, leaking Tauri/WASM into engine crate, separate frontend/backend state models.
+1. **Event Normalizer (new)** -- translates Forge.rs events to animation-compatible shapes
+2. **animationStore (ported from Alchemy)** -- step-based queue with board snapshots, display health tracking, position registry
+3. **dispatchWithAnimations (ported + adapted)** -- async wrapper: pre-snapshot -> EngineAdapter dispatch -> event normalization -> animation grouping -> enqueue
+4. **OpponentController + useGameLoop (ported + adapted)** -- AI scheduling via WASM `get_ai_action()`, auto-priority-pass driven by `WaitingFor`
+5. **GameDispatchProvider (ported)** -- React context providing dispatch + controller to all components
+6. **GameObject view model (new)** -- adapts Forge.rs's deep `GameObject` to flat props for Alchemy-derived components
 
 ### Critical Pitfalls
 
-See PITFALLS.md for all 15 pitfalls with detailed prevention strategies.
+See `.planning/research/PITFALLS.md` for all 13 pitfalls with detection strategies.
 
-1. **Layer system dependency cycles (Rule 613)** -- Effects within the same layer can depend on each other, overriding timestamp ordering. Implement dependency detection as a separate pass before applying effects within each layer. Port Forge's layer tests as the initial test suite.
-2. **State-based actions recursive loop** -- SBAs must be checked in a fixpoint loop (check, apply all atomically, recheck). Add a loop counter cap (~1000) and treat exceeding it as a draw per Rule 104.4b.
-3. **Replacement effect self-application** -- Each replacement can only modify a given event once. Track per-event application with unique event IDs. Player chooses order when multiple replacements apply.
-4. **Rust ownership vs. game state mutation** -- Effects need to read state while producing mutations. Use the command-buffer pattern: handlers take &GameState and return Vec<StateMutation>, never &mut GameState.
-5. **WASM binary size explosion** -- Target <3MB for engine WASM. Configure release profile (panic=abort, opt-level=z, lto=true, strip=true), use wasm-opt, profile with twiggy, set CI size budget from day one.
+1. **Fixed board slots vs. dynamic permanent count** -- Alchemy's 5-slot `CreatureSlots` breaks with MTG's unbounded permanents. Use multi-row layout with separate rows per card type and aggressive token stacking.
+2. **Sync vs. async dispatch timing** -- Alchemy captures board snapshots synchronously before dispatch. Forge.rs dispatch is async (WASM boundary). Capture positions before the async call; serialize the dispatch-animate flow to prevent concurrent dispatches during animation.
+3. **Type shape mismatch** -- Alchemy's flat `Permanent` vs. Forge.rs's deep `GameObject` (layer-evaluated power/toughness, counters, attachments). Create a view model mapping layer; do NOT spread `GameObject` props directly into ported components.
+4. **No stack/priority/instant UI in Alchemy** -- MTG's stack, instant-speed interaction, and WUBRG mana payment have no Alchemy equivalent. These must be built from scratch, not ported.
+5. **Card image loading model** -- Alchemy uses sync static asset paths; Forge.rs uses async Scryfall API with caching. Add loading skeletons to card art areas and batch-prefetch deck images at game init.
 
 ## Implications for Roadmap
 
-Based on combined research, the project naturally splits into 8 phases following the dependency graph identified in ARCHITECTURE.md and validated by PITFALLS.md phase warnings.
+Based on research, suggested phase structure:
 
-### Phase 1: Project Scaffold & Core Types
-**Rationale:** Everything depends on the type system. Enum definitions for actions, events, zones, phases, and mana drive every subsequent component. Must also establish the dual-target build (native + WASM) from day one to catch threading/platform issues early.
-**Delivers:** Cargo workspace with three crates, Vite + React frontend skeleton, CI pipeline with WASM size tracking, core type definitions (GameState, GameAction, GameEvent, Zone, Phase, ManaColor enums)
-**Addresses:** Project structure, build tooling
-**Avoids:** Pitfall 9 (WASM threading -- design async interface upfront), Pitfall 5 (WASM size -- set budget from first build)
+### Phase 1: Foundation and Board Layout
+**Rationale:** Everything visual depends on card sizing, board layout, and the adapter layer. This phase establishes the rendering foundation that all subsequent phases build on. Must resolve the fixed-slots vs. dynamic-permanents problem immediately.
+**Delivers:** Responsive game board with multi-row permanent layout, MTGA-style hand with fan/peek/drag, Hero HUD with health bar and mana pool, preferences store, graveyard viewer.
+**Addresses:** Table stakes features (responsive sizing, hand interaction, HUD, graveyard viewer). Forge.rs-specific features (multi-zone battlefield, tapped permanents, P/T display).
+**Avoids:** Pitfalls 1 (fixed slots), 3 (type mismatch), 5 (image loading), 7 (phase model mismatch), 8 (WASM serialization), 9 (Alchemy concepts), 10 (legal actions), 11 (CSS collision), 12 (player ID types).
+**Key work:** CSS custom properties, GameObject view model, `useCombatState()` hook, card loading skeletons, legal actions from WASM bridge.
 
-### Phase 2: Card Parser & Database
-**Rationale:** Card definitions are the data the engine operates on. The parser is independently testable against Forge's existing card files and validates the type system from Phase 1.
-**Delivers:** Parser for Forge .txt card format, CardDefinition structs, CardDatabase index, ability string parsing foundation
-**Addresses:** Card parser (table stakes), deck import foundation
-**Avoids:** Pitfall 7 (multi-face card parsing -- build test matrix of all face types)
+### Phase 2: Animation Pipeline
+**Rationale:** The animation system is the largest single visual upgrade and the most architecturally sensitive port. It transforms static state changes into visual experiences. Depends on Phase 1's board layout and position registry.
+**Delivers:** Step-based animation queue, particle VFX (9 effect types remapped to WUBRG), floating damage/heal numbers, screen shake, card reveal overlay, damage vignette, block assignment lines, board snapshot preservation for death animations.
+**Addresses:** Table stakes (particle VFX, floating numbers, screen shake, block assignment lines, card animations). Differentiators (card reveal, damage vignette, combat math bubbles).
+**Avoids:** Pitfalls 2 (async dispatch timing), 6 (event shape mismatch), 13 (animation store ID formats).
+**Key work:** Event normalizer, async `dispatchWithAnimations`, animationStore port, ParticleSystem port with WUBRG color constants.
 
-### Phase 3: Game State Engine (Zones, Mana, Turns, Stack, SBAs)
-**Rationale:** The core game loop must work before any card abilities. Two players should be able to take turns, play lands, tap for mana, pass priority, and have SBAs checked. This validates the dispatch/action/event architecture.
-**Delivers:** Working game loop with land play, mana production, phase progression, priority passing, stack operation, state-based action checking
-**Addresses:** Turn/phase system, priority, mana system, zone management (all table stakes)
-**Avoids:** Pitfall 2 (SBA recursive loop -- atomic batch checking), Pitfall 4 (ownership model -- command buffer pattern), Pitfall 14 (mana payment -- constraint satisfaction)
+### Phase 3: Game Loop and Controllers
+**Rationale:** With visual rendering and animation in place, the game loop ties them together with auto-advance, AI scheduling, and controller abstraction. This phase makes the game "play itself" smoothly.
+**Delivers:** OpponentController (AI via WASM, network via WebSocket), useGameLoop (auto-priority-pass, turn detection, animation-awareness), GameDispatchProvider (context-based dispatch).
+**Addresses:** Differentiators (double-click to play, action feedback toasts). Core gameplay flow (auto-advance trivial phases, AI opponent timing).
+**Avoids:** Pitfall 4 partially -- this phase adds auto-pass logic but Phase 5 handles the full priority UI.
 
-### Phase 4: Ability System & Top 15 Effects
-**Rationale:** This is the riskiest phase -- if the ability parsing and effect handler architecture is wrong, everything downstream breaks. Target: cast Lightning Bolt, Counterspell, Giant Growth, create tokens, and see them resolve correctly.
-**Delivers:** Ability parser, effect handler registry, top 15 ApiType handlers (~60% card coverage), targeting system with legality rechecks
-**Addresses:** Core spellcasting, targeting UI requirements
-**Avoids:** Pitfall 12 (targeting legality rechecks -- store IDs, revalidate on resolution)
+### Phase 4: Audio System
+**Rationale:** Audio is high-impact but fully independent of visual features. Can be built in parallel with Phase 3. Zero new dependencies -- pure Web Audio API.
+**Delivers:** AudioContext singleton with SFX/music gain buses, procedural synthesis with sample playback fallback, ambient music with track rotation and cross-fade, iOS/iPadOS warm-up.
+**Addresses:** Differentiators (SFX system, ambient music). Preferences (volume controls, mute toggles).
+**Key work:** Port `audioContext.ts`, `sounds.ts`, `ambientMusic.ts`, `audioStore.ts`. Create .m4a sample assets for MTG events. Remap Alchemy's element-keyed sound variants to WUBRG.
 
-### Phase 5: Triggers & Combat
-**Rationale:** Triggers depend on the ability system (triggered abilities are abilities). Combat depends on triggers (attack/block triggers) and the stack (combat damage uses the stack in some contexts). This phase unlocks creature-based gameplay.
-**Delivers:** Event bus, trigger matching by mode, APNAP ordering, full combat system with core keywords, death triggers, ETB triggers
-**Addresses:** Combat system, trigger system (table stakes)
-**Avoids:** Pitfall 10 (APNAP ordering -- bake into trigger architecture)
-
-### Phase 6: Advanced Rules (Replacements, Layers, Static Abilities)
-**Rationale:** Most rules-complex phase. Replacement effects modify the event pipeline before triggers fire. The layer system (Rule 613) requires careful dependency handling. Fewer cards depend on correct layer evaluation for basic play, so this can come after combat.
-**Delivers:** Replacement effect pipeline with per-event tracking, 7-layer continuous effect evaluation with dependency detection, static ability grants
-**Addresses:** Static abilities (table stakes for full rules correctness)
-**Avoids:** Pitfall 1 (layer dependency cycles -- dependency detection pass, port Forge tests), Pitfall 3 (replacement self-application -- unique event IDs)
-
-### Phase 7: Platform Bridges & React UI
-**Rationale:** The engine API stabilizes after Phase 6. Bridge crates are thin wrappers. React UI development can start earlier with mock data, but full integration happens here. The adapter pattern means UI code is platform-agnostic.
-**Delivers:** Tauri commands and event emission, WASM exports, EngineAdapter with TauriAdapter/WasmAdapter, full game UI (battlefield, hand, stack, prompt bar, card preview, phase tracker, life totals), Scryfall image loading with three-tier cache, deck builder
-**Addresses:** All UI table stakes, card image display, deck builder, dual-target delivery
-**Avoids:** Pitfall 6 (IPC bottleneck -- batch updates at priority windows, delta state), Pitfall 11 (card image loading -- three-tier cache), Pitfall 15 (serde overhead -- opaque handles where possible), Pitfall 13 (webview CSS -- test cross-platform early)
-
-### Phase 8: AI & Card Coverage Expansion
-**Rationale:** AI requires a working rules engine to enumerate legal actions and evaluate board states. Card coverage expansion (remaining 187 effect types) is parallelizable and independent. Both build on the stable foundation from prior phases.
-**Delivers:** Heuristic AI (board evaluation, land play, spell casting, combat decisions), remaining effect handlers by card frequency, Standard format card coverage target
-**Addresses:** AI opponent (table stakes), card coverage (table stakes for playability)
-**Avoids:** Pitfall 8 (game tree explosion -- heuristic-first, no deep tree search for v1)
+### Phase 5: MTG-Specific UI Polish
+**Rationale:** These features define what makes this an MTG client rather than a generic card game. They cannot be ported from Alchemy and must be designed for MTG's specific complexity. Deferred until last because the existing Forge.rs UI already handles them functionally.
+**Delivers:** Arena-style stack visualization, WUBRG mana payment UI redesign (hybrid/phyrexian/X costs), priority pass/respond controls (auto-pass, full-control, smart-stop), battlefield backgrounds with WUBRG auto-selection, VFX quality levels, animation speed controls.
+**Addresses:** Forge.rs-specific features (stack display, mana payment, priority controls). Differentiators (battlefield backgrounds, VFX levels, animation speed).
+**Avoids:** Pitfall 4 (no stack/priority UI in Alchemy). These are new builds, not ports.
 
 ### Phase Ordering Rationale
 
-- **Types before behavior:** Enum definitions drive everything; wrong types mean rewriting all downstream code
-- **Parser before engine:** Card definitions are the data the engine operates on; validates the type system
-- **Stack before abilities:** Spells and abilities go on the stack; stack must work first
-- **Abilities before triggers:** Triggers execute abilities; the ability system must be proven before adding trigger dispatch
-- **Triggers before replacements:** Replacements modify the event pipeline that triggers consume; ordering matters
-- **Layers after combat:** Most cards play correctly without perfect layer evaluation; combat is higher priority for playability
-- **UI can parallel from Phase 3 onward:** React components only need zone state data, not full rules, to start rendering
-- **AI is last:** It needs everything else to work; heuristic AI is sufficient for MVP
+- **Phase 1 before all others** because every visual component depends on card sizing CSS properties, the board layout model, and the adapter layer (view model, legal actions, player ID normalization).
+- **Phase 2 before Phase 3** because the game loop's animation-awareness (wait for animations before advancing) requires the animation store to exist.
+- **Phase 3 and Phase 4 are parallelizable** -- audio and game loop are fully independent subsystems.
+- **Phase 5 last** because it builds NEW components (not ports) and the existing Forge.rs UI already handles these features functionally, just without polish.
+- This ordering minimizes the risk of rework: each phase builds on a stable foundation from the previous phase.
 
 ### Research Flags
 
 Phases likely needing deeper research during planning:
-- **Phase 4 (Ability System):** Highest-risk phase. The mapping from Forge's Java ability/effect class hierarchy to Rust enums + handler functions needs careful design. Research Forge's SpellAbility class hierarchy and ApiType taxonomy in detail.
-- **Phase 6 (Replacements & Layers):** Most complex rules interactions. Research MTG Comprehensive Rules 613 (layers) and 614 (replacement effects) directly. Port Forge's test cases as specification.
-- **Phase 7 (Platform Bridges):** Tauri v2 Channel API and WASM boundary optimization need hands-on prototyping. The IPC protocol design (full state vs. deltas vs. opaque handles) should be validated with profiling.
+- **Phase 2 (Animation Pipeline):** The async dispatch timing is the trickiest integration challenge. The event normalizer must handle all Forge.rs event types (some have no Alchemy equivalent: `PermanentTapped`, `CounterAdded`, `TokenCreated`, `SpellCountered`). Research the full Forge.rs event catalog during phase planning.
+- **Phase 5 (MTG-Specific UI):** Stack visualization, mana payment, and priority controls are new builds with no Alchemy reference. Research MTGA's UX patterns for these interactions.
 
 Phases with standard patterns (skip research-phase):
-- **Phase 1 (Scaffold):** Well-documented Cargo workspace + Tauri + Vite setup. Official Tauri templates exist.
-- **Phase 2 (Card Parser):** Straightforward text parsing against known format. Forge card files are the spec.
-- **Phase 3 (Game State Engine):** The reducer/dispatcher pattern is well-established. MTG turn structure is well-documented in the Comprehensive Rules.
-- **Phase 5 (Triggers & Combat):** Event bus + observer pattern is standard. Combat rules are well-specified.
-- **Phase 8 (AI):** Forge's existing AI architecture (heuristic-based, ~57k LOC) provides the blueprint. Start simple.
+- **Phase 1 (Foundation):** Both codebases are well-understood. CSS custom properties, responsive layouts, and view model patterns are straightforward.
+- **Phase 3 (Game Loop):** Alchemy's controller/game-loop pattern ports cleanly with well-defined adaptations.
+- **Phase 4 (Audio):** Alchemy's audio system is a clean, self-contained port. Web Audio API patterns are well-documented.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | All recommended technologies are actively maintained, well-documented, and have clear rationale. Version pins are specific. Only medium-confidence items (rpds, Tailwind, Framer Motion) are swappable without architectural impact. |
-| Features | HIGH | Competitive landscape is well-understood. Feature dependencies are mapped. MVP scope is clearly defined with rational deferral decisions. |
-| Architecture | HIGH | Pattern is validated by Argentum engine, Rust community consensus, and the existing Forge port plan. Component boundaries follow natural dependency lines. |
-| Pitfalls | HIGH | All critical pitfalls cite specific MTG rules, documented failure modes, or confirmed platform limitations. Prevention strategies are concrete and actionable. |
+| Stack | HIGH | Direct package.json comparison of both projects. Zero ambiguity on dependencies. |
+| Features | HIGH | Direct source code analysis of both projects. Every feature verified in source. |
+| Architecture | HIGH | Direct analysis of dispatch flow, store patterns, type systems in both projects. |
+| Pitfalls | HIGH | All pitfalls derived from concrete code-level incompatibilities, not speculation. |
 
-**Overall confidence:** HIGH
+**Overall confidence:** HIGH -- all research based on direct source code analysis of both Alchemy and Forge.rs. No external documentation or community sources needed.
 
 ### Gaps to Address
 
-- **rpds vs im crate in practice:** STACK.md recommends rpds (actively maintained) but ARCHITECTURE.md examples use `im` crate syntax. Decision is rpds, but verify its API supports all needed operations (HashMap, Vector, OrdMap equivalents) during Phase 1 scaffold.
-- **tsify-next compatibility:** MEDIUM confidence. Must verify it works with current wasm-bindgen 0.2.114 and generates correct discriminated union types for the GameAction/GameEvent enums. Test during Phase 1.
-- **Tauri Channel vs Event performance:** ARCHITECTURE.md suggests starting with events and migrating to channels if needed. Validate during Phase 7 prototyping -- MTG state updates may or may not hit the throughput threshold where channels matter.
-- **Forge card format completeness:** The parser must handle all multi-face card types (Split, Flip, Transform, Meld, Adventure, MDFC, Aftermath, Fuse). Exact format conventions need validation against actual Forge card files during Phase 2.
-- **WASM binary size budget feasibility:** The <3MB target for the engine WASM is aspirational. With 202 effect handlers compiled in, actual size needs measurement during Phase 1. May need to lazy-load effect handlers or split the WASM module.
+- **Forge.rs event catalog completeness:** The event normalizer mapping covers the most common events but the full set of Forge.rs `GameEvent` variants needs auditing during Phase 2 planning. Events like `CounterAdded`, `TokenCreated`, `SpellCountered`, `ReplacementApplied` need animation handling decisions.
+- **Audio asset creation:** Alchemy has ~30+ .m4a samples organized by element. MTG equivalents need creation or sourcing -- the research identifies the architecture but not the specific audio assets needed.
+- **WASM `getLegalActions()` export:** The research identifies that this is needed (Pitfall 10) but the Rust-side implementation scope is unresearched. May require changes to the engine crate's public API.
+- **Token stacking UX:** The research identifies aggressive token stacking as necessary (Pitfall 1) but the specific UX (count badge, stack interaction, expand-on-click) needs design during Phase 1 planning.
+- **Vite 6->7 migration:** Listed as a version bump but major version upgrades can have breaking changes. Validate plugin compatibility (`vite-plugin-wasm`, `vite-plugin-top-level-await`) during setup.
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- [Tauri v2 Documentation](https://v2.tauri.app/) -- IPC, commands, events, channels, state management
-- [wasm-bindgen Guide](https://rustwasm.github.io/docs/wasm-bindgen/) -- WASM-JS bridge, serde integration
-- [MTG Comprehensive Rules](https://magic.wizards.com/en/rules) -- Authoritative rules reference (layers, SBAs, replacements, priority, triggers)
-- [Forge GitHub](https://github.com/Card-Forge/forge) -- Source reference for card format, AI architecture, rules engine patterns
-- [Rust WASM Size Optimization Guide](https://rustwasm.github.io/book/reference/code-size.html) -- Official size reduction techniques
+- Alchemy source code (`/Users/matt/dev/alchemy/src/`) -- all component, store, audio, hook, and type files
+- Forge.rs source code (`/Users/matt/dev/forge.rs/client/src/`) -- all adapter, store, component, hook, and service files
+- Forge.rs Rust engine source (`/Users/matt/dev/forge.rs/crates/`) -- WASM bridge, type definitions
+- Both projects' `package.json` files -- dependency comparison
 
 ### Secondary (MEDIUM confidence)
-- [Argentum MTG Engine Architecture](https://wingedsheep.com/building-argentum-a-magic-the-gathering-rules-engine/) -- Validated architecture pattern (deterministic engine, state projection)
-- [rpds GitHub](https://github.com/orium/rpds) -- Persistent data structures (actively maintained replacement for im crate)
-- [serde-wasm-bindgen docs](https://docs.rs/serde-wasm-bindgen/latest/serde_wasm_bindgen/) -- Direct JS value conversion for WASM boundary
-- [tsify-next GitHub](https://github.com/AmbientRun/tsify-next) -- TypeScript type generation from Rust
-- [Forge Rules Engine Blog](http://mtgrares.blogspot.com/2009/12/rules-engine-is-pain-in-neck.html) -- Original developer's perspective on complexity
+- None -- all findings from direct source analysis
 
 ### Tertiary (LOW confidence)
-- [tauri-interop crate](https://lib.rs/crates/tauri-interop) -- Generate WASM functions from Tauri commands (may simplify adapter layer, needs evaluation)
-- WASM binary size <3MB target -- aspirational based on documented techniques, needs validation with actual engine code
+- None
 
 ---
-*Research completed: 2026-03-07*
+*Research completed: 2026-03-08*
 *Ready for roadmap: yes*

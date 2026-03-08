@@ -1,155 +1,142 @@
-# Domain Pitfalls
+# Domain Pitfalls: Arena UI Port (Alchemy to Forge.rs)
 
-**Domain:** MTG Rules Engine (Rust + Tauri + WASM dual-target)
-**Researched:** 2026-03-07
+**Domain:** Porting a card game UI from a simpler engine to a complex one
+**Researched:** 2026-03-08
+**Source projects:** Alchemy (simple: 5 elements, fixed board slots, sync TS engine) -> Forge.rs (complex: MTG 5 colors, unlimited permanents, async WASM engine, stack/priority)
 
 ---
 
 ## Critical Pitfalls
 
-Mistakes that cause rewrites or major issues. Each of these has wrecked MTG engine projects.
+Mistakes that cause rewrites or major issues when porting UI between engines with different complexity levels.
 
 ---
 
-### Pitfall 1: Layer System Dependency Cycles (Rule 613)
+### Pitfall 1: Fixed Board Slots vs. Dynamic Permanent Count
 
-**What goes wrong:** The seven-layer continuous effect evaluation (Rule 613) seems straightforward until dependency exceptions appear. Effect A in Layer 4 (type-changing) can make Effect B in the same layer applicable or inapplicable. The spec says "if applying one effect would change whether another effect applies, there's a dependency." Naive implementations either ignore dependencies (wrong results) or detect them incorrectly (infinite loops during evaluation).
+**What goes wrong:** Alchemy's `PlayerState.board` is `(Permanent | null)[]` with a fixed `maxBoardSize` (typically 5 slots per player). The `CreatureSlots` component is designed around this bounded array -- it calculates card sizes against a known maximum, uses slot indices for creature placement (`targetSlot` in `PLAY_CARD`), and the `boardStacking` and `boardSizing` modules assume a bounded upper limit. Forge.rs's battlefield is `ObjectId[]` with no upper bound, partitioned by card type (creatures, lands, other permanents). A single player can control 20+ permanents of different types simultaneously.
 
-**Why it happens:** Developers implement layers as a simple ordered loop and forget that within a single layer, effects can depend on each other. The dependency exception overrides timestamp ordering within a layer. Additionally, Layer 7 (power/toughness) has five sublayers (7a-7e) where characteristic-defining abilities, set-to effects, and +N/+N effects interact in non-obvious ways — a Tarmogoyf (7a, CDA) that gets Humility'd (7b, sets P/T) then Giant Growth'd (7d, +3/+3) has a specific correct answer.
+**Why it happens:** Developers port the `CreatureSlots` component and wire it to `gameState.battlefield`, but the layout breaks when a token deck creates 15 creatures, or when lands (which Alchemy doesn't have as permanents) need their own row. The `calculateBoardCardSize` function works well for 5-7 cards but produces unusable sizes at 15+.
 
-**Consequences:** Wrong P/T calculations, wrong type assignments, wrong ability grants. Cards that "almost work" but produce wrong results in 5% of board states — the hardest bugs to find.
+**Consequences:** Cards shrink to unreadable sizes. Board becomes unscrollable. Layout overflow causes z-index layering bugs. Lands and enchantments have nowhere to display. Touch targets become too small on mobile.
 
 **Prevention:**
-- Implement dependency detection as a separate pass before applying effects within each layer. If effect A's applicability changes based on effect B, A depends on B; apply B first regardless of timestamp.
-- Port Forge's layer system tests verbatim as your first test suite — these encode decades of edge case discovery.
-- Use the MTG Comprehensive Rules 613.8 (dependency rules) as your spec, not blog posts or summaries.
-- Build a "layer debugger" that traces which effects applied in which order for any given board state.
+- Replace the single `CreatureSlots` component with Forge.rs's existing `GameBoard` pattern: separate `BattlefieldRow` components for creatures, lands, and other permanents, each independently scrollable.
+- Port the `groupIntoStacks` logic but parameterize it for unbounded counts -- the stacking threshold in Alchemy (lines 400-407 of `CreatureSlots.tsx`) uses `minWidth = baseWidth * 0.7` which is already decent, but needs a fallback for 15+ cards (e.g., horizontal scroll or multi-row grid).
+- Keep Alchemy's `CardStackGroup` concept but add aggressive stacking by card name for tokens (10 identical 1/1 Soldier tokens should stack to a single visual with a count badge, not 10 individual cards).
+- The Forge.rs `BattlefieldRow` already uses `flex-wrap` -- preserve this. Alchemy's `CreatureSlots` uses `w-fit mx-auto` single-row flex with horizontal scroll, which is fine for 5 cards but poor for 15.
 
-**Detection:** Test with Humility + Opalescence, Blood Moon + Urborg, any cards that change types/abilities in the same layer. If results differ from MTGO/Arena, dependency handling is wrong.
+**Detection:** Test with token-heavy decks (e.g., a deck that creates 10+ creature tokens). If cards are unreadable or overflow, the layout assumptions are wrong.
 
-**Confidence:** HIGH — this is the single most-documented failure mode in MTG engine development. The original Forge blog noted "the rules engine itself is the most complicated part."
+**Confidence:** HIGH -- directly observable from code comparison. Alchemy's `RulesetConfig.maxBoardSize` is 5; Forge.rs has no equivalent limit.
 
-**Phase:** Phase addressing static abilities and layer system. Must be the most heavily tested phase.
+**Phase:** Phase 1 (Board Layout Port). Must be resolved before any creature rendering.
 
 ---
 
-### Pitfall 2: State-Based Actions Recursive Check Loop
+### Pitfall 2: Synchronous Dispatch vs. Async WASM Boundary
 
-**What goes wrong:** SBAs must be checked repeatedly until none apply, then triggers go on the stack, then SBAs check again. Developers either check once (missing cascading SBAs) or check without a termination guard (infinite loop when SBAs create conditions for more SBAs).
+**What goes wrong:** Alchemy's `gameStore.dispatch()` is synchronous: it calls `reduce(state, action, actingPlayer, rng)` inline, gets back `{ newState, events }`, and immediately updates the store with `legalActions`. There is zero async gap. Alchemy's animation system relies on this -- `groupEventsIntoSteps` receives events synchronously in the same call stack, and `boardSnapshot` is set before dispatch to preserve dying creatures.
 
-**Why it happens:** The spec says: "check SBAs → perform all simultaneously → if any were performed, check again → once stable, put triggered abilities on stack → check SBAs again." This is a fixpoint loop. If your SBA handler has a bug where performing an SBA re-triggers the same condition (e.g., moving a creature to graveyard triggers another creature's -1/-1 but the state update isn't atomic), you loop forever.
+Forge.rs's `gameStore.dispatch()` is `async`: it calls `adapter.submitAction(action)` which goes through a promise queue (`WasmAdapter.enqueue`), then calls `adapter.getState()` (another async call). There is a multi-frame gap between dispatching an action and receiving the new state.
 
-**Consequences:** Game hangs, stack overflow, or incorrect game state where triggers fire before SBAs stabilize.
+**Why it happens:** Alchemy's animation pipeline assumes: (1) capture board snapshot, (2) dispatch action synchronously, (3) immediately receive events, (4) call `groupEventsIntoSteps` with events, (5) enqueue animation steps. In Forge.rs, steps 2-3 are async. If the animation system tries to capture a snapshot and then dispatch, the snapshot may be stale by the time events arrive (other React renders may have occurred).
+
+**Consequences:** Animations show stale positions. "Dying creature" snapshots expire before death animations play. Combat math bubbles appear at wrong positions. Floating damage numbers target elements that have already unmounted.
 
 **Prevention:**
-- Implement SBAs as a single atomic batch: collect all applicable SBAs, apply them all, then re-check. Never interleave SBA checks with individual SBA execution.
-- Add a loop counter with a reasonable cap (e.g., 1000 iterations) and treat exceeding it as a draw (matching MTG rules for mandatory action loops, Rule 104.4b).
-- SBAs must not use the stack and must not give priority — they are invisible to the priority system.
-- Test with scenarios that cascade: a board full of 1/1 tokens where a -X/-X effect kills some, creating death triggers that kill more.
+- Forge.rs already has a `dispatchWithAnimations` pattern (via the animation store). Port Alchemy's `groupEventsIntoSteps` but ensure it runs *after* the async dispatch resolves, not synchronously alongside it.
+- The `boardSnapshot` pattern from Alchemy is correct in concept but must be adapted: capture the snapshot *before* the async dispatch, store it in the animation store, and clear it only when the death animation step begins (Alchemy already does this in `advanceStep` line 156).
+- The position registry (`registerPosition`/`unregisterPosition`) is portable as-is -- it's a mutable module-level Map, not tied to React render timing. But the `getPositions()` call must happen at animation-enqueue time (after async dispatch resolves), not at dispatch-start time.
+- Wrap the entire dispatch-animate flow in a serialized queue: `await dispatch(action) -> events -> groupEventsIntoSteps(events, positions) -> enqueueSteps(steps)`. No concurrent dispatches during animation playback.
 
-**Detection:** Any game that hangs during resolution likely has an SBA fixpoint bug.
+**Detection:** Play a combat round. If damage numbers appear at coordinates (0,0) or at the card's pre-combat position instead of post-attack position, position capture timing is wrong. If dying creatures disappear before their death particle animation, the snapshot timing is wrong.
 
-**Confidence:** HIGH — directly from MTG Comprehensive Rules and multiple rules engine post-mortems.
+**Confidence:** HIGH -- directly observable from comparing `gameStore.dispatch` in both projects. Alchemy line 171: `const result = reduce(state, action, actingPlayer, rng)` (sync). Forge.rs line 57: `const events = await adapter.submitAction(action)` (async).
 
-**Phase:** Core game state engine phase. Get this right before adding any card abilities.
+**Phase:** Phase 2 (Animation System Port). The most architecturally sensitive port.
 
 ---
 
-### Pitfall 3: Replacement Effect Self-Application and "Apply Once" Rule
+### Pitfall 3: Type Shape Mismatch -- Alchemy's Flat Model vs. Forge.rs's Object Graph
 
-**What goes wrong:** Replacement effects modify events before they happen. A replacement effect can only apply once to any given event. Two doublers (e.g., two "if a creature would deal damage, it deals double instead") produce 4x damage, not infinite. Developers who don't track "already applied this replacement to this event" get infinite loops or wrong multipliers.
+**What goes wrong:** Alchemy's `Permanent` is a flat struct with inline stats: `{ permanentId, cardId, ownerId, attack, health, damage, isTapped, summonedThisTurn, temporaryAttackBonus, temporaryHealthBonus }`. Stats are directly on the object. Card data is looked up via `CARD_REGISTRY[cardId]`.
 
-**Why it happens:** The implementation needs per-event tracking of which replacement effects have already modified that specific event instance. Without this, the system re-applies the same replacement after it modified the event, seeing "oh, damage is happening, I should double it" again.
+Forge.rs's `GameObject` is a deep object from the WASM boundary: `{ id, card_id, owner, controller, zone, tapped, power, toughness, damage_marked, card_types, mana_cost, keywords, counters, attachments, color, ... }`. There is no separate "card registry" in the frontend -- all card data comes from the engine state. Power/toughness are engine-computed (layer system applied). There is no `attack`/`health` -- the fields are `power`/`toughness`.
 
-**Consequences:** Infinite loops, wrong damage calculations, game crashes during replacement effect resolution.
+**Why it happens:** Developers copy Alchemy components and try to map props 1:1. `permanent.attack` becomes `gameObject.power`, `permanent.health` becomes `gameObject.toughness`. But these are semantically different: Alchemy's `attack` is base + temporary bonus; Forge.rs's `power` is already layer-evaluated (includes +1/+1 counters, enchantment buffs, type-changing effects, etc.). Applying Alchemy's buff detection logic (`isBuffedAttack = attack > baseAttack`) to Forge.rs data produces wrong visual indicators because `base_power` vs `power` comparison doesn't account for counter-based buffs vs spell-based buffs.
+
+**Consequences:** Buff indicators wrong (card shows "buffed" when it has counters, which are permanent not temporary). Health/toughness display wrong (shows toughness where it should show toughness minus damage). Card type display wrong (Alchemy has `creature | spell`; MTG has creatures, instants, sorceries, enchantments, artifacts, planeswalkers, lands, each needing different visual treatment).
 
 **Prevention:**
-- Every pending event gets a unique ID. Each replacement effect records which event IDs it has already modified. A replacement cannot modify an event it has already modified.
-- When multiple replacement effects apply to the same event, the affected player (or controller of the affected object) chooses the order — this requires a UI prompt.
-- Implement replacement effects as a pipeline: event enters, eligible replacements are collected, player chooses one, it modifies the event, re-check for remaining eligible replacements (excluding the one just applied), repeat until none remain.
+- Create a mapping layer (adapter component or hook) that converts Forge.rs's `GameObject` into a view model matching Alchemy's `BoardCard` expectations. Do NOT spread `GameObject` props directly into Alchemy components.
+- The view model should compute:
+  - `effectiveAttack` = `gameObject.power` (already layer-evaluated)
+  - `effectiveHealth` = `gameObject.toughness - gameObject.damage_marked`
+  - `isBuffed` = `gameObject.power > gameObject.base_power || gameObject.toughness > gameObject.base_toughness`
+  - `isDamaged` = `gameObject.damage_marked > 0`
+  - `isSummoningSick` = `gameObject.entered_battlefield_turn === currentTurn && !gameObject.keywords.includes("Haste")`
+  - `cardType` = derived from `gameObject.card_types.core_types` (not a simple string enum)
+- The view model replaces Alchemy's `CARD_REGISTRY` lookups -- Forge.rs cards don't have a static registry in the frontend.
 
-**Detection:** Test with two damage doublers, two ETB replacement effects, prevention shields + damage redirection. If damage goes infinite or effects apply more than once, the tracking is broken.
+**Detection:** Play a card with +1/+1 counters. If the UI shows it as "temporarily buffed" (with Alchemy's gold buff particles), the mapping is wrong. Play an enchantment -- if the UI doesn't know where to render it, the type mapping is incomplete.
 
-**Confidence:** HIGH — Rule 614.5 explicitly states this. Confirmed in multiple MTG rules forums.
+**Confidence:** HIGH -- directly from comparing `Permanent` (Alchemy types.ts:57-70) with `GameObject` (Forge.rs adapter/types.ts:75-109).
 
-**Phase:** Replacement effects phase. Must be architecturally solid before trigger system, since triggers fire after events and replacements modify events before they happen.
+**Phase:** Phase 1 (Component Adapter Layer). Must exist before any Alchemy component renders Forge.rs data.
 
 ---
 
-### Pitfall 4: Rust Ownership vs. Game State Mutation During Effect Resolution
+### Pitfall 4: Missing Stack/Priority/Instant UI Concepts
 
-**What goes wrong:** MTG effect resolution frequently needs to read the game state while simultaneously mutating it. Example: "Destroy all creatures with power less than X, where X is the number of creatures you control." You need to read the battlefield to calculate X, then mutate the battlefield to destroy creatures. Rust's borrow checker prevents holding an immutable reference (for reading) and a mutable reference (for writing) simultaneously.
+**What goes wrong:** Alchemy has no stack visualization. Its phase system is linear: `mulligan -> draw -> energy -> play -> battle -> end`. The only instant-speed interaction is a limited `combat_priority` phase. Forge.rs has a full priority system where either player can respond at almost any point with instants and activated abilities. The stack (`StackEntry[]`) can have multiple items, each with their own targets and controllers. There is no Alchemy component for: stack visualization, mana payment modal, priority pass controls, or instant-speed card casting.
 
-**Why it happens:** Game engines naturally want a "god object" game state that everything reads from and writes to. Rust's ownership model fundamentally rejects this pattern. Naive approaches either clone the entire state for every read (performance disaster at MTG scale) or use `RefCell`/interior mutability everywhere (loses compile-time safety, panics at runtime).
+**Why it happens:** Developers port Alchemy's `ActionButton` (which handles `ADVANCE_PHASE`, `CONFIRM_ATTACKERS`, `CONFIRM_BLOCKERS`, `PASS_PRIORITY`) but don't realize Forge.rs's `PassPriority` happens dozens of times per turn. Alchemy's button toggles between 3-4 states; Forge.rs's priority system needs context-aware prompts ("Pass priority (opponent has mana open)", "Respond to Lightning Bolt targeting your creature?").
 
-**Consequences:** Either the codebase is littered with `.clone()` calls destroying performance, or `RefCell<>` wrappers creating runtime panics, or unsafe blocks undermining Rust's safety guarantees.
+**Consequences:** Players cannot interact at instant speed. No way to see what's on the stack. No way to respond to spells. The game auto-passes priority without the player understanding what happened. Mana payment is impossible (Alchemy uses single-element costs; MTG uses multi-color, hybrid, and generic costs requiring interactive payment).
 
 **Prevention:**
-- **Command buffer pattern:** Effects don't mutate state directly. They return a list of state mutations (commands) that are applied after all reads are complete. This is the ECS-standard pattern and maps perfectly to the reducer/action architecture already planned.
-- **Snapshot reads:** Before resolving an effect, snapshot the relevant state (not the entire state — just what the effect needs to query). The effect reads from the snapshot and produces mutations applied to the live state.
-- **Arena-based allocation:** Use an arena allocator for temporary game objects during resolution (e.g., `bumpalo`). Allocations are fast and freed in bulk.
-- The planned immutable state + reducer architecture already mitigates this — lean into it. Effects are pure functions: `(state, effect) -> Vec<StateMutation>`.
+- These are NOT ports from Alchemy -- they are new components built from scratch for Forge.rs:
+  - **Stack display:** Vertical list showing pending spells/abilities with source, controller, targets. Clickable to inspect.
+  - **Priority indicator:** Shows whose priority it is, whether the active player can respond, and a "Pass" button that's always visible during priority windows.
+  - **Mana payment modal:** Shows available mana, required cost, auto-pay suggestion with manual override. Triggered when `WaitingFor.type === "ManaPayment"`.
+  - **Instant-speed casting:** Hand cards must be playable during opponent's turn when the player has priority. Alchemy's hand only allows plays during the `play` phase.
+- Port Alchemy's `ActionButton` as the *base* but extend it significantly. The `WaitingFor` discriminated union in Forge.rs has 8 variants vs Alchemy's simpler phase model.
+- Do NOT try to hide priority complexity. MTG players expect to see it. Auto-pass priority for phases where the player has no legal actions (Alchemy's approach of skipping irrelevant phases is correct, but must not skip phases where the player COULD respond).
 
-**Detection:** If you're fighting the borrow checker on every effect handler, the architecture is wrong. Effect handlers should take `&GameState` (immutable) and return mutations, never `&mut GameState`.
+**Detection:** Cast an instant during the opponent's combat phase. If the UI doesn't allow it, instant-speed interaction is broken. Check for stack display when multiple spells are pending.
 
-**Confidence:** HIGH — well-documented Rust game development pattern. The project's planned reducer architecture is the correct mitigation.
+**Confidence:** HIGH -- fundamental game mechanic difference. Alchemy has no equivalent UI to port.
 
-**Phase:** Core game state engine design phase. Architecture decision that pervades everything.
+**Phase:** Phase 3 (MTG-Specific UI). After board and animation ports are stable.
 
 ---
 
-### Pitfall 5: WASM Binary Size Explosion
+### Pitfall 5: Card Image Loading Model Change (Static Assets vs. Async API)
 
-**What goes wrong:** A Rust WASM binary for a full MTG engine can easily reach 10-20MB+ without optimization. At that size, PWA load times are unacceptable (especially on tablet over WiFi). One documented case showed a 3.2MB WASM module that was 9x larger than the equivalent C implementation.
+**What goes wrong:** Alchemy uses static assets: `getCardArtPath(cardId, element)` returns a synchronous path like `/cards/fire/flame_elemental.webp`. The `CardFace` component uses this as a CSS `background-image` with zero loading state -- the art either exists at that path or an element icon placeholder is shown. There is no loading spinner, no error handling for network failures, no rate limiting.
 
-**Why it happens:** Multiple compounding factors:
-- Rust monomorphizes generics — every `Vec<T>` for a different T generates separate code
-- The default allocator (dlmalloc port) adds ~10KB baseline
-- `serde` derive macros generate substantial code for every type
-- `std::fmt` machinery (used by `format!`, `panic!` messages) pulls in significant code
-- Debug info and panic strings are included by default
-- String formatting for error messages adds hidden bloat
+Forge.rs uses `useCardImage(cardName)` which is fully async: checks IndexedDB cache, then fetches from Scryfall API with 75ms rate limiting, returns `{ src: string | null, isLoading: boolean }`. A hand of 7 cards generates up to 7 sequential API calls on first load.
 
-**Consequences:** PWA is unusable on slower connections. Mobile Safari may refuse to compile very large WASM modules. Users abandon before the game loads.
+**Why it happens:** Alchemy's `CardFace` component treats art as an optional decoration -- `getCardArtPath` returns a path unconditionally and the element icon placeholder is always visible behind the art. If the art file doesn't exist (missing asset), the card is still fully readable. Port this to Forge.rs and every card shows the placeholder because there are no static art files -- all art comes from Scryfall.
+
+**Consequences:** All cards show placeholder art until images load (can take 500ms-5s for uncached cards). No loading indicators. Broken or missing images show element icon placeholders that make no sense for MTG (there are no "elements" in MTG). Rate limiting causes cards loaded later in the hand to appear blank for seconds.
 
 **Prevention:**
-- Configure release profile: `panic = 'abort'`, `opt-level = 'z'`, `lto = true`, `codegen-units = 1`, `strip = true`
-- Use `wasm-opt` (from binaryen) as a post-processing step — typically saves 10-20% additional
-- Profile with `twiggy` to identify what's taking space before optimizing blindly
-- Consider `talc` allocator instead of dlmalloc (smaller and faster)
-- Minimize serde usage across the WASM boundary — prefer opaque handles with getter/setter methods over serializing entire game state
-- Avoid `format!` and `println!` in engine code — use error codes instead of formatted error strings
-- Lazy-load card definitions (don't compile 32k cards into the WASM binary)
-- Set a size budget early (target: <3MB for engine WASM, ideally <1.5MB) and track it in CI
+- Replace `getCardArtPath` calls with `useCardImage(cardName)` hook from Forge.rs, but add a loading skeleton to Alchemy's `CardFace` component:
+  - Show card frame, name, type, stats immediately (these come from engine state, no network needed).
+  - Show a shimmer/skeleton in the art area while `isLoading === true`.
+  - Show the actual card image when `src` resolves.
+- Replace element-based placeholders with generic card back or mana-color-based gradient placeholder. MTG colors (WUBRG) map naturally to gradient backgrounds.
+- Batch-prefetch images: when game initializes, call `prefetchDeckImages` (already exists in Forge.rs scryfall.ts) for both players' decks. This front-loads the Scryfall calls before the board renders.
+- For the card preview modal (`CardPreview`), use `size: "large"` for the detailed view and `size: "normal"` for board/hand cards.
+- Consider using Scryfall's `image_uris.art_crop` for Alchemy-style art-only display (no card frame), keeping Alchemy's custom card frame rendering.
 
-**Detection:** Add WASM binary size to CI metrics from day one. If it exceeds budget, investigate immediately rather than deferring.
+**Detection:** Start a game with no cached images. If all 7 hand cards and the initial battlefield are blank for >1 second, the loading UX needs work.
 
-**Confidence:** HIGH — multiple documented sources with specific techniques.
+**Confidence:** HIGH -- directly from code comparison. Alchemy `cardUtils.ts:6-8` (sync path) vs Forge.rs `useCardImage.ts` (async with cache).
 
-**Phase:** Must be addressed from the very first WASM build. Retrofitting size optimization is far harder than building with it from the start.
-
----
-
-### Pitfall 6: Tauri IPC Serialization Bottleneck
-
-**What goes wrong:** Every communication between the Rust engine (backend) and React UI (frontend) goes through Tauri's IPC layer. In v1, this was JSON serialization. V2 improved this with custom protocols, but serializing full game state (battlefield with 20+ permanents, each with counters, attachments, modifications, continuous effects) on every state change creates noticeable lag.
-
-**Why it happens:** MTG game state is 10-50x larger than simple card games. A single spell resolution can trigger cascading state changes (spell resolves → triggers fire → SBAs check → more triggers). If each intermediate state is serialized and sent to the UI, the IPC becomes the bottleneck.
-
-**Consequences:** UI lag during complex resolution sequences. Animations stutter. The game feels sluggish despite the Rust engine being fast.
-
-**Prevention:**
-- **Delta updates, not full state:** Send only what changed, not the entire game state. Use a diffing mechanism or event-based updates ("card X moved from zone A to zone B", "player life changed to N").
-- **Batch updates:** During resolution sequences, batch all state changes and send a single update when a priority window opens (when the player can actually act).
-- **Use Tauri v2 raw byte protocol** for large payloads instead of JSON serialization.
-- **Keep complex state queries in Rust:** Don't send the full layer-evaluated state to JS. Instead, expose queries: "what is card X's current P/T?" that the frontend calls as needed.
-- **Consider SharedArrayBuffer** for the WASM PWA target — shared memory between WASM and JS avoids serialization entirely.
-
-**Detection:** Profile IPC round-trip time. If a single game action takes >16ms for the UI to reflect (one frame at 60fps), the IPC is the bottleneck.
-
-**Confidence:** MEDIUM-HIGH — Tauri v2's improvements help, but MTG's state complexity is unusual even among card games.
-
-**Phase:** UI integration phase. Design the IPC protocol before building the UI, not after.
+**Phase:** Phase 1 (Card Rendering). Must be resolved alongside the component adapter layer.
 
 ---
 
@@ -157,115 +144,113 @@ Mistakes that cause rewrites or major issues. Each of these has wrecked MTG engi
 
 ---
 
-### Pitfall 7: Forge Card Format Multi-Face Card Parsing
+### Pitfall 6: Event System Shape Mismatch
 
-**What goes wrong:** Forge's `.txt` card format handles multi-face cards (split cards, double-faced cards, adventure cards, MDFCs, meld cards, flip cards) with different conventions. Split cards use `//` in names. DFCs use separate files with `DeckHas:` references. Adventure cards have `ALTERNATE` sections. Each type has subtly different parsing rules.
+**What goes wrong:** Alchemy's `GameEvent` and Forge.rs's `GameEvent` are both discriminated unions with `type` tags, but they have different shapes, different event names, and different data payloads. Alchemy's animation system (`groupEventsIntoSteps`) is tightly coupled to Alchemy's event shapes: it checks for `CREATURE_ENTERED`, `SPELL_RESOLVED`, `DAMAGE_DEALT`, `CREATURE_DIED` etc. Forge.rs events use different names: `ZoneChanged`, `SpellCast`, `DamageDealt`, `CreatureDestroyed`.
 
 **Prevention:**
-- Catalog every multi-face card type Forge supports: Split, Flip, Transform (DFC), Meld, Adventure, MDFC, Aftermath, Fuse. Write a parser test for at least one card of each type.
-- Parse the `AlternateMode:` field early — it determines how to interpret the rest of the card definition.
-- Don't assume two faces = two files. Some multi-face types are single file with sections, others are separate files linked by reference.
-- Handle encoding carefully — Forge card names include special characters (Lim-Dul's, Juzam Djinn accents in some localizations). Use UTF-8 throughout.
+- Create an event mapping layer that converts Forge.rs events to Alchemy-compatible event shapes before passing to `groupEventsIntoSteps`. This is preferable to rewriting the animation grouping logic.
+- Key mappings:
+  - `ZoneChanged { to: "Battlefield" }` -> `CREATURE_ENTERED` (when object is a creature)
+  - `DamageDealt` -> `DAMAGE_DEALT` (rename, restructure fields: `target: TargetRef` needs unpacking to `targetId: string`)
+  - `LifeChanged { amount < 0 }` -> `PLAYER_DAMAGED`
+  - `CreatureDestroyed` -> `CREATURE_DIED`
+  - `SpellCast` -> `CARD_PLAYED` + `SPELL_RESOLVED` (Forge.rs separates cast and resolution; Alchemy combines them)
+- Some Forge.rs events have no Alchemy equivalent and need new animation handling: `PermanentTapped`, `CounterAdded`, `TokenCreated`, `SpellCountered`, `ReplacementApplied`.
 
-**Detection:** Run the parser against Forge's full `cardsfolder/` and count parse failures. Any card that fails to parse is likely a multi-face edge case.
+**Detection:** Cast a spell. If no animation plays, the event mapping is missing or wrong.
 
-**Confidence:** MEDIUM — based on Forge's known format conventions. Exact edge cases need validation against the actual card files.
+**Confidence:** HIGH -- directly from comparing event union types in both adapter/types.ts files.
 
-**Phase:** Card parser phase. Build a comprehensive test matrix of card types before claiming the parser is complete.
+**Phase:** Phase 2 (Animation System). The event mapper must exist before `groupEventsIntoSteps` can process Forge.rs events.
 
 ---
 
-### Pitfall 8: AI Game Tree Explosion in MTG
+### Pitfall 7: Phase/Turn Model Impedance Mismatch
 
-**What goes wrong:** MTG has a vastly higher branching factor than chess or even other card games. A single main phase can have 10+ legal plays (multiple cards in hand, multiple abilities on board, multiple mana payment options). With instant-speed interactions, each player can respond at every priority window. A 2-turn lookahead can produce millions of nodes.
+**What goes wrong:** Alchemy's `Phase` is a rich discriminated union carrying state (e.g., `{ type: 'battle', step: 'declare_attackers', tentativeAttackers: string[] }` embeds the list of tentative attackers directly in the phase object). Components read combat state directly from the phase. Forge.rs's `Phase` is a simple string enum (`"DeclareAttackers" | "DeclareBlockers" | ...`) and combat state lives in a separate `CombatState` object on the `GameState`. The `WaitingFor` discriminated union replaces Alchemy's phase as the primary "what should the UI show right now?" signal.
+
+**Why it happens:** Alchemy's `CreatureSlots` reads `phase.tentativeAttackers`, `phase.confirmedAttackers`, `phase.blockers` directly from the phase. These fields don't exist in Forge.rs -- attackers are in `gameState.combat.attackers`, blockers are in `gameState.combat.blocker_assignments`.
+
+**Consequences:** All combat UI code that reads from `phase` breaks. Blocker assignment, attacker declaration, combat resolution displays all fail.
 
 **Prevention:**
-- Do NOT attempt minimax/alpha-beta for MTG — the branching factor is too high. Use heuristic evaluation with limited lookahead (1 phase, not 1 turn).
-- Start with a purely heuristic AI (board evaluation function, no search tree). This is how Forge's AI works for most decisions.
-- Use Monte Carlo Tree Search (MCTS) only for critical decisions (combat, counterspell timing) where the branching factor is bounded.
-- For WASM target, AI computation must not block the main thread. Use Web Workers (a separate WASM instance in a worker thread).
-- Hidden information (opponent's hand, library order) makes perfect search impossible anyway. Use information set sampling (play out N random possible hands for the opponent).
-- Set hard time limits (e.g., 2 seconds per decision) and return best-so-far when time expires.
+- Create a `useCombatState()` hook that normalizes combat data from either source:
+  - Reads `gameState.combat` (Forge.rs) or `phase.tentativeAttackers`/`phase.confirmedAttackers` (Alchemy).
+  - Returns a consistent shape: `{ attackers, blockers, blockerToAttacker, step }`.
+- Replace all `phase.type === 'battle' && phase.step === 'declare_attackers'` checks with `waitingFor.type === 'DeclareAttackers'` checks.
+- The `shouldFanOut` function in `CreatureSlots` needs complete rewriting -- it checks Alchemy-specific phase shapes.
+- Alchemy's `ActionButton` component determines button label and action from phase type. Replace with a `WaitingFor`-driven approach.
 
-**Detection:** If AI turns take more than 3 seconds on native or 5 seconds in WASM, the search is too deep.
+**Detection:** Enter combat. If the UI doesn't show attacker selection or blocker assignment overlays, the phase/combat state mapping is wrong.
 
-**Confidence:** HIGH — fundamental game theory limitation. Forge's AI is ~57k LOC of heuristics, not tree search, for this exact reason.
+**Confidence:** HIGH -- structurally incompatible phase models visible in both type files.
 
-**Phase:** AI foundation phase. Start with heuristics. Tree search is an optimization for specific decisions, not the core approach.
+**Phase:** Phase 1 (Board Layout). Combat interaction is core to the board.
 
 ---
 
-### Pitfall 9: WASM Threading and Main Thread Blocking
+### Pitfall 8: WASM Serialization Artifacts (Map -> Record Conversion)
 
-**What goes wrong:** Rust's `std::thread` does not work in `wasm32-unknown-unknown`. There is no concept of thread spawn, thread join, or thread-local storage in browser WASM. `Mutex::lock()` will panic on the main thread because the browser main thread cannot block. AI computation or complex resolution sequences that work fine in native Rust will hang or crash in the browser.
+**What goes wrong:** Forge.rs's `WasmAdapter.fetchState()` includes a `convertMapsToRecords` function (wasm-adapter.ts:17-36) because `serde_wasm_bindgen` serializes Rust `HashMap<NonStringKey, V>` as JavaScript `Map`, not as plain objects. The frontend expects bracket access (`state.objects[id]`). If Alchemy components are ported and receive a `Map` instead of a `Record`, property access silently returns `undefined`.
 
 **Prevention:**
-- Design the engine with an async interface from the start: `async fn resolve_next() -> StateUpdate` rather than blocking `fn resolve_all() -> FinalState`.
-- Use Web Workers for AI computation — spawn a separate WASM instance in a worker thread and communicate via `postMessage`.
-- Never use `std::sync::Mutex` in code that targets WASM. Use `std::cell::RefCell` for single-threaded contexts or design around message passing.
-- Use conditional compilation (`#[cfg(target_arch = "wasm32")]`) for platform-specific concurrency code, but minimize the divergence — the core engine logic should be identical.
-- Consider `wasm_thread` crate if you absolutely need thread-like abstractions, but prefer restructuring to async.
+- The `convertMapsToRecords` function already exists and works. Ensure it runs before any component receives state data.
+- However, be aware that this recursive conversion is O(n) in state size. For large game states (30+ permanents), this adds measurable overhead on every `getState()` call. If animations are reading state frequently, this compounds.
+- Consider moving hot-path data access to typed getter functions on the WASM side (`get_object(id) -> GameObject`) rather than serializing the entire `objects` map on every state fetch.
 
-**Detection:** Any use of `std::thread`, `std::sync::Mutex`, or blocking operations in code that compiles to WASM. Lint for these in CI.
+**Detection:** If a component reads `gameState.objects[someId]` and gets `undefined` despite the object existing, `convertMapsToRecords` may not have run, or a nested Map was missed.
 
-**Confidence:** HIGH — confirmed by Rust WASM documentation and `wasm32-unknown-unknown` platform support docs.
+**Confidence:** HIGH -- the `convertMapsToRecords` function in the codebase exists specifically because this problem was already encountered.
 
-**Phase:** Project scaffolding phase. The dual-target (native + WASM) async boundary must be designed before any engine code.
+**Phase:** Phase 1 (Adapter Integration). Existing mitigation, but new components must be aware.
 
 ---
 
-### Pitfall 10: Trigger Ordering and APNAP
+### Pitfall 9: Alchemy-Specific Concepts That Don't Map to MTG
 
-**What goes wrong:** When multiple triggered abilities trigger simultaneously, they go on the stack in APNAP (Active Player, Non-Active Player) order. Within a single player's triggers, that player chooses the order. Implementations that ignore APNAP ordering or don't prompt for trigger ordering produce subtly wrong game states.
+**What goes wrong:** Alchemy components reference concepts that don't exist in MTG and will cause errors or nonsensical UI if ported without removal:
+- **Elements** (`fire | water | earth | air | shadow`) -- used for card frame colors, art paths, particle effects, ambient music. MTG has **mana colors** (WUBRG + colorless) which serve a similar visual role but have different values and meanings.
+- **Energy system** (`currentEnergy`, `maxEnergy`, `energyCap`) -- Alchemy uses a Hearthstone-style mana crystal system. MTG uses land-based mana with a pool that empties each phase.
+- **Learning challenges** -- Alchemy's educational overlay system. Entirely absent from Forge.rs.
+- **Tier system** (`apprentice | alchemist | archmage`) -- Alchemy's difficulty tiers. No MTG equivalent.
+- **Creature types** (`angel | beast | dragon | ...`) -- Alchemy has a fixed enum of 12 types. MTG has 200+ creature subtypes as strings.
+- **Spell speed** (`sorcery | instant`) -- Similar concept but Alchemy treats it as a card property; MTG treats it as a card type.
 
 **Prevention:**
-- Implement APNAP ordering from the start: active player's triggers go on stack first (resolving last), then non-active player's.
-- Within a single player's triggers, if there are 2+, prompt that player to choose the order (or auto-order when order doesn't matter for AI efficiency).
-- Triggers that are "when" vs "whenever" vs "at" have identical mechanical handling — the difference is only in English templating, not timing.
-- Track trigger sources carefully — a trigger that says "whenever a creature enters the battlefield" must record which specific creature entered, because the creature might be gone by resolution time (the "last known information" rule).
+- Before porting any component, grep for Alchemy-specific imports: `@engine/types`, `@engine/cards`, `@engine/effects`, `@engine/keywords`. Every one of these needs replacement.
+- Create a color mapping: `Element -> ManaColor[]`. A mono-red MTG card uses similar visuals to Alchemy's `fire`. Multi-color cards need blended gradients.
+- Remove all `LearningChallengeOverlay`, `AdaptiveLearningToast`, `CoachOverlay`, `TutorialHelpPanel` references. These are Alchemy-only.
+- Remove `HeroHUD` energy display. Replace with mana pool display from Forge.rs.
+- The `getElementColor`, `getElementArtGradient`, `getElementFrameGradient`, `getElementIconPath` utility functions in Alchemy's `cardUtils.ts` need MTG equivalents: `getManaColorGradient(colors: ManaColor[])`, handling mono, dual, tri, and 5-color cards.
 
-**Detection:** Test with multiple ETB triggers from the same player. If they always resolve in a fixed order rather than player-chosen, APNAP is broken.
+**Detection:** If the UI references "energy" or shows element icons, Alchemy concepts haven't been fully replaced.
 
-**Confidence:** HIGH — directly from MTG Comprehensive Rules 603.3b.
+**Confidence:** HIGH -- directly enumerable from Alchemy's type definitions.
 
-**Phase:** Trigger system phase. Bake into the trigger architecture, don't bolt on later.
+**Phase:** Phase 1 (Component Port). Systematic replacement needed for every ported component.
 
 ---
 
-### Pitfall 11: Card Image Loading Performance
+### Pitfall 10: Legal Action Computation Location
 
-**What goes wrong:** Loading 7 cards in hand + 20+ permanents on battlefield from Scryfall (even cached) creates a waterfall of HTTP requests on first game. Without progressive loading, the board appears blank for seconds.
+**What goes wrong:** Alchemy computes `legalActions` on the frontend via `enumerateLegalActions(gameState, humanPlayer)` synchronously after every dispatch (gameStore.ts:172). The result is immediately available for UI rendering (highlighting valid attackers, valid targets, playable cards). Forge.rs computes legal actions on the WASM/engine side -- the frontend doesn't have an `enumerateLegalActions` function. The current Forge.rs store doesn't even have a `legalActions` array.
 
-**Prevention:**
-- Implement a three-tier loading strategy: memory cache → disk cache (IndexedDB for PWA, filesystem for Tauri) → Scryfall API.
-- Show card text/stats immediately with a placeholder frame, load images async.
-- Pre-fetch images for cards in hand and top of library during opponent's turn.
-- Respect Scryfall's rate limits (10 requests/second) — use bulk data download for known sets instead of per-card API calls.
-- For WASM/PWA, use service worker caching for card images.
+**Why it happens:** Alchemy's `CreatureSlots` builds an `actionIndex` (lines 145-213) from `legalActions` to determine which creatures can attack, block, or be targeted. Every card interaction highlight depends on this array. Without it, the ported UI has no way to show valid moves.
 
-**Detection:** First game after fresh install. If the board takes >2 seconds to show card images, the caching strategy needs work.
-
-**Confidence:** MEDIUM — standard image loading patterns, Scryfall-specific rate limits confirmed in their API docs.
-
-**Phase:** UI phase, specifically when card rendering is implemented.
-
----
-
-### Pitfall 12: Targeting and Legality Rechecks
-
-**What goes wrong:** Targets are chosen when a spell/ability is put on the stack, but legality is rechecked on resolution. If all targets become illegal, the spell is countered. If some targets become illegal, the spell resolves with remaining legal targets. Implementations that don't recheck (or that recheck incorrectly) allow spells to target dead creatures or fizzle when they shouldn't.
+**Consequences:** No visual feedback for legal moves. Players can't tell which creatures can attack or block. Targeting shows no valid targets. The UI feels broken even though the engine works.
 
 **Prevention:**
-- Store target references as IDs, not direct pointers/references. Targets may change zones between targeting and resolution.
-- On resolution, re-validate each target independently. Remove illegal targets. If zero remain, counter the spell/ability.
-- "Target" vs "choose" is a critical distinction — "choose" doesn't use the targeting system and isn't affected by hexproof/shroud.
-- Implement the "last known information" rule: if a target left the battlefield, use its characteristics as they were when it last existed in that zone.
+- Add a `getLegalActions()` export to the WASM bridge that returns the set of legal actions for the current player. This must be called after every state update.
+- Store `legalActions` in Forge.rs's `gameStore` alongside `gameState`.
+- The `actionIndex` pattern from Alchemy's `CreatureSlots` is excellent and should be ported directly -- it pre-indexes legal actions by type for O(1) lookup.
+- Be aware that Forge.rs's `GameAction` shape differs from Alchemy's: `DeclareAttackers { data: { attacker_ids: ObjectId[] } }` (batch) vs Alchemy's `DECLARE_ATTACKER { permanentId: string }` (individual). The `actionIndex` will need structural changes.
 
-**Detection:** Cast a removal spell targeting a creature, then destroy that creature in response. If the spell still "resolves" instead of being countered, target rechecking is broken.
+**Detection:** Start a game. If no cards in hand glow as "playable" and no creatures highlight as valid attackers, legal actions aren't being surfaced.
 
-**Confidence:** HIGH — fundamental MTG rule, common source of bugs in every MTG implementation.
+**Confidence:** HIGH -- structural difference between sync frontend validation (Alchemy) and engine-side validation (Forge.rs).
 
-**Phase:** Ability system core phase, when the stack and resolution are implemented.
+**Phase:** Phase 1 (Adapter Integration). Legal actions must be available before any interactive UI works.
 
 ---
 
@@ -273,56 +258,37 @@ Mistakes that cause rewrites or major issues. Each of these has wrecked MTG engi
 
 ---
 
-### Pitfall 13: Webview CSS/Rendering Inconsistencies
+### Pitfall 11: CSS Custom Property Naming Collision
 
-**What goes wrong:** Tauri uses the system webview (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux). CSS grid layouts, animations, and transforms can behave differently across platforms. A battlefield layout that looks correct on macOS may break on Linux.
+**What goes wrong:** Both projects use CSS custom properties for card sizing. Alchemy uses `--card-font-scale`, `--board-card-width`, `--board-card-height`, `--_board-w`, `--_board-h`. Forge.rs uses `--card-h`. If both sets of properties exist during the port, components read the wrong values.
 
-**Prevention:**
-- Test on all three platforms early, not just your development machine.
-- Avoid bleeding-edge CSS features. Stick to well-supported Grid/Flexbox.
-- For animations, use Framer Motion or similar libraries that handle cross-browser differences.
-- Set a minimum webview version requirement and document it.
+**Prevention:** Audit all CSS custom properties in both projects. Standardize on one naming convention. Prefer Alchemy's more descriptive names.
 
-**Detection:** CI that runs visual regression tests across platforms (or at minimum, manual testing on Windows + Linux when macOS is the primary dev platform).
-
-**Confidence:** MEDIUM — known Tauri limitation, severity depends on how complex the UI CSS is.
-
-**Phase:** UI phase. Test cross-platform early.
+**Phase:** Phase 1 (Board Layout). Resolve before any visual rendering.
 
 ---
 
-### Pitfall 14: Mana Payment Complexity
+### Pitfall 12: Player ID Type Mismatch
 
-**What goes wrong:** Mana payment seems simple until hybrid mana ({W/U}), phyrexian mana ({W/P}), generic mana, colorless-only mana ({C}), snow mana, and convoke/delve alternative costs interact. Auto-pay algorithms that work for simple costs break on complex costs.
+**What goes wrong:** Alchemy uses string literal union: `PlayerId = 'player1' | 'player2'`. Forge.rs uses numeric: `PlayerId = number` (0 for player, 1 for opponent). Position registry keys in Alchemy use `player:${playerId}` (e.g., `player:player1`). Forge.rs would produce `player:0`. All position lookups for player targeting will silently fail.
 
-**Prevention:**
-- Implement mana payment as constraint satisfaction, not greedy assignment. Greedy algorithms (pay colored first, then generic) fail when hybrid costs create multiple valid payment paths.
-- Always allow manual mana payment as a fallback — players sometimes want to pay a specific way (e.g., leaving blue mana open for a counterspell).
-- Handle mana abilities specially: they don't use the stack, resolve immediately, and can be activated during mana payment. This creates a recursive payment loop that must terminate.
+**Prevention:** Normalize player IDs at the adapter layer. Either convert numeric IDs to string labels or update all template literals. The position registry pattern is used extensively in the animation system and must be consistent.
 
-**Detection:** Test with hybrid mana costs, triple-color costs with limited lands, and convoke. If auto-pay picks the wrong lands, the algorithm is too greedy.
+**Detection:** Try to target a player with a spell. If the targeting glow doesn't appear on the player's avatar/HUD, the player ID format is wrong in the position registry.
 
-**Confidence:** HIGH — every MTG engine struggles with this. Forge has extensive mana payment logic.
+**Confidence:** HIGH -- directly from type definitions.
 
-**Phase:** Core game state engine (mana pool basics) and ability system (mana abilities).
+**Phase:** Phase 1 (Adapter Layer). One-time mapping.
 
 ---
 
-### Pitfall 15: Serde Serialization Overhead at WASM Boundary
+### Pitfall 13: Animation Store Intermediate Display State
 
-**What goes wrong:** Using `serde` to serialize/deserialize game state between Rust WASM and JavaScript on every state update creates measurable overhead. With MTG's large state, this can add 5-15ms per serialization round-trip.
+**What goes wrong:** Alchemy's animation store tracks `displayHealth`, `displayCreatureDamage`, `previousDisplayHealth`, and `previousDisplayCreatureDamage` for per-step animated health changes. These use Alchemy's `PlayerId` (`'player1' | 'player2'`) as keys and `permanentId` strings for creature damage. Forge.rs uses numeric player IDs and `ObjectId` (number) for permanents. The `applyStepHealthDeltas` and `applyStepCreatureDamage` functions hardcode Alchemy's player ID strings.
 
-**Prevention:**
-- Don't serialize full game state. Expose the WASM engine as an opaque object with getter methods: `engine.get_player_life(player_id)`, `engine.get_battlefield_cards()`.
-- Use `serde_wasm_bindgen` (not JSON-based serde) when serialization is needed — it's significantly smaller and often faster.
-- For the Tauri native path, serialization cost is lower but still matters for large payloads — use Tauri v2's raw byte protocol for bulk data.
-- Profile serialization cost explicitly — it's easy to miss because it's spread across many small calls.
+**Prevention:** The animation store's health/damage tracking functions need the same ID normalization as the rest of the system. If player IDs are mapped at the adapter layer (Pitfall 12), this resolves automatically. But if creature IDs change format (string to number), the damage tracking maps will silently miss updates.
 
-**Detection:** If WASM-to-JS boundary calls appear in performance profiles, serialization is the likely culprit.
-
-**Confidence:** MEDIUM-HIGH — documented in wasm-bindgen issues and serde-wasm-bindgen benchmarks.
-
-**Phase:** WASM integration phase. Design the JS-WASM API surface to minimize serialization from the start.
+**Phase:** Phase 2 (Animation System). Ensure ID consistency across all stores.
 
 ---
 
@@ -330,34 +296,35 @@ Mistakes that cause rewrites or major issues. Each of these has wrecked MTG engi
 
 | Phase Topic | Likely Pitfall | Mitigation |
 |-------------|---------------|------------|
-| Project scaffold | WASM threading model not planned (Pitfall 9) | Design async engine interface before writing engine code |
-| Card parser | Multi-face card format edge cases (Pitfall 7) | Build test matrix of all card face types from Forge's cardsfolder |
-| Core game state | SBA recursive loop (Pitfall 2), ownership model (Pitfall 4) | Atomic batch SBAs, command buffer pattern for mutations |
-| Ability system | Target legality rechecks (Pitfall 12), mana payment (Pitfall 14) | Store target IDs not references, constraint-based mana payment |
-| Trigger system | APNAP ordering (Pitfall 10) | Bake into trigger architecture from day one |
-| Replacement effects | Self-application loops (Pitfall 3) | Per-event application tracking with unique event IDs |
-| Static abilities / layers | Dependency cycles (Pitfall 1) | Port Forge's layer tests first, dependency detection pass |
-| AI foundation | Game tree explosion (Pitfall 8) | Heuristic-first, no deep tree search |
-| React UI | Card image loading (Pitfall 11), cross-platform CSS (Pitfall 13) | Three-tier cache, test on all platforms early |
-| Tauri/WASM integration | IPC bottleneck (Pitfall 6), WASM binary size (Pitfall 5), serde overhead (Pitfall 15) | Delta updates, size budget in CI, opaque handle API |
+| Board Layout (Phase 1) | Fixed slots break with unlimited permanents (1) | Multi-row layout with separate rows per card type, aggressive token stacking |
+| Board Layout (Phase 1) | Phase/combat state shape mismatch (7) | `useCombatState()` hook normalizing both models |
+| Component Adapter (Phase 1) | Type shape mismatch -- flat vs deep (3) | View model mapping layer between `GameObject` and component props |
+| Card Rendering (Phase 1) | Static vs async image loading (5) | `useCardImage` hook with loading skeleton, batch prefetch |
+| Card Rendering (Phase 1) | Alchemy concepts don't map (9) | Systematic element -> mana color replacement, remove learning/energy UI |
+| Adapter Integration (Phase 1) | Legal actions not available (10) | Add `getLegalActions()` to WASM bridge, store in gameStore |
+| Adapter Integration (Phase 1) | Player ID type mismatch (12) | Normalize at adapter layer |
+| Adapter Integration (Phase 1) | WASM Map serialization (8) | Existing `convertMapsToRecords`, consider typed getters |
+| Animation System (Phase 2) | Sync vs async dispatch timing (2) | Serialize dispatch-animate flow, capture positions after async resolves |
+| Animation System (Phase 2) | Event shape mismatch (6) | Event mapping layer before `groupEventsIntoSteps` |
+| Animation System (Phase 2) | Intermediate display state ID formats (13) | Consistent ID normalization |
+| MTG-Specific UI (Phase 3) | No stack/priority/instant UI (4) | New components, not ports. Stack display, priority controls, mana payment modal |
+| Styling (All phases) | CSS custom property collisions (11) | Audit and standardize naming |
 
 ---
 
 ## Sources
 
-- [MTG Layer System Wiki](https://mtg.fandom.com/wiki/Layer) — Layer 613 rules reference
-- [State-Based Actions Wiki](https://mtg.fandom.com/wiki/State-based_action) — SBA timing and checking rules
-- [Replacement Effect Wiki](https://mtg.fandom.com/wiki/Replacement_effect) — Self-application rules
-- [MTG Timing and Priority Wiki](https://mtg.fandom.com/wiki/Timing_and_priority) — Priority system reference
-- [Forge Rules Engine Blog](http://mtgrares.blogspot.com/2009/12/rules-engine-is-pain-in-neck.html) — Original Forge developer on rules engine complexity
-- [Shrinking WASM Size - Rust Book](https://rustwasm.github.io/book/reference/code-size.html) — Official Rust WASM size optimization guide
-- [WASM Size Diet (Medium)](https://medium.com/beyond-localhost/wasm-size-diet-rust-binaries-under-one-megabyte-9104c1bc30b2) — Practical WASM size reduction techniques
-- [Leptos Binary Size Optimization](https://book.leptos.dev/deployment/binary_size.html) — Build profile configuration for WASM
-- [Tauri IPC Discussion #5690](https://github.com/tauri-apps/tauri/discussions/5690) — IPC performance improvements in Tauri v2
-- [Tauri v2 Performance Guide (Oflight)](https://www.oflight.co.jp/en/columns/tauri-v2-performance-bundle-size) — Tauri optimization strategies
-- [Avoiding Serde in Rust WASM (Medium)](https://medium.com/@wl1508/avoiding-using-serde-and-deserde-in-rust-webassembly-c1e4640970ca) — Serialization alternatives
-- [wasm-bindgen Serde Guide](https://rustwasm.github.io/docs/wasm-bindgen/reference/arbitrary-data-with-serde.html) — Official serde-wasm-bindgen docs
-- [wasm32-unknown-unknown Platform Support](https://doc.rust-lang.org/beta/rustc/platform-support/wasm32-unknown-unknown.html) — Threading limitations
-- [wasm_thread crate](https://github.com/chemicstry/wasm_thread) — WASM threading workarounds
-- [min-sized-rust (GitHub)](https://github.com/johnthagen/min-sized-rust) — Comprehensive Rust binary size reduction guide
-- [Forge GitHub Repository](https://github.com/Card-Forge/forge) — Source reference for card format and architecture
+- Alchemy `types.ts` (`/Users/matt/dev/alchemy/src/engine/types.ts`) -- Alchemy type system analysis
+- Alchemy `CreatureSlots.tsx` -- Board layout with fixed slots, stacking logic
+- Alchemy `gameStore.ts` -- Synchronous dispatch pattern
+- Alchemy `animationStore.ts` -- Animation queue and event grouping
+- Alchemy `BoardCard.tsx` -- Card rendering with static art
+- Alchemy `CardFace.tsx` -- Card face rendering with element-based art paths
+- Alchemy `GameBoard.tsx` -- Board layout composition
+- Forge.rs `adapter/types.ts` -- Engine type system (WASM boundary)
+- Forge.rs `wasm-adapter.ts` -- Async dispatch, Map conversion
+- Forge.rs `stores/gameStore.ts` -- Async dispatch pattern
+- Forge.rs `components/board/GameBoard.tsx` -- Existing multi-row battlefield layout
+- Forge.rs `components/board/BattlefieldRow.tsx` -- Dynamic permanent row rendering
+- Forge.rs `services/scryfall.ts` -- Async card image loading with rate limiting
+- Forge.rs `hooks/useCardImage.ts` -- Async image hook with cache
