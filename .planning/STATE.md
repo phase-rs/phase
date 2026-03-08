@@ -10,8 +10,8 @@ progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 14
-  completed_plans: 13
-  percent: 93
+  completed_plans: 14
+  percent: 100
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 
 ## Current Position
 
-Phase: 5 of 8 (Triggers & Combat)
-Plan: 2 of 3 in current phase -- COMPLETE
-Status: Executing Phase 05
-Last activity: 2026-03-08 -- Completed 05-02 (Trigger Pipeline & Engine Integration)
+Phase: 5 of 8 (Triggers & Combat) -- COMPLETE
+Plan: 3 of 3 in current phase -- COMPLETE
+Status: Phase 05 Complete
+Last activity: 2026-03-08 -- Completed 05-03 (Combat System)
 
-Progress: [█████████░] 93% (13/14 plans across phases)
+Progress: [██████████] 100% (14/14 plans across phases)
 
 ## Performance Metrics
 
@@ -65,6 +65,7 @@ Progress: [█████████░] 93% (13/14 plans across phases)
 | Phase 04 P03 | 4min | 2 tasks | 6 files |
 | Phase 05 P01 | 5min | 2 tasks | 9 files |
 | Phase 05 P02 | 5min | 2 tasks | 7 files |
+| Phase 05 P03 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,10 @@ Recent decisions affecting current work:
 - [Phase 05]: APNAP ordering via sort-by-key then reverse for LIFO stack placement
 - [Phase 05]: Unimplemented trigger modes return false (recognized but don't fire)
 - [Phase 05]: Execute param resolves SVars via existing parse_ability
+- [Phase 05]: Auto-order blockers by ObjectId ascending (deterministic default, UI player choice deferred)
+- [Phase 05]: CombatState as Option on GameState -- None outside combat, Some during combat phases
+- [Phase 05]: SBA: deathtouch flag + damage > 0 = lethal; indestructible prevents destruction
+- [Phase 05]: Combat phases auto-skip via has_potential_attackers check
 
 ### Pending Todos
 
@@ -134,6 +139,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T01:14:39Z
-Stopped at: Completed 05-02-PLAN.md
-Resume file: .planning/phases/05-triggers-combat/05-02-SUMMARY.md
+Last session: 2026-03-08T01:22:45Z
+Stopped at: Completed 05-03-PLAN.md
+Resume file: .planning/phases/05-triggers-combat/05-03-SUMMARY.md

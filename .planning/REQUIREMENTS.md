@@ -56,10 +56,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Combat
 
-- [ ] **COMB-01**: Attack/block declaration with legality validation
-- [ ] **COMB-02**: Damage assignment (first strike, double strike, trample, deathtouch, lifelink)
-- [ ] **COMB-03**: Combat keyword interactions (flying/reach, menace, vigilance, haste, indestructible)
-- [ ] **COMB-04**: Death triggers and post-combat state-based actions
+- [x] **COMB-01**: Attack/block declaration with legality validation
+- [x] **COMB-02**: Damage assignment (first strike, double strike, trample, deathtouch, lifelink)
+- [x] **COMB-03**: Combat keyword interactions (flying/reach, menace, vigilance, haste, indestructible)
+- [x] **COMB-04**: Death triggers and post-combat state-based actions
 
 ### Keywords
 
@@ -188,10 +188,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STAT-02 | Phase 6 | Pending |
 | STAT-03 | Phase 6 | Pending |
 | STAT-04 | Phase 6 | Pending |
-| COMB-01 | Phase 5 | Pending |
-| COMB-02 | Phase 5 | Pending |
-| COMB-03 | Phase 5 | Pending |
-| COMB-04 | Phase 5 | Pending |
+| COMB-01 | Phase 5 | Complete |
+| COMB-02 | Phase 5 | Complete |
+| COMB-03 | Phase 5 | Complete |
+| COMB-04 | Phase 5 | Complete |
 | KWRD-01 | Phase 5 | Complete |
 | KWRD-02 | Phase 5 | Complete |
 | UI-01 | Phase 7 | Pending |
