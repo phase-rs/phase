@@ -19,5 +19,9 @@ serde_json = "1"
 name = "coverage-report"
 path = "src/bin/coverage_report.rs"
 
+[[bin]]
+name = "card-data-export"
+path = "src/bin/card_data_export.rs"
+
 [dev-dependencies]
 tempfile = "3"

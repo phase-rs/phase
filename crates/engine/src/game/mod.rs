@@ -1,6 +1,7 @@
 pub mod casting;
 pub mod coverage;
 pub mod combat;
+pub mod deck_loading;
 pub mod combat_damage;
 pub mod effects;
 pub mod engine;
@@ -19,6 +20,7 @@ pub mod triggers;
 pub mod turns;
 pub mod zones;
 
+pub use deck_loading::{load_deck_into_state, DeckEntry, DeckPayload};
 pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineError};
 pub use layers::evaluate_layers;
 pub use game_object::{CounterType, GameObject};
