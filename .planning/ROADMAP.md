@@ -155,13 +155,14 @@ Plans:
   3. Network games support reconnection -- a disconnected player can rejoin and resume the game
   4. At least 60% of current Standard-legal cards are playable with correct behavior
   5. A card coverage dashboard shows which cards and effects are supported vs. missing
-**Plans**: 4 plans
+**Plans**: 5 plans
 
 Plans:
 - [ ] 08-01-PLAN.md — AI foundation: forge-ai crate with legal actions, evaluation, combat AI, difficulty config, card hints
 - [ ] 08-02-PLAN.md — AI search + client integration: alpha-beta search, WASM bindings, AI controller, game setup UI
 - [ ] 08-03-PLAN.md — Multiplayer server: server-core + forge-server crates with WebSocket, sessions, hidden info, reconnect
 - [ ] 08-04-PLAN.md — Multiplayer client + coverage: WebSocketAdapter, online game flow, Standard card coverage analysis
+- [ ] 08-05-PLAN.md — Gap closure: per-card Standard coverage dashboard with build-time pre-computation
 
 ## Progress
 
@@ -177,4 +178,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 5. Triggers & Combat | 3/3 | Complete   | 2026-03-08 |
 | 6. Advanced Rules | 3/3 | Complete   | 2026-03-08 |
 | 7. Platform Bridges & UI | 9/9 | Complete   | 2026-03-08 |
-| 8. AI & Multiplayer | 2/4 | In Progress|  |
+| 8. AI & Multiplayer | 4/5 | In Progress|  |
