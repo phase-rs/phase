@@ -27,6 +27,8 @@ vi.mock("../../wasm/engine_wasm", () => {
   });
   const mockGetGameState = vi.fn().mockReturnValue(null);
 
+  const mockRestoreGameState = vi.fn();
+
   return {
     default: mockInit,
     ping: mockPing,
@@ -34,6 +36,7 @@ vi.mock("../../wasm/engine_wasm", () => {
     initialize_game: mockInitializeGame,
     submit_action: mockSubmitAction,
     get_game_state: mockGetGameState,
+    restore_game_state: mockRestoreGameState,
   };
 });
 
@@ -126,6 +129,61 @@ describe("WasmAdapter", () => {
 
       // Should throw NOT_INITIALIZED after dispose
       await expect(adapter.getState()).rejects.toThrow(AdapterError);
+    });
+  });
+
+  describe("restoreState", () => {
+    it("calls restore_game_state with the provided state", async () => {
+      await adapter.initialize();
+
+      const mockState = {
+        turn_number: 3,
+        active_player: 0,
+        phase: "PreCombatMain",
+        players: [],
+        priority_player: 0,
+      } as unknown as import("../../adapter/types").GameState;
+
+      const { restore_game_state } = await import("../../wasm/engine_wasm");
+      adapter.restoreState(mockState);
+      expect(restore_game_state).toHaveBeenCalledWith(mockState);
+    });
+
+    it("throws if not initialized", () => {
+      const mockState = {} as import("../../adapter/types").GameState;
+      expect(() => adapter.restoreState(mockState)).toThrow(AdapterError);
+    });
+  });
+
+  describe("initialize_game", () => {
+    it("returns events from initialize_game binding", async () => {
+      await adapter.initialize();
+      const events = adapter.initializeGame();
+      expect(events).toEqual([{ type: "GameStarted" }]);
+    });
+  });
+
+  describe("getState returns current game state", () => {
+    it("returns state from get_game_state when available", async () => {
+      const fullState = {
+        turn_number: 5,
+        active_player: 1,
+        phase: "Draw",
+        players: [
+          { id: 0, life: 18, mana_pool: { mana: [] } },
+          { id: 1, life: 20, mana_pool: { mana: [] } },
+        ],
+        priority_player: 1,
+      };
+
+      const { get_game_state } = await import("../../wasm/engine_wasm");
+      vi.mocked(get_game_state).mockReturnValue(fullState);
+
+      await adapter.initialize();
+      const state = await adapter.getState();
+      expect(state.turn_number).toBe(5);
+      expect(state.active_player).toBe(1);
+      expect(state.phase).toBe("Draw");
     });
   });
 
