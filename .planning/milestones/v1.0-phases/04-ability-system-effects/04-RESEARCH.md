@@ -507,7 +507,7 @@ pub fn resolve(
 
 ### Primary (HIGH confidence)
 - Forge Java source at `/Users/matt/dev/forge` -- ability factory, effect implementations, card definitions
-- Existing codebase at `/Users/matt/dev/forge.ts/crates/engine/src/` -- all current types, engine, parser code
+- Existing codebase at `/Users/matt/dev/forge.rs/crates/engine/src/` -- all current types, engine, parser code
 - Forge card definitions (Lightning Bolt, Counterspell, Giant Growth, Execute, Reckless Scholar, Ravaging Blaze)
 
 ### Secondary (MEDIUM confidence)

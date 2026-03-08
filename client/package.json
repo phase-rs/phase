@@ -1,5 +1,5 @@
 {
-  "name": "forge-ts-client",
+  "name": "forge-rs-client",
   "private": true,
   "version": "0.1.0",
   "type": "module",

@@ -1,4 +1,4 @@
-# Forge.ts — MTG Rules Engine & Game Client
+# Forge.rs — MTG Rules Engine & Game Client
 
 ## What This Is
 

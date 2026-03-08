@@ -1,13 +1,13 @@
 # Project Research Summary
 
-**Project:** Forge.ts -- MTG Rules Engine & Game Client
+**Project:** Forge.rs -- MTG Rules Engine & Game Client
 **Domain:** Game engine port (Java to Rust/TypeScript) with dual-target desktop/PWA delivery
 **Researched:** 2026-03-07
 **Confidence:** HIGH
 
 ## Executive Summary
 
-Forge.ts is a port of the Java-based Forge MTG client to a Rust rules engine with a React/TypeScript frontend, targeting both native desktop (Tauri) and browser/tablet (WASM PWA) from a single codebase. The expert approach for this domain is a platform-agnostic pure-function engine using persistent data structures for cheap state cloning (critical for AI tree search), wrapped by thin platform adapters. The Rust ecosystem is mature enough for this: `rpds` for structural sharing, `serde` + `wasm-bindgen` for cross-boundary serialization, and Tauri v2 for the desktop shell. The recommended architecture -- immutable state, enum-based dispatch, command-buffer mutations -- is both idiomatic Rust and a natural fit for MTG's discrete event-driven rules.
+Forge.rs is a port of the Java-based Forge MTG client to a Rust rules engine with a React/TypeScript frontend, targeting both native desktop (Tauri) and browser/tablet (WASM PWA) from a single codebase. The expert approach for this domain is a platform-agnostic pure-function engine using persistent data structures for cheap state cloning (critical for AI tree search), wrapped by thin platform adapters. The Rust ecosystem is mature enough for this: `rpds` for structural sharing, `serde` + `wasm-bindgen` for cross-boundary serialization, and Tauri v2 for the desktop shell. The recommended architecture -- immutable state, enum-based dispatch, command-buffer mutations -- is both idiomatic Rust and a natural fit for MTG's discrete event-driven rules.
 
 The primary risk is rules engine complexity, not technology. MTG has 202 effect types, 137 trigger modes, a 7-layer continuous effect system with intra-layer dependencies, and recursive state-based action checks. These are the systems that have wrecked previous MTG engine projects. The mitigation is to build bottom-up (types, then zones, then stack, then abilities, then triggers, then layers), validate each level with ported Forge tests, and defer the long tail of card coverage until the architecture proves sound. The secondary risk is WASM binary size -- without aggressive optimization from day one, the PWA target becomes unusable.
 

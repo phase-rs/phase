@@ -6,7 +6,7 @@
 
 ## Summary
 
-Phase 7 builds the complete game UI for Forge.ts — a React 19 application rendering an MTG game board with Arena-style visuals, plus a deck builder and platform bridges (PWA + Tauri desktop). The Alchemy reference project at `../alchemy` provides battle-tested patterns for Zustand stores, Framer Motion animations, board layout, glow rings, and touch interaction that should be directly adapted.
+Phase 7 builds the complete game UI for Forge.rs — a React 19 application rendering an MTG game board with Arena-style visuals, plus a deck builder and platform bridges (PWA + Tauri desktop). The Alchemy reference project at `../alchemy` provides battle-tested patterns for Zustand stores, Framer Motion animations, board layout, glow rings, and touch interaction that should be directly adapted.
 
 The engine already exposes all required state via serde-serialized types: `GameState` with `HashMap<ObjectId, GameObject>` for the object store, `WaitingFor` discriminated union (9 variants) driving UI prompts, `GameEvent` tagged union (30+ variants) driving the animation queue and game log, and `GameAction` for user input. The existing `EngineAdapter` interface (4 methods) and `WasmAdapter` provide the transport layer. The primary technical challenges are: (1) mapping engine state to visual components efficiently, (2) Scryfall image caching across platforms, (3) the animation queue coordinating Framer Motion with game state updates, and (4) Tauri IPC adapter.
 
@@ -548,7 +548,7 @@ function parseDeckFile(content: string): { main: DeckEntry[]; sideboard: DeckEnt
 
 ### Primary (HIGH confidence)
 - Alchemy project at `../alchemy` — game store pattern, UI store, animation store, board components, card rendering, Tailwind v4 setup
-- Forge.ts engine types at `crates/engine/src/types/` — GameState, GameObject, WaitingFor, GameEvent, GameAction structures
+- Forge.rs engine types at `crates/engine/src/types/` — GameState, GameObject, WaitingFor, GameEvent, GameAction structures
 - Existing client at `client/src/` — EngineAdapter interface, WasmAdapter, WASM bindings, Vite config
 - [Scryfall Card Imagery docs](https://scryfall.com/docs/api/images) — image sizes and formats
 - [Scryfall API docs](https://scryfall.com/docs/api) — rate limits (50-100ms delay, 10 req/sec)

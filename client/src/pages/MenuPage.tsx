@@ -98,7 +98,7 @@ export function MenuPage() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-8">
-      <h1 className="text-5xl font-bold tracking-tight">Forge.ts</h1>
+      <h1 className="text-5xl font-bold tracking-tight">Forge.rs</h1>
       <p className="text-gray-400">Magic: The Gathering Engine</p>
 
       {/* Deck tile selector */}

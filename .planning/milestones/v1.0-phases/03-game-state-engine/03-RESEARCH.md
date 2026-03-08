@@ -549,7 +549,7 @@ pub enum StackEntryKind {
 
 ### Primary (HIGH confidence)
 - Forge source code at `../forge/forge-game/src/main/java/forge/game/` — PhaseHandler.java, GameAction.java (checkStateEffects), mana/Mana.java, mana/ManaPool.java, mulligan/LondonMulligan.java, zone/MagicStack.java
-- Existing forge.ts codebase at `crates/engine/src/types/` — all type files inspected for current state
+- Existing forge.rs codebase at `crates/engine/src/types/` — all type files inspected for current state
 - MTG Comprehensive Rules (training knowledge) — Rule 117 (priority), 704 (SBAs), 106 (mana), 103 (mulligan), 500-514 (turn structure)
 
 ### Secondary (MEDIUM confidence)

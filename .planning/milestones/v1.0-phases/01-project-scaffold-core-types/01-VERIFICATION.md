@@ -100,7 +100,7 @@ No blockers or warnings. Both placeholder comments are expected per plan scope -
 ### 1. React App WASM Integration
 
 **Test:** Run `cd client && pnpm dev`, open browser
-**Expected:** Page shows "forge.ts" heading, "Engine: Ready", ping result "forge-ts engine ready", and initial game state (2 players, 20 life each)
+**Expected:** Page shows "forge.rs" heading, "Engine: Ready", ping result "forge-rs engine ready", and initial game state (2 players, 20 life each)
 **Why human:** Requires browser with WASM support and visual confirmation
 
 ### 2. WASM Build Script End-to-End

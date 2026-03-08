@@ -1,6 +1,6 @@
 # Technology Stack
 
-**Project:** Forge.ts -- MTG Rules Engine & Game Client
+**Project:** Forge.rs -- MTG Rules Engine & Game Client
 **Researched:** 2026-03-07
 
 ## Recommended Stack
@@ -157,7 +157,7 @@ Cypress runs inside the browser's execution loop, which creates friction when te
 #### Cargo Workspace Layout
 
 ```
-forge.ts/
+forge.rs/
   Cargo.toml              # Workspace root
   crates/
     forge-core/           # Pure game engine (no platform deps)

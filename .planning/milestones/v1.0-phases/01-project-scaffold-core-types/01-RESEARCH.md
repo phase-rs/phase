@@ -123,7 +123,7 @@ pnpm add -D vitest
 
 ### Recommended Project Structure
 ```
-forge-ts/
+forge-rs/
 ├── Cargo.toml                    # Workspace root
 ├── Cargo.lock
 ├── .cargo/
@@ -479,7 +479,7 @@ pub struct ManaPool(engine::types::ManaPool);
 // Simple function to verify WASM integration works
 #[wasm_bindgen]
 pub fn ping() -> String {
-    "forge-ts engine ready".to_string()
+    "forge-rs engine ready".to_string()
 }
 
 #[wasm_bindgen]

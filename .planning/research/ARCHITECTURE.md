@@ -453,7 +453,7 @@ async fn start_game(
 ## Cargo Workspace Structure
 
 ```
-forge.ts/
+forge.rs/
   Cargo.toml                    # workspace root
   crates/
     forge-engine/

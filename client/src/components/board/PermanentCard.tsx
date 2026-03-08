@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { useCallback } from "react";
 
 import { CardImage } from "../card/CardImage.tsx";
+import { COMBAT_TILT_DEGREES } from "../../constants/ui.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -104,7 +105,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
       }}
-      animate={{ rotate: isAttacking ? 15 : 0 }}
+      animate={{ rotate: isAttacking ? COMBAT_TILT_DEGREES : 0 }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
       onMouseEnter={() => hoverObject(objectId)}

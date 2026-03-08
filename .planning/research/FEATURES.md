@@ -14,7 +14,7 @@
 | **Untap.in** | Browser | None (honor system) | No | Browser P2P | All (manual) | All (no enforcement) |
 | **MTGO** | Commercial client | Full enforcement | No | Online matchmaking | All | Complete |
 
-Forge.ts competes most directly with **Java Forge** (same scope, modernized) and **XMage** (rules enforcement + multiplayer). MTGA is the quality bar for UI/UX but is commercial and format-limited.
+Forge.rs competes most directly with **Java Forge** (same scope, modernized) and **XMage** (rules enforcement + multiplayer). MTGA is the quality bar for UI/UX but is commercial and format-limited.
 
 ---
 
@@ -47,7 +47,7 @@ Features users expect. Missing = product feels incomplete.
 
 ## Differentiators
 
-Features that set Forge.ts apart from competitors. Not expected, but valued.
+Features that set Forge.rs apart from competitors. Not expected, but valued.
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
@@ -73,7 +73,7 @@ Features to explicitly NOT build.
 
 | Anti-Feature | Why Avoid | What to Do Instead |
 |--------------|-----------|-------------------|
-| **Collection/economy system** | Forge.ts is open-source with all cards available; paywalls are antithetical to the project | All cards available, no wildcards/packs/currency |
+| **Collection/economy system** | Forge.rs is open-source with all cards available; paywalls are antithetical to the project | All cards available, no wildcards/packs/currency |
 | **Cosmetics store** | Not a revenue product; adds complexity for zero gameplay value | Focus engineering on gameplay and rules correctness |
 | **Draft/Sealed modes (v1)** | Significant UI complexity (pack display, pick tracking, pool building, deck construction timer) beyond core 1v1 | Defer to v2; focus on constructed first |
 | **Quest/Adventure mode (v1)** | Narrative framework, progression systems, unlocks, overworld map -- huge scope | Defer to v2+; Forge's quest mode is beloved but is a separate product layer |
