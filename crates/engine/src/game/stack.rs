@@ -93,8 +93,8 @@ fn execute_effect(
     if ability.api_type.is_empty() {
         return; // No-op ability (used in tests with empty api_type)
     }
-    // Errors from effect handlers are logged but don't crash resolution
-    let _ = effects::resolve_effect(registry, state, ability, events);
+    // Use resolve_ability_chain to support SubAbility/Execute chaining
+    let _ = effects::resolve_ability_chain(state, ability, events, registry, 0);
 }
 
 pub fn stack_is_empty(state: &GameState) -> bool {

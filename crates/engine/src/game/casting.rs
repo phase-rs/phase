@@ -86,6 +86,7 @@ pub fn handle_cast_spell(
 
     // 4. Build ResolvedAbility
     let mana_cost = obj.mana_cost.clone();
+    let svars = obj.svars.clone();
     let mut resolved = ResolvedAbility {
         api_type: ability_def.api_type,
         params: ability_def.params.clone(),
@@ -93,7 +94,7 @@ pub fn handle_cast_spell(
         source_id: object_id,
         controller: player,
         sub_ability: None,
-        svars: HashMap::new(),
+        svars,
     };
 
     // 5. Handle targeting

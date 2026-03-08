@@ -50,6 +50,7 @@ pub struct GameObject {
     pub mana_cost: ManaCost,
     pub keywords: Vec<String>,
     pub abilities: Vec<String>,
+    pub svars: HashMap<String, String>,
     pub color: Vec<ManaColor>,
 
     // Summoning sickness
@@ -87,6 +88,7 @@ impl GameObject {
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),
             abilities: Vec::new(),
+            svars: HashMap::new(),
             color: Vec::new(),
             entered_battlefield_turn: None,
         }
