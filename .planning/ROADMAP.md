@@ -12,13 +12,13 @@ Forge.ts delivers a playable MTG game engine by building bottom-up through the r
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Project Scaffold & Core Types** - Cargo workspace, dual-target build (native + WASM), React skeleton, CI, and core enum/struct definitions
+- [x] **Phase 1: Project Scaffold & Core Types** - Cargo workspace, dual-target build (native + WASM), React skeleton, CI, and core enum/struct definitions (completed 2026-03-07)
 - [x] **Phase 2: Card Parser & Database** - Parse Forge's .txt card format into typed structures with indexing and lazy loading (completed 2026-03-07)
-- [ ] **Phase 3: Game State Engine** - Turn structure, priority, stack, zones, mana system, and state-based actions
+- [x] **Phase 3: Game State Engine** - Turn structure, priority, stack, zones, mana system, and state-based actions (completed 2026-03-08)
 - [x] **Phase 4: Ability System & Effects** - Ability parsing, effect handler registry, targeting, conditions, and top effect types (completed 2026-03-08)
 - [x] **Phase 5: Triggers & Combat** - Event bus, trigger matching, full combat system with keyword abilities (completed 2026-03-08)
-- [ ] **Phase 6: Advanced Rules** - Replacement effects, seven-layer continuous effects, static abilities
-- [ ] **Phase 7: Platform Bridges & UI** - Tauri/WASM adapters, full React game UI, deck builder, Scryfall images, QoL features
+- [x] **Phase 6: Advanced Rules** - Replacement effects, seven-layer continuous effects, static abilities (completed 2026-03-08)
+- [x] **Phase 7: Platform Bridges & UI** - Tauri/WASM adapters, full React game UI, deck builder, Scryfall images, QoL features (completed 2026-03-08)
 - [ ] **Phase 8: AI & Multiplayer** - AI opponent with game tree search, WebSocket multiplayer, Standard card coverage target
 
 ## Phase Details
@@ -155,12 +155,13 @@ Plans:
   3. Network games support reconnection -- a disconnected player can rejoin and resume the game
   4. At least 60% of current Standard-legal cards are playable with correct behavior
   5. A card coverage dashboard shows which cards and effects are supported vs. missing
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 08-01: TBD
-- [ ] 08-02: TBD
-- [ ] 08-03: TBD
+- [ ] 08-01-PLAN.md — AI foundation: forge-ai crate with legal actions, evaluation, combat AI, difficulty config, card hints
+- [ ] 08-02-PLAN.md — AI search + client integration: alpha-beta search, WASM bindings, AI controller, game setup UI
+- [ ] 08-03-PLAN.md — Multiplayer server: server-core + forge-server crates with WebSocket, sessions, hidden info, reconnect
+- [ ] 08-04-PLAN.md — Multiplayer client + coverage: WebSocketAdapter, online game flow, Standard card coverage analysis
 
 ## Progress
 
@@ -171,9 +172,9 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 |-------|----------------|--------|-----------|
 | 1. Project Scaffold & Core Types | 2/2 | Complete | 2026-03-07 |
 | 2. Card Parser & Database | 3/3 | Complete   | 2026-03-07 |
-| 3. Game State Engine | 2/3 | In Progress|  |
+| 3. Game State Engine | 3/3 | Complete   | 2026-03-08 |
 | 4. Ability System & Effects | 3/3 | Complete   | 2026-03-08 |
 | 5. Triggers & Combat | 3/3 | Complete   | 2026-03-08 |
-| 6. Advanced Rules | 1/3 | In Progress|  |
-| 7. Platform Bridges & UI | 8/9 | In Progress|  |
-| 8. AI & Multiplayer | 0/3 | Not started | - |
+| 6. Advanced Rules | 3/3 | Complete   | 2026-03-08 |
+| 7. Platform Bridges & UI | 9/9 | Complete   | 2026-03-08 |
+| 8. AI & Multiplayer | 0/4 | Not started | - |
