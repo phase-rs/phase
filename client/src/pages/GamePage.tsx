@@ -1,4 +1,5 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
@@ -20,8 +21,14 @@ import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { createAIController } from "../game/controllers/aiController.ts";
+import type { AIController } from "../game/controllers/aiController.ts";
 
 export function GamePage() {
+  const [searchParams] = useSearchParams();
+  const mode = searchParams.get("mode");
+  const difficulty = searchParams.get("difficulty") ?? "Medium";
+
   const initGame = useGameStore((s) => s.initGame);
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
@@ -29,6 +36,8 @@ export function GamePage() {
   const reset = useGameStore((s) => s.reset);
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = gameState?.objects;
+  const aiControllerRef = useRef<AIController | null>(null);
+  const [showAiHand, setShowAiHand] = useState(false);
 
   const inspectedCardName =
     inspectedObjectId != null && objects
@@ -40,10 +49,27 @@ export function GamePage() {
   useEffect(() => {
     const adapter = new WasmAdapter();
     initGame(adapter);
+
+    if (mode === "ai") {
+      const controller = createAIController(
+        () => useGameStore.getState().gameState,
+        async (action) => {
+          await useGameStore.getState().dispatch(action);
+        },
+        { difficulty },
+      );
+      aiControllerRef.current = controller;
+      controller.start();
+    }
+
     return () => {
+      if (aiControllerRef.current) {
+        aiControllerRef.current.dispose();
+        aiControllerRef.current = null;
+      }
       reset();
     };
-  }, [initGame, reset]);
+  }, [initGame, reset, mode, difficulty]);
 
   const handleMulliganChoice = useCallback(
     (id: string) => {
@@ -95,6 +121,16 @@ export function GamePage() {
           <FullControlToggle />
         </div>
       </div>
+
+      {/* AI debug toggle */}
+      {mode === "ai" && (
+        <button
+          onClick={() => setShowAiHand((v) => !v)}
+          className="fixed right-2 top-2 z-40 rounded bg-gray-800/80 px-2 py-1 text-xs text-gray-400 hover:text-gray-200"
+        >
+          {showAiHand ? "Hide AI Hand" : "Show AI Hand"}
+        </button>
+      )}
 
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay />
