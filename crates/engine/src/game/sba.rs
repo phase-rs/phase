@@ -1,3 +1,4 @@
+use crate::game::layers;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -11,6 +12,11 @@ const MAX_SBA_ITERATIONS: u32 = 9;
 /// Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS per Forge's convention.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // Evaluate layers before SBA checks so computed P/T is current
+    if state.layers_dirty {
+        layers::evaluate_layers(state);
+    }
+
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
 

@@ -97,7 +97,10 @@ pub fn handle_cast_spell(
         svars,
     };
 
-    // 5. Handle targeting
+    // 5. Handle targeting -- ensure layers evaluated before target legality
+    if state.layers_dirty {
+        super::layers::evaluate_layers(state);
+    }
     if let Some(valid_tgts) = ability_def.params.get("ValidTgts") {
         let legal = targeting::find_legal_targets(state, valid_tgts, player, object_id);
         if legal.is_empty() {

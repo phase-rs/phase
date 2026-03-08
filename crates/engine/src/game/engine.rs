@@ -192,6 +192,11 @@ pub fn apply(
                 waiting_for: wf,
             });
         }
+
+        // Re-evaluate layers if dirty after SBA/trigger processing
+        if state.layers_dirty {
+            super::layers::evaluate_layers(state);
+        }
     }
 
     state.waiting_for = waiting_for.clone();
@@ -1608,5 +1613,281 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), hand_before + 1);
         // Spell in graveyard
         assert!(state.players[0].graveyard.contains(&spell_id));
+    }
+
+    // =========================================================================
+    // Integration tests for replacement + layer + trigger pipeline
+    // =========================================================================
+
+    mod integration {
+        use super::*;
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::combat_damage;
+        use crate::game::layers;
+        use crate::game::replacement;
+        use crate::game::sba;
+        use crate::game::triggers;
+        use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefinition};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+        use std::collections::HashMap;
+
+        fn make_creature(
+            state: &mut GameState,
+            owner: PlayerId,
+            name: &str,
+            power: i32,
+            toughness: i32,
+        ) -> ObjectId {
+            let id = zones::create_object(
+                state,
+                CardId(state.next_object_id),
+                owner,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            obj.toughness = Some(toughness);
+            obj.base_power = Some(power);
+            obj.base_toughness = Some(toughness);
+            obj.timestamp = ts;
+            obj.entered_battlefield_turn = Some(state.turn_number);
+            id
+        }
+
+        #[test]
+        fn test_replacement_redirects_destruction_to_exile() {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+
+            // Create a creature with a "if would die, exile instead" replacement
+            let creature = make_creature(&mut state, PlayerId(0), "Resilient", 2, 2);
+            state.objects.get_mut(&creature).unwrap().replacement_definitions.push(
+                ReplacementDefinition {
+                    event: "Moved".to_string(),
+                    params: HashMap::from([
+                        ("Origin$".to_string(), "Battlefield".to_string()),
+                        ("Destination$".to_string(), "Graveyard".to_string()),
+                        ("NewDestination$".to_string(), "Exile".to_string()),
+                    ]),
+                },
+            );
+
+            // Destroy the creature via the destroy effect handler
+            let ability = crate::types::ability::ResolvedAbility {
+                api_type: "Destroy".to_string(),
+                params: HashMap::new(),
+                targets: vec![crate::types::ability::TargetRef::Object(creature)],
+                source_id: ObjectId(100),
+                controller: PlayerId(1),
+                sub_ability: None,
+                svars: HashMap::new(),
+            };
+            let mut events = Vec::new();
+
+            crate::game::effects::destroy::resolve(&mut state, &ability, &mut events).unwrap();
+
+            // Creature should be in exile, NOT graveyard
+            assert!(state.exile.contains(&creature), "creature should be in exile");
+            assert!(!state.battlefield.contains(&creature), "creature should not be on battlefield");
+            assert!(!state.players[0].graveyard.contains(&creature), "creature should NOT be in graveyard");
+
+            // ReplacementApplied event should have been emitted
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::ReplacementApplied { event_type, .. } if event_type == "Moved"
+            )), "ReplacementApplied event should be emitted");
+        }
+
+        #[test]
+        fn test_layer_evaluation_before_sba() {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+
+            // Create a 2/2 creature
+            let creature = make_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+            // Create a lord that gives all creatures -2/-2
+            let lord = make_creature(&mut state, PlayerId(0), "Death Lord", 1, 1);
+            state.objects.get_mut(&lord).unwrap().static_definitions.push(
+                StaticDefinition {
+                    mode: "Continuous".to_string(),
+                    params: HashMap::from([
+                        ("Affected".to_string(), "Creature.YouCtrl.Other".to_string()),
+                        ("AddPower".to_string(), "-2".to_string()),
+                        ("AddToughness".to_string(), "-2".to_string()),
+                    ]),
+                },
+            );
+
+            // Mark layers dirty so SBA will evaluate them
+            state.layers_dirty = true;
+
+            let mut events = Vec::new();
+            sba::check_state_based_actions(&mut state, &mut events);
+
+            // Layer eval should run first: bear becomes 0/0
+            // SBA should then destroy the bear (0 toughness)
+            assert!(!state.battlefield.contains(&creature), "bear with 0 toughness should be destroyed by SBA");
+            assert!(state.players[0].graveyard.contains(&creature), "bear should be in graveyard");
+
+            // Lord itself should survive (its own buff doesn't apply to itself due to Other filter)
+            // Lord is 1/1 with no debuff applied to self
+            assert!(state.battlefield.contains(&lord), "lord should still be on battlefield");
+        }
+
+        #[test]
+        fn test_combat_damage_through_replacement() {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+            state.active_player = PlayerId(0);
+
+            // Create an attacking creature
+            let attacker = make_creature(&mut state, PlayerId(0), "Attacker", 3, 3);
+
+            // Create a damage prevention replacement on the battlefield
+            let preventer = make_creature(&mut state, PlayerId(1), "Preventer", 0, 1);
+            state.objects.get_mut(&preventer).unwrap().replacement_definitions.push(
+                ReplacementDefinition {
+                    event: "DamageDone".to_string(),
+                    params: HashMap::from([
+                        ("Prevent".to_string(), "True".to_string()),
+                        ("DamageType$".to_string(), "Combat".to_string()),
+                    ]),
+                },
+            );
+
+            // Set up combat: attacker unblocked
+            let mut combat = CombatState::default();
+            combat.attackers = vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }];
+            state.combat = Some(combat);
+
+            let mut events = Vec::new();
+            combat_damage::resolve_combat_damage(&mut state, &mut events);
+
+            // Damage should have been prevented
+            assert_eq!(state.players[1].life, 20, "combat damage should be prevented");
+        }
+
+        #[test]
+        fn test_lord_buff_applies_and_unapplies() {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+
+            let lord = make_creature(&mut state, PlayerId(0), "Lord", 2, 2);
+            state.objects.get_mut(&lord).unwrap().static_definitions.push(
+                StaticDefinition {
+                    mode: "Continuous".to_string(),
+                    params: HashMap::from([
+                        ("Affected".to_string(), "Creature.YouCtrl.Other".to_string()),
+                        ("AddPower".to_string(), "1".to_string()),
+                        ("AddToughness".to_string(), "1".to_string()),
+                    ]),
+                },
+            );
+
+            let bear = make_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+            // Evaluate layers
+            layers::evaluate_layers(&mut state);
+            assert_eq!(state.objects[&bear].power, Some(3), "bear should be 3/3 with lord buff");
+            assert_eq!(state.objects[&bear].toughness, Some(3));
+
+            // Destroy the lord (move to graveyard)
+            let mut events = Vec::new();
+            zones::move_to_zone(&mut state, lord, Zone::Graveyard, &mut events);
+
+            // Re-evaluate layers
+            layers::evaluate_layers(&mut state);
+
+            assert_eq!(state.objects[&bear].power, Some(2), "bear should return to 2/2 without lord");
+            assert_eq!(state.objects[&bear].toughness, Some(2));
+        }
+
+        #[test]
+        fn test_full_pipeline_destroy_with_replacement_and_trigger() {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+
+            // Creature A with "if would die, exile instead" replacement
+            let creature_a = make_creature(&mut state, PlayerId(0), "Resilient A", 2, 2);
+            state.objects.get_mut(&creature_a).unwrap().replacement_definitions.push(
+                ReplacementDefinition {
+                    event: "Moved".to_string(),
+                    params: HashMap::from([
+                        ("Origin$".to_string(), "Battlefield".to_string()),
+                        ("Destination$".to_string(), "Graveyard".to_string()),
+                        ("NewDestination$".to_string(), "Exile".to_string()),
+                    ]),
+                },
+            );
+
+            // Creature B with "when a creature is exiled, draw a card" trigger
+            let creature_b = make_creature(&mut state, PlayerId(0), "Observer B", 1, 1);
+            // Add a card to draw from
+            let draw_card = zones::create_object(
+                &mut state,
+                CardId(99),
+                PlayerId(0),
+                "DrawTarget".to_string(),
+                Zone::Library,
+            );
+            state.objects.get_mut(&creature_b).unwrap().trigger_definitions.push(
+                TriggerDefinition {
+                    mode: "ChangesZone".to_string(),
+                    params: HashMap::from([
+                        ("Origin".to_string(), "Battlefield".to_string()),
+                        ("Destination".to_string(), "Exile".to_string()),
+                        ("ValidCard".to_string(), "Creature".to_string()),
+                        ("Execute".to_string(), "TrigDraw".to_string()),
+                    ]),
+                },
+            );
+            state.objects.get_mut(&creature_b).unwrap().svars.insert(
+                "TrigDraw".to_string(),
+                "SP$ Draw | NumCards$ 1".to_string(),
+            );
+
+            // Destroy creature A
+            let ability = crate::types::ability::ResolvedAbility {
+                api_type: "Destroy".to_string(),
+                params: HashMap::new(),
+                targets: vec![crate::types::ability::TargetRef::Object(creature_a)],
+                source_id: ObjectId(200),
+                controller: PlayerId(1),
+                sub_ability: None,
+                svars: HashMap::new(),
+            };
+            let mut events = Vec::new();
+            crate::game::effects::destroy::resolve(&mut state, &ability, &mut events).unwrap();
+
+            // Creature A should be in exile (replacement redirected)
+            assert!(state.exile.contains(&creature_a), "creature A should be in exile");
+            assert!(!state.players[0].graveyard.contains(&creature_a), "creature A should not be in graveyard");
+
+            // Process triggers -- creature B's trigger should fire on the zone change to exile
+            triggers::process_triggers(&mut state, &events);
+
+            // B's trigger should have been placed on the stack
+            assert!(!state.stack.is_empty(), "trigger should be on stack");
+
+            // The stack entry should be a triggered ability for drawing
+            let top = &state.stack.last().unwrap();
+            match &top.kind {
+                crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => {
+                    assert_eq!(ability.api_type, "Draw", "trigger should resolve Draw");
+                }
+                _ => panic!("expected TriggeredAbility on stack"),
+            }
+        }
     }
 }

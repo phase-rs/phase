@@ -42,13 +42,41 @@ pub fn resolve(
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     match event {
-                        ProposedEvent::Destroy { object_id, .. } => {
-                            zones::move_to_zone(state, object_id, Zone::Graveyard, events);
-                            state.layers_dirty = true;
+                        ProposedEvent::Destroy { object_id, source, .. } => {
+                            // Destruction resolved -- now create a ZoneChange proposal
+                            // so Moved replacements can intercept the actual zone transfer
+                            let zone_proposed = ProposedEvent::ZoneChange {
+                                object_id,
+                                from: Zone::Battlefield,
+                                to: Zone::Graveyard,
+                                cause: source,
+                                applied: HashSet::new(),
+                            };
+                            match replacement::replace_event(state, zone_proposed, events) {
+                                ReplacementResult::Execute(zone_event) => {
+                                    if let ProposedEvent::ZoneChange { object_id: oid, to, .. } = zone_event {
+                                        zones::move_to_zone(state, oid, to, events);
+                                        state.layers_dirty = true;
+                                    }
+                                }
+                                ReplacementResult::Prevented => {}
+                                ReplacementResult::NeedsChoice(player) => {
+                                    let candidate_count = state
+                                        .pending_replacement
+                                        .as_ref()
+                                        .map(|p| p.candidates.len())
+                                        .unwrap_or(0);
+                                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                                        player,
+                                        candidate_count,
+                                    };
+                                    return Ok(());
+                                }
+                            }
                             events.push(GameEvent::CreatureDestroyed { object_id });
                         }
                         ProposedEvent::ZoneChange { object_id, to, .. } => {
-                            // Replacement redirected (e.g., exile instead of destroy)
+                            // Destroy replacement redirected directly to a zone change
                             zones::move_to_zone(state, object_id, to, events);
                             state.layers_dirty = true;
                         }

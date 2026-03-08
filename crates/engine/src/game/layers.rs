@@ -20,14 +20,24 @@ use crate::types::mana::ManaColor;
 /// 4. Apply counter-based P/T modifications (layer 7e).
 /// 5. Clear the layers_dirty flag.
 pub fn evaluate_layers(state: &mut GameState) {
-    // Step 1: Reset computed characteristics to base values
+    // Step 1: Reset computed characteristics to base values.
+    // Only reset fields where base values were explicitly set; objects without
+    // base values (e.g., from older test helpers) retain their current values.
     let bf_ids: Vec<ObjectId> = state.battlefield.clone();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.power = obj.base_power;
-            obj.toughness = obj.base_toughness;
-            obj.keywords = obj.base_keywords.clone();
-            obj.color = obj.base_color.clone();
+            if obj.base_power.is_some() {
+                obj.power = obj.base_power;
+            }
+            if obj.base_toughness.is_some() {
+                obj.toughness = obj.base_toughness;
+            }
+            if !obj.base_keywords.is_empty() {
+                obj.keywords = obj.base_keywords.clone();
+            }
+            if !obj.base_color.is_empty() {
+                obj.color = obj.base_color.clone();
+            }
         }
     }
 
