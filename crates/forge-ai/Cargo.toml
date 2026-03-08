@@ -1,0 +1,12 @@
+[package]
+name = "forge-ai"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+engine = { path = "../engine" }
+serde = { workspace = true }
+rand = "0.9"
+
+[dev-dependencies]
+serde_json = "1"
