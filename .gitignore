@@ -7,6 +7,12 @@ node_modules/
 # WASM output (generated)
 client/src/wasm/
 
+# Build output
+client/dist/
+
+# Coverage
+client/coverage/
+
 # OS
 .DS_Store
 Thumbs.db
