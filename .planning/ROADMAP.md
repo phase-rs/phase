@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 1: Project Scaffold & Core Types** - Cargo workspace, dual-target build (native + WASM), React skeleton, CI, and core enum/struct definitions
 - [x] **Phase 2: Card Parser & Database** - Parse Forge's .txt card format into typed structures with indexing and lazy loading (completed 2026-03-07)
 - [ ] **Phase 3: Game State Engine** - Turn structure, priority, stack, zones, mana system, and state-based actions
-- [ ] **Phase 4: Ability System & Effects** - Ability parsing, effect handler registry, targeting, conditions, and top effect types
+- [x] **Phase 4: Ability System & Effects** - Ability parsing, effect handler registry, targeting, conditions, and top effect types (completed 2026-03-08)
 - [ ] **Phase 5: Triggers & Combat** - Event bus, trigger matching, full combat system with keyword abilities
 - [ ] **Phase 6: Advanced Rules** - Replacement effects, seven-layer continuous effects, static abilities
 - [ ] **Phase 7: Platform Bridges & UI** - Tauri/WASM adapters, full React game UI, deck builder, Scryfall images, QoL features
@@ -166,7 +166,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 1. Project Scaffold & Core Types | 2/2 | Complete | 2026-03-07 |
 | 2. Card Parser & Database | 3/3 | Complete   | 2026-03-07 |
 | 3. Game State Engine | 2/3 | In Progress|  |
-| 4. Ability System & Effects | 0/3 | Not started | - |
+| 4. Ability System & Effects | 3/3 | Complete   | 2026-03-08 |
 | 5. Triggers & Combat | 0/3 | Not started | - |
 | 6. Advanced Rules | 0/2 | Not started | - |
 | 7. Platform Bridges & UI | 0/4 | Not started | - |

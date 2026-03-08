@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in-progress
-stopped_at: Completed 04-01 (Effect Handler Registry)
-last_updated: "2026-03-08T00:05:53Z"
-last_activity: 2026-03-08 -- Completed 04-01 (Effect Handler Registry)
+stopped_at: Completed 04-03 (Sub-ability Chaining & Integration Tests)
+last_updated: "2026-03-08T00:21:16Z"
+last_activity: 2026-03-08 -- Completed 04-03 (Sub-ability Chaining & Integration Tests)
 progress:
   total_phases: 8
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 11
-  completed_plans: 10
-  percent: 91
+  completed_plans: 11
+  percent: 100
 ---
 
 # Project State
@@ -25,17 +25,17 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 
 ## Current Position
 
-Phase: 4 of 8 (Ability System & Effects)
-Plan: 2 of 3 in current phase -- COMPLETE
-Status: Executing Phase 04
-Last activity: 2026-03-08 -- Completed 04-02 (Casting Flow & Targeting)
+Phase: 4 of 8 (Ability System & Effects) -- COMPLETE
+Plan: 3 of 3 in current phase -- COMPLETE
+Status: Phase 04 Complete
+Last activity: 2026-03-08 -- Completed 04-03 (Sub-ability Chaining & Integration Tests)
 
-Progress: [█████████░] 91% (10/11 plans across phases)
+Progress: [██████████] 100% (11/11 plans across phases)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
+- Total plans completed: 11
 - Average duration: 6min
 - Total execution time: 0.9 hours
 
@@ -62,6 +62,7 @@ Progress: [█████████░] 91% (10/11 plans across phases)
 | Phase 03 P03 | 7min | 2 tasks | 7 files |
 | Phase 04 P01 | 5min | 2 tasks | 17 files |
 | Phase 04 P02 | 7min | 2 tasks | 11 files |
+| Phase 04 P03 | 4min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -106,6 +107,10 @@ Recent decisions affecting current work:
 - [Phase 04]: Build effect registry per apply() call -- cheap and avoids static patterns
 - [Phase 04]: Auto-target when exactly one legal target (skip WaitingFor round-trip)
 - [Phase 04]: Effect handler errors don't crash resolution -- graceful degradation
+- [Phase 04]: SVar resolution via lazy lookup in ability.svars HashMap at resolve time
+- [Phase 04]: Conditions default to true when not present or unrecognized (safe fallback)
+- [Phase 04]: Sub-ability inherits svars, source_id, controller from parent
+- [Phase 04]: Card filter added to targeting for stack spell targeting (Counterspell)
 
 ### Pending Todos
 
@@ -118,6 +123,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T00:14:57Z
-Stopped at: Completed 04-02-PLAN.md
-Resume file: .planning/phases/04-ability-system-effects/04-02-SUMMARY.md
+Last session: 2026-03-08T00:21:16Z
+Stopped at: Completed 04-03-PLAN.md
+Resume file: .planning/phases/04-ability-system-effects/04-03-SUMMARY.md
