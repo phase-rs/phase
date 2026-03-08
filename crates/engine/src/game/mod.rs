@@ -11,6 +11,7 @@ pub mod mulligan;
 pub mod priority;
 pub mod replacement;
 pub mod sba;
+pub mod static_abilities;
 pub mod stack;
 pub mod targeting;
 pub mod triggers;
