@@ -1,4 +1,6 @@
 pub mod casting;
+pub mod combat;
+pub mod combat_damage;
 pub mod effects;
 pub mod engine;
 pub mod game_object;

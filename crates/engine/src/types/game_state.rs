@@ -11,6 +11,8 @@ use super::mana::ManaCost;
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
 
+use crate::game::combat::CombatState;
+
 use crate::game::game_object::GameObject;
 
 fn default_rng() -> ChaCha20Rng {
@@ -33,6 +35,8 @@ pub enum WaitingFor {
     MulliganBottomCards { player: PlayerId, count: u8 },
     ManaPayment { player: PlayerId },
     TargetSelection { player: PlayerId, pending_cast: PendingCast },
+    DeclareAttackers { player: PlayerId },
+    DeclareBlockers { player: PlayerId },
     GameOver { winner: Option<PlayerId> },
 }
 
@@ -80,6 +84,9 @@ pub struct GameState {
     #[serde(skip, default = "default_rng")]
     pub rng: ChaCha20Rng,
 
+    // Combat
+    pub combat: Option<CombatState>,
+
     // Game flow
     pub waiting_for: WaitingFor,
     pub lands_played_this_turn: u8,
@@ -113,6 +120,7 @@ impl GameState {
             exile: Vec::new(),
             rng_seed: seed,
             rng: ChaCha20Rng::seed_from_u64(seed),
+            combat: None,
             waiting_for: WaitingFor::Priority {
                 player: PlayerId(0),
             },
@@ -143,6 +151,7 @@ impl PartialEq for GameState {
             && self.stack == other.stack
             && self.exile == other.exile
             && self.rng_seed == other.rng_seed
+            && self.combat == other.combat
             && self.waiting_for == other.waiting_for
             && self.lands_played_this_turn == other.lands_played_this_turn
             && self.max_lands_per_turn == other.max_lands_per_turn
