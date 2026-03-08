@@ -20,7 +20,10 @@ export type WsAdapterEvent =
   | { type: "opponentDisconnected"; graceSeconds: number }
   | { type: "opponentReconnected" }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "reconnecting"; attempt: number; maxAttempts: number }
+  | { type: "reconnected" }
+  | { type: "reconnectFailed" };
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -47,6 +50,10 @@ export class WebSocketAdapter implements EngineAdapter {
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
   private listeners: WsAdapterEventListener[] = [];
+  private reconnectAttempt = 0;
+  private readonly maxReconnectAttempts = 3;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
 
   constructor(
     private readonly serverUrl: string,
@@ -129,6 +136,8 @@ export class WebSocketAdapter implements EngineAdapter {
           );
           this.initResolve = null;
           this.initReject = null;
+        } else if (this.gameState !== null) {
+          this.attemptReconnect();
         }
       };
     });
@@ -162,6 +171,11 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   dispose(): void {
+    this.disposed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -198,9 +212,40 @@ export class WebSocketAdapter implements EngineAdapter {
       });
     };
     this.ws.onmessage = (event) => {
-      this.handleMessage(JSON.parse(event.data as string));
+      const msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
+      if (msg.type === "GameStarted") {
+        this.reconnectAttempt = 0;
+        this.emit({ type: "reconnected" });
+      }
+      this.handleMessage(msg);
+    };
+    this.ws.onclose = () => {
+      if (this.gameState !== null) {
+        this.attemptReconnect();
+      }
+    };
+    this.ws.onerror = () => {
+      // onclose will fire after onerror, which triggers attemptReconnect
     };
     return true;
+  }
+
+  private attemptReconnect(): void {
+    if (this.disposed) return;
+    if (this.reconnectAttempt >= this.maxReconnectAttempts) {
+      this.emit({ type: "reconnectFailed" });
+      return;
+    }
+    this.reconnectAttempt++;
+    const delay = Math.pow(2, this.reconnectAttempt - 1) * 1000;
+    this.emit({
+      type: "reconnecting",
+      attempt: this.reconnectAttempt,
+      maxAttempts: this.maxReconnectAttempts,
+    });
+    this.reconnectTimer = setTimeout(() => {
+      this.tryReconnect();
+    }, delay);
   }
 
   private send(msg: unknown): void {
