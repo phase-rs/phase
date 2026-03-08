@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::ability::TriggerDefinition;
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -51,6 +52,7 @@ pub struct GameObject {
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<String>,
+    pub trigger_definitions: Vec<TriggerDefinition>,
     pub svars: HashMap<String, String>,
     pub color: Vec<ManaColor>,
 
@@ -89,6 +91,7 @@ impl GameObject {
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),
             abilities: Vec::new(),
+            trigger_definitions: Vec::new(),
             svars: HashMap::new(),
             color: Vec::new(),
             entered_battlefield_turn: None,

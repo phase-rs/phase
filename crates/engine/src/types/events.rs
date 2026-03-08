@@ -114,6 +114,17 @@ pub enum GameEvent {
         api_type: String,
         source_id: ObjectId,
     },
+    AttackersDeclared {
+        attacker_ids: Vec<ObjectId>,
+        defending_player: PlayerId,
+    },
+    BlockersDeclared {
+        assignments: Vec<(ObjectId, ObjectId)>,
+    },
+    BecomesTarget {
+        object_id: ObjectId,
+        source_id: ObjectId,
+    },
 }
 
 #[cfg(test)]

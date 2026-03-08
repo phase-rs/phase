@@ -9,6 +9,7 @@ pub mod priority;
 pub mod sba;
 pub mod stack;
 pub mod targeting;
+pub mod triggers;
 pub mod turns;
 pub mod zones;
 
@@ -16,4 +17,5 @@ pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineEr
 pub use game_object::{CounterType, GameObject};
 pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
+pub use triggers::process_triggers;
 pub use zones::{add_to_zone, create_object, move_to_library_position, move_to_zone, remove_from_zone};

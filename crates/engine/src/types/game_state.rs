@@ -55,6 +55,7 @@ pub struct StackEntry {
 pub enum StackEntryKind {
     Spell { card_id: CardId, ability: ResolvedAbility },
     ActivatedAbility { source_id: ObjectId, ability: ResolvedAbility },
+    TriggeredAbility { source_id: ObjectId, ability: ResolvedAbility },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

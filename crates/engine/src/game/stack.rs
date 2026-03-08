@@ -35,6 +35,7 @@ pub fn resolve_top(
     let (ability, is_spell) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (ability.clone(), true),
         StackEntryKind::ActivatedAbility { ability, .. } => (ability.clone(), false),
+        StackEntryKind::TriggeredAbility { ability, .. } => (ability.clone(), false),
     };
 
     // Run fizzle check if the ability has targets
