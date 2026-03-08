@@ -1,7 +1,7 @@
 # Requirements: Forge.rs v1.1 Arena UI
 
 **Defined:** 2026-03-08
-**Core Value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent — with all cards behaving correctly according to MTG comprehensive rules.
+**Core Value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
 
 ## v1.1 Requirements
 
@@ -13,7 +13,7 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [ ] **BOARD-02**: Battlefield renders permanents in dynamic multi-row layout grouped by type (creatures, non-creatures, lands)
 - [ ] **BOARD-03**: Same-name tokens stack with count badge, expandable on click
 - [ ] **BOARD-04**: Same-name lands group together with count badge
-- [ ] **BOARD-05**: Tapped permanents render at 90° rotation
+- [ ] **BOARD-05**: Tapped permanents render at 90 degree rotation
 - [ ] **BOARD-06**: Auras and equipment render visually attached to their host permanent
 - [ ] **BOARD-07**: Counter overlays display on permanents (e.g. +1/+1, loyalty) with count
 - [ ] **BOARD-08**: Persistent damage number displays on damaged creatures
@@ -144,13 +144,71 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (populated during roadmap creation) | | |
+| BOARD-01 | Phase 13 | Pending |
+| BOARD-02 | Phase 13 | Pending |
+| BOARD-03 | Phase 13 | Pending |
+| BOARD-04 | Phase 13 | Pending |
+| BOARD-05 | Phase 13 | Pending |
+| BOARD-06 | Phase 13 | Pending |
+| BOARD-07 | Phase 13 | Pending |
+| BOARD-08 | Phase 13 | Pending |
+| BOARD-09 | Phase 13 | Pending |
+| HAND-01 | Phase 13 | Pending |
+| HAND-02 | Phase 13 | Pending |
+| HAND-03 | Phase 13 | Pending |
+| HAND-04 | Phase 13 | Pending |
+| HUD-01 | Phase 13 | Pending |
+| HUD-02 | Phase 13 | Pending |
+| HUD-03 | Phase 13 | Pending |
+| ZONE-01 | Phase 13 | Pending |
+| ZONE-02 | Phase 13 | Pending |
+| ZONE-03 | Phase 13 | Pending |
+| LOG-01 | Phase 13 | Pending |
+| LOG-02 | Phase 13 | Pending |
+| LOG-03 | Phase 13 | Pending |
+| INTEG-01 | Phase 13 | Pending |
+| INTEG-02 | Phase 13 | Pending |
+| INTEG-03 | Phase 13 | Pending |
+| ANIM-01 | Phase 14 | Pending |
+| ANIM-02 | Phase 14 | Pending |
+| ANIM-03 | Phase 14 | Pending |
+| ANIM-04 | Phase 14 | Pending |
+| ANIM-05 | Phase 14 | Pending |
+| ANIM-06 | Phase 14 | Pending |
+| VFX-01 | Phase 14 | Pending |
+| VFX-02 | Phase 14 | Pending |
+| VFX-03 | Phase 14 | Pending |
+| VFX-04 | Phase 14 | Pending |
+| VFX-05 | Phase 14 | Pending |
+| VFX-06 | Phase 14 | Pending |
+| VFX-07 | Phase 14 | Pending |
+| VFX-08 | Phase 14 | Pending |
+| LOOP-01 | Phase 15 | Pending |
+| LOOP-02 | Phase 15 | Pending |
+| LOOP-03 | Phase 15 | Pending |
+| LOOP-04 | Phase 15 | Pending |
+| AUDIO-01 | Phase 16 | Pending |
+| AUDIO-02 | Phase 16 | Pending |
+| AUDIO-03 | Phase 16 | Pending |
+| AUDIO-04 | Phase 16 | Pending |
+| AUDIO-05 | Phase 16 | Pending |
+| STACK-01 | Phase 17 | Pending |
+| STACK-02 | Phase 17 | Pending |
+| STACK-03 | Phase 17 | Pending |
+| STACK-04 | Phase 17 | Pending |
+| MANA-01 | Phase 17 | Pending |
+| MANA-02 | Phase 17 | Pending |
+| MANA-03 | Phase 17 | Pending |
+| COMBAT-01 | Phase 17 | Pending |
+| COMBAT-02 | Phase 17 | Pending |
+| COMBAT-03 | Phase 17 | Pending |
+| COMBAT-04 | Phase 17 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 46 total
-- Mapped to phases: 0
-- Unmapped: 46 ⚠️
+- Mapped to phases: 46
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-08*
-*Last updated: 2026-03-08 after initial definition*
+*Last updated: 2026-03-08 after roadmap creation*
