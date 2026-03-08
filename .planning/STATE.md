@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Completed 10-01-PLAN.md
-last_updated: "2026-03-08T17:16:32.055Z"
+stopped_at: Phase 11 context gathered
+last_updated: "2026-03-08T18:22:30.866Z"
 last_activity: 2026-03-08 -- Completed 10-01 (Fix Undo/WASM State Sync)
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 10
   total_plans: 35
   completed_plans: 35
@@ -207,6 +207,10 @@ Recent decisions affecting current work:
 - [Phase 09]: Import button opens paste modal with From File option inside
 - [Phase 10]: RNG reconstructed from rng_seed after deserialization for WASM state restore
 
+### Roadmap Evolution
+
+- Phase 11 added: Tech Debt Cleanup: Constants, Combat UI, WASM Tests, CI Coverage
+
 ### Pending Todos
 
 None yet.
@@ -218,6 +222,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T17:13:53.737Z
-Stopped at: Completed 10-01-PLAN.md
-Resume file: None
+Last session: 2026-03-08T18:22:30.862Z
+Stopped at: Phase 11 context gathered
+Resume file: .planning/phases/11-tech-debt-cleanup-constants-combat-ui-wasm-tests-ci-coverage/11-CONTEXT.md
