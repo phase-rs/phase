@@ -27,8 +27,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **ABIL-01**: Ability parser for A:, T:, S:, R: strings into typed structures
 - [ ] **ABIL-02**: SVar resolution (SubAbility$, Execute$, ReplaceWith$)
-- [ ] **ABIL-03**: Cost parser (mana costs, tap, sacrifice, discard, life payment)
-- [ ] **ABIL-04**: Target system with legality validation and rechecks on resolution
+- [x] **ABIL-03**: Cost parser (mana costs, tap, sacrifice, discard, life payment)
+- [x] **ABIL-04**: Target system with legality validation and rechecks on resolution
 - [ ] **ABIL-05**: Condition system (ConditionPresent$, ConditionCompare$)
 - [x] **ABIL-06**: All 202 effect type handlers via registry
 - [ ] **ABIL-07**: Sub-ability chaining
@@ -171,8 +171,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PARSE-04 | Phase 2 | Pending |
 | ABIL-01 | Phase 2 | Pending |
 | ABIL-02 | Phase 4 | Pending |
-| ABIL-03 | Phase 4 | Pending |
-| ABIL-04 | Phase 4 | Pending |
+| ABIL-03 | Phase 4 | Complete |
+| ABIL-04 | Phase 4 | Complete |
 | ABIL-05 | Phase 4 | Pending |
 | ABIL-06 | Phase 4 | Complete |
 | ABIL-07 | Phase 4 | Pending |

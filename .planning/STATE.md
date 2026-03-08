@@ -10,8 +10,8 @@ progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 11
-  completed_plans: 9
-  percent: 82
+  completed_plans: 10
+  percent: 91
 ---
 
 # Project State
@@ -26,18 +26,18 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 ## Current Position
 
 Phase: 4 of 8 (Ability System & Effects)
-Plan: 1 of 3 in current phase -- COMPLETE
+Plan: 2 of 3 in current phase -- COMPLETE
 Status: Executing Phase 04
-Last activity: 2026-03-08 -- Completed 04-01 (Effect Handler Registry)
+Last activity: 2026-03-08 -- Completed 04-02 (Casting Flow & Targeting)
 
-Progress: [████████░░] 82% (9/11 plans across phases)
+Progress: [█████████░] 91% (10/11 plans across phases)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
+- Total plans completed: 10
 - Average duration: 6min
-- Total execution time: 0.8 hours
+- Total execution time: 0.9 hours
 
 **By Phase:**
 
@@ -48,7 +48,7 @@ Progress: [████████░░] 82% (9/11 plans across phases)
 | 03 | 3 | 15min | 5min |
 
 **Recent Trend:**
-- Last 5 plans: 4min, 3min, 4min, 4min, 7min
+- Last 5 plans: 3min, 4min, 4min, 7min, 5min, 7min
 - Trend: stable
 
 *Updated after each plan completion*
@@ -61,6 +61,7 @@ Progress: [████████░░] 82% (9/11 plans across phases)
 | Phase 03 P02 | 4min | 2 tasks | 7 files |
 | Phase 03 P03 | 7min | 2 tasks | 7 files |
 | Phase 04 P01 | 5min | 2 tasks | 17 files |
+| Phase 04 P02 | 7min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -102,6 +103,9 @@ Recent decisions affecting current work:
 - [Phase 04]: Each handler emits EffectResolved event for tracking and trigger detection
 - [Phase 04]: Token objects use CardId(0) convention
 - [Phase 04]: Destroy checks indestructible keyword case-insensitively
+- [Phase 04]: Build effect registry per apply() call -- cheap and avoids static patterns
+- [Phase 04]: Auto-target when exactly one legal target (skip WaitingFor round-trip)
+- [Phase 04]: Effect handler errors don't crash resolution -- graceful degradation
 
 ### Pending Todos
 
@@ -114,6 +118,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T00:05:53Z
-Stopped at: Completed 04-01-PLAN.md
-Resume file: .planning/phases/04-ability-system-effects/04-01-SUMMARY.md
+Last session: 2026-03-08T00:14:57Z
+Stopped at: Completed 04-02-PLAN.md
+Resume file: .planning/phases/04-ability-system-effects/04-02-SUMMARY.md
