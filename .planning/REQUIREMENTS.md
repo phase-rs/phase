@@ -168,8 +168,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PARSE-01 | Phase 2 | Complete |
 | PARSE-02 | Phase 2 | Complete |
 | PARSE-03 | Phase 2 | Complete |
-| PARSE-04 | Phase 2 | Pending |
-| ABIL-01 | Phase 2 | Pending |
+| PARSE-04 | Phase 2 | Complete |
+| ABIL-01 | Phase 2 | Complete |
 | ABIL-02 | Phase 4 | Complete |
 | ABIL-03 | Phase 4 | Complete |
 | ABIL-04 | Phase 4 | Complete |
@@ -230,8 +230,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 - v1 requirements: 57 total
 - Mapped to phases: 57
 - Unmapped: 0
-- Pending (gap closure): 3 (DECK-01, DECK-03, QOL-02)
+- Complete: 57
 
 ---
 *Requirements defined: 2026-03-07*
-*Last updated: 2026-03-07 after roadmap creation*
+*Last updated: 2026-03-08 after milestone audit reconciliation*

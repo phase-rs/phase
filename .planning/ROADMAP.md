@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: Triggers & Combat** - Event bus, trigger matching, full combat system with keyword abilities (completed 2026-03-08)
 - [x] **Phase 6: Advanced Rules** - Replacement effects, seven-layer continuous effects, static abilities (completed 2026-03-08)
 - [x] **Phase 7: Platform Bridges & UI** - Tauri/WASM adapters, full React game UI, deck builder, Scryfall images, QoL features (completed 2026-03-08)
-- [ ] **Phase 8: AI & Multiplayer** - AI opponent with game tree search, WebSocket multiplayer, Standard card coverage target
+- [x] **Phase 8: AI & Multiplayer** - AI opponent with game tree search, WebSocket multiplayer, Standard card coverage target (completed 2026-03-08)
 - [x] **Phase 9: Wire DeckBuilder to Game Engine** - Fix sessionStorage handoff, mode parameter, and WASM deck loading (gap closure) (completed 2026-03-08)
 - [x] **Phase 10: Fix Undo/WASM State Sync** - Add WASM state restoration binding for undo (gap closure) (completed 2026-03-08)
 
@@ -211,6 +211,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 5. Triggers & Combat | 3/3 | Complete   | 2026-03-08 |
 | 6. Advanced Rules | 3/3 | Complete   | 2026-03-08 |
 | 7. Platform Bridges & UI | 9/9 | Complete   | 2026-03-08 |
-| 8. AI & Multiplayer | 4/5 | In Progress|  |
+| 8. AI & Multiplayer | 5/5 | Complete | 2026-03-08 |
 | 9. Wire DeckBuilder to Game Engine | 3/3 | Complete   | 2026-03-08 |
 | 10. Fix Undo/WASM State Sync | 1/1 | Complete    | 2026-03-08 |
