@@ -103,7 +103,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Platform
 
-- [ ] **PLAT-01**: Tauri desktop app (Windows, macOS, Linux)
+- [x] **PLAT-01**: Tauri desktop app (Windows, macOS, Linux)
 - [x] **PLAT-02**: PWA + WASM build for tablet/browser
 - [x] **PLAT-03**: EngineAdapter abstraction (Tauri IPC and WASM bindings)
 - [x] **PLAT-04**: Scryfall card image caching (on-demand with local cache)
@@ -111,9 +111,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Quality of Life
 
-- [ ] **QOL-01**: Undo for unrevealed-information actions
-- [ ] **QOL-02**: Keyboard shortcuts (pass turn, full control, tap all lands)
-- [ ] **QOL-03**: Card coverage dashboard (which cards/effects are supported)
+- [x] **QOL-01**: Undo for unrevealed-information actions
+- [x] **QOL-02**: Keyboard shortcuts (pass turn, full control, tap all lands)
+- [x] **QOL-03**: Card coverage dashboard (which cards/effects are supported)
 
 ## v2 Requirements
 
@@ -217,14 +217,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MP-02 | Phase 8 | Pending |
 | MP-03 | Phase 8 | Pending |
 | MP-04 | Phase 8 | Pending |
-| PLAT-01 | Phase 7 | Pending |
+| PLAT-01 | Phase 7 | Complete |
 | PLAT-02 | Phase 7 | Complete |
 | PLAT-03 | Phase 1 | Complete |
 | PLAT-04 | Phase 7 | Complete |
 | PLAT-05 | Phase 8 | Pending |
-| QOL-01 | Phase 7 | Pending |
-| QOL-02 | Phase 7 | Pending |
-| QOL-03 | Phase 7 | Pending |
+| QOL-01 | Phase 7 | Complete |
+| QOL-02 | Phase 7 | Complete |
+| QOL-03 | Phase 7 | Complete |
 
 **Coverage:**
 - v1 requirements: 57 total
