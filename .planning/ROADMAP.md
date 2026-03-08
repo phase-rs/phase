@@ -192,7 +192,10 @@ Plans:
   1. A WASM binding exists to restore/inject a previous GameState into the thread-local GAME_STATE
   2. `gameStore.undo()` calls the WASM state restoration binding after reverting client-side state
   3. After undo, the next `submitAction` operates on the restored state (no desync)
-**Plans**: 0 plans (pending `/gsd:plan-phase 10`)
+**Plans**: 1 plan
+
+Plans:
+- [ ] 10-01-PLAN.md — Add restore_game_state WASM binding, adapter restoreState, and wire gameStore.undo()
 
 ## Progress
 
@@ -210,4 +213,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 7. Platform Bridges & UI | 9/9 | Complete   | 2026-03-08 |
 | 8. AI & Multiplayer | 4/5 | In Progress|  |
 | 9. Wire DeckBuilder to Game Engine | 3/3 | Complete   | 2026-03-08 |
-| 10. Fix Undo/WASM State Sync | 0/0 | Not Started |  |
+| 10. Fix Undo/WASM State Sync | 0/1 | Not Started |  |
