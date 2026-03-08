@@ -5,7 +5,8 @@ use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
 use engine::game::engine::apply;
-use engine::types::{ActionResult, GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
+use engine::game::{start_game, load_deck_into_state, DeckPayload};
+use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
 use engine::types::player::PlayerId;
 
 use forge_ai::config::{AiDifficulty, Platform, create_config};
@@ -29,19 +30,26 @@ pub fn create_initial_state() -> JsValue {
 }
 
 /// Initialize a new game with two players.
-/// Accepts deck_data as JSON (reserved for future deck loading).
+/// Accepts deck_data as a DeckPayload JSON (or null/undefined for empty libraries).
 /// Returns the initial ActionResult (events + waiting_for).
 #[wasm_bindgen]
-pub fn initialize_game(_deck_data: JsValue) -> JsValue {
-    let state = GameState::new_two_player(42);
-    let waiting_for = state.waiting_for.clone();
+pub fn initialize_game(deck_data: JsValue) -> JsValue {
+    let mut state = GameState::new_two_player(42);
+
+    // Load deck data if provided
+    if !deck_data.is_null() && !deck_data.is_undefined() {
+        if let Ok(payload) = serde_wasm_bindgen::from_value::<DeckPayload>(deck_data) {
+            load_deck_into_state(&mut state, &payload);
+        }
+    }
+
+    // Start the game (auto-detects libraries for mulligan vs skip)
+    let result = start_game(&mut state);
+
     GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
         *gs.borrow_mut() = Some(state);
     });
-    let result = ActionResult {
-        events: vec![GameEvent::GameStarted],
-        waiting_for,
-    };
+
     serde_wasm_bindgen::to_value(&result).unwrap()
 }
 
