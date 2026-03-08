@@ -132,13 +132,17 @@ Plans:
   3. The stack, phase tracker, life totals, and game log are all visible and update in real time as the game progresses
   4. The deck builder allows searching cards, adding/removing them, viewing mana curve, and importing .dck/.dec files
   5. The app runs as both a Tauri desktop app and a PWA in the browser, with touch-optimized layout working well on tablets
-**Plans**: TBD
+**Plans**: 8 plans
 
 Plans:
-- [ ] 07-01: TBD
-- [ ] 07-02: TBD
-- [ ] 07-03: TBD
-- [ ] 07-04: TBD
+- [ ] 07-01-PLAN.md — Foundation: dependencies, Tailwind v4, WASM bindings expansion, Zustand stores, router
+- [ ] 07-02-PLAN.md — Scryfall image pipeline: API client, IndexedDB caching, CardImage, CardPreview zoom
+- [ ] 07-03-PLAN.md — Game board: battlefield layout, PermanentCard visuals, PlayerHand, OpponentHand
+- [ ] 07-04-PLAN.md — Game controls: stack visualization, phase tracker, life totals, game log
+- [ ] 07-05-PLAN.md — Interactive prompts: targeting UI, mana payment, choice modals, replacement ordering
+- [ ] 07-06-PLAN.md — Animation infrastructure: animation overlay, floating numbers, particle VFX, dispatch integration
+- [ ] 07-07-PLAN.md — Deck builder: card search, Scryfall grid, deck list, mana curve, .dck import
+- [ ] 07-08-PLAN.md — QoL + platform: keyboard shortcuts, undo, coverage dashboard, TauriAdapter, PWA
 
 ### Phase 8: AI & Multiplayer
 **Goal**: A player can sit down and play a complete game of Magic against a competent AI opponent, or connect to another player over the network -- with Standard-format card coverage sufficient for real gameplay
@@ -170,5 +174,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 4. Ability System & Effects | 3/3 | Complete   | 2026-03-08 |
 | 5. Triggers & Combat | 3/3 | Complete   | 2026-03-08 |
 | 6. Advanced Rules | 1/3 | In Progress|  |
-| 7. Platform Bridges & UI | 0/4 | Not started | - |
+| 7. Platform Bridges & UI | 0/8 | Not started | - |
 | 8. AI & Multiplayer | 0/3 | Not started | - |
