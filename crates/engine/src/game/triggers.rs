@@ -1198,4 +1198,190 @@ pub mod tests {
         let gain_event = GameEvent::LifeChanged { player_id: PlayerId(0), amount: 3 };
         assert!(!match_life_lost(&gain_event, &params, ObjectId(1), &state));
     }
+
+    // === Integration tests for engine trigger processing ===
+
+    #[test]
+    fn etb_trigger_places_ability_on_stack() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create a permanent with an ETB trigger on battlefield
+        let trigger_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "ETB Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: "ChangesZone".to_string(),
+                params: HashMap::from([
+                    ("Origin".to_string(), "Any".to_string()),
+                    ("Destination".to_string(), "Battlefield".to_string()),
+                    ("Execute".to_string(), "TrigAbility".to_string()),
+                ]),
+            });
+            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+        }
+
+        // Simulate a ZoneChanged event (another creature enters)
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: ObjectId(99),
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Trigger should be on the stack
+        assert_eq!(state.stack.len(), 1);
+        let entry = &state.stack[0];
+        assert_eq!(entry.source_id, trigger_creature);
+        assert_eq!(entry.controller, PlayerId(0));
+        match &entry.kind {
+            StackEntryKind::TriggeredAbility { source_id, ability } => {
+                assert_eq!(*source_id, trigger_creature);
+                assert_eq!(ability.api_type, "Draw");
+                assert_eq!(ability.params.get("NumCards").unwrap(), "1");
+            }
+            _ => panic!("Expected TriggeredAbility on stack"),
+        }
+    }
+
+    #[test]
+    fn multiple_triggers_from_same_event() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create two creatures with ETB triggers, different controllers
+        let c1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 ETB".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&c1).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: "ChangesZone".to_string(),
+                params: HashMap::from([
+                    ("Origin".to_string(), "Any".to_string()),
+                    ("Destination".to_string(), "Battlefield".to_string()),
+                    ("Execute".to_string(), "TrigAbility".to_string()),
+                ]),
+            });
+            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+        }
+
+        let c2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 ETB".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&c2).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.controller = PlayerId(1);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: "ChangesZone".to_string(),
+                params: HashMap::from([
+                    ("Origin".to_string(), "Any".to_string()),
+                    ("Destination".to_string(), "Battlefield".to_string()),
+                    ("Execute".to_string(), "TrigAbility".to_string()),
+                ]),
+            });
+            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+        }
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: ObjectId(99),
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(state.stack.len(), 2);
+        // APNAP: AP (P0) on top, NAP (P1) on bottom
+        assert_eq!(state.stack[state.stack.len() - 1].controller, PlayerId(0));
+        assert_eq!(state.stack[0].controller, PlayerId(1));
+    }
+
+    #[test]
+    fn trigger_with_condition_only_matches_when_met() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create a trigger that only fires for creature zone changes
+        let trigger_src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_src).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: "ChangesZone".to_string(),
+                params: HashMap::from([
+                    ("Origin".to_string(), "Any".to_string()),
+                    ("Destination".to_string(), "Battlefield".to_string()),
+                    ("ValidCard".to_string(), "Creature".to_string()),
+                    ("Execute".to_string(), "TrigAbility".to_string()),
+                ]),
+            });
+            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+        }
+
+        // Create a non-creature that enters
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types.push(CoreType::Land);
+
+        // Land enters -- should NOT trigger (ValidCard = Creature)
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: land,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 0, "Land entering should not trigger creature-only ETB");
+
+        // Now a creature enters -- should trigger
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&creature).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 1, "Creature entering should trigger creature ETB");
+    }
 }

@@ -14,6 +14,7 @@ use super::mana_payment;
 use super::mulligan;
 use super::priority;
 use super::sba;
+use super::triggers;
 use super::turns;
 use super::zones;
 
@@ -105,6 +106,22 @@ pub fn apply(
         // SBA might have set game over
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             let wf = state.waiting_for.clone();
+            return Ok(ActionResult {
+                events,
+                waiting_for: wf,
+            });
+        }
+
+        // Process triggers after action + SBA events
+        let stack_before = state.stack.len();
+        triggers::process_triggers(state, &events);
+
+        // If triggers were placed on stack, grant priority to active player
+        if state.stack.len() > stack_before {
+            let wf = WaitingFor::Priority {
+                player: state.active_player,
+            };
+            state.waiting_for = wf.clone();
             return Ok(ActionResult {
                 events,
                 waiting_for: wf,
