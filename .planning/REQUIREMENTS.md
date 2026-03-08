@@ -91,7 +91,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **AI-01**: Legal action enumeration from any game state
 - [x] **AI-02**: Board evaluation heuristic
 - [x] **AI-03**: Per-card ability decision logic (Forge-level)
-- [ ] **AI-04**: Game tree search (leveraging Rust native performance)
+- [x] **AI-04**: Game tree search (leveraging Rust native performance)
 - [x] **AI-05**: Multiple difficulty levels
 
 ### Multiplayer
@@ -211,7 +211,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AI-01 | Phase 8 | Complete |
 | AI-02 | Phase 8 | Complete |
 | AI-03 | Phase 8 | Complete |
-| AI-04 | Phase 8 | Pending |
+| AI-04 | Phase 8 | Complete |
 | AI-05 | Phase 8 | Complete |
 | MP-01 | Phase 8 | Complete |
 | MP-02 | Phase 8 | Complete |

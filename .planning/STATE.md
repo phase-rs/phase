@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 08-03 (Server Core & WebSocket Server)
-last_updated: "2026-03-08T13:12:58.000Z"
-last_activity: 2026-03-08 -- Completed 08-01 (AI Foundation Crate)
+stopped_at: Completed 08-02 (AI Search & Game Setup)
+last_updated: "2026-03-08T13:22:34.159Z"
+last_activity: 2026-03-08 -- Completed 08-03 (Server Core & WebSocket Server)
 progress:
   total_phases: 8
   completed_phases: 7
-  total_plans: 29
-  completed_plans: 27
-  percent: 93
+  total_plans: 30
+  completed_plans: 29
+  percent: 100
 ---
 
 # Project State
@@ -80,6 +80,7 @@ Progress: [██████████] 100% (29/29 plans across phases)
 | Phase 07 P08 | 4min | 2 tasks | 13 files |
 | Phase 08 P01 | 5min | 2 tasks | 8 files |
 | Phase 08 P03 | 5min | 2 tasks | 8 files |
+| Phase 08 P02 | 6min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -183,6 +184,8 @@ Recent decisions affecting current work:
 - [Phase 08]: tokio::select loop for WebSocket bidirectional handling (simpler than futures_util split)
 - [Phase 08]: filter_state_for_player hides both players' libraries to prevent ordering info leaks
 - [Phase 08]: ReconnectManager composite key (game_code:player_id) for per-player disconnect tracking
+- [Phase 08]: Combat decisions bypass tree search, delegate to combat_ai
+- [Phase 08]: AI controller uses zustand subscribeWithSelector for reactive turn detection
 
 ### Pending Todos
 
@@ -195,6 +198,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T13:12:58.000Z
-Stopped at: Completed 08-03 (Server Core & WebSocket Server)
-Resume file: .planning/phases/08-ai-multiplayer/08-03-SUMMARY.md
+Last session: 2026-03-08T13:22:34.157Z
+Stopped at: Completed 08-02 (AI Search & Game Setup)
+Resume file: None
