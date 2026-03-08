@@ -1,17 +1,7 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { EngineAdapter, GameAction, GameEvent, GameState, WaitingFor } from "../adapter/types";
-
-/** Action types that don't reveal hidden information and are safe to undo. */
-const UNDOABLE_ACTIONS = new Set([
-  "PassPriority",
-  "DeclareAttackers",
-  "DeclareBlockers",
-  "ActivateAbility",
-]);
-
-/** Maximum number of undo history entries. */
-const MAX_UNDO_HISTORY = 5;
+import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 
 interface GameStoreState {
   gameState: GameState | null;

@@ -1,9 +1,7 @@
 import { get_ai_action } from "../../wasm/engine_wasm";
 import type { GameAction, GameState } from "../../adapter/types";
+import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, AI_PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
-
-const AI_BASE_DELAY = 800;
-const AI_DELAY_VARIANCE = 400;
 
 export interface AIControllerConfig {
   difficulty: string;
@@ -38,9 +36,8 @@ export function createAIController(
     if (waitingFor.type === "GameOver") return;
 
     // Check if it's the AI's turn (player 1)
-    const aiPlayer = 1;
     if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
-    if (waitingFor.data.player !== aiPlayer) return;
+    if (waitingFor.data.player !== AI_PLAYER_ID) return;
 
     scheduleAction();
   }
@@ -49,7 +46,7 @@ export function createAIController(
     if (pending) return;
     pending = true;
 
-    const delay = AI_BASE_DELAY + Math.random() * AI_DELAY_VARIANCE;
+    const delay = AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
     timeoutId = setTimeout(async () => {
       try {
         const actionValue = get_ai_action(config.difficulty);

@@ -4,20 +4,6 @@ import { useGameStore } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 
 /**
- * Unrevealed-information action types that are safe to undo.
- * These don't reveal hidden information (unlike CardDrawn).
- */
-const UNDOABLE_ACTIONS = new Set([
-  "PassPriority",
-  "DeclareAttackers",
-  "DeclareBlockers",
-  "ActivateAbility",
-]);
-
-/** Maximum number of undo history entries to keep. */
-const MAX_UNDO_HISTORY = 5;
-
-/**
  * Registers global keyboard shortcuts for the game.
  * - Space/Enter: Pass priority (when waiting for Priority)
  * - F: Toggle full control
@@ -105,5 +91,3 @@ export function useKeyboardShortcuts(): void {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 }
-
-export { UNDOABLE_ACTIONS, MAX_UNDO_HISTORY };
