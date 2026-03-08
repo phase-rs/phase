@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::ability::TargetRef;
 use super::identifiers::{CardId, ObjectId};
 use super::mana::{ManaColor, ManaType};
 use super::phase::Phase;
@@ -79,6 +80,40 @@ pub enum GameEvent {
     GameOver {
         winner: Option<PlayerId>,
     },
+    DamageDealt {
+        source_id: ObjectId,
+        target: TargetRef,
+        amount: u32,
+    },
+    SpellCountered {
+        object_id: ObjectId,
+        countered_by: ObjectId,
+    },
+    CounterAdded {
+        object_id: ObjectId,
+        counter_type: String,
+        count: u32,
+    },
+    CounterRemoved {
+        object_id: ObjectId,
+        counter_type: String,
+        count: u32,
+    },
+    TokenCreated {
+        object_id: ObjectId,
+        name: String,
+    },
+    CreatureDestroyed {
+        object_id: ObjectId,
+    },
+    PermanentSacrificed {
+        object_id: ObjectId,
+        player_id: PlayerId,
+    },
+    EffectResolved {
+        api_type: String,
+        source_id: ObjectId,
+    },
 }
 
 #[cfg(test)]
@@ -129,6 +164,30 @@ mod tests {
     #[test]
     fn game_over_without_winner_roundtrips() {
         let event = GameEvent::GameOver { winner: None };
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn damage_dealt_event_roundtrips() {
+        use crate::types::ability::TargetRef;
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn effect_resolved_event_roundtrips() {
+        let event = GameEvent::EffectResolved {
+            api_type: "DealDamage".to_string(),
+            source_id: ObjectId(5),
+        };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
         assert_eq!(event, deserialized);

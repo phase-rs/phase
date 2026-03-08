@@ -10,7 +10,7 @@ pub mod phase;
 pub mod player;
 pub mod zones;
 
-pub use ability::{AbilityDefinition, AbilityKind, ReplacementDefinition, StaticDefinition, TriggerDefinition};
+pub use ability::{AbilityDefinition, AbilityKind, EffectError, ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetRef, TriggerDefinition};
 pub use card::{CardFace, CardLayout, CardRules};
 pub use card_type::{CardType, CoreType, Supertype};
 pub use actions::GameAction;
