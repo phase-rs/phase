@@ -1,6 +1,5 @@
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 /// Returns a filtered copy of the game state for the given player.
 /// Hides opponent hand contents and library order/contents for both players.
@@ -60,6 +59,7 @@ mod tests {
     use super::*;
     use engine::game::zones::create_object;
     use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
 
     fn setup_state() -> GameState {
         let mut state = GameState::new_two_player(42);

@@ -1,0 +1,17 @@
+[package]
+name = "forge-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "forge-server"
+path = "src/main.rs"
+
+[dependencies]
+server-core = { path = "../server-core" }
+engine = { path = "../engine" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+serde = { workspace = true }
+serde_json = "1"
