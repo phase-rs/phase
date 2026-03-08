@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { parseDeckFile, exportDeckFile } from '../deckParser';
+import {
+  parseDeckFile,
+  exportDeckFile,
+  parseMtgaDeck,
+  detectAndParseDeck,
+} from '../deckParser';
 
 describe('deckParser', () => {
   it('parses simple deck: "4 Lightning Bolt" -> { count: 4, name: "Lightning Bolt" }', () => {
@@ -91,5 +96,106 @@ describe('deckParser', () => {
     const result = parseDeckFile(content);
     expect(result.main).toHaveLength(2);
     expect(result.sideboard).toEqual([]);
+  });
+});
+
+describe('parseMtgaDeck', () => {
+  it('parses MTGA format lines into main deck', () => {
+    const content = '4 Lightning Bolt (FDN) 123\n2 Counterspell (MKM) 56';
+    const result = parseMtgaDeck(content);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+      { count: 2, name: 'Counterspell' },
+    ]);
+    expect(result.sideboard).toEqual([]);
+  });
+
+  it('puts cards after blank line into sideboard', () => {
+    const content = `4 Lightning Bolt (FDN) 123
+2 Mountain (FDN) 280
+
+3 Red Elemental Blast (LEA) 166`;
+    const result = parseMtgaDeck(content);
+    expect(result.main).toHaveLength(2);
+    expect(result.sideboard).toEqual([
+      { count: 3, name: 'Red Elemental Blast' },
+    ]);
+  });
+
+  it('ignores empty lines at start/end and comment lines', () => {
+    const content = `
+# This is a comment
+4 Lightning Bolt (FDN) 123
+# Another comment
+2 Mountain (FDN) 280
+`;
+    const result = parseMtgaDeck(content);
+    expect(result.main).toHaveLength(2);
+  });
+
+  it('handles "Deck" and "Sideboard" header labels', () => {
+    const content = `Deck
+4 Lightning Bolt (FDN) 123
+2 Mountain (FDN) 280
+Sideboard
+3 Red Elemental Blast (LEA) 166`;
+    const result = parseMtgaDeck(content);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+      { count: 2, name: 'Mountain' },
+    ]);
+    expect(result.sideboard).toEqual([
+      { count: 3, name: 'Red Elemental Blast' },
+    ]);
+  });
+
+  it('handles "Companion" header label', () => {
+    const content = `Companion
+1 Lurrus of the Dream-Den (IKO) 226
+
+Deck
+4 Lightning Bolt (FDN) 123`;
+    const result = parseMtgaDeck(content);
+    // Companion section treated as main until blank line or Deck header
+    expect(result.main).toHaveLength(2);
+  });
+
+  it('handles multi-word card names with special characters', () => {
+    const content = "2 Lim-Dul's Vault (ALL) 107";
+    const result = parseMtgaDeck(content);
+    expect(result.main).toEqual([
+      { count: 2, name: "Lim-Dul's Vault" },
+    ]);
+  });
+});
+
+describe('detectAndParseDeck', () => {
+  it('auto-detects MTGA format and parses correctly', () => {
+    const mtgaContent = '4 Lightning Bolt (FDN) 123\n2 Counterspell (MKM) 56';
+    const result = detectAndParseDeck(mtgaContent);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+      { count: 2, name: 'Counterspell' },
+    ]);
+  });
+
+  it('auto-detects .dck format and parses correctly', () => {
+    const dckContent = `[Main]
+4 Lightning Bolt
+2 Mountain`;
+    const result = detectAndParseDeck(dckContent);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+      { count: 2, name: 'Mountain' },
+    ]);
+  });
+
+  it('detects plain "count CardName" as .dck format', () => {
+    const plainContent = '4 Lightning Bolt\n2 Mountain';
+    const result = detectAndParseDeck(plainContent);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+      { count: 2, name: 'Mountain' },
+    ]);
   });
 });
