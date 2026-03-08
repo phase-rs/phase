@@ -175,5 +175,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 | 4. Ability System & Effects | 3/3 | Complete   | 2026-03-08 |
 | 5. Triggers & Combat | 3/3 | Complete   | 2026-03-08 |
 | 6. Advanced Rules | 1/3 | In Progress|  |
-| 7. Platform Bridges & UI | 4/9 | In Progress|  |
+| 7. Platform Bridges & UI | 8/9 | In Progress|  |
 | 8. AI & Multiplayer | 0/3 | Not started | - |
