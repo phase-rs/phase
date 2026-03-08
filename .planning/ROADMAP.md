@@ -98,12 +98,12 @@ Plans:
   3. ETB triggers fire when a creature enters the battlefield and are placed on the stack with correct APNAP ordering
   4. Death triggers fire when creatures die in combat, and post-combat state-based actions clean up the battlefield
   5. 50+ keyword abilities are registered and functional (flying, haste, hexproof, ward, flashback, kicker, cycling, etc.)
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 05-01: TBD
-- [ ] 05-02: TBD
-- [ ] 05-03: TBD
+- [ ] 05-01-PLAN.md — Keyword enum (50+ variants), TriggerMode enum (137 variants), GameObject keyword migration
+- [ ] 05-02-PLAN.md — Trigger matching pipeline, APNAP ordering, 137 trigger mode handlers, engine integration
+- [ ] 05-03-PLAN.md — Combat system: CombatState, attack/block legality, damage resolution, keyword interactions
 
 ### Phase 6: Advanced Rules
 **Goal**: The engine handles MTG's most complex rule interactions -- replacement effects intercept events before they happen, continuous effects are evaluated through the seven-layer system, and static abilities modify the game state correctly
