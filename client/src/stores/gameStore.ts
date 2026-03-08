@@ -84,10 +84,14 @@ export const useGameStore = create<GameStore>()(
     },
 
     undo: () => {
-      const { stateHistory } = get();
-      if (stateHistory.length === 0) return;
+      const { stateHistory, adapter } = get();
+      if (stateHistory.length === 0 || !adapter) return;
 
       const previous = stateHistory[stateHistory.length - 1];
+
+      // Sync WASM engine state with the restored client state
+      adapter.restoreState(previous);
+
       set({
         gameState: previous,
         waitingFor: previous.waiting_for,

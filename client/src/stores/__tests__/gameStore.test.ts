@@ -35,6 +35,7 @@ function createMockAdapter(state: GameState): EngineAdapter {
     initializeGame: vi.fn().mockResolvedValue([]),
     submitAction: vi.fn().mockResolvedValue([]),
     getState: vi.fn().mockResolvedValue(state),
+    restoreState: vi.fn(),
     dispose: vi.fn(),
   };
 }
@@ -141,12 +142,45 @@ describe("gameStore", () => {
     expect(store.gameState?.turn_number).toBe(1);
     expect(store.stateHistory).toHaveLength(0);
     expect(store.events).toEqual([]);
+    expect(adapter.restoreState).toHaveBeenCalledWith(state1);
   });
 
-  it("undo is unavailable when stateHistory is empty", () => {
-    const original = useGameStore.getState().gameState;
+  it("undo calls adapter.restoreState with previous state", async () => {
+    const state1 = createMockState({ turn_number: 1 });
+    const state2 = createMockState({ turn_number: 2 });
+    const adapter = createMockAdapter(state1);
+
+    await act(() => useGameStore.getState().initGame(adapter));
+    (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(state2);
+
+    await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
+
     act(() => useGameStore.getState().undo());
-    expect(useGameStore.getState().gameState).toBe(original);
+
+    expect(adapter.restoreState).toHaveBeenCalledOnce();
+    expect(adapter.restoreState).toHaveBeenCalledWith(state1);
+  });
+
+  it("undo with no adapter does nothing", () => {
+    // Set stateHistory but no adapter
+    act(() => {
+      useGameStore.setState({
+        stateHistory: [createMockState()],
+        adapter: null,
+      });
+    });
+    act(() => useGameStore.getState().undo());
+    // Should not crash; stateHistory unchanged
+    expect(useGameStore.getState().stateHistory).toHaveLength(1);
+  });
+
+  it("undo is unavailable when stateHistory is empty", async () => {
+    const state = createMockState();
+    const adapter = createMockAdapter(state);
+    await act(() => useGameStore.getState().initGame(adapter));
+
+    act(() => useGameStore.getState().undo());
+    expect(adapter.restoreState).not.toHaveBeenCalled();
   });
 
   it("limits stateHistory to MAX_UNDO_HISTORY entries", async () => {
