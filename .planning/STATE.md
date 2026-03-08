@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Phase 12 context gathered
-last_updated: "2026-03-08T19:50:31.074Z"
-last_activity: 2026-03-08 -- Completed 11-03 (WASM Tests, Component Tests, CI Coverage)
+stopped_at: Completed 12-01-PLAN.md
+last_updated: "2026-03-08T20:11:12.857Z"
+last_activity: 2026-03-08 -- Completed 12-01 (Server-Side Deck Resolution)
 progress:
   total_phases: 12
-  completed_phases: 11
+  completed_phases: 12
   total_plans: 40
   completed_plans: 40
   percent: 100
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 Phase: 12 of 12 (Multiplayer Wiring & Final Cleanup)
 Plan: 2 of 2 in current phase (12-02 complete)
 Status: Completed
-Last activity: 2026-03-08 -- Completed 12-02 (WebSocket Reconnection Wiring)
+Last activity: 2026-03-08 -- Completed 12-01 (Server-Side Deck Resolution)
 
 Progress: [██████████] 100% (40/40 plans across phases)
 
@@ -90,6 +90,7 @@ Progress: [██████████] 100% (40/40 plans across phases)
 | Phase 11 P01 | 2min | 2 tasks | 7 files |
 | Phase 11 P02 | 3min | 2 tasks | 7 files |
 | Phase 11 P03 | 4 | 2 tasks | 7 files |
+| Phase 12 P01 | 3min | 2 tasks | 5 files |
 | Phase 12 P02 | 2min | 2 tasks | 2 files |
 
 ## Accumulated Context
@@ -216,6 +217,8 @@ Recent decisions affecting current work:
 - [Phase 11]: Coverage thresholds set at 10% lines/functions (current baseline ~11%) to prevent regression without blocking on untested UI components
 - [Phase 11]: @vitest/coverage-v8@3.x pinned to match vitest@3.x (v4 incompatible)
 - [Phase 12]: Reconnect attempts max at 3 with exponential backoff (1s, 2s, 4s), disposed flag prevents reconnect on intentional navigation
+- [Phase 12]: CardDatabase wrapped in Arc (no Mutex) since read-only after startup
+- [Phase 12]: resolve_deck in server-core for testability; SessionManager accepts Vec<DeckEntry> not DeckData
 
 ### Roadmap Evolution
 
@@ -232,6 +235,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T20:08:00Z
-Stopped at: Completed 12-02-PLAN.md
-Resume file: .planning/phases/12-multiplayer-wiring-final-cleanup/12-02-SUMMARY.md
+Last session: 2026-03-08T20:11:12.854Z
+Stopped at: Completed 12-01-PLAN.md
+Resume file: None

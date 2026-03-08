@@ -23,7 +23,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 9: Wire DeckBuilder to Game Engine** - Fix sessionStorage handoff, mode parameter, and WASM deck loading (gap closure) (completed 2026-03-08)
 - [x] **Phase 10: Fix Undo/WASM State Sync** - Add WASM state restoration binding for undo (gap closure) (completed 2026-03-08)
 - [x] **Phase 11: Tech Debt Cleanup** - Constants consolidation, combat UI overlay, card-data.json modal, WASM tests, CI coverage enforcement (completed 2026-03-08)
-- [ ] **Phase 12: Multiplayer Wiring & Final Cleanup** - Wire server deck loading, client reconnect, remove orphaned endpoint, fix remaining tech debt (gap closure)
+- [x] **Phase 12: Multiplayer Wiring & Final Cleanup** - Wire server deck loading, client reconnect, remove orphaned endpoint, fix remaining tech debt (gap closure) (completed 2026-03-08)
 
 ## Phase Details
 
@@ -251,4 +251,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 9. Wire DeckBuilder to Game Engine | 3/3 | Complete   | 2026-03-08 |
 | 10. Fix Undo/WASM State Sync | 1/1 | Complete    | 2026-03-08 |
 | 11. Tech Debt Cleanup | 3/3 | Complete    | 2026-03-08 |
-| 12. Multiplayer Wiring & Final Cleanup | 1/2 | In Progress|  |
+| 12. Multiplayer Wiring & Final Cleanup | 2/2 | Complete   | 2026-03-08 |
