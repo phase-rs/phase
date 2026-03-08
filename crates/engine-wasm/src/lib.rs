@@ -1,16 +1,18 @@
 use std::cell::RefCell;
 
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
 use engine::game::engine::apply;
-use engine::game::{start_game, load_deck_into_state, DeckPayload};
-use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
+use engine::game::{load_deck_into_state, start_game, DeckPayload};
 use engine::types::player::PlayerId;
+use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
 
-use forge_ai::config::{AiDifficulty, Platform, create_config};
 use forge_ai::choose_action;
+use forge_ai::config::{create_config, AiDifficulty, Platform};
 
 thread_local! {
     static GAME_STATE: RefCell<Option<GameState>> = const { RefCell::new(None) };
@@ -56,8 +58,8 @@ pub fn initialize_game(deck_data: JsValue) -> JsValue {
 /// Submit a game action and return the ActionResult (events + waiting_for).
 #[wasm_bindgen]
 pub fn submit_action(action: JsValue) -> JsValue {
-    let action: GameAction = serde_wasm_bindgen::from_value(action)
-        .expect("Failed to deserialize GameAction");
+    let action: GameAction =
+        serde_wasm_bindgen::from_value(action).expect("Failed to deserialize GameAction");
 
     GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
         let mut state_ref = gs.borrow_mut();
@@ -84,6 +86,19 @@ pub fn get_game_state() -> JsValue {
             None => JsValue::NULL,
         }
     })
+}
+
+/// Restore the game state from a serialized GameState (for undo support).
+/// Replaces the thread-local GAME_STATE and reconstructs the RNG from seed.
+#[wasm_bindgen]
+pub fn restore_game_state(state_js: JsValue) -> Result<(), JsValue> {
+    let mut state: GameState = serde_wasm_bindgen::from_value(state_js)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
+    state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
+    GAME_STATE.with(|gs| {
+        *gs.borrow_mut() = Some(state);
+    });
+    Ok(())
 }
 
 /// Get the AI's chosen action for the current game state.
@@ -127,15 +142,35 @@ pub fn get_ai_action(difficulty: &str) -> Result<JsValue, JsValue> {
 #[serde(tag = "type", content = "data")]
 pub enum WasmGameAction {
     PassPriority,
-    PlayLand { card_id: u64 },
-    CastSpell { card_id: u64, targets: Vec<u64> },
-    ActivateAbility { source_id: u64, ability_index: usize },
-    DeclareAttackers { attacker_ids: Vec<u64> },
-    DeclareBlockers { assignments: Vec<(u64, u64)> },
-    MulliganDecision { keep: bool },
-    TapLandForMana { object_id: u64 },
-    SelectCards { cards: Vec<u64> },
-    ChooseReplacement { index: usize },
+    PlayLand {
+        card_id: u64,
+    },
+    CastSpell {
+        card_id: u64,
+        targets: Vec<u64>,
+    },
+    ActivateAbility {
+        source_id: u64,
+        ability_index: usize,
+    },
+    DeclareAttackers {
+        attacker_ids: Vec<u64>,
+    },
+    DeclareBlockers {
+        assignments: Vec<(u64, u64)>,
+    },
+    MulliganDecision {
+        keep: bool,
+    },
+    TapLandForMana {
+        object_id: u64,
+    },
+    SelectCards {
+        cards: Vec<u64>,
+    },
+    ChooseReplacement {
+        index: usize,
+    },
 }
 
 #[derive(Tsify, Serialize, Deserialize)]

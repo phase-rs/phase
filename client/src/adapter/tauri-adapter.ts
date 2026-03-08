@@ -54,6 +54,14 @@ export class TauriAdapter implements EngineAdapter {
     }
   }
 
+  restoreState(_state: GameState): void {
+    throw new AdapterError(
+      AdapterErrorCode.WASM_ERROR,
+      "restoreState not supported in TauriAdapter",
+      false,
+    );
+  }
+
   dispose(): void {
     if (this.invoke) {
       this.invoke("dispose_game").catch(() => {

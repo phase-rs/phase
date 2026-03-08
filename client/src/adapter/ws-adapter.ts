@@ -5,7 +5,7 @@ import type {
   GameState,
   PlayerId,
 } from "./types";
-import { AdapterError } from "./types";
+import { AdapterError, AdapterErrorCode } from "./types";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
@@ -151,6 +151,14 @@ export class WebSocketAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
     return this.gameState;
+  }
+
+  restoreState(_state: GameState): void {
+    throw new AdapterError(
+      AdapterErrorCode.WASM_ERROR,
+      "Undo not supported in multiplayer",
+      false,
+    );
   }
 
   dispose(): void {

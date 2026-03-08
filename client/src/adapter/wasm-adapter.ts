@@ -4,6 +4,7 @@ import init, {
   initialize_game,
   submit_action,
   get_game_state,
+  restore_game_state,
 } from "../wasm/engine_wasm";
 import type { EngineAdapter, GameAction, GameEvent, GameState } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
@@ -31,6 +32,11 @@ export class WasmAdapter implements EngineAdapter {
   async getState(): Promise<GameState> {
     this.assertInitialized();
     return this.enqueue(() => this.fetchState());
+  }
+
+  restoreState(state: GameState): void {
+    this.assertInitialized();
+    restore_game_state(state);
   }
 
   dispose(): void {
