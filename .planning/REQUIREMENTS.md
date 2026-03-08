@@ -73,10 +73,10 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **UI-03**: Stack visualization
 - [x] **UI-04**: Phase/turn tracker
 - [x] **UI-05**: Life total display
-- [ ] **UI-06**: Targeting UI with valid target highlighting
-- [ ] **UI-07**: Mana payment UI with auto-tap and manual override
+- [x] **UI-06**: Targeting UI with valid target highlighting
+- [x] **UI-07**: Mana payment UI with auto-tap and manual override
 - [x] **UI-08**: Card preview/zoom with Scryfall images
-- [ ] **UI-09**: Choice prompts for modal effects
+- [x] **UI-09**: Choice prompts for modal effects
 - [x] **UI-10**: Game log
 - [x] **UI-11**: Touch-optimized responsive design (great on tablets)
 
@@ -199,10 +199,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UI-03 | Phase 7 | Complete |
 | UI-04 | Phase 7 | Complete |
 | UI-05 | Phase 7 | Complete |
-| UI-06 | Phase 7 | Pending |
-| UI-07 | Phase 7 | Pending |
+| UI-06 | Phase 7 | Complete |
+| UI-07 | Phase 7 | Complete |
 | UI-08 | Phase 7 | Complete |
-| UI-09 | Phase 7 | Pending |
+| UI-09 | Phase 7 | Complete |
 | UI-10 | Phase 7 | Complete |
 | UI-11 | Phase 7 | Complete |
 | DECK-01 | Phase 7 | Complete |
