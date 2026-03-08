@@ -75,7 +75,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **UI-05**: Life total display
 - [ ] **UI-06**: Targeting UI with valid target highlighting
 - [ ] **UI-07**: Mana payment UI with auto-tap and manual override
-- [ ] **UI-08**: Card preview/zoom with Scryfall images
+- [x] **UI-08**: Card preview/zoom with Scryfall images
 - [ ] **UI-09**: Choice prompts for modal effects
 - [ ] **UI-10**: Game log
 - [ ] **UI-11**: Touch-optimized responsive design (great on tablets)
@@ -106,7 +106,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **PLAT-01**: Tauri desktop app (Windows, macOS, Linux)
 - [x] **PLAT-02**: PWA + WASM build for tablet/browser
 - [x] **PLAT-03**: EngineAdapter abstraction (Tauri IPC and WASM bindings)
-- [ ] **PLAT-04**: Scryfall card image caching (on-demand with local cache)
+- [x] **PLAT-04**: Scryfall card image caching (on-demand with local cache)
 - [ ] **PLAT-05**: Standard format card coverage (60-70%+ of current Standard-legal cards)
 
 ### Quality of Life
@@ -201,7 +201,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UI-05 | Phase 7 | Pending |
 | UI-06 | Phase 7 | Pending |
 | UI-07 | Phase 7 | Pending |
-| UI-08 | Phase 7 | Pending |
+| UI-08 | Phase 7 | Complete |
 | UI-09 | Phase 7 | Pending |
 | UI-10 | Phase 7 | Pending |
 | UI-11 | Phase 7 | Pending |
@@ -220,7 +220,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-01 | Phase 7 | Pending |
 | PLAT-02 | Phase 7 | Complete |
 | PLAT-03 | Phase 1 | Complete |
-| PLAT-04 | Phase 7 | Pending |
+| PLAT-04 | Phase 7 | Complete |
 | PLAT-05 | Phase 8 | Pending |
 | QOL-01 | Phase 7 | Pending |
 | QOL-02 | Phase 7 | Pending |
