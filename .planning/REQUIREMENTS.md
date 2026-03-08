@@ -49,10 +49,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Static Abilities & Layers
 
-- [ ] **STAT-01**: Seven-layer continuous effect evaluation per Rule 613
-- [ ] **STAT-02**: Timestamp ordering within layers
-- [ ] **STAT-03**: Intra-layer dependency detection
-- [ ] **STAT-04**: All 61 static ability type handlers
+- [x] **STAT-01**: Seven-layer continuous effect evaluation per Rule 613
+- [x] **STAT-02**: Timestamp ordering within layers
+- [x] **STAT-03**: Intra-layer dependency detection
+- [x] **STAT-04**: All 61 static ability type handlers
 
 ### Combat
 
@@ -184,10 +184,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REPL-02 | Phase 6 | Complete |
 | REPL-03 | Phase 6 | Complete |
 | REPL-04 | Phase 6 | Complete |
-| STAT-01 | Phase 6 | Pending |
-| STAT-02 | Phase 6 | Pending |
-| STAT-03 | Phase 6 | Pending |
-| STAT-04 | Phase 6 | Pending |
+| STAT-01 | Phase 6 | Complete |
+| STAT-02 | Phase 6 | Complete |
+| STAT-03 | Phase 6 | Complete |
+| STAT-04 | Phase 6 | Complete |
 | COMB-01 | Phase 5 | Complete |
 | COMB-02 | Phase 5 | Complete |
 | COMB-03 | Phase 5 | Complete |

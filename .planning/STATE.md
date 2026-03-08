@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in_progress
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-03-08T04:42:51Z"
-last_activity: 2026-03-08 -- Completed 06-01 (Replacement Effects)
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-03-08T04:50:20Z"
+last_activity: 2026-03-08 -- Completed 06-02 (Layer System & Static Abilities)
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 17
-  completed_plans: 15
-  percent: 88
+  completed_plans: 16
+  percent: 94
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-07)
 ## Current Position
 
 Phase: 6 of 8 (Advanced Rules) -- IN PROGRESS
-Plan: 1 of 3 in current phase -- COMPLETE
+Plan: 2 of 3 in current phase -- COMPLETE
 Status: Phase 06 In Progress
-Last activity: 2026-03-08 -- Completed 06-01 (Replacement Effects)
+Last activity: 2026-03-08 -- Completed 06-02 (Layer System & Static Abilities)
 
-Progress: [████████░░] 88% (15/17 plans across phases)
+Progress: [█████████░] 94% (16/17 plans across phases)
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ Progress: [████████░░] 88% (15/17 plans across phases)
 | Phase 05 P02 | 5min | 2 tasks | 7 files |
 | Phase 05 P03 | 5min | 2 tasks | 7 files |
 | Phase 06 P01 | 5min | 2 tasks | 10 files |
+| Phase 06 P02 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -132,6 +133,10 @@ Recent decisions affecting current work:
 - [Phase 06]: Flat replacement.rs file -- all 14 handlers inline until file grows unwieldy
 - [Phase 06]: ReplacementMatcher/ReplacementApplier fn pointer pair per handler type
 - [Phase 06]: ProposedEvent carries HashSet<ReplacementId> for once-per-event tracking
+- [Phase 06]: petgraph DiGraph for layer dependency ordering with toposort fallback on cycles
+- [Phase 06]: Deterministic sort key (timestamp, source_id, def_index) within layers
+- [Phase 06]: StaticAbilityHandler returns Vec<StaticEffect> for Continuous and RuleModification modes
+- [Phase 06]: Build static registry per call (cheap HashMap, same pattern as effect/trigger registries)
 
 ### Pending Todos
 
@@ -144,6 +149,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-08T04:42:51Z
-Stopped at: Completed 06-01-PLAN.md
-Resume file: .planning/phases/06-advanced-rules/06-01-SUMMARY.md
+Last session: 2026-03-08T04:50:20Z
+Stopped at: Completed 06-02-PLAN.md
+Resume file: .planning/phases/06-advanced-rules/06-02-SUMMARY.md
