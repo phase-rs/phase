@@ -112,7 +112,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Quality of Life
 
 - [x] **QOL-01**: Undo for unrevealed-information actions
-- [ ] **QOL-02**: Keyboard shortcuts (pass turn, full control, tap all lands)
+- [x] **QOL-02**: Keyboard shortcuts (pass turn, full control, tap all lands)
 - [x] **QOL-03**: Card coverage dashboard (which cards/effects are supported)
 
 ## v2 Requirements
@@ -223,7 +223,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-04 | Phase 7 | Complete |
 | PLAT-05 | Phase 8 | Complete |
 | QOL-01 | Phase 7 | Complete |
-| QOL-02 | Phase 10 | Pending |
+| QOL-02 | Phase 10 | Complete |
 | QOL-03 | Phase 7 | Complete |
 
 **Coverage:**
