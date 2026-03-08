@@ -1,4 +1,5 @@
 pub mod casting;
+pub mod coverage;
 pub mod combat;
 pub mod combat_damage;
 pub mod effects;

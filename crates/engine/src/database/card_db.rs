@@ -73,6 +73,10 @@ impl CardDatabase {
     pub fn errors(&self) -> &[(PathBuf, String)] {
         &self.errors
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &CardRules)> {
+        self.cards.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {

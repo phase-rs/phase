@@ -2,44 +2,65 @@ import { useMemo, useState } from "react";
 
 /** Known effect API types supported by the engine. */
 const SUPPORTED_EFFECTS = [
-  "DealDamage", "GainLife", "LoseLife", "DrawCard", "Discard",
-  "DestroyTarget", "DestroyAll", "ExileTarget", "BounceTarget",
-  "CounterSpell", "PutCounter", "RemoveCounter", "CreateToken",
-  "PumpTarget", "PumpAll", "TapTarget", "UntapTarget",
-  "GainControl", "Sacrifice", "Mill", "Scry", "Surveil",
-  "FightTarget", "AttachTarget", "Search", "Regenerate",
-  "PreventDamage", "SetPowerToughness", "SwitchPowerToughness",
-  "CopySpell", "Proliferate", "Transform", "Manifest",
-  "PhaseOut", "Populate", "Amass", "Adapt", "Explore",
+  "DealDamage", "GainLife", "LoseLife", "Draw", "DiscardCard",
+  "Destroy", "ChangeZone", "Counter",
+  "AddCounter", "RemoveCounter", "Token",
+  "Pump", "Tap", "Untap",
+  "Sacrifice",
 ] as const;
 
-/** Known trigger modes supported by the engine. */
+/** Known trigger modes supported by the engine (with real handlers). */
 const SUPPORTED_TRIGGERS = [
-  "ChangesZone", "Attacks", "Blocks", "BecomesTarget",
-  "SpellCast", "AbilityActivated", "Damaged", "Untaps",
-  "TurnBegin", "PhaseBegin", "Draws", "Discards",
-  "LandPlayed", "LifeGained", "LifeLost", "CounterAdded",
-  "CounterRemoved", "TokenCreated", "Dies", "Sacrificed",
-  "Destroyed", "Exiled", "Returned", "Attached",
-  "Detached", "Transformed", "TappedForMana",
+  "ChangesZone", "ChangesZoneAll",
+  "DamageDone", "DamageDoneOnce", "DamageAll", "DamageDealtOnce", "DamageDoneOnceByController",
+  "SpellCast", "SpellCastOrCopy",
+  "Attacks", "AttackersDeclared", "AttackersDeclaredOneTarget",
+  "Blocks", "BlockersDeclared",
+  "Countered",
+  "CounterAdded", "CounterAddedOnce", "CounterAddedAll",
+  "CounterRemoved", "CounterRemovedOnce",
+  "Taps", "TapAll", "Untaps", "UntapAll",
+  "LifeGained", "LifeLost", "LifeLostAll",
 ] as const;
 
-/** Known keyword abilities. */
+/** Known keyword abilities (non-Unknown variants). */
 const SUPPORTED_KEYWORDS = [
   "Flying", "First Strike", "Double Strike", "Deathtouch",
   "Haste", "Hexproof", "Indestructible", "Lifelink",
   "Menace", "Reach", "Trample", "Vigilance",
   "Flash", "Defender", "Fear", "Intimidate",
-  "Shroud", "Protection", "Ward", "Prowess",
-  "Convoke", "Delve", "Cascade", "Cycling",
-  "Equip", "Enchant", "Kicker", "Flashback",
-  "Retrace", "Unearth", "Bestow", "Morph",
-  "Emerge", "Evoke", "Suspend", "Madness",
-  "Miracle", "Overload", "Entwine", "Buyback",
-  "Affinity", "Metalcraft", "Landfall", "Revolt",
-  "Ferocious", "Heroic", "Constellation", "Devotion",
-  "Crew", "Fabricate", "Exploit", "Outlast",
+  "Shroud", "Skulk", "Shadow", "Horsemanship",
+  "Wither", "Infect", "Afflict",
+  "Prowess", "Undying", "Persist", "Cascade",
+  "Exalted", "Flanking", "Evolve", "Extort",
+  "Exploit", "Explore", "Ascend", "Soulbond",
+  "Convoke", "Delve", "Devoid", "Changeling", "Phasing",
+  "Protection", "Ward",
+  "Cycling", "Equip", "Enchant", "Kicker", "Flashback",
+  "Retrace", "Bestow", "Morph", "Emerge", "Evoke",
+  "Suspend", "Madness", "Miracle", "Overload",
+  "Entwine", "Buyback", "Affinity",
+  "Crew", "Fabricate", "Outlast",
 ] as const;
+
+/** Static ability modes supported by the engine. */
+const SUPPORTED_STATICS = [
+  "Continuous",
+  "CantAttack", "CantBlock", "CantBeTargeted", "CantBeCast",
+  "CantBeActivated", "CastWithFlash", "ReduceCost", "RaiseCost",
+  "CantGainLife", "CantLoseLife", "MustAttack", "MustBlock",
+  "CantDraw", "Panharmonicon", "IgnoreHexproof",
+] as const;
+
+/** Replacement effect types with real handlers. */
+const SUPPORTED_REPLACEMENTS = [
+  "DamageDone", "Moved", "Destroy", "Draw",
+  "GainLife", "LifeReduced",
+  "AddCounter", "RemoveCounter",
+  "Tap", "Untap", "Counter", "CreateToken",
+] as const;
+
+type TabKey = "effects" | "triggers" | "keywords" | "statics" | "replacements";
 
 interface CardCoverageDashboardProps {
   onClose: () => void;
@@ -47,7 +68,7 @@ interface CardCoverageDashboardProps {
 
 export function CardCoverageDashboard({ onClose }: CardCoverageDashboardProps) {
   const [search, setSearch] = useState("");
-  const [activeTab, setActiveTab] = useState<"effects" | "triggers" | "keywords">("effects");
+  const [activeTab, setActiveTab] = useState<TabKey>("effects");
 
   const filteredItems = useMemo(() => {
     const lowerSearch = search.toLowerCase();
@@ -56,17 +77,30 @@ export function CardCoverageDashboard({ onClose }: CardCoverageDashboardProps) {
         ? SUPPORTED_EFFECTS
         : activeTab === "triggers"
           ? SUPPORTED_TRIGGERS
-          : SUPPORTED_KEYWORDS;
+          : activeTab === "keywords"
+            ? SUPPORTED_KEYWORDS
+            : activeTab === "statics"
+              ? SUPPORTED_STATICS
+              : SUPPORTED_REPLACEMENTS;
 
     if (!lowerSearch) return items;
     return items.filter((item) => item.toLowerCase().includes(lowerSearch));
   }, [search, activeTab]);
 
-  const tabs = [
-    { key: "effects" as const, label: "Effects", count: SUPPORTED_EFFECTS.length },
-    { key: "triggers" as const, label: "Triggers", count: SUPPORTED_TRIGGERS.length },
-    { key: "keywords" as const, label: "Keywords", count: SUPPORTED_KEYWORDS.length },
+  const tabs: { key: TabKey; label: string; count: number }[] = [
+    { key: "effects", label: "Effects", count: SUPPORTED_EFFECTS.length },
+    { key: "triggers", label: "Triggers", count: SUPPORTED_TRIGGERS.length },
+    { key: "keywords", label: "Keywords", count: SUPPORTED_KEYWORDS.length },
+    { key: "statics", label: "Statics", count: SUPPORTED_STATICS.length },
+    { key: "replacements", label: "Replacements", count: SUPPORTED_REPLACEMENTS.length },
   ];
+
+  const totalHandlers =
+    SUPPORTED_EFFECTS.length +
+    SUPPORTED_TRIGGERS.length +
+    SUPPORTED_KEYWORDS.length +
+    SUPPORTED_STATICS.length +
+    SUPPORTED_REPLACEMENTS.length;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -83,8 +117,26 @@ export function CardCoverageDashboard({ onClose }: CardCoverageDashboardProps) {
           </button>
         </div>
 
-        {/* Summary stats */}
-        <div className="flex gap-4 border-b border-gray-800 px-4 py-3">
+        {/* Summary bar */}
+        <div className="border-b border-gray-800 px-4 py-3">
+          <div className="mb-2 flex items-center justify-between text-sm">
+            <span className="text-gray-300">
+              {totalHandlers} total handlers implemented
+            </span>
+            <span className="font-mono text-emerald-400">
+              {SUPPORTED_EFFECTS.length} effects / {SUPPORTED_TRIGGERS.length} triggers / {SUPPORTED_KEYWORDS.length} keywords
+            </span>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-gray-800">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-emerald-600 to-emerald-400"
+              style={{ width: "100%" }}
+            />
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex flex-wrap gap-2 border-b border-gray-800 px-4 py-3">
           {tabs.map((tab) => (
             <button
               key={tab.key}
@@ -133,7 +185,7 @@ export function CardCoverageDashboard({ onClose }: CardCoverageDashboardProps) {
 
         {/* Footer */}
         <div className="border-t border-gray-800 px-4 py-3 text-center text-xs text-gray-500">
-          {SUPPORTED_EFFECTS.length} effect types | {SUPPORTED_TRIGGERS.length} trigger modes | {SUPPORTED_KEYWORDS.length} keywords
+          {totalHandlers} total handlers across {tabs.length} categories
         </div>
       </div>
     </div>
