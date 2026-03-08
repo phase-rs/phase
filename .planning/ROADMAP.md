@@ -22,6 +22,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 8: AI & Multiplayer** - AI opponent with game tree search, WebSocket multiplayer, Standard card coverage target (completed 2026-03-08)
 - [x] **Phase 9: Wire DeckBuilder to Game Engine** - Fix sessionStorage handoff, mode parameter, and WASM deck loading (gap closure) (completed 2026-03-08)
 - [x] **Phase 10: Fix Undo/WASM State Sync** - Add WASM state restoration binding for undo (gap closure) (completed 2026-03-08)
+- [ ] **Phase 11: Tech Debt Cleanup** - Constants consolidation, combat UI overlay, card-data.json modal, WASM tests, CI coverage enforcement
 
 ## Phase Details
 
@@ -197,10 +198,27 @@ Plans:
 Plans:
 - [ ] 10-01-PLAN.md — Add restore_game_state WASM binding, adapter restoreState, and wire gameStore.undo()
 
+### Phase 11: Tech Debt Cleanup: Constants, Combat UI, WASM Tests, CI Coverage
+**Goal**: Clean up accumulated tech debt from v1.0 milestone -- consolidate duplicated constants, build Arena-style combat UI overlay, add missing card-data.json modal, expand test coverage for WASM adapter and new components, and enforce coverage thresholds in CI
+**Depends on**: Phase 10
+**Requirements**: TD-01, TD-02, TD-03, TD-04, TD-05, TD-06
+**Success Criteria** (what must be TRUE):
+  1. Zero duplicated constant definitions across the TypeScript client codebase
+  2. Arena-style combat overlay enables attacker selection (click-to-toggle, tilt + glow) and blocker assignment (click-blocker-then-click-attacker with arrows)
+  3. Missing card-data.json triggers a blocking modal with generation instructions and a "Continue anyway" escape hatch
+  4. WASM adapter tests cover all 4 key bindings (initialize_game, submit_action, get_game_state, restore_game_state)
+  5. CI pipeline enforces coverage thresholds for TypeScript and reports Rust coverage
+**Plans**: 3 plans
+
+Plans:
+- [ ] 11-01-PLAN.md — Constants consolidation, CardDataMissingModal, documentation fixes
+- [ ] 11-02-PLAN.md — Arena-style combat overlay (attacker/blocker selection, visual feedback, action buttons)
+- [ ] 11-03-PLAN.md — WASM adapter tests, component tests, coverage configuration, CI enforcement
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -214,3 +232,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 8. AI & Multiplayer | 5/5 | Complete | 2026-03-08 |
 | 9. Wire DeckBuilder to Game Engine | 3/3 | Complete   | 2026-03-08 |
 | 10. Fix Undo/WASM State Sync | 1/1 | Complete    | 2026-03-08 |
+| 11. Tech Debt Cleanup | 0/3 | In Progress | — |
