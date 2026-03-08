@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -10,7 +11,6 @@ use forge_ai::get_legal_actions;
 use rand::Rng;
 
 use crate::filter::filter_state_for_player;
-use crate::protocol::DeckData;
 use crate::reconnect::ReconnectManager;
 
 pub struct GameSession {
@@ -18,7 +18,7 @@ pub struct GameSession {
     pub state: GameState,
     pub player_tokens: [String; 2],
     pub connected: [bool; 2],
-    pub decks: [Option<DeckData>; 2],
+    pub decks: [Option<Vec<DeckEntry>>; 2],
 }
 
 impl GameSession {
@@ -59,7 +59,7 @@ impl SessionManager {
     }
 
     /// Create a new game session. Returns (game_code, player_token).
-    pub fn create_game(&mut self, deck: DeckData) -> (String, String) {
+    pub fn create_game(&mut self, deck: Vec<DeckEntry>) -> (String, String) {
         let game_code = generate_game_code();
         let player_token = generate_player_token();
 
@@ -82,7 +82,7 @@ impl SessionManager {
     pub fn join_game(
         &mut self,
         game_code: &str,
-        deck: DeckData,
+        deck: Vec<DeckEntry>,
     ) -> Result<(String, GameState), String> {
         let session = self
             .sessions
@@ -101,9 +101,16 @@ impl SessionManager {
         self.token_to_game
             .insert(player_token.clone(), game_code.to_string());
 
+        // Load deck data into game state before starting
+        let player_deck = session.decks[0].clone().unwrap_or_default();
+        let opponent_deck = session.decks[1].clone().unwrap_or_default();
+        let payload = DeckPayload {
+            player_deck,
+            opponent_deck,
+        };
+        load_deck_into_state(&mut session.state, &payload);
+
         // Initialize the game via engine
-        // Note: In a real implementation, decks would be loaded and cards created as objects.
-        // For now, start_game handles the game initialization.
         let _result = start_game(&mut session.state);
 
         let filtered = filter_state_for_player(&session.state, PlayerId(1));
@@ -240,12 +247,37 @@ fn generate_player_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::CardType;
+    use engine::types::mana::ManaCost;
 
-    fn make_deck() -> DeckData {
-        DeckData {
-            main_deck: vec!["Forest".to_string(); 10],
-            sideboard: Vec::new(),
-        }
+    fn make_deck() -> Vec<DeckEntry> {
+        vec![DeckEntry {
+            card: CardFace {
+                name: "Forest".to_string(),
+                mana_cost: ManaCost::NoCost,
+                card_type: CardType {
+                    supertypes: vec![],
+                    core_types: vec![engine::types::card_type::CoreType::Land],
+                    subtypes: vec!["Forest".to_string()],
+                },
+                power: None,
+                toughness: None,
+                loyalty: None,
+                defense: None,
+                oracle_text: None,
+                non_ability_text: None,
+                flavor_name: None,
+                keywords: vec![],
+                abilities: vec![],
+                triggers: vec![],
+                static_abilities: vec![],
+                replacements: vec![],
+                svars: std::collections::HashMap::new(),
+                color_override: None,
+            },
+            count: 10,
+        }]
     }
 
     #[test]

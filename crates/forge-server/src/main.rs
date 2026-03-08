@@ -1,13 +1,16 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
-use axum::response::{IntoResponse, Json};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use engine::database::CardDatabase;
 use engine::types::player::PlayerId;
 use server_core::protocol::{ClientMessage, ServerMessage};
+use server_core::resolve_deck;
 use server_core::session::SessionManager;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -15,6 +18,7 @@ use tower_http::cors::CorsLayer;
 type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
     Arc<Mutex<HashMap<String, HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>>>>;
+type SharedDb = Arc<CardDatabase>;
 
 /// Per-socket state tracking which game/player this connection belongs to.
 struct SocketIdentity {
@@ -26,6 +30,13 @@ struct SocketIdentity {
 #[tokio::main]
 async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let cards_dir = std::env::var("FORGE_CARDS_DIR")
+        .expect("FORGE_CARDS_DIR environment variable must be set to Forge card files directory");
+    let card_db =
+        CardDatabase::load(Path::new(&cards_dir)).expect("Failed to load card database");
+    println!("Loaded {} cards", card_db.card_count());
+    let db: SharedDb = Arc::new(card_db);
+
     let state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
     let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
 
@@ -58,9 +69,8 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
-        .route("/games", get(list_games))
         .layer(CorsLayer::permissive())
-        .with_state((state, connections));
+        .with_state((state, connections, db));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
@@ -73,24 +83,18 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn list_games(
-    State((state, _)): State<(SharedState, SharedConnections)>,
-) -> Json<Vec<String>> {
-    let mgr = state.lock().await;
-    Json(mgr.open_games())
-}
-
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State((state, connections)): State<(SharedState, SharedConnections)>,
+    State((state, connections, db)): State<(SharedState, SharedConnections, SharedDb)>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, connections))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, connections, db))
 }
 
 async fn handle_socket(
     mut socket: WebSocket,
     state: SharedState,
     connections: SharedConnections,
+    db: SharedDb,
 ) {
     // Channel for sending messages to this client from other tasks
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
@@ -140,6 +144,7 @@ async fn handle_socket(
                             &mut socket,
                             &state,
                             &connections,
+                            &db,
                             &tx,
                             &mut identity,
                         )
@@ -172,13 +177,25 @@ async fn handle_client_message(
     socket: &mut WebSocket,
     state: &SharedState,
     connections: &SharedConnections,
+    db: &SharedDb,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
 ) {
     match client_msg {
         ClientMessage::CreateGame { deck } => {
+            let resolved = match resolve_deck(db, &deck) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    let msg = ServerMessage::Error { message: e };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
             let mut mgr = state.lock().await;
-            let (game_code, player_token) = mgr.create_game(deck);
+            let (game_code, player_token) = mgr.create_game(resolved);
 
             identity.game_code = Some(game_code.clone());
             identity.player_id = Some(PlayerId(0));
@@ -201,8 +218,19 @@ async fn handle_client_message(
         }
 
         ClientMessage::JoinGame { game_code, deck } => {
+            let resolved = match resolve_deck(db, &deck) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    let msg = ServerMessage::Error { message: e };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
             let mut mgr = state.lock().await;
-            match mgr.join_game(&game_code, deck) {
+            match mgr.join_game(&game_code, resolved) {
                 Ok((player_token, filtered_state)) => {
                     identity.game_code = Some(game_code.clone());
                     identity.player_id = Some(PlayerId(1));
