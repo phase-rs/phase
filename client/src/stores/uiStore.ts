@@ -6,6 +6,8 @@ interface UiStoreState {
   hoveredObjectId: ObjectId | null;
   inspectedObjectId: ObjectId | null;
   targetingMode: boolean;
+  validTargetIds: ObjectId[];
+  sourceObjectId: ObjectId | null;
   selectedTargets: ObjectId[];
   fullControl: boolean;
   autoPass: boolean;
@@ -15,7 +17,7 @@ interface UiStoreActions {
   selectObject: (id: ObjectId | null) => void;
   hoverObject: (id: ObjectId | null) => void;
   inspectObject: (id: ObjectId | null) => void;
-  startTargeting: () => void;
+  startTargeting: (validIds: ObjectId[], sourceId: ObjectId | null) => void;
   addTarget: (id: ObjectId) => void;
   clearTargets: () => void;
   toggleFullControl: () => void;
@@ -29,6 +31,8 @@ export const useUiStore = create<UiStore>()((set) => ({
   hoveredObjectId: null,
   inspectedObjectId: null,
   targetingMode: false,
+  validTargetIds: [],
+  sourceObjectId: null,
   selectedTargets: [],
   fullControl: false,
   autoPass: false,
@@ -37,7 +41,8 @@ export const useUiStore = create<UiStore>()((set) => ({
   hoverObject: (id) => set({ hoveredObjectId: id }),
   inspectObject: (id) => set({ inspectedObjectId: id }),
 
-  startTargeting: () => set({ targetingMode: true, selectedTargets: [] }),
+  startTargeting: (validIds, sourceId) =>
+    set({ targetingMode: true, validTargetIds: validIds, sourceObjectId: sourceId, selectedTargets: [] }),
 
   addTarget: (id) =>
     set((state) => ({
@@ -45,7 +50,7 @@ export const useUiStore = create<UiStore>()((set) => ({
     })),
 
   clearTargets: () =>
-    set({ targetingMode: false, selectedTargets: [] }),
+    set({ targetingMode: false, validTargetIds: [], sourceObjectId: null, selectedTargets: [] }),
 
   toggleFullControl: () =>
     set((state) => ({ fullControl: !state.fullControl })),

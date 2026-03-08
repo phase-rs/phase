@@ -41,13 +41,17 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     obj.entered_battlefield_turn === turnNumber &&
     !obj.keywords.some((k) => k.toLowerCase() === "haste");
 
+  const validTargetIds = useUiStore((s) => s.validTargetIds);
   const isSelected = selectedObjectId === objectId;
   const isTarget = selectedTargets.includes(objectId);
+  const isValidTarget = targetingMode && validTargetIds.includes(objectId);
 
   // Glow ring styles
   let glowClass = "";
   if (isTarget) {
     glowClass = "ring-2 ring-cyan-400 shadow-[0_0_10px_2px_rgba(34,211,238,0.5)]";
+  } else if (isValidTarget) {
+    glowClass = "ring-2 ring-cyan-400/60 shadow-[0_0_12px_3px_rgba(0,229,255,0.8)]";
   } else if (isSelected) {
     glowClass = "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
   }
@@ -69,6 +73,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   return (
     <motion.div
+      data-object-id={objectId}
       layoutId={`permanent-${objectId}`}
       className={`relative cursor-pointer rounded-lg ${glowClass}`}
       style={{
