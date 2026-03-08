@@ -232,4 +232,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 8. AI & Multiplayer | 5/5 | Complete | 2026-03-08 |
 | 9. Wire DeckBuilder to Game Engine | 3/3 | Complete   | 2026-03-08 |
 | 10. Fix Undo/WASM State Sync | 1/1 | Complete    | 2026-03-08 |
-| 11. Tech Debt Cleanup | 0/3 | In Progress | — |
+| 11. Tech Debt Cleanup | 2/3 | In Progress|  |
