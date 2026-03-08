@@ -42,8 +42,14 @@ Full decision log in PROJECT.md Key Decisions table.
 
 None — milestone complete.
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 1 | Add card-data generation, cargo script aliases, and README | 2026-03-08 | 1837030 | [1-add-card-data-generation-cargo-script-al](./quick/1-add-card-data-generation-cargo-script-al/) |
+
 ## Session Continuity
 
-Last session: 2026-03-08T20:45:26.123Z
-Stopped at: Completed quick-1-01-PLAN.md
+Last activity: 2026-03-08 - Completed quick task 1: Add card-data generation, cargo script aliases, and README
+Stopped at: Quick task 1 complete
 Resume file: None
