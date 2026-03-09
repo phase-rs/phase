@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 15-03-PLAN.md
-last_updated: "2026-03-09T06:56:59.249Z"
+stopped_at: Phase 18 context gathered
+last_updated: "2026-03-09T13:38:08.694Z"
 last_activity: 2026-03-09 — Completed 15-02 game loop controller & GameProvider
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 3
   total_plans: 12
   completed_plans: 12
@@ -98,6 +98,10 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 15-03]: PassButton uses MTGA terminology: Done (empty stack) / Resolve (stack has items)
 - [Phase 15-03]: Turn indicator badge with cyan/red color coding for your/opponent turn
 
+### Roadmap Evolution
+
+- Phase 18 added: Select candidates to support and implement stubbed mechanics
+
 ### Blockers/Concerns
 
 None.
@@ -111,5 +115,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 15-02 game loop controller & GameProvider
-Stopped at: Completed 15-03-PLAN.md
-Resume file: None
+Stopped at: Phase 18 context gathered
+Resume file: .planning/phases/18-select-candidates-to-support-and-implement-stubbed-mechanics/18-CONTEXT.md
