@@ -1,6 +1,8 @@
+use crate::game::effects::matches_filter;
 use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::zones::Zone;
 
 /// Temporarily pump target creatures' power and toughness.
 /// Reads `NumAtt` and `NumDef` params (default "0").
@@ -46,11 +48,57 @@ pub fn resolve(
 /// Pump all creatures matching the `Valid` filter on the battlefield.
 /// Reads `NumAtt`, `NumDef`, and `Valid` params.
 pub fn resolve_all(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    todo!("PumpAll not yet implemented")
+    let num_att: i32 = ability
+        .params
+        .get("NumAtt")
+        .map(|v| v.parse().unwrap_or(0))
+        .unwrap_or(0);
+    let num_def: i32 = ability
+        .params
+        .get("NumDef")
+        .map(|v| v.parse().unwrap_or(0))
+        .unwrap_or(0);
+    let filter = ability
+        .params
+        .get("Valid")
+        .map(|s| s.as_str())
+        .unwrap_or("Creature");
+
+    // Collect matching object IDs first to avoid borrow conflicts
+    let matching: Vec<_> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| obj.zone == Zone::Battlefield && matches_filter(obj, filter, ability.controller))
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect();
+
+    for obj_id in matching {
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            if let Some(ref mut power) = obj.power {
+                *power += num_att;
+            }
+            if let Some(ref mut toughness) = obj.toughness {
+                *toughness += num_def;
+            }
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]

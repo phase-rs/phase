@@ -88,11 +88,51 @@ pub fn resolve(
 /// Move all objects matching the `Valid` filter from `Origin` zone to `Destination` zone.
 /// Reads `Origin`, `Destination`, and `Valid` params.
 pub fn resolve_all(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    todo!("ChangeZoneAll not yet implemented")
+    let origin = ability
+        .params
+        .get("Origin")
+        .ok_or_else(|| EffectError::MissingParam("Origin".to_string()))?;
+    let origin_zone = parse_zone(origin)?;
+
+    let destination = ability
+        .params
+        .get("Destination")
+        .ok_or_else(|| EffectError::MissingParam("Destination".to_string()))?;
+    let dest_zone = parse_zone(destination)?;
+
+    let filter = ability
+        .params
+        .get("Valid")
+        .map(|s| s.as_str())
+        .unwrap_or("Permanent");
+
+    // Collect matching object IDs from the origin zone
+    let matching: Vec<_> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| {
+            obj.zone == origin_zone && super::matches_filter(obj, filter, ability.controller)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+
+    for obj_id in matching {
+        zones::move_to_zone(state, obj_id, dest_zone, events);
+        if dest_zone == Zone::Battlefield || origin_zone == Zone::Battlefield {
+            state.layers_dirty = true;
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -85,11 +85,54 @@ pub fn resolve(
 /// Deal damage to all permanents (and optionally players) matching the `Valid` filter.
 /// Reads `NumDmg` and `Valid` params.
 pub fn resolve_all(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    todo!("DamageAll not yet implemented")
+    let num_dmg: u32 = ability
+        .params
+        .get("NumDmg")
+        .ok_or_else(|| EffectError::MissingParam("NumDmg".to_string()))?
+        .parse()
+        .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?;
+
+    let filter = ability
+        .params
+        .get("Valid")
+        .map(|s| s.as_str())
+        .unwrap_or("Creature");
+
+    // Collect matching object IDs
+    let matching: Vec<_> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| super::matches_filter(obj, filter, ability.controller))
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect();
+
+    for obj_id in matching {
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            obj.damage_marked += num_dmg;
+        }
+        events.push(GameEvent::DamageDealt {
+            source_id: ability.source_id,
+            target: TargetRef::Object(obj_id),
+            amount: num_dmg,
+        });
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]

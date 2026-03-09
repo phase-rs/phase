@@ -111,11 +111,46 @@ pub fn resolve(
 /// Destroy all permanents matching the `Valid` filter.
 /// Reads `Valid` param and optionally `NoRegen`.
 pub fn resolve_all(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    todo!("DestroyAll not yet implemented")
+    let filter = ability
+        .params
+        .get("Valid")
+        .map(|s| s.as_str())
+        .unwrap_or("Creature");
+
+    // Collect matching object IDs that are on the battlefield and not indestructible
+    let matching: Vec<_> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    obj.zone == Zone::Battlefield
+                        && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
+                        && super::matches_filter(obj, filter, ability.controller)
+                })
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect();
+
+    for obj_id in matching {
+        zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
+        state.layers_dirty = true;
+        events.push(GameEvent::CreatureDestroyed { object_id: obj_id });
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]
