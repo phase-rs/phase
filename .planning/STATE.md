@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 19-04-PLAN.md
-last_updated: "2026-03-09T23:10:00Z"
+stopped_at: Completed 19-06-PLAN.md
+last_updated: "2026-03-09T23:11:38.917Z"
 last_activity: 2026-03-09 — Completed 19-04 Targeting & Combat Visuals
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 33
   completed_plans: 33
   percent: 97
@@ -77,6 +77,7 @@ Progress: [██████████] 97%
 | Phase 19 P03 | 3min | 2 tasks | 6 files |
 | Phase 19 P05 | 3min | 2 tasks | 4 files |
 | Phase 19 P04 | 2min | 2 tasks | 2 files |
+| Phase 19 P06 | 2min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -173,6 +174,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19-04]: Blocker glow matches attacker glow (both orange) per MTGA convention
 - [Phase 19-04]: Valid target glow uses amber-400 with gold rgba for Arena-style golden highlight
 - [Phase 19-04]: Attack slide direction determined by controller ID (0=up, 1=down)
+- [Phase 19]: VictoryParticles uses Framer Motion animated divs for simplicity over canvas
+- [Phase 19-06]: Rematch reads mode/difficulty from URL search params via useSearchParams inside GameOverScreen
+- [Phase 19-06]: Card fan uses 3-degree increments per card offset from center for subtle fanning
 
 ### Roadmap Evolution
 
@@ -193,5 +197,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 19-04 Targeting & Combat Visuals
-Stopped at: Completed 19-04-PLAN.md
+Stopped at: Completed 19-06-PLAN.md
 Resume file: None
