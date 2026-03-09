@@ -54,6 +54,8 @@ pub fn build_registry() -> HashMap<String, EffectHandler> {
     registry.insert("DamageAll".to_string(), deal_damage::resolve_all);
     registry.insert("DestroyAll".to_string(), destroy::resolve_all);
     registry.insert("ChangeZoneAll".to_string(), change_zone::resolve_all);
+    registry.insert("Dig".to_string(), dig::resolve);
+    registry.insert("GainControl".to_string(), gain_control::resolve);
     registry
 }
 
@@ -291,9 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_21_entries() {
+    fn registry_has_23_entries() {
         let registry = build_registry();
-        assert_eq!(registry.len(), 21);
+        assert_eq!(registry.len(), 23);
     }
 
     #[test]
@@ -321,6 +323,8 @@ mod tests {
             "DamageAll",
             "DestroyAll",
             "ChangeZoneAll",
+            "Dig",
+            "GainControl",
         ];
         for name in &expected {
             assert!(registry.contains_key(*name), "missing: {}", name);

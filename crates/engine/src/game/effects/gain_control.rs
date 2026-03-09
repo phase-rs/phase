@@ -1,14 +1,29 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// GainControl: change target permanent's controller to the ability's controller.
 pub fn resolve(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    Err(EffectError::Unregistered("GainControl".to_string()))
+    for target in &ability.targets {
+        if let TargetRef::Object(obj_id) = target {
+            let obj = state
+                .objects
+                .get_mut(obj_id)
+                .ok_or(EffectError::ObjectNotFound(*obj_id))?;
+            obj.controller = ability.controller;
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]

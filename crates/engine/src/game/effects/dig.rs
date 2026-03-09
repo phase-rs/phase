@@ -1,17 +1,74 @@
+use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::zones::Zone;
 
 /// Dig/Reveal effect: reveal top N cards, put ChangeNum in hand, rest to bottom of library.
 /// Reads `DigNum` or `NumCards` param for how many to reveal.
 /// Reads `ChangeNum` param for how many to keep (put in hand).
 // TODO: Full implementation needs WaitingFor::DigChoice for player to select which cards to keep
 pub fn resolve(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    Err(EffectError::Unregistered("Dig".to_string()))
+    let dig_num: usize = ability
+        .params
+        .get("DigNum")
+        .or_else(|| ability.params.get("NumCards"))
+        .map(|v| v.parse().unwrap_or(1))
+        .unwrap_or(1);
+
+    let change_num: usize = ability
+        .params
+        .get("ChangeNum")
+        .map(|v| v.parse().unwrap_or(1))
+        .unwrap_or(1);
+
+    let player = state
+        .players
+        .iter()
+        .find(|p| p.id == ability.controller)
+        .ok_or(EffectError::PlayerNotFound)?;
+
+    let count = dig_num.min(player.library.len());
+    if count == 0 {
+        return Ok(());
+    }
+
+    let revealed: Vec<_> = player.library[..count].to_vec();
+
+    // Simplified: first ChangeNum cards go to hand, rest to bottom of library
+    let keep_count = change_num.min(revealed.len());
+    let to_hand = &revealed[..keep_count];
+    let to_bottom = &revealed[keep_count..];
+
+    for &obj_id in to_hand {
+        zones::move_to_zone(state, obj_id, Zone::Hand, events);
+    }
+
+    // Move rest to bottom of library (they're already removed by move_to_zone above
+    // if they were moved; the remaining ones are still in library at original positions).
+    // We need to move them to the bottom: remove then re-add at end.
+    for &obj_id in to_bottom {
+        let player = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == ability.controller)
+            .unwrap();
+        if let Some(pos) = player.library.iter().position(|&id| id == obj_id) {
+            player.library.remove(pos);
+            player.library.push(obj_id);
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]
