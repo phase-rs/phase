@@ -2,6 +2,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 
 interface OpponentHandProps {
   showCards?: boolean;
@@ -10,6 +11,7 @@ interface OpponentHandProps {
 export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const opponent = useGameStore((s) => s.gameState?.players[1]);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const inspectObject = useUiStore((s) => s.inspectObject);
 
   if (!opponent) return null;
 
@@ -48,7 +50,11 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
               style={{ marginLeft: i > 0 ? "-16px" : undefined, zIndex: i }}
             >
               {obj ? (
-                <div style={{ transform: "scale(0.6)", transformOrigin: "top left", width: "calc(var(--card-w) * 0.6)", height: "calc(var(--card-h) * 0.6)" }}>
+                <div
+                  style={{ transform: "scale(0.6)", transformOrigin: "top left", width: "calc(var(--card-w) * 0.6)", height: "calc(var(--card-h) * 0.6)" }}
+                  onMouseEnter={() => inspectObject(id)}
+                  onMouseLeave={() => inspectObject(null)}
+                >
                   <CardImage cardName={obj.name} size="small" />
                 </div>
               ) : (
