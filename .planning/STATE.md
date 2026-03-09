@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 16-02-PLAN.md
-last_updated: "2026-03-09T22:35:03.822Z"
-last_activity: 2026-03-09 — Completed 16-02 Dispatch Integration
+stopped_at: Completed 19-01-PLAN.md
+last_updated: "2026-03-09T22:56:25Z"
+last_activity: 2026-03-09 — Completed 19-01 Art-Crop Card & Image Infrastructure
 progress:
   total_phases: 7
   completed_phases: 6
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 16 - Audio System
+**Current focus:** Phase 19 - Recreate MTGA UI
 
 ## Current Position
 
-Phase: 16 of 18 (Audio System)
-Plan: 2 of 3 in current phase
+Phase: 19 of 20 (Recreate MTGA UI)
+Plan: 1 of 8 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 16-02 Dispatch Integration
+Last activity: 2026-03-09 — Completed 19-01 Art-Crop Card & Image Infrastructure
 
-Progress: [██████████] 100%
+Progress: [█---------] 12%
 
 ## Performance Metrics
 
@@ -70,6 +70,7 @@ Progress: [██████████] 100%
 | Phase 16 P01 | 4min | 2 tasks | 5 files |
 | Phase 16 P03 | 2min | 2 tasks | 2 files |
 | Phase 16 P02 | 2min | 2 tasks | 3 files |
+| Phase 19 P01 | 2min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -145,11 +146,15 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 16-02]: SFX scheduling uses setTimeout with cumulative offsets to sync with visual animation step timing
 - [Phase 16-02]: GameOver triggers music fade-out via audioManager.stopMusic(2.0) after state update
 - [Phase 16-02]: Music starts after onReady callback for online games to avoid playing during opponent wait
+- [Phase 19-01]: Tokens detected via card_id === 0 (no is_token field on GameObject)
+- [Phase 19-01]: Art crop aspect ratio 0.75 (width:height) matches Scryfall art_crop format
+- [Phase 19-01]: ImageSize type exported from scryfall.ts for reuse
 
 ### Roadmap Evolution
 
 - Phase 18 added: Select candidates to support and implement stubbed mechanics
 - Phase 19 added: Recreate the MTGA UI as faithfully as possible
+- Phase 20 added: Implement all remaining effects, keywords, statuses, and stubbed mechanics
 
 ### Blockers/Concerns
 
@@ -163,6 +168,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 16-01 Core Audio System
-Stopped at: Completed 16-02-PLAN.md
+Last activity: 2026-03-09 - Completed 19-01 Art-Crop Card & Image Infrastructure
+Stopped at: Completed 19-01-PLAN.md
 Resume file: None

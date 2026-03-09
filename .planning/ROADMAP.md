@@ -165,7 +165,7 @@ Plans:
   6. Full-screen MTGA-style mulligan with large card images, dramatic VICTORY/DEFEAT game over screens
   7. Mode-first menu flow with splash screen, deck gallery with art tiles, animated particle background
   8. Deck builder displays art-crop grid with instant card preview and visual color/type filtering
-**Plans:** 8 plans
+**Plans:** 1/8 plans executed
 
 Plans:
 - [ ] 19-01-PLAN.md — Image infrastructure (art_crop type extension, CSS vars) and ArtCropCard component
@@ -176,3 +176,13 @@ Plans:
 - [ ] 19-06-PLAN.md — Full-screen mulligan and dramatic game over screens
 - [ ] 19-07-PLAN.md — Splash screen, mode-first MenuPage, DeckGallery, menu particles
 - [ ] 19-08-PLAN.md — Deck builder art-crop grid, instant preview, color/type filtering
+
+### Phase 20: Implement all remaining effects, keywords, statuses, and stubbed mechanics
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 19
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 20 to break down)
