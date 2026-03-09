@@ -104,7 +104,6 @@ export function PlayerHand() {
       className="relative flex items-end justify-center px-4 py-1"
       style={{ perspective: "800px" }}
       onClick={handleContainerClick}
-      onMouseEnter={() => setExpanded(true)}
       onMouseLeave={() => {
         setExpanded(false);
         setSelectedCardId(null);
@@ -129,7 +128,7 @@ export function PlayerHand() {
               hasPriority={hasPriority}
               onDragEnd={handleDragEnd}
               onClick={handleCardClick}
-              onMouseEnter={() => inspectObject(obj.id)}
+              onMouseEnter={() => { setExpanded(true); inspectObject(obj.id); }}
               onMouseLeave={() => inspectObject(null)}
             />
           );
