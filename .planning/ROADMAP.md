@@ -122,7 +122,7 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
-| 13. Foundation & Board Layout | 5/5 | Complete   | 2026-03-09 | - |
+| 13. Foundation & Board Layout | 5/5 | Complete    | 2026-03-09 | - |
 | 14. Animation Pipeline | v1.1 | 0/3 | Not started | - |
 | 15. Game Loop & Controllers | v1.1 | 0/1 | Not started | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
