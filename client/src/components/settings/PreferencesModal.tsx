@@ -4,7 +4,6 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { AnimationSpeed, VfxQuality } from "../../animation/types.ts";
 import type {
   CardSizePreference,
-  HudLayout,
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
@@ -14,7 +13,6 @@ interface PreferencesModalProps {
 }
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
-const HUD_LAYOUTS: HudLayout[] = ["inline", "floating"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 const ANIMATION_SPEEDS: AnimationSpeed[] = ["slow", "normal", "fast", "instant"];
@@ -26,13 +24,11 @@ const BOARD_BACKGROUNDS: { value: string; label: string }[] = [
 
 export function PreferencesModal({ onClose }: PreferencesModalProps) {
   const cardSize = usePreferencesStore((s) => s.cardSize);
-  const hudLayout = usePreferencesStore((s) => s.hudLayout);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const animationSpeed = usePreferencesStore((s) => s.animationSpeed);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
-  const setHudLayout = usePreferencesStore((s) => s.setHudLayout);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const setVfxQuality = usePreferencesStore((s) => s.setVfxQuality);
@@ -87,15 +83,6 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                 options={CARD_SIZES}
                 value={cardSize}
                 onChange={setCardSize}
-              />
-            </SettingGroup>
-
-            {/* HUD Layout */}
-            <SettingGroup label="HUD Layout">
-              <SegmentedControl
-                options={HUD_LAYOUTS}
-                value={hudLayout}
-                onChange={setHudLayout}
               />
             </SettingGroup>
 
