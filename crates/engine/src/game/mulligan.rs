@@ -109,8 +109,7 @@ pub fn handle_mulligan_bottom(
         zones::move_to_library_position(state, card_id, false, events);
     }
 
-    advance_mulligan(state, player, events)
-        .pipe(Ok)
+    advance_mulligan(state, player, events).pipe(Ok)
 }
 
 /// Move to the next player's mulligan, or finish mulligans if all done.
@@ -135,11 +134,7 @@ fn finish_mulligans(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
     turns::auto_advance(state, events)
 }
 
-fn shuffle_hand_into_library(
-    state: &mut GameState,
-    player: PlayerId,
-    events: &mut Vec<GameEvent>,
-) {
+fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     let hand_ids: Vec<ObjectId> = state
         .players
         .iter()
@@ -259,13 +254,7 @@ mod tests {
         let mut events = Vec::new();
         start_mulligan(&mut state, &mut events);
 
-        let waiting = handle_mulligan_decision(
-            &mut state,
-            PlayerId(0),
-            true,
-            0,
-            &mut events,
-        );
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(0), true, 0, &mut events);
 
         assert!(matches!(
             waiting,
@@ -283,13 +272,7 @@ mod tests {
         start_mulligan(&mut state, &mut events);
 
         // Mulligan once
-        let waiting = handle_mulligan_decision(
-            &mut state,
-            PlayerId(0),
-            false,
-            0,
-            &mut events,
-        );
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(0), false, 0, &mut events);
         assert!(matches!(
             waiting,
             WaitingFor::MulliganDecision {
@@ -299,13 +282,7 @@ mod tests {
         ));
 
         // Keep after 1 mulligan
-        let waiting = handle_mulligan_decision(
-            &mut state,
-            PlayerId(0),
-            true,
-            1,
-            &mut events,
-        );
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(0), true, 1, &mut events);
         assert!(matches!(
             waiting,
             WaitingFor::MulliganBottomCards {
@@ -324,13 +301,7 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), 7);
 
         // Mulligan
-        handle_mulligan_decision(
-            &mut state,
-            PlayerId(0),
-            false,
-            0,
-            &mut events,
-        );
+        handle_mulligan_decision(&mut state, PlayerId(0), false, 0, &mut events);
 
         // Should still have 7 in hand after redraw
         assert_eq!(state.players[0].hand.len(), 7);
@@ -358,11 +329,8 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(state.players[0].hand.len(), 6); // 7 - 1
-        // Card should be at bottom of library
-        assert_eq!(
-            *state.players[0].library.last().unwrap(),
-            card_to_bottom,
-        );
+                                                    // Card should be at bottom of library
+        assert_eq!(*state.players[0].library.last().unwrap(), card_to_bottom,);
     }
 
     #[test]
@@ -371,13 +339,7 @@ mod tests {
         let mut events = Vec::new();
         start_mulligan(&mut state, &mut events);
 
-        let result = handle_mulligan_bottom(
-            &mut state,
-            PlayerId(0),
-            vec![],
-            1,
-            &mut events,
-        );
+        let result = handle_mulligan_bottom(&mut state, PlayerId(0), vec![], 1, &mut events);
 
         assert!(result.is_err());
     }
@@ -389,13 +351,7 @@ mod tests {
         start_mulligan(&mut state, &mut events);
 
         // Player 0 keeps
-        let waiting = handle_mulligan_decision(
-            &mut state,
-            PlayerId(0),
-            true,
-            0,
-            &mut events,
-        );
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(0), true, 0, &mut events);
         assert!(matches!(
             waiting,
             WaitingFor::MulliganDecision {
@@ -405,13 +361,7 @@ mod tests {
         ));
 
         // Player 1 keeps
-        let waiting = handle_mulligan_decision(
-            &mut state,
-            PlayerId(1),
-            true,
-            0,
-            &mut events,
-        );
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(1), true, 0, &mut events);
 
         // Should auto-advance to PreCombatMain
         assert!(matches!(waiting, WaitingFor::Priority { .. }));

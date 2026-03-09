@@ -86,10 +86,17 @@ pub fn choose_action(
             .into_iter()
             .map(|a| {
                 let h = should_play_now(state, &a, ai_player);
-                ScoredAction { action: a, score: h }
+                ScoredAction {
+                    action: a,
+                    score: h,
+                }
             })
             .collect();
-        heuristic_scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        heuristic_scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         heuristic_scored.truncate(branching);
 
         heuristic_scored
@@ -97,11 +104,22 @@ pub fn choose_action(
             .map(|sa| {
                 let mut sim = state.clone();
                 let score = if apply(&mut sim, sa.action.clone()).is_ok() {
-                    search_value(&sim, ai_player, depth.saturating_sub(1), f64::NEG_INFINITY, f64::INFINITY, config, &mut budget)
+                    search_value(
+                        &sim,
+                        ai_player,
+                        depth.saturating_sub(1),
+                        f64::NEG_INFINITY,
+                        f64::INFINITY,
+                        config,
+                        &mut budget,
+                    )
                 } else {
                     f64::NEG_INFINITY
                 };
-                ScoredAction { action: sa.action, score }
+                ScoredAction {
+                    action: sa.action,
+                    score,
+                }
             })
             .collect()
     } else {
@@ -218,7 +236,11 @@ fn softmax_select(
         // Fallback: pick the highest-scored action
         return scored
             .iter()
-            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|s| s.action.clone());
     }
 
@@ -244,10 +266,10 @@ mod tests {
     use engine::types::mana::{ManaCost, ManaType, ManaUnit};
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
-    use rand::SeedableRng;
     use rand::rngs::SmallRng;
+    use rand::SeedableRng;
 
-    use crate::config::{AiDifficulty, Platform, create_config};
+    use crate::config::{create_config, AiDifficulty, Platform};
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -392,7 +414,10 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(42);
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         // Should return some valid action (not None)
-        assert!(action.is_some(), "AI should choose an action with board advantage");
+        assert!(
+            action.is_some(),
+            "AI should choose an action with board advantage"
+        );
     }
 
     #[test]

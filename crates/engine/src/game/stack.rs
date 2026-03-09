@@ -10,11 +10,7 @@ use super::effects::{self, EffectHandler};
 use super::targeting;
 use super::zones;
 
-pub fn push_to_stack(
-    state: &mut GameState,
-    entry: StackEntry,
-    events: &mut Vec<GameEvent>,
-) {
+pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });

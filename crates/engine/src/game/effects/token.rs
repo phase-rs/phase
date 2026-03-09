@@ -30,16 +30,16 @@ pub fn resolve(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::CreateToken { owner, name: token_name, .. } = event {
-                let power: Option<i32> = ability
-                    .params
-                    .get("Power")
-                    .and_then(|v| v.parse().ok());
+            if let ProposedEvent::CreateToken {
+                owner,
+                name: token_name,
+                ..
+            } = event
+            {
+                let power: Option<i32> = ability.params.get("Power").and_then(|v| v.parse().ok());
 
-                let toughness: Option<i32> = ability
-                    .params
-                    .get("Toughness")
-                    .and_then(|v| v.parse().ok());
+                let toughness: Option<i32> =
+                    ability.params.get("Toughness").and_then(|v| v.parse().ok());
 
                 // Use CardId(0) for tokens
                 let obj_id = zones::create_object(
@@ -139,6 +139,8 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::TokenCreated { name, .. } if name == "Angel")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::TokenCreated { name, .. } if name == "Angel")));
     }
 }

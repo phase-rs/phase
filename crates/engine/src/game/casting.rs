@@ -4,9 +4,7 @@ use crate::parser::ability::parse_ability;
 use crate::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{
-    GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
-};
+use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCostShard;
 use crate::types::phase::Phase;
@@ -48,15 +46,20 @@ pub fn handle_cast_spell(
 
     let obj = state.objects.get(&object_id).unwrap();
 
-    // 2. Parse the first ability
-    if obj.abilities.is_empty() {
-        return Err(EngineError::InvalidAction(
-            "Card has no abilities".to_string(),
-        ));
-    }
-    let ability_def = parse_ability(&obj.abilities[0]).map_err(|e| {
-        EngineError::InvalidAction(format!("Failed to parse ability: {}", e))
-    })?;
+    // 2. Parse the first ability (or use default for vanilla permanents)
+    let ability_def = if obj.abilities.is_empty() {
+        // Vanilla creatures/enchantments/etc. have no explicit ability text
+        // but are still castable — they resolve by entering the battlefield.
+        use crate::types::ability::AbilityDefinition;
+        AbilityDefinition {
+            api_type: "PermanentNoncreature".to_string(),
+            kind: AbilityKind::Spell,
+            params: HashMap::new(),
+        }
+    } else {
+        parse_ability(&obj.abilities[0])
+            .map_err(|e| EngineError::InvalidAction(format!("Failed to parse ability: {}", e)))?
+    };
 
     // 3. Validate timing
     let is_instant_speed = obj.card_types.core_types.contains(&CoreType::Instant)
@@ -126,7 +129,9 @@ pub fn handle_cast_spell(
     }
 
     // 6. Pay mana cost
-    pay_and_push(state, player, object_id, card_id, resolved, &mana_cost, events)
+    pay_and_push(
+        state, player, object_id, card_id, resolved, &mana_cost, events,
+    )
 }
 
 /// Handle target selection for a pending cast.
@@ -148,12 +153,7 @@ pub fn handle_select_targets(
 
     // Validate targets are legal
     if let Some(valid_tgts) = pending.ability.params.get("ValidTgts") {
-        let legal = targeting::find_legal_targets(
-            state,
-            valid_tgts,
-            player,
-            pending.object_id,
-        );
+        let legal = targeting::find_legal_targets(state, valid_tgts, player, pending.object_id);
         for t in &targets {
             if !legal.contains(t) {
                 return Err(EngineError::InvalidAction(
@@ -185,9 +185,10 @@ pub fn handle_activate_ability(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let obj = state.objects.get(&source_id).ok_or_else(|| {
-        EngineError::InvalidAction("Object not found".to_string())
-    })?;
+    let obj = state
+        .objects
+        .get(&source_id)
+        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
 
     if obj.zone != Zone::Battlefield {
         return Err(EngineError::InvalidAction(
@@ -203,9 +204,8 @@ pub fn handle_activate_ability(
         ));
     }
 
-    let ability_def = parse_ability(&obj.abilities[ability_index]).map_err(|e| {
-        EngineError::InvalidAction(format!("Failed to parse ability: {}", e))
-    })?;
+    let ability_def = parse_ability(&obj.abilities[ability_index])
+        .map_err(|e| EngineError::InvalidAction(format!("Failed to parse ability: {}", e)))?;
 
     // Handle tap cost
     let has_tap_cost = ability_def
@@ -305,6 +305,9 @@ fn pay_and_push(
         }
     }
 
+    // Auto-tap lands to fill mana pool before paying
+    auto_tap_lands(state, player, cost, events);
+
     // Auto-pay mana cost
     let player_data = state
         .players
@@ -330,10 +333,7 @@ fn pay_and_push(
             id: object_id,
             source_id: object_id,
             controller: player,
-            kind: StackEntryKind::Spell {
-                card_id,
-                ability,
-            },
+            kind: StackEntryKind::Spell { card_id, ability },
         },
         events,
     );
@@ -346,6 +346,104 @@ fn pay_and_push(
     });
 
     Ok(WaitingFor::Priority { player })
+}
+
+/// Auto-tap untapped lands controlled by `player` to produce enough mana for `cost`.
+///
+/// Strategy: tap lands producing colors required by the cost first (colored shards),
+/// then tap any remaining untapped lands for generic requirements.
+fn auto_tap_lands(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::types::mana::{ManaCost, ManaType};
+
+    let (shards, generic) = match cost {
+        ManaCost::NoCost | ManaCost::Cost { generic: 0, .. }
+            if matches!(cost, ManaCost::NoCost) =>
+        {
+            return
+        }
+        ManaCost::Cost { shards, generic } => (shards, *generic),
+        _ => return,
+    };
+
+    // Build list of (object_id, mana_color) for untapped lands this player controls
+    let available: Vec<(ObjectId, ManaType)> = state
+        .battlefield
+        .iter()
+        .filter_map(|&oid| {
+            let obj = state.objects.get(&oid)?;
+            if obj.controller != player || obj.tapped {
+                return None;
+            }
+            if !obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+            {
+                return None;
+            }
+            let color = obj
+                .card_types
+                .subtypes
+                .iter()
+                .find_map(|st| mana_payment::land_subtype_to_mana_type(st))
+                .unwrap_or(ManaType::Colorless);
+            Some((oid, color))
+        })
+        .collect();
+
+    let mut to_tap: Vec<(ObjectId, ManaType)> = Vec::new();
+    let mut used: Vec<bool> = vec![false; available.len()];
+
+    // Phase 1: satisfy colored shards by tapping matching lands
+    for shard in shards {
+        let needed_color = match shard {
+            ManaCostShard::White => Some(ManaType::White),
+            ManaCostShard::Blue => Some(ManaType::Blue),
+            ManaCostShard::Black => Some(ManaType::Black),
+            ManaCostShard::Red => Some(ManaType::Red),
+            ManaCostShard::Green => Some(ManaType::Green),
+            _ => None, // Generic, hybrid, phyrexian — handled by phase 2 or pool
+        };
+        if let Some(needed) = needed_color {
+            if let Some(idx) = available.iter().enumerate().find_map(|(i, (_, color))| {
+                if !used[i] && *color == needed {
+                    Some(i)
+                } else {
+                    None
+                }
+            }) {
+                used[idx] = true;
+                to_tap.push(available[idx]);
+            }
+        }
+    }
+
+    // Phase 2: satisfy generic cost with any remaining untapped lands
+    let mut remaining_generic = generic;
+    for (i, &(oid, color)) in available.iter().enumerate() {
+        if remaining_generic == 0 {
+            break;
+        }
+        if !used[i] {
+            used[i] = true;
+            to_tap.push((oid, color));
+            remaining_generic -= 1;
+        }
+    }
+
+    // Phase 3: tap and produce mana
+    for (oid, color) in to_tap {
+        if let Some(obj) = state.objects.get_mut(&oid) {
+            obj.tapped = true;
+        }
+        events.push(GameEvent::PermanentTapped { object_id: oid });
+        mana_payment::produce_mana(state, oid, color, player, events);
+    }
 }
 
 #[cfg(test)]
@@ -411,8 +509,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities
-                .push("SP$ Draw | NumCards$ 2".to_string());
+            obj.abilities.push("SP$ Draw | NumCards$ 2".to_string());
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -429,8 +526,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
         let mut events = Vec::new();
-        let result =
-            handle_cast_spell(&mut state, PlayerId(0), CardId(20), &mut events).unwrap();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(20), &mut events).unwrap();
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert_eq!(state.stack.len(), 1);
@@ -503,8 +599,7 @@ mod tests {
             .push(CoreType::Creature);
 
         let mut events = Vec::new();
-        let result =
-            handle_cast_spell(&mut state, PlayerId(0), CardId(10), &mut events);
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(10), &mut events);
         // Should succeed -- instants can be cast at any priority
         assert!(result.is_ok());
     }
@@ -539,8 +634,7 @@ mod tests {
             .push(CoreType::Creature);
 
         let mut events = Vec::new();
-        let result =
-            handle_cast_spell(&mut state, PlayerId(0), CardId(10), &mut events).unwrap();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(10), &mut events).unwrap();
 
         // Auto-targeted the single creature, should go straight to stack
         assert!(matches!(result, WaitingFor::Priority { .. }));

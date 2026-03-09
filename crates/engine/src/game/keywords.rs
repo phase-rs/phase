@@ -104,9 +104,16 @@ mod tests {
 
     #[test]
     fn parse_keywords_known() {
-        let strings = vec!["Flying".to_string(), "Haste".to_string(), "Deathtouch".to_string()];
+        let strings = vec![
+            "Flying".to_string(),
+            "Haste".to_string(),
+            "Deathtouch".to_string(),
+        ];
         let parsed = parse_keywords(&strings);
-        assert_eq!(parsed, vec![Keyword::Flying, Keyword::Haste, Keyword::Deathtouch]);
+        assert_eq!(
+            parsed,
+            vec![Keyword::Flying, Keyword::Haste, Keyword::Deathtouch]
+        );
     }
 
     #[test]

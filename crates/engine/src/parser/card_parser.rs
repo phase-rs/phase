@@ -4,7 +4,7 @@ use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::CardType;
 use crate::types::mana::{ManaColor, ManaCost};
 
-use super::{mana_cost, card_type, ParseError};
+use super::{card_type, mana_cost, ParseError};
 
 struct CardFaceBuilder {
     name: Option<String>,
@@ -50,7 +50,9 @@ impl CardFaceBuilder {
     }
 
     fn build(self) -> Result<CardFace, ParseError> {
-        let name = self.name.ok_or_else(|| ParseError::MissingField("name".to_string()))?;
+        let name = self
+            .name
+            .ok_or_else(|| ParseError::MissingField("name".to_string()))?;
         Ok(CardFace {
             name,
             mana_cost: self.mana_cost.unwrap_or_default(),
@@ -143,10 +145,8 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
         },
         Some(b'C') => match key {
             "Colors" => {
-                let colors: Vec<ManaColor> = value
-                    .split(',')
-                    .filter_map(|s| parse_color(s))
-                    .collect();
+                let colors: Vec<ManaColor> =
+                    value.split(',').filter_map(|s| parse_color(s)).collect();
                 if !colors.is_empty() {
                     face.color_override = Some(colors);
                 }
@@ -212,7 +212,8 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
             "S" => face.static_abilities.push(value.to_string()),
             "SVar" => {
                 if let Some((var_name, var_value)) = value.split_once(':') {
-                    face.svars.insert(var_name.to_string(), var_value.to_string());
+                    face.svars
+                        .insert(var_name.to_string(), var_value.to_string());
                 }
             }
             _ => {}
@@ -241,8 +242,8 @@ fn parse_color(s: &str) -> Option<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::mana::ManaCostShard;
     use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaCostShard;
 
     #[test]
     fn parse_lightning_bolt() {
@@ -260,13 +261,22 @@ SVar:Picture:https://example.com/bolt.jpg";
                 assert_eq!(face.name, "Lightning Bolt");
                 assert_eq!(
                     face.mana_cost,
-                    ManaCost::Cost { shards: vec![ManaCostShard::Red], generic: 0 }
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Red],
+                        generic: 0
+                    }
                 );
                 assert_eq!(face.card_type.core_types, vec![CoreType::Instant]);
                 assert_eq!(face.abilities.len(), 1);
                 assert!(face.abilities[0].starts_with("SP$ DealDamage"));
-                assert_eq!(face.oracle_text.as_deref(), Some("Lightning Bolt deals 3 damage to any target."));
-                assert_eq!(face.svars.get("Picture").map(|s| s.as_str()), Some("https://example.com/bolt.jpg"));
+                assert_eq!(
+                    face.oracle_text.as_deref(),
+                    Some("Lightning Bolt deals 3 damage to any target.")
+                );
+                assert_eq!(
+                    face.svars.get("Picture").map(|s| s.as_str()),
+                    Some("https://example.com/bolt.jpg")
+                );
             }
             _ => panic!("Expected Single layout"),
         }
@@ -485,7 +495,10 @@ Oracle:Test oracle text.";
                 assert_eq!(face.name, "Test Card");
                 assert_eq!(
                     face.mana_cost,
-                    ManaCost::Cost { shards: vec![], generic: 1 }
+                    ManaCost::Cost {
+                        shards: vec![],
+                        generic: 1
+                    }
                 );
                 assert_eq!(face.oracle_text.as_deref(), Some("Test oracle text."));
             }
@@ -505,8 +518,14 @@ SVar:Picture:http://example.com/pic.jpg";
         let rules = parse_card_file(input).unwrap();
         match &rules.layout {
             CardLayout::Single(face) => {
-                assert_eq!(face.svars.get("RemAIDeck").map(|s| s.as_str()), Some("True"));
-                assert_eq!(face.svars.get("Picture").map(|s| s.as_str()), Some("http://example.com/pic.jpg"));
+                assert_eq!(
+                    face.svars.get("RemAIDeck").map(|s| s.as_str()),
+                    Some("True")
+                );
+                assert_eq!(
+                    face.svars.get("Picture").map(|s| s.as_str()),
+                    Some("http://example.com/pic.jpg")
+                );
             }
             _ => panic!("Expected Single layout"),
         }
@@ -649,8 +668,14 @@ Oracle:Trample, haste";
         let rules = parse_card_file(input).unwrap();
         match &rules.layout {
             CardLayout::Single(face) => {
-                assert_eq!(face.non_ability_text.as_deref(), Some("This creature is powerful."));
-                assert_eq!(face.flavor_name.as_deref(), Some("Godzilla, King of the Monsters"));
+                assert_eq!(
+                    face.non_ability_text.as_deref(),
+                    Some("This creature is powerful.")
+                );
+                assert_eq!(
+                    face.flavor_name.as_deref(),
+                    Some("Godzilla, King of the Monsters")
+                );
             }
             _ => panic!("Expected Single layout"),
         }

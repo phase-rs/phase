@@ -124,7 +124,13 @@ mod tests {
         core_type: CoreType,
         svars: HashMap<String, String>,
     ) -> CardId {
-        let id = create_object(state, CardId(state.next_object_id), owner, name.to_string(), Zone::Hand);
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Hand,
+        );
         let card_id = state.objects.get(&id).unwrap().card_id;
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(core_type);
@@ -138,9 +144,7 @@ mod tests {
         let state = make_state();
         let score = should_play_now(
             &state,
-            &GameAction::PlayLand {
-                card_id: CardId(1),
-            },
+            &GameAction::PlayLand { card_id: CardId(1) },
             PlayerId(0),
         );
         assert_eq!(score, 1.0);
@@ -151,7 +155,13 @@ mod tests {
         let mut state = make_state();
         let mut svars = HashMap::new();
         svars.insert("Mode".to_string(), "Destroy".to_string());
-        let card_id = add_spell_to_hand(&mut state, PlayerId(0), "Murder", CoreType::Instant, svars.clone());
+        let card_id = add_spell_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Murder",
+            CoreType::Instant,
+            svars.clone(),
+        );
 
         // No opponent creatures
         let score_empty = should_play_now(
@@ -197,7 +207,13 @@ mod tests {
         let mut state = make_state();
         let mut svars = HashMap::new();
         svars.insert("Mode".to_string(), "Counter".to_string());
-        let card_id = add_spell_to_hand(&mut state, PlayerId(0), "Counterspell", CoreType::Instant, svars);
+        let card_id = add_spell_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Counterspell",
+            CoreType::Instant,
+            svars,
+        );
 
         let score = should_play_now(
             &state,
@@ -207,7 +223,10 @@ mod tests {
             },
             PlayerId(0),
         );
-        assert!(score < 0.3, "Counterspell should score low on own turn, got {score}");
+        assert!(
+            score < 0.3,
+            "Counterspell should score low on own turn, got {score}"
+        );
     }
 
     #[test]
@@ -216,7 +235,13 @@ mod tests {
         state.active_player = PlayerId(1); // Opponent's turn
         let mut svars = HashMap::new();
         svars.insert("Mode".to_string(), "Counter".to_string());
-        let card_id = add_spell_to_hand(&mut state, PlayerId(0), "Counterspell", CoreType::Instant, svars);
+        let card_id = add_spell_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Counterspell",
+            CoreType::Instant,
+            svars,
+        );
 
         let score = should_play_now(
             &state,
@@ -226,7 +251,10 @@ mod tests {
             },
             PlayerId(0),
         );
-        assert!(score > 0.5, "Counterspell should score high on opponent turn, got {score}");
+        assert!(
+            score > 0.5,
+            "Counterspell should score high on opponent turn, got {score}"
+        );
     }
 
     #[test]
@@ -259,6 +287,9 @@ mod tests {
             PlayerId(0),
         );
 
-        assert!(score_pre > score_post, "Creatures should prefer pre-combat main");
+        assert!(
+            score_pre > score_post,
+            "Creatures should prefer pre-combat main"
+        );
     }
 }

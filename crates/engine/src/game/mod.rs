@@ -1,8 +1,8 @@
 pub mod casting;
-pub mod coverage;
 pub mod combat;
-pub mod deck_loading;
 pub mod combat_damage;
+pub mod coverage;
+pub mod deck_loading;
 pub mod effects;
 pub mod engine;
 pub mod game_object;
@@ -13,19 +13,21 @@ pub mod mulligan;
 pub mod priority;
 pub mod replacement;
 pub mod sba;
-pub mod static_abilities;
 pub mod stack;
+pub mod static_abilities;
 pub mod targeting;
+pub mod test_helpers;
 pub mod triggers;
 pub mod turns;
-pub mod test_helpers;
 pub mod zones;
 
 pub use deck_loading::{load_deck_into_state, DeckEntry, DeckPayload};
 pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineError};
-pub use layers::evaluate_layers;
 pub use game_object::{CounterType, GameObject};
 pub use keywords::parse_keywords;
+pub use layers::evaluate_layers;
 pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
 pub use triggers::process_triggers;
-pub use zones::{add_to_zone, create_object, move_to_library_position, move_to_zone, remove_from_zone};
+pub use zones::{
+    add_to_zone, create_object, move_to_library_position, move_to_zone, remove_from_zone,
+};

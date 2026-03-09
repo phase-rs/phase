@@ -105,11 +105,7 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                 continue;
             }
 
-            let affected = def
-                .params
-                .get("Affected")
-                .cloned()
-                .unwrap_or_default();
+            let affected = def.params.get("Affected").cloned().unwrap_or_default();
 
             // Determine which layer(s) this effect targets based on params
             let layers = determine_layers_from_params(&def.params);
@@ -204,16 +200,18 @@ fn order_with_dependencies(
 
 /// Check if effect `a` depends on effect `b`.
 /// If `b` changes types and `a`'s filter is type-based, `a` depends on `b`.
-fn depends_on(
-    a: &ActiveContinuousEffect,
-    b: &ActiveContinuousEffect,
-    _state: &GameState,
-) -> bool {
+fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
     // If b changes types (layer Type) and a's filter references a type
     if b.params.contains_key("AddType") || b.params.contains_key("RemoveType") {
         let type_keywords = [
-            "Creature", "Artifact", "Enchantment", "Land", "Planeswalker",
-            "Instant", "Sorcery", "Tribal",
+            "Creature",
+            "Artifact",
+            "Enchantment",
+            "Land",
+            "Planeswalker",
+            "Instant",
+            "Sorcery",
+            "Tribal",
         ];
         for kw in &type_keywords {
             if a.affected_filter.contains(kw) {
@@ -288,7 +286,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         }
         if let Some(val) = effect.params.get("RemoveKeyword") {
             let kw: Keyword = val.parse().unwrap();
-            obj.keywords.retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&kw));
+            obj.keywords
+                .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&kw));
         }
         if let Some(val) = effect.params.get("AddType") {
             if let Ok(ct) = val.parse::<CoreType>() {
@@ -426,8 +425,20 @@ mod tests {
         GameState::new_two_player(42)
     }
 
-    fn make_creature(state: &mut GameState, name: &str, power: i32, toughness: i32, player: PlayerId) -> ObjectId {
-        let id = create_object(state, CardId(0), player, name.to_string(), Zone::Battlefield);
+    fn make_creature(
+        state: &mut GameState,
+        name: &str,
+        power: i32,
+        toughness: i32,
+        player: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
         let ts = state.next_timestamp();
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
@@ -439,7 +450,13 @@ mod tests {
         id
     }
 
-    fn add_lord_static(state: &mut GameState, lord_id: ObjectId, filter: &str, add_power: i32, add_toughness: i32) {
+    fn add_lord_static(
+        state: &mut GameState,
+        lord_id: ObjectId,
+        filter: &str,
+        add_power: i32,
+        add_toughness: i32,
+    ) {
         let mut params = HashMap::new();
         params.insert("Affected".to_string(), filter.to_string());
         params.insert("AddPower".to_string(), add_power.to_string());
@@ -448,7 +465,12 @@ mod tests {
             mode: "Continuous".to_string(),
             params,
         };
-        state.objects.get_mut(&lord_id).unwrap().static_definitions.push(def);
+        state
+            .objects
+            .get_mut(&lord_id)
+            .unwrap()
+            .static_definitions
+            .push(def);
     }
 
     #[test]
@@ -462,10 +484,22 @@ mod tests {
         evaluate_layers(&mut state);
 
         let bear_obj = state.objects.get(&bear).unwrap();
-        assert_eq!(bear_obj.power, Some(3), "Bear computed power should be 2+1=3");
-        assert_eq!(bear_obj.toughness, Some(3), "Bear computed toughness should be 2+1=3");
+        assert_eq!(
+            bear_obj.power,
+            Some(3),
+            "Bear computed power should be 2+1=3"
+        );
+        assert_eq!(
+            bear_obj.toughness,
+            Some(3),
+            "Bear computed toughness should be 2+1=3"
+        );
         assert_eq!(bear_obj.base_power, Some(2), "Bear base power unchanged");
-        assert_eq!(bear_obj.base_toughness, Some(2), "Bear base toughness unchanged");
+        assert_eq!(
+            bear_obj.base_toughness,
+            Some(2),
+            "Bear base toughness unchanged"
+        );
     }
 
     #[test]
@@ -473,7 +507,13 @@ mod tests {
         let mut state = setup();
 
         // A non-creature artifact
-        let artifact = create_object(&mut state, CardId(0), PlayerId(0), "Artifact".to_string(), Zone::Battlefield);
+        let artifact = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Artifact".to_string(),
+            Zone::Battlefield,
+        );
         let art_ts = state.next_timestamp();
         {
             let obj = state.objects.get_mut(&artifact).unwrap();
@@ -495,7 +535,12 @@ mod tests {
                 mode: "Continuous".to_string(),
                 params,
             };
-            state.objects.get_mut(&animator).unwrap().static_definitions.push(def);
+            state
+                .objects
+                .get_mut(&animator)
+                .unwrap()
+                .static_definitions
+                .push(def);
         }
 
         // Effect that buffs creatures (layer 7c - ModifyPT)
@@ -536,7 +581,13 @@ mod tests {
         let mut state = setup();
 
         // A non-creature artifact (will gain creature type from effect B)
-        let artifact = create_object(&mut state, CardId(0), PlayerId(0), "Artifact".to_string(), Zone::Battlefield);
+        let artifact = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Artifact".to_string(),
+            Zone::Battlefield,
+        );
         let art_ts = state.next_timestamp();
         {
             let obj = state.objects.get_mut(&artifact).unwrap();
@@ -570,7 +621,12 @@ mod tests {
                 mode: "Continuous".to_string(),
                 params,
             };
-            state.objects.get_mut(&animator).unwrap().static_definitions.push(def);
+            state
+                .objects
+                .get_mut(&animator)
+                .unwrap()
+                .static_definitions
+                .push(def);
         }
 
         evaluate_layers(&mut state);
@@ -588,8 +644,12 @@ mod tests {
         let mut state = setup();
         let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
 
-        state.objects.get_mut(&creature).unwrap()
-            .counters.insert(CounterType::Plus1Plus1, 2);
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
 
         evaluate_layers(&mut state);
 
@@ -627,7 +687,11 @@ mod tests {
         evaluate_layers(&mut state);
 
         let bear_obj = state.objects.get(&bear).unwrap();
-        assert_eq!(bear_obj.power, Some(2), "Bear returns to base P/T after lord leaves");
+        assert_eq!(
+            bear_obj.power,
+            Some(2),
+            "Bear returns to base P/T after lord leaves"
+        );
         assert_eq!(bear_obj.toughness, Some(2));
     }
 }

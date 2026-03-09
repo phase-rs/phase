@@ -160,8 +160,8 @@ impl SessionManager {
         }
 
         // Apply action
-        let result = apply(&mut session.state, action)
-            .map_err(|e| format!("Engine error: {}", e))?;
+        let result =
+            apply(&mut session.state, action).map_err(|e| format!("Engine error: {}", e))?;
 
         let p0_state = filter_state_for_player(&session.state, PlayerId(0));
         let p1_state = filter_state_for_player(&session.state, PlayerId(1));
@@ -234,7 +234,9 @@ impl Default for SessionManager {
 fn generate_game_code() -> String {
     let mut rng = rand::rng();
     let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".chars().collect();
-    (0..6).map(|_| chars[rng.random_range(0..chars.len())]).collect()
+    (0..6)
+        .map(|_| chars[rng.random_range(0..chars.len())])
+        .collect()
 }
 
 fn generate_player_token() -> String {
@@ -365,7 +367,9 @@ mod tests {
     #[test]
     fn game_code_is_uppercase_alphanumeric() {
         let code = generate_game_code();
-        assert!(code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert!(code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
     }
 
     #[test]

@@ -21,8 +21,7 @@ impl CardDatabase {
         for entry in WalkDir::new(root)
             .into_iter()
             .filter_entry(|e| {
-                e.depth() == 0
-                    || !e.file_name().to_str().is_some_and(|s| s.starts_with('.'))
+                e.depth() == 0 || !e.file_name().to_str().is_some_and(|s| s.starts_with('.'))
             })
             .filter_map(|e| e.ok())
         {
@@ -55,7 +54,11 @@ impl CardDatabase {
             }
         }
 
-        Ok(Self { cards, face_index, errors })
+        Ok(Self {
+            cards,
+            face_index,
+            errors,
+        })
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<&CardRules> {
@@ -185,7 +188,11 @@ mod tests {
     fn parse_errors_dont_prevent_other_cards() {
         let tmp = tempfile::tempdir().unwrap();
         create_card_file(tmp.path(), "lightning_bolt", lightning_bolt_content());
-        create_card_file(tmp.path(), "malformed", "This is not a valid card file at all");
+        create_card_file(
+            tmp.path(),
+            "malformed",
+            "This is not a valid card file at all",
+        );
 
         let db = CardDatabase::load(tmp.path()).unwrap();
 
@@ -254,12 +261,19 @@ mod tests {
     fn load_real_forge_cards() {
         let forge_path = Path::new("../forge/forge-gui/res/cardsfolder/");
         if !forge_path.exists() {
-            eprintln!("Forge card directory not found at {:?}, skipping", forge_path);
+            eprintln!(
+                "Forge card directory not found at {:?}, skipping",
+                forge_path
+            );
             return;
         }
 
         let db = CardDatabase::load(forge_path).unwrap();
-        eprintln!("Loaded {} cards with {} errors", db.card_count(), db.errors().len());
+        eprintln!(
+            "Loaded {} cards with {} errors",
+            db.card_count(),
+            db.errors().len()
+        );
 
         // Print first few errors for debugging
         for (path, err) in db.errors().iter().take(5) {

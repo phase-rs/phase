@@ -32,8 +32,7 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let cards_dir = std::env::var("FORGE_CARDS_DIR")
         .expect("FORGE_CARDS_DIR environment variable must be set to Forge card files directory");
-    let card_db =
-        CardDatabase::load(Path::new(&cards_dir)).expect("Failed to load card database");
+    let card_db = CardDatabase::load(Path::new(&cards_dir)).expect("Failed to load card database");
     println!("Loaded {} cards", card_db.card_count());
     let db: SharedDb = Arc::new(card_db);
 
@@ -165,9 +164,7 @@ async fn handle_socket(
         let opponent = PlayerId(1 - player_id.0);
         let conns = connections.lock().await;
         if let Some(opp_sender) = conns.get(game_code).and_then(|m| m.get(&opponent)) {
-            let _ = opp_sender.send(ServerMessage::OpponentDisconnected {
-                grace_seconds: 120,
-            });
+            let _ = opp_sender.send(ServerMessage::OpponentDisconnected { grace_seconds: 120 });
         }
     }
 }
@@ -257,8 +254,7 @@ async fn handle_client_message(
                         &mgr.sessions.get(&game_code).unwrap().state,
                         PlayerId(0),
                     );
-                    if let Some(p0_sender) =
-                        conns.get(&game_code).and_then(|m| m.get(&PlayerId(0)))
+                    if let Some(p0_sender) = conns.get(&game_code).and_then(|m| m.get(&PlayerId(0)))
                     {
                         let _ = p0_sender.send(ServerMessage::GameStarted {
                             state: p0_state,
@@ -360,9 +356,7 @@ async fn handle_client_message(
 
                     // Notify opponent
                     let opponent = PlayerId(1 - player.0);
-                    if let Some(opp_sender) =
-                        conns.get(&game_code).and_then(|m| m.get(&opponent))
-                    {
+                    if let Some(opp_sender) = conns.get(&game_code).and_then(|m| m.get(&opponent)) {
                         let _ = opp_sender.send(ServerMessage::OpponentReconnected);
                     }
                 }

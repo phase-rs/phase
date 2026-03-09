@@ -7,7 +7,7 @@ use crate::parser::ability::{parse_replacement, parse_static, parse_trigger};
 use crate::types::card::CardFace;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
-use crate::types::mana::{ManaCost, ManaCostShard, ManaColor};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -117,7 +117,10 @@ pub fn create_object_from_card_face(
 
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face.loyalty.as_ref().and_then(|s| s.parse::<u32>().ok());
+    let loyalty = card_face
+        .loyalty
+        .as_ref()
+        .and_then(|s| s.parse::<u32>().ok());
     let keywords = parse_keywords(&card_face.keywords);
     let color = card_face
         .color_override
@@ -412,8 +415,9 @@ mod tests {
     fn create_object_with_replacement_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.replacements =
-            vec!["Event$ DamageDone | ActiveZones$ Battlefield | ValidSource$ Card.Self".to_string()];
+        face.replacements = vec![
+            "Event$ DamageDone | ActiveZones$ Battlefield | ValidSource$ Card.Self".to_string(),
+        ];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];

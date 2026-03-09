@@ -128,25 +128,41 @@ mod tests {
     #[test]
     fn tap_sets_tapped_true() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Land".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
         let mut events = Vec::new();
 
         resolve_tap(&mut state, &make_ability("Tap", obj_id), &mut events).unwrap();
 
         assert!(state.objects[&obj_id].tapped);
-        assert!(events.iter().any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
     }
 
     #[test]
     fn untap_sets_tapped_false() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Land".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
         let mut events = Vec::new();
 
         resolve_untap(&mut state, &make_ability("Untap", obj_id), &mut events).unwrap();
 
         assert!(!state.objects[&obj_id].tapped);
-        assert!(events.iter().any(|e| matches!(e, GameEvent::PermanentUntapped { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })));
     }
 }

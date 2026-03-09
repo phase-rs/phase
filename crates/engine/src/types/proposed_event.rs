@@ -138,22 +138,18 @@ impl ProposedEvent {
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::AddCounter { object_id, .. }
-            | ProposedEvent::RemoveCounter { object_id, .. } => {
-                state
-                    .objects
-                    .get(object_id)
-                    .map(|o| o.controller)
-                    .unwrap_or(PlayerId(0))
-            }
+            | ProposedEvent::RemoveCounter { object_id, .. } => state
+                .objects
+                .get(object_id)
+                .map(|o| o.controller)
+                .unwrap_or(PlayerId(0)),
             ProposedEvent::Damage { target, .. } => match target {
                 TargetRef::Player(pid) => *pid,
-                TargetRef::Object(oid) => {
-                    state
-                        .objects
-                        .get(oid)
-                        .map(|o| o.controller)
-                        .unwrap_or(PlayerId(0))
-                }
+                TargetRef::Object(oid) => state
+                    .objects
+                    .get(oid)
+                    .map(|o| o.controller)
+                    .unwrap_or(PlayerId(0)),
             },
             ProposedEvent::Draw { player_id, .. }
             | ProposedEvent::LifeGain { player_id, .. }

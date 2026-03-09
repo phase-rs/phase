@@ -56,14 +56,20 @@ pub fn resolve(
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     match event {
-                        ProposedEvent::Discard { player_id: pid, object_id: oid, .. } => {
+                        ProposedEvent::Discard {
+                            player_id: pid,
+                            object_id: oid,
+                            ..
+                        } => {
                             zones::move_to_zone(state, oid, Zone::Graveyard, events);
                             events.push(GameEvent::Discarded {
                                 player_id: pid,
                                 object_id: oid,
                             });
                         }
-                        ProposedEvent::ZoneChange { object_id: oid, to, .. } => {
+                        ProposedEvent::ZoneChange {
+                            object_id: oid, to, ..
+                        } => {
                             // Replacement redirected (e.g., exile instead of graveyard)
                             zones::move_to_zone(state, oid, to, events);
                         }
@@ -109,21 +115,23 @@ pub fn resolve(
             };
 
             match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    match event {
-                        ProposedEvent::Discard { player_id, object_id, .. } => {
-                            zones::move_to_zone(state, object_id, Zone::Graveyard, events);
-                            events.push(GameEvent::Discarded {
-                                player_id,
-                                object_id,
-                            });
-                        }
-                        ProposedEvent::ZoneChange { object_id, to, .. } => {
-                            zones::move_to_zone(state, object_id, to, events);
-                        }
-                        _ => {}
+                ReplacementResult::Execute(event) => match event {
+                    ProposedEvent::Discard {
+                        player_id,
+                        object_id,
+                        ..
+                    } => {
+                        zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+                        events.push(GameEvent::Discarded {
+                            player_id,
+                            object_id,
+                        });
                     }
-                }
+                    ProposedEvent::ZoneChange { object_id, to, .. } => {
+                        zones::move_to_zone(state, object_id, to, events);
+                    }
+                    _ => {}
+                },
                 ReplacementResult::Prevented => {}
                 ReplacementResult::NeedsChoice(player) => {
                     let candidate_count = state
@@ -160,7 +168,13 @@ mod tests {
     #[test]
     fn discard_moves_card_from_hand_to_graveyard() {
         let mut state = GameState::new_two_player(42);
-        let card = create_object(&mut state, CardId(1), PlayerId(0), "Card".to_string(), Zone::Hand);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
         let ability = ResolvedAbility {
             api_type: "DiscardCard".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
@@ -181,8 +195,20 @@ mod tests {
     #[test]
     fn discard_specific_target() {
         let mut state = GameState::new_two_player(42);
-        let c1 = create_object(&mut state, CardId(1), PlayerId(0), "Keep".to_string(), Zone::Hand);
-        let c2 = create_object(&mut state, CardId(2), PlayerId(0), "Discard".to_string(), Zone::Hand);
+        let c1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Keep".to_string(),
+            Zone::Hand,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Discard".to_string(),
+            Zone::Hand,
+        );
         let ability = ResolvedAbility {
             api_type: "DiscardCard".to_string(),
             params: HashMap::new(),
@@ -203,7 +229,13 @@ mod tests {
     #[test]
     fn discard_emits_discarded_event() {
         let mut state = GameState::new_two_player(42);
-        let card = create_object(&mut state, CardId(1), PlayerId(0), "Card".to_string(), Zone::Hand);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
         let ability = ResolvedAbility {
             api_type: "DiscardCard".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
@@ -217,6 +249,8 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::Discarded { object_id, .. } if *object_id == card)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Discarded { object_id, .. } if *object_id == card)));
     }
 }

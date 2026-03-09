@@ -38,7 +38,11 @@ pub fn resolve(
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     match event {
-                        ProposedEvent::Sacrifice { object_id, player_id: pid, .. } => {
+                        ProposedEvent::Sacrifice {
+                            object_id,
+                            player_id: pid,
+                            ..
+                        } => {
                             zones::move_to_zone(state, object_id, Zone::Graveyard, events);
                             state.layers_dirty = true;
                             events.push(GameEvent::PermanentSacrificed {
@@ -90,7 +94,13 @@ mod tests {
     #[test]
     fn sacrifice_moves_to_graveyard() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Creature".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
         let ability = ResolvedAbility {
             api_type: "Sacrifice".to_string(),
             params: HashMap::new(),
@@ -111,7 +121,13 @@ mod tests {
     #[test]
     fn sacrifice_emits_permanent_sacrificed_event() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Creature".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
         let ability = ResolvedAbility {
             api_type: "Sacrifice".to_string(),
             params: HashMap::new(),

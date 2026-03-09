@@ -30,10 +30,7 @@ pub enum EngineError {
     ActionNotAllowed(String),
 }
 
-pub fn apply(
-    state: &mut GameState,
-    action: GameAction,
-) -> Result<ActionResult, EngineError> {
+pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
     let mut events = Vec::new();
     let registry = effects::build_registry();
 
@@ -63,7 +60,13 @@ pub fn apply(
             }
             casting::handle_cast_spell(state, *player, card_id, &mut events)?
         }
-        (WaitingFor::Priority { player }, GameAction::ActivateAbility { source_id, ability_index }) => {
+        (
+            WaitingFor::Priority { player },
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ) => {
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
             }
@@ -83,16 +86,16 @@ pub fn apply(
             let mc = *mulligan_count;
             mulligan::handle_mulligan_decision(state, p, keep, mc, &mut events)
         }
-        (
-            WaitingFor::MulliganBottomCards { player, count },
-            GameAction::SelectCards { cards },
-        ) => {
+        (WaitingFor::MulliganBottomCards { player, count }, GameAction::SelectCards { cards }) => {
             let p = *player;
             let c = *count;
             mulligan::handle_mulligan_bottom(state, p, cards, c, &mut events)
                 .map_err(|e| EngineError::InvalidAction(e))?
         }
-        (WaitingFor::DeclareAttackers { player }, GameAction::DeclareAttackers { attacker_ids }) => {
+        (
+            WaitingFor::DeclareAttackers { player },
+            GameAction::DeclareAttackers { attacker_ids },
+        ) => {
             if state.active_player != *player {
                 return Err(EngineError::WrongPlayer);
             }
@@ -134,11 +137,9 @@ pub fn apply(
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             match super::replacement::continue_replacement(state, index, &mut events) {
-                super::replacement::ReplacementResult::Execute(_) => {
-                    WaitingFor::Priority {
-                        player: state.active_player,
-                    }
-                }
+                super::replacement::ReplacementResult::Execute(_) => WaitingFor::Priority {
+                    player: state.active_player,
+                },
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     let candidate_count = state
                         .pending_replacement
@@ -150,11 +151,9 @@ pub fn apply(
                         candidate_count,
                     }
                 }
-                super::replacement::ReplacementResult::Prevented => {
-                    WaitingFor::Priority {
-                        player: state.active_player,
-                    }
-                }
+                super::replacement::ReplacementResult::Prevented => WaitingFor::Priority {
+                    player: state.active_player,
+                },
             }
         }
         (waiting, action) => {
@@ -247,9 +246,7 @@ fn handle_play_land(
                 .unwrap_or(false)
         })
         .copied()
-        .ok_or_else(|| {
-            EngineError::InvalidAction("Card not found in hand".to_string())
-        })?;
+        .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))?;
 
     // Move from hand to battlefield
     zones::move_to_zone(state, object_id, Zone::Battlefield, events);
@@ -288,9 +285,10 @@ fn handle_tap_land_for_mana(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let obj = state.objects.get(&object_id).ok_or_else(|| {
-        EngineError::InvalidAction("Object not found".to_string())
-    })?;
+    let obj = state
+        .objects
+        .get(&object_id)
+        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
 
     // Validate: on battlefield, controlled by acting player, is a land, not tapped
     if obj.zone != Zone::Battlefield {
@@ -323,9 +321,7 @@ fn handle_tap_land_for_mana(
         .iter()
         .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
         .ok_or_else(|| {
-            EngineError::InvalidAction(
-                "Land has no recognized basic land subtype".to_string(),
-            )
+            EngineError::InvalidAction("Land has no recognized basic land subtype".to_string())
         })?;
 
     // Tap the permanent
@@ -335,13 +331,7 @@ fn handle_tap_land_for_mana(
     events.push(GameEvent::PermanentTapped { object_id });
 
     // Produce mana
-    mana_payment::produce_mana(
-        state,
-        object_id,
-        mana_type,
-        state.priority_player,
-        events,
-    );
+    mana_payment::produce_mana(state, object_id, mana_type, state.priority_player, events);
 
     Ok(WaitingFor::Priority {
         player: state.priority_player,
@@ -485,11 +475,7 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let result = apply(
-            &mut state,
-            GameAction::PlayLand { card_id: CardId(1) },
-        )
-        .unwrap();
+        let result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) }).unwrap();
 
         assert!(state.battlefield.contains(&obj_id));
         assert!(!state.players[0].hand.contains(&obj_id));
@@ -517,10 +503,7 @@ mod tests {
             Zone::Hand,
         );
 
-        let result = apply(
-            &mut state,
-            GameAction::PlayLand { card_id: CardId(1) },
-        );
+        let result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) });
 
         assert!(result.is_err());
     }
@@ -538,10 +521,7 @@ mod tests {
             Zone::Hand,
         );
 
-        let result = apply(
-            &mut state,
-            GameAction::PlayLand { card_id: CardId(1) },
-        );
+        let result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) });
 
         assert!(result.is_err());
     }
@@ -673,11 +653,7 @@ mod tests {
             .push(CoreType::Land);
 
         // Play the land
-        let result = apply(
-            &mut state,
-            GameAction::PlayLand { card_id: CardId(1) },
-        )
-        .unwrap();
+        let result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) }).unwrap();
 
         assert!(state.battlefield.contains(&land_id));
         assert_eq!(state.lands_played_this_turn, 1);
@@ -912,11 +888,7 @@ mod tests {
         assert_eq!(state.players[1].hand.len(), 7);
 
         // Player 0 keeps
-        let result = apply(
-            &mut state,
-            GameAction::MulliganDecision { keep: true },
-        )
-        .unwrap();
+        let result = apply(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::MulliganDecision {
@@ -926,11 +898,7 @@ mod tests {
         ));
 
         // Player 1 keeps -> game starts, auto-advances to PreCombatMain
-        let result = apply(
-            &mut state,
-            GameAction::MulliganDecision { keep: true },
-        )
-        .unwrap();
+        let result = apply(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {
@@ -1024,7 +992,11 @@ mod tests {
         }
 
         // Add mana
-        let player = state.players.iter_mut().find(|p| p.id == PlayerId(0)).unwrap();
+        let player = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
         for _ in 0..3 {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
@@ -1043,7 +1015,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(result.waiting_for, WaitingFor::Priority { player: PlayerId(0) }));
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
         assert_eq!(state.stack.len(), 1);
         assert!(!state.players[0].hand.contains(&obj_id));
     }
@@ -1083,7 +1060,11 @@ mod tests {
             );
         }
 
-        let player = state.players.iter_mut().find(|p| p.id == PlayerId(0)).unwrap();
+        let player = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
         for _ in 0..3 {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
@@ -1158,7 +1139,11 @@ mod tests {
             };
         }
 
-        let player = state.players.iter_mut().find(|p| p.id == PlayerId(0)).unwrap();
+        let player = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
         player.mana_pool.add(ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(0),
@@ -1194,8 +1179,8 @@ mod tests {
 
     // === Phase 04 Plan 03 Integration Tests ===
 
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::ability::TargetRef;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
         let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
@@ -1311,7 +1296,10 @@ mod tests {
         .unwrap();
 
         // Should need target selection (2 players)
-        assert!(matches!(result.waiting_for, WaitingFor::TargetSelection { .. }));
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
 
         // Select player 1 as target
         let result = apply(
@@ -1540,7 +1528,10 @@ mod tests {
         assert!(state.stack.is_empty());
         assert!(state.players[0].graveyard.contains(&bolt_id));
         // No DamageDealt event
-        assert!(!result.events.iter().any(|e| matches!(e, GameEvent::DamageDealt { .. })));
+        assert!(!result
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
     }
 
     #[test]
@@ -1569,9 +1560,11 @@ mod tests {
         {
             let obj = state.objects.get_mut(&spell_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 2 | SubAbility$ DBDraw".to_string());
-            obj.svars.insert("DBDraw".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.abilities.push(
+                "SP$ DealDamage | ValidTgts$ Player | NumDmg$ 2 | SubAbility$ DBDraw".to_string(),
+            );
+            obj.svars
+                .insert("DBDraw".to_string(), "DB$ Draw | NumCards$ 1".to_string());
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1589,7 +1582,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(result.waiting_for, WaitingFor::TargetSelection { .. }));
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
 
         // Select P1 as target
         apply(
@@ -1668,16 +1664,19 @@ mod tests {
 
             // Create a creature with a "if would die, exile instead" replacement
             let creature = make_creature(&mut state, PlayerId(0), "Resilient", 2, 2);
-            state.objects.get_mut(&creature).unwrap().replacement_definitions.push(
-                ReplacementDefinition {
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .replacement_definitions
+                .push(ReplacementDefinition {
                     event: "Moved".to_string(),
                     params: HashMap::from([
                         ("Origin$".to_string(), "Battlefield".to_string()),
                         ("Destination$".to_string(), "Graveyard".to_string()),
                         ("NewDestination$".to_string(), "Exile".to_string()),
                     ]),
-                },
-            );
+                });
 
             // Destroy the creature via the destroy effect handler
             let ability = crate::types::ability::ResolvedAbility {
@@ -1694,15 +1693,27 @@ mod tests {
             crate::game::effects::destroy::resolve(&mut state, &ability, &mut events).unwrap();
 
             // Creature should be in exile, NOT graveyard
-            assert!(state.exile.contains(&creature), "creature should be in exile");
-            assert!(!state.battlefield.contains(&creature), "creature should not be on battlefield");
-            assert!(!state.players[0].graveyard.contains(&creature), "creature should NOT be in graveyard");
+            assert!(
+                state.exile.contains(&creature),
+                "creature should be in exile"
+            );
+            assert!(
+                !state.battlefield.contains(&creature),
+                "creature should not be on battlefield"
+            );
+            assert!(
+                !state.players[0].graveyard.contains(&creature),
+                "creature should NOT be in graveyard"
+            );
 
             // ReplacementApplied event should have been emitted
-            assert!(events.iter().any(|e| matches!(
-                e,
-                GameEvent::ReplacementApplied { event_type, .. } if event_type == "Moved"
-            )), "ReplacementApplied event should be emitted");
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::ReplacementApplied { event_type, .. } if event_type == "Moved"
+                )),
+                "ReplacementApplied event should be emitted"
+            );
         }
 
         #[test]
@@ -1715,16 +1726,19 @@ mod tests {
 
             // Create a lord that gives all creatures -2/-2
             let lord = make_creature(&mut state, PlayerId(0), "Death Lord", 1, 1);
-            state.objects.get_mut(&lord).unwrap().static_definitions.push(
-                StaticDefinition {
+            state
+                .objects
+                .get_mut(&lord)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition {
                     mode: "Continuous".to_string(),
                     params: HashMap::from([
                         ("Affected".to_string(), "Creature.YouCtrl.Other".to_string()),
                         ("AddPower".to_string(), "-2".to_string()),
                         ("AddToughness".to_string(), "-2".to_string()),
                     ]),
-                },
-            );
+                });
 
             // Mark layers dirty so SBA will evaluate them
             state.layers_dirty = true;
@@ -1734,12 +1748,21 @@ mod tests {
 
             // Layer eval should run first: bear becomes 0/0
             // SBA should then destroy the bear (0 toughness)
-            assert!(!state.battlefield.contains(&creature), "bear with 0 toughness should be destroyed by SBA");
-            assert!(state.players[0].graveyard.contains(&creature), "bear should be in graveyard");
+            assert!(
+                !state.battlefield.contains(&creature),
+                "bear with 0 toughness should be destroyed by SBA"
+            );
+            assert!(
+                state.players[0].graveyard.contains(&creature),
+                "bear should be in graveyard"
+            );
 
             // Lord itself should survive (its own buff doesn't apply to itself due to Other filter)
             // Lord is 1/1 with no debuff applied to self
-            assert!(state.battlefield.contains(&lord), "lord should still be on battlefield");
+            assert!(
+                state.battlefield.contains(&lord),
+                "lord should still be on battlefield"
+            );
         }
 
         #[test]
@@ -1753,15 +1776,18 @@ mod tests {
 
             // Create a damage prevention replacement on the battlefield
             let preventer = make_creature(&mut state, PlayerId(1), "Preventer", 0, 1);
-            state.objects.get_mut(&preventer).unwrap().replacement_definitions.push(
-                ReplacementDefinition {
+            state
+                .objects
+                .get_mut(&preventer)
+                .unwrap()
+                .replacement_definitions
+                .push(ReplacementDefinition {
                     event: "DamageDone".to_string(),
                     params: HashMap::from([
                         ("Prevent".to_string(), "True".to_string()),
                         ("DamageType$".to_string(), "Combat".to_string()),
                     ]),
-                },
-            );
+                });
 
             // Set up combat: attacker unblocked
             let mut combat = CombatState::default();
@@ -1775,7 +1801,10 @@ mod tests {
             combat_damage::resolve_combat_damage(&mut state, &mut events);
 
             // Damage should have been prevented
-            assert_eq!(state.players[1].life, 20, "combat damage should be prevented");
+            assert_eq!(
+                state.players[1].life, 20,
+                "combat damage should be prevented"
+            );
         }
 
         #[test]
@@ -1784,22 +1813,29 @@ mod tests {
             state.turn_number = 2;
 
             let lord = make_creature(&mut state, PlayerId(0), "Lord", 2, 2);
-            state.objects.get_mut(&lord).unwrap().static_definitions.push(
-                StaticDefinition {
+            state
+                .objects
+                .get_mut(&lord)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition {
                     mode: "Continuous".to_string(),
                     params: HashMap::from([
                         ("Affected".to_string(), "Creature.YouCtrl.Other".to_string()),
                         ("AddPower".to_string(), "1".to_string()),
                         ("AddToughness".to_string(), "1".to_string()),
                     ]),
-                },
-            );
+                });
 
             let bear = make_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
             // Evaluate layers
             layers::evaluate_layers(&mut state);
-            assert_eq!(state.objects[&bear].power, Some(3), "bear should be 3/3 with lord buff");
+            assert_eq!(
+                state.objects[&bear].power,
+                Some(3),
+                "bear should be 3/3 with lord buff"
+            );
             assert_eq!(state.objects[&bear].toughness, Some(3));
 
             // Destroy the lord (move to graveyard)
@@ -1809,7 +1845,11 @@ mod tests {
             // Re-evaluate layers
             layers::evaluate_layers(&mut state);
 
-            assert_eq!(state.objects[&bear].power, Some(2), "bear should return to 2/2 without lord");
+            assert_eq!(
+                state.objects[&bear].power,
+                Some(2),
+                "bear should return to 2/2 without lord"
+            );
             assert_eq!(state.objects[&bear].toughness, Some(2));
         }
 
@@ -1820,16 +1860,19 @@ mod tests {
 
             // Creature A with "if would die, exile instead" replacement
             let creature_a = make_creature(&mut state, PlayerId(0), "Resilient A", 2, 2);
-            state.objects.get_mut(&creature_a).unwrap().replacement_definitions.push(
-                ReplacementDefinition {
+            state
+                .objects
+                .get_mut(&creature_a)
+                .unwrap()
+                .replacement_definitions
+                .push(ReplacementDefinition {
                     event: "Moved".to_string(),
                     params: HashMap::from([
                         ("Origin$".to_string(), "Battlefield".to_string()),
                         ("Destination$".to_string(), "Graveyard".to_string()),
                         ("NewDestination$".to_string(), "Exile".to_string()),
                     ]),
-                },
-            );
+                });
 
             // Creature B with "when a creature is exiled, draw a card" trigger
             let creature_b = make_creature(&mut state, PlayerId(0), "Observer B", 1, 1);
@@ -1841,8 +1884,12 @@ mod tests {
                 "DrawTarget".to_string(),
                 Zone::Library,
             );
-            state.objects.get_mut(&creature_b).unwrap().trigger_definitions.push(
-                TriggerDefinition {
+            state
+                .objects
+                .get_mut(&creature_b)
+                .unwrap()
+                .trigger_definitions
+                .push(TriggerDefinition {
                     mode: "ChangesZone".to_string(),
                     params: HashMap::from([
                         ("Origin".to_string(), "Battlefield".to_string()),
@@ -1850,12 +1897,13 @@ mod tests {
                         ("ValidCard".to_string(), "Creature".to_string()),
                         ("Execute".to_string(), "TrigDraw".to_string()),
                     ]),
-                },
-            );
-            state.objects.get_mut(&creature_b).unwrap().svars.insert(
-                "TrigDraw".to_string(),
-                "SP$ Draw | NumCards$ 1".to_string(),
-            );
+                });
+            state
+                .objects
+                .get_mut(&creature_b)
+                .unwrap()
+                .svars
+                .insert("TrigDraw".to_string(), "SP$ Draw | NumCards$ 1".to_string());
 
             // Destroy creature A
             let ability = crate::types::ability::ResolvedAbility {
@@ -1871,8 +1919,14 @@ mod tests {
             crate::game::effects::destroy::resolve(&mut state, &ability, &mut events).unwrap();
 
             // Creature A should be in exile (replacement redirected)
-            assert!(state.exile.contains(&creature_a), "creature A should be in exile");
-            assert!(!state.players[0].graveyard.contains(&creature_a), "creature A should not be in graveyard");
+            assert!(
+                state.exile.contains(&creature_a),
+                "creature A should be in exile"
+            );
+            assert!(
+                !state.players[0].graveyard.contains(&creature_a),
+                "creature A should not be in graveyard"
+            );
 
             // Process triggers -- creature B's trigger should fire on the zone change to exile
             triggers::process_triggers(&mut state, &events);

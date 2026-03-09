@@ -102,7 +102,10 @@ mod tests {
     fn parse_legendary_enchantment_creature() {
         let ct = parse("Legendary Enchantment Creature God");
         assert_eq!(ct.supertypes, vec![Supertype::Legendary]);
-        assert_eq!(ct.core_types, vec![CoreType::Enchantment, CoreType::Creature]);
+        assert_eq!(
+            ct.core_types,
+            vec![CoreType::Enchantment, CoreType::Creature]
+        );
         assert_eq!(ct.subtypes, vec!["God"]);
     }
 

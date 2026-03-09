@@ -241,9 +241,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     .map_or(false, |c| !c.attackers.is_empty());
                 if has_attackers {
                     let defending = PlayerId(1 - state.active_player.0);
-                    return WaitingFor::DeclareBlockers {
-                        player: defending,
-                    };
+                    return WaitingFor::DeclareBlockers { player: defending };
                 } else {
                     // No attackers, skip to EndCombat
                     state.phase = Phase::EndCombat;
@@ -314,9 +312,12 @@ mod tests {
         advance_phase(&mut state, &mut events);
 
         assert_eq!(state.phase, Phase::Upkeep);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::PhaseChanged { phase: Phase::Upkeep })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PhaseChanged {
+                phase: Phase::Upkeep
+            }
+        )));
     }
 
     #[test]
@@ -389,13 +390,9 @@ mod tests {
 
         start_next_turn(&mut state, &mut events);
 
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::TurnStarted {
-                turn_number: 2,
-                ..
-            }
-        )));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::TurnStarted { turn_number: 2, .. })));
     }
 
     #[test]

@@ -1,9 +1,10 @@
 use engine::game::game_object::GameObject;
+use engine::game::mana_payment;
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
-use engine::types::actions::GameAction;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -25,11 +26,11 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
         WaitingFor::TargetSelection { player, .. } => target_selection_actions(state, *player),
         WaitingFor::DeclareAttackers { player } => attacker_actions(state, *player),
         WaitingFor::DeclareBlockers { player } => blocker_actions(state, *player),
-        WaitingFor::ReplacementChoice { candidate_count, .. } => {
-            (0..*candidate_count)
-                .map(|i| GameAction::ChooseReplacement { index: i })
-                .collect()
-        }
+        WaitingFor::ReplacementChoice {
+            candidate_count, ..
+        } => (0..*candidate_count)
+            .map(|i| GameAction::ChooseReplacement { index: i })
+            .collect(),
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }
@@ -103,27 +104,160 @@ fn can_cast(
     }
 
     // Sorcery-speed: must be main phase, stack empty, active player
-    let is_instant = obj.card_types.core_types.contains(&CoreType::Instant)
-        || obj.has_keyword(&Keyword::Flash);
+    let is_instant =
+        obj.card_types.core_types.contains(&CoreType::Instant) || obj.has_keyword(&Keyword::Flash);
 
     if !is_instant && !(is_main_phase && stack_empty && is_active) {
         return false;
     }
 
-    // Check if player can afford the mana cost
-    let p = &state.players[player.0 as usize];
-    can_afford(&p.mana_pool, &obj.mana_cost)
+    // Check if player could afford the cost using pool + untapped lands
+    let available = compute_available_mana(state, player);
+    can_afford_with(&available, &obj.mana_cost)
 }
 
-fn can_afford(pool: &engine::types::mana::ManaPool, cost: &ManaCost) -> bool {
-    match cost {
-        ManaCost::NoCost => false, // NoCost means can't be cast normally
-        ManaCost::Cost { shards, generic } => {
-            let total_available = pool.total();
-            let colored_needed = shards.len();
-            let total_needed = colored_needed + *generic as usize;
-            total_available >= total_needed
+/// Mana available from the current pool plus untapped lands on the battlefield.
+/// Used for UI highlighting — shows what the player *could* cast, not just
+/// what they can cast with currently floating mana.
+struct AvailableMana {
+    white: usize,
+    blue: usize,
+    black: usize,
+    red: usize,
+    green: usize,
+    colorless: usize,
+}
+
+impl AvailableMana {
+    fn total(&self) -> usize {
+        self.white + self.blue + self.black + self.red + self.green + self.colorless
+    }
+
+    fn count(&self, color: ManaType) -> usize {
+        match color {
+            ManaType::White => self.white,
+            ManaType::Blue => self.blue,
+            ManaType::Black => self.black,
+            ManaType::Red => self.red,
+            ManaType::Green => self.green,
+            ManaType::Colorless => self.colorless,
         }
+    }
+}
+
+fn compute_available_mana(state: &GameState, player: PlayerId) -> AvailableMana {
+    let p = &state.players[player.0 as usize];
+    let pool = &p.mana_pool;
+
+    let mut available = AvailableMana {
+        white: pool.count_color(ManaType::White),
+        blue: pool.count_color(ManaType::Blue),
+        black: pool.count_color(ManaType::Black),
+        red: pool.count_color(ManaType::Red),
+        green: pool.count_color(ManaType::Green),
+        colorless: pool.count_color(ManaType::Colorless),
+    };
+
+    // Add potential mana from untapped lands on the battlefield
+    for &obj_id in &state.battlefield {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.controller != player || obj.tapped {
+                continue;
+            }
+            if !obj.card_types.core_types.contains(&CoreType::Land) {
+                continue;
+            }
+            if let Some(mana_type) = obj
+                .card_types
+                .subtypes
+                .iter()
+                .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
+            {
+                match mana_type {
+                    ManaType::White => available.white += 1,
+                    ManaType::Blue => available.blue += 1,
+                    ManaType::Black => available.black += 1,
+                    ManaType::Red => available.red += 1,
+                    ManaType::Green => available.green += 1,
+                    ManaType::Colorless => available.colorless += 1,
+                }
+            }
+        }
+    }
+
+    available
+}
+
+fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
+    match cost {
+        ManaCost::NoCost => false,
+        ManaCost::Cost { shards, generic } => {
+            // Track how much of each color we consume for colored shards
+            let mut remaining = AvailableMana {
+                white: available.white,
+                blue: available.blue,
+                black: available.black,
+                red: available.red,
+                green: available.green,
+                colorless: available.colorless,
+            };
+
+            for shard in shards {
+                let color = shard_to_mana_type(shard);
+                if remaining.count(color) > 0 {
+                    match color {
+                        ManaType::White => remaining.white -= 1,
+                        ManaType::Blue => remaining.blue -= 1,
+                        ManaType::Black => remaining.black -= 1,
+                        ManaType::Red => remaining.red -= 1,
+                        ManaType::Green => remaining.green -= 1,
+                        ManaType::Colorless => remaining.colorless -= 1,
+                    }
+                } else {
+                    return false;
+                }
+            }
+
+            // Generic cost can be paid with any remaining mana
+            remaining.total() >= *generic as usize
+        }
+    }
+}
+
+/// Map a mana cost shard to the ManaType it requires.
+/// Hybrid/phyrexian shards return the first option for simplicity —
+/// this is a conservative approximation for UI highlighting.
+fn shard_to_mana_type(shard: &ManaCostShard) -> ManaType {
+    match shard {
+        ManaCostShard::White
+        | ManaCostShard::PhyrexianWhite
+        | ManaCostShard::TwoWhite => ManaType::White,
+        ManaCostShard::Blue
+        | ManaCostShard::PhyrexianBlue
+        | ManaCostShard::TwoBlue => ManaType::Blue,
+        ManaCostShard::Black
+        | ManaCostShard::PhyrexianBlack
+        | ManaCostShard::TwoBlack => ManaType::Black,
+        ManaCostShard::Red
+        | ManaCostShard::PhyrexianRed
+        | ManaCostShard::TwoRed => ManaType::Red,
+        ManaCostShard::Green
+        | ManaCostShard::PhyrexianGreen
+        | ManaCostShard::TwoGreen => ManaType::Green,
+        ManaCostShard::Colorless => ManaType::Colorless,
+        // Hybrid: use first color (conservative — may miss some castable spells)
+        ManaCostShard::WhiteBlue | ManaCostShard::PhyrexianWhiteBlue | ManaCostShard::ColorlessWhite => ManaType::White,
+        ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => ManaType::White,
+        ManaCostShard::BlueBlack | ManaCostShard::PhyrexianBlueBlack | ManaCostShard::ColorlessBlue => ManaType::Blue,
+        ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => ManaType::Blue,
+        ManaCostShard::BlackRed | ManaCostShard::PhyrexianBlackRed | ManaCostShard::ColorlessBlack => ManaType::Black,
+        ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => ManaType::Black,
+        ManaCostShard::RedWhite | ManaCostShard::PhyrexianRedWhite | ManaCostShard::ColorlessRed => ManaType::Red,
+        ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => ManaType::Red,
+        ManaCostShard::GreenWhite | ManaCostShard::PhyrexianGreenWhite | ManaCostShard::ColorlessGreen => ManaType::Green,
+        ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => ManaType::Green,
+        // X costs and Snow cost nothing for affordability check
+        ManaCostShard::X | ManaCostShard::Snow => ManaType::Colorless,
     }
 }
 
@@ -155,7 +289,10 @@ fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<Ga
     actions
 }
 
-fn combinations(items: &[engine::types::identifiers::ObjectId], k: usize) -> Vec<Vec<engine::types::identifiers::ObjectId>> {
+fn combinations(
+    items: &[engine::types::identifiers::ObjectId],
+    k: usize,
+) -> Vec<Vec<engine::types::identifiers::ObjectId>> {
     if k == 0 {
         return vec![Vec::new()];
     }
@@ -384,7 +521,13 @@ mod tests {
         core_type: CoreType,
         cost: ManaCost,
     ) -> ObjectId {
-        let id = create_object(state, CardId(state.next_object_id), owner, name.to_string(), Zone::Hand);
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Hand,
+        );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(core_type);
         obj.mana_cost = cost;
@@ -421,7 +564,9 @@ mod tests {
             ManaCost::NoCost,
         );
         let actions = get_legal_actions(&state);
-        assert!(actions.iter().any(|a| matches!(a, GameAction::PlayLand { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, GameAction::PlayLand { .. })));
     }
 
     #[test]
@@ -436,7 +581,9 @@ mod tests {
             ManaCost::NoCost,
         );
         let actions = get_legal_actions(&state);
-        assert!(!actions.iter().any(|a| matches!(a, GameAction::PlayLand { .. })));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GameAction::PlayLand { .. })));
     }
 
     #[test]
@@ -446,10 +593,18 @@ mod tests {
             shards: vec![ManaCostShard::Red],
             generic: 0,
         };
-        add_card_to_hand(&mut state, PlayerId(0), "Lightning Bolt", CoreType::Instant, cost);
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Lightning Bolt",
+            CoreType::Instant,
+            cost,
+        );
         add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
         let actions = get_legal_actions(&state);
-        assert!(actions.iter().any(|a| matches!(a, GameAction::CastSpell { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
     }
 
     #[test]
@@ -459,9 +614,17 @@ mod tests {
             shards: vec![ManaCostShard::Red],
             generic: 0,
         };
-        add_card_to_hand(&mut state, PlayerId(0), "Lightning Bolt", CoreType::Instant, cost);
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Lightning Bolt",
+            CoreType::Instant,
+            cost,
+        );
         let actions = get_legal_actions(&state);
-        assert!(!actions.iter().any(|a| matches!(a, GameAction::CastSpell { .. })));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
     }
 
     #[test]
@@ -550,13 +713,173 @@ mod tests {
             "Forest".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&id).unwrap().card_types.core_types.push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
 
         let actions = get_legal_actions(&state);
         assert!(actions.iter().any(|a| matches!(
             a,
             GameAction::TapLandForMana { object_id } if *object_id == id
         )));
+    }
+
+    fn add_land_to_battlefield(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        subtype: &str,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push(subtype.to_string());
+        id
+    }
+
+    #[test]
+    fn spell_castable_with_untapped_land_on_battlefield() {
+        let mut state = make_state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        };
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Lightning Bolt",
+            CoreType::Instant,
+            cost,
+        );
+        add_land_to_battlefield(&mut state, PlayerId(0), "Mountain", "Mountain");
+        let actions = get_legal_actions(&state);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn spell_not_castable_with_wrong_color_land() {
+        let mut state = make_state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Opt",
+            CoreType::Instant,
+            cost,
+        );
+        // Only have a Forest, need Blue
+        add_land_to_battlefield(&mut state, PlayerId(0), "Forest", "Forest");
+        let actions = get_legal_actions(&state);
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn spell_castable_with_generic_plus_colored_from_lands() {
+        let mut state = make_state();
+        // Cost: 1U (one blue + one generic)
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        };
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Counterspell",
+            CoreType::Instant,
+            cost,
+        );
+        add_land_to_battlefield(&mut state, PlayerId(0), "Island", "Island");
+        add_land_to_battlefield(&mut state, PlayerId(0), "Plains", "Plains");
+        let actions = get_legal_actions(&state);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn spell_not_castable_with_insufficient_lands() {
+        let mut state = make_state();
+        // Cost: 1U (need 2 total, 1 must be blue)
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        };
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Counterspell",
+            CoreType::Instant,
+            cost,
+        );
+        // Only one Island — need 2 total mana
+        add_land_to_battlefield(&mut state, PlayerId(0), "Island", "Island");
+        let actions = get_legal_actions(&state);
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn tapped_lands_not_counted_as_available() {
+        let mut state = make_state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        };
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Lightning Bolt",
+            CoreType::Instant,
+            cost,
+        );
+        let land_id = add_land_to_battlefield(&mut state, PlayerId(0), "Mountain", "Mountain");
+        state.objects.get_mut(&land_id).unwrap().tapped = true;
+        let actions = get_legal_actions(&state);
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn pool_mana_plus_lands_combine_for_affordability() {
+        let mut state = make_state();
+        // Cost: UU (two blue)
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 0,
+        };
+        add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Counterspell",
+            CoreType::Instant,
+            cost,
+        );
+        // One blue floating + one untapped Island = 2 blue
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_land_to_battlefield(&mut state, PlayerId(0), "Island", "Island");
+        let actions = get_legal_actions(&state);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
     }
 
     #[test]

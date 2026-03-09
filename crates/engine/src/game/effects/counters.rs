@@ -46,7 +46,13 @@ pub fn resolve_add(
 
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
-                    if let ProposedEvent::AddCounter { object_id, counter_type, count, .. } = event {
+                    if let ProposedEvent::AddCounter {
+                        object_id,
+                        counter_type,
+                        count,
+                        ..
+                    } = event
+                    {
                         let ct = parse_counter_type(&counter_type);
                         let obj = state
                             .objects
@@ -121,7 +127,13 @@ pub fn resolve_remove(
 
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
-                    if let ProposedEvent::RemoveCounter { object_id, counter_type, count, .. } = event {
+                    if let ProposedEvent::RemoveCounter {
+                        object_id,
+                        counter_type,
+                        count,
+                        ..
+                    } = event
+                    {
                         let ct = parse_counter_type(&counter_type);
                         let obj = state
                             .objects
@@ -175,7 +187,12 @@ mod tests {
     use crate::types::zones::Zone;
     use std::collections::HashMap;
 
-    fn make_counter_ability(api_type: &str, ct: &str, num: u32, target: ObjectId) -> ResolvedAbility {
+    fn make_counter_ability(
+        api_type: &str,
+        ct: &str,
+        num: u32,
+        target: ObjectId,
+    ) -> ResolvedAbility {
         ResolvedAbility {
             api_type: api_type.to_string(),
             params: HashMap::from([
@@ -193,10 +210,21 @@ mod tests {
     #[test]
     fn add_counter_increments() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Creature".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
         let mut events = Vec::new();
 
-        resolve_add(&mut state, &make_counter_ability("AddCounter", "P1P1", 2, obj_id), &mut events).unwrap();
+        resolve_add(
+            &mut state,
+            &make_counter_ability("AddCounter", "P1P1", 2, obj_id),
+            &mut events,
+        )
+        .unwrap();
 
         assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 2);
     }
@@ -204,11 +232,27 @@ mod tests {
     #[test]
     fn remove_counter_decrements_clamped() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Creature".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&obj_id).unwrap().counters.insert(CounterType::Plus1Plus1, 1);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
         let mut events = Vec::new();
 
-        resolve_remove(&mut state, &make_counter_ability("RemoveCounter", "P1P1", 3, obj_id), &mut events).unwrap();
+        resolve_remove(
+            &mut state,
+            &make_counter_ability("RemoveCounter", "P1P1", 3, obj_id),
+            &mut events,
+        )
+        .unwrap();
 
         assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 0);
     }
@@ -216,21 +260,46 @@ mod tests {
     #[test]
     fn add_generic_counter() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Artifact".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Artifact".to_string(),
+            Zone::Battlefield,
+        );
         let mut events = Vec::new();
 
-        resolve_add(&mut state, &make_counter_ability("AddCounter", "charge", 3, obj_id), &mut events).unwrap();
+        resolve_add(
+            &mut state,
+            &make_counter_ability("AddCounter", "charge", 3, obj_id),
+            &mut events,
+        )
+        .unwrap();
 
-        assert_eq!(state.objects[&obj_id].counters[&CounterType::Generic("charge".to_string())], 3);
+        assert_eq!(
+            state.objects[&obj_id].counters[&CounterType::Generic("charge".to_string())],
+            3
+        );
     }
 
     #[test]
     fn add_counter_emits_counter_added_event() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Creature".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
         let mut events = Vec::new();
 
-        resolve_add(&mut state, &make_counter_ability("AddCounter", "P1P1", 1, obj_id), &mut events).unwrap();
+        resolve_add(
+            &mut state,
+            &make_counter_ability("AddCounter", "P1P1", 1, obj_id),
+            &mut events,
+        )
+        .unwrap();
 
         assert!(events.iter().any(|e| matches!(e, GameEvent::CounterAdded { counter_type, count: 1, .. } if counter_type == "P1P1")));
     }

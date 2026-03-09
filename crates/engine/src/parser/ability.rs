@@ -102,7 +102,10 @@ mod tests {
     fn parse_ability_missing_kind_errors() {
         let result = parse_ability("NoKind$ Value | Foo$ Bar");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ParseError::MissingAbilityKind));
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingAbilityKind
+        ));
     }
 
     #[test]
@@ -119,8 +122,7 @@ mod tests {
 
     #[test]
     fn parse_static_continuous() {
-        let result =
-            parse_static("Mode$ Continuous | Affected$ Card.Self | AddPower$ 2").unwrap();
+        let result = parse_static("Mode$ Continuous | Affected$ Card.Self | AddPower$ 2").unwrap();
         assert_eq!(result.mode, "Continuous");
         assert_eq!(result.params.get("Affected").unwrap(), "Card.Self");
         assert_eq!(result.params.get("AddPower").unwrap(), "2");

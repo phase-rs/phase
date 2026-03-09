@@ -313,7 +313,10 @@ mod tests {
         add_creature(&mut state, PlayerId(1), "Bear", 2, 2, vec![]);
 
         let attackers = choose_attackers(&state, PlayerId(0));
-        assert!(attackers.contains(&flyer), "Flying creature should always attack");
+        assert!(
+            attackers.contains(&flyer),
+            "Flying creature should always attack"
+        );
     }
 
     #[test]
@@ -322,7 +325,10 @@ mod tests {
         let bear = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
 
         let attackers = choose_attackers(&state, PlayerId(0));
-        assert!(attackers.contains(&bear), "Should attack with no blockers present");
+        assert!(
+            attackers.contains(&bear),
+            "Should attack with no blockers present"
+        );
     }
 
     #[test]
@@ -342,7 +348,14 @@ mod tests {
     #[test]
     fn deathtouch_blocker_assigned_to_biggest_threat() {
         let mut state = setup();
-        let big = add_creature(&mut state, PlayerId(0), "Dragon", 6, 6, vec![Keyword::Flying]);
+        let big = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Dragon",
+            6,
+            6,
+            vec![Keyword::Flying],
+        );
         let small = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
         let dt = add_creature(
             &mut state,
@@ -356,11 +369,12 @@ mod tests {
         let blockers = choose_blockers(&state, PlayerId(1), &[big, small]);
 
         // Deathtouch blocker should be assigned to the dragon (highest value)
-        let blocked_target = blockers
-            .iter()
-            .find(|&&(b, _)| b == dt)
-            .map(|&(_, a)| a);
-        assert_eq!(blocked_target, Some(big), "Deathtouch should block highest-value attacker");
+        let blocked_target = blockers.iter().find(|&&(b, _)| b == dt).map(|&(_, a)| a);
+        assert_eq!(
+            blocked_target,
+            Some(big),
+            "Deathtouch should block highest-value attacker"
+        );
     }
 
     #[test]
@@ -374,7 +388,10 @@ mod tests {
 
         // Wall should block (survives), squirrel should not (dies for nothing)
         let blocker_ids: Vec<_> = blockers.iter().map(|&(b, _)| b).collect();
-        assert!(blocker_ids.contains(&wall), "Wall should block since it survives");
+        assert!(
+            blocker_ids.contains(&wall),
+            "Wall should block since it survives"
+        );
     }
 
     #[test]
@@ -396,7 +413,14 @@ mod tests {
     #[test]
     fn defender_cannot_attack() {
         let mut state = setup();
-        let id = add_creature(&mut state, PlayerId(0), "Wall", 0, 5, vec![Keyword::Defender]);
+        let id = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Wall",
+            0,
+            5,
+            vec![Keyword::Defender],
+        );
         assert!(!can_attack(&state, id));
     }
 }

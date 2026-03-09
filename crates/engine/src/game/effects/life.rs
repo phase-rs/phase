@@ -28,7 +28,12 @@ pub fn resolve_gain(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::LifeGain { player_id, amount: gain_amount, .. } = event {
+            if let ProposedEvent::LifeGain {
+                player_id,
+                amount: gain_amount,
+                ..
+            } = event
+            {
                 let player = state
                     .players
                     .iter_mut()
@@ -102,7 +107,12 @@ pub fn resolve_lose(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::LifeLoss { player_id, amount: loss_amount, .. } = event {
+            if let ProposedEvent::LifeLoss {
+                player_id,
+                amount: loss_amount,
+                ..
+            } = event
+            {
                 let player = state
                     .players
                     .iter_mut()
@@ -201,7 +211,9 @@ mod tests {
 
         resolve_gain(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == 4)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == 4)));
     }
 
     #[test]
@@ -220,6 +232,8 @@ mod tests {
 
         resolve_lose(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == -2)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == -2)));
     }
 }

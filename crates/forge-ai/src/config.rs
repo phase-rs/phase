@@ -60,36 +60,61 @@ impl Default for AiConfig {
 /// WASM platform reduces search budgets to fit within browser constraints.
 pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     let (temperature, play_lookahead, combat_lookahead, search) = match difficulty {
-        AiDifficulty::VeryEasy => (4.0, false, false, SearchConfig {
-            enabled: false,
-            max_depth: 0,
-            max_nodes: 0,
-            max_branching: 5,
-        }),
-        AiDifficulty::Easy => (2.0, true, false, SearchConfig {
-            enabled: false,
-            max_depth: 0,
-            max_nodes: 0,
-            max_branching: 5,
-        }),
-        AiDifficulty::Medium => (1.0, true, true, SearchConfig {
-            enabled: true,
-            max_depth: 2,
-            max_nodes: 24,
-            max_branching: 5,
-        }),
-        AiDifficulty::Hard => (0.5, true, true, SearchConfig {
-            enabled: true,
-            max_depth: 3,
-            max_nodes: 48,
-            max_branching: 5,
-        }),
-        AiDifficulty::VeryHard => (0.01, true, true, SearchConfig {
-            enabled: true,
-            max_depth: 3,
-            max_nodes: 64,
-            max_branching: 6,
-        }),
+        AiDifficulty::VeryEasy => (
+            4.0,
+            false,
+            false,
+            SearchConfig {
+                enabled: false,
+                max_depth: 0,
+                max_nodes: 0,
+                max_branching: 5,
+            },
+        ),
+        AiDifficulty::Easy => (
+            2.0,
+            true,
+            false,
+            SearchConfig {
+                enabled: false,
+                max_depth: 0,
+                max_nodes: 0,
+                max_branching: 5,
+            },
+        ),
+        AiDifficulty::Medium => (
+            1.0,
+            true,
+            true,
+            SearchConfig {
+                enabled: true,
+                max_depth: 2,
+                max_nodes: 24,
+                max_branching: 5,
+            },
+        ),
+        AiDifficulty::Hard => (
+            0.5,
+            true,
+            true,
+            SearchConfig {
+                enabled: true,
+                max_depth: 3,
+                max_nodes: 48,
+                max_branching: 5,
+            },
+        ),
+        AiDifficulty::VeryHard => (
+            0.01,
+            true,
+            true,
+            SearchConfig {
+                enabled: true,
+                max_depth: 3,
+                max_nodes: 64,
+                max_branching: 6,
+            },
+        ),
     };
 
     let mut config = AiConfig {

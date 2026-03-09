@@ -98,9 +98,7 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
                         // X can be 0, so always satisfiable
                     }
                     ShardRequirement::ColorlessHybrid(color) => {
-                        if sim.spend(ManaType::Colorless).is_none()
-                            && sim.spend(color).is_none()
-                        {
+                        if sim.spend(ManaType::Colorless).is_none() && sim.spend(color).is_none() {
                             return false;
                         }
                     }
@@ -134,16 +132,12 @@ pub fn pay_cost(
             for shard in shards {
                 match shard_to_mana_type(*shard) {
                     ShardRequirement::Single(mt) => {
-                        let unit = pool
-                            .spend(mt)
-                            .ok_or(PaymentError::InsufficientMana)?;
+                        let unit = pool.spend(mt).ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::Hybrid(a, b) => {
                         let color = auto_pay_hybrid(pool, a, b);
-                        let unit = pool
-                            .spend(color)
-                            .ok_or(PaymentError::InsufficientMana)?;
+                        let unit = pool.spend(color).ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::Phyrexian(color) => {
@@ -162,22 +156,21 @@ pub fn pay_cost(
                         } else {
                             // Pay 2 generic
                             for _ in 0..2 {
-                                let unit = spend_any_unit(pool)
-                                    .ok_or(PaymentError::InsufficientMana)?;
+                                let unit =
+                                    spend_any_unit(pool).ok_or(PaymentError::InsufficientMana)?;
                                 spent.push(unit);
                             }
                         }
                     }
                     ShardRequirement::Generic(n) => {
                         for _ in 0..n {
-                            let unit = spend_any_unit(pool)
-                                .ok_or(PaymentError::InsufficientMana)?;
+                            let unit =
+                                spend_any_unit(pool).ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         }
                     }
                     ShardRequirement::Snow => {
-                        let unit = spend_snow_unit(pool)
-                            .ok_or(PaymentError::InsufficientMana)?;
+                        let unit = spend_snow_unit(pool).ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::X => {
@@ -187,9 +180,7 @@ pub fn pay_cost(
                         if let Some(unit) = pool.spend(ManaType::Colorless) {
                             spent.push(unit);
                         } else {
-                            let unit = pool
-                                .spend(color)
-                                .ok_or(PaymentError::InsufficientMana)?;
+                            let unit = pool.spend(color).ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         }
                     }
@@ -210,8 +201,7 @@ pub fn pay_cost(
 
             // (d) Pay generic from any remaining mana (prefer colorless first, then least-available color)
             for _ in 0..*generic {
-                let unit =
-                    spend_any_unit(pool).ok_or(PaymentError::InsufficientMana)?;
+                let unit = spend_any_unit(pool).ok_or(PaymentError::InsufficientMana)?;
                 spent.push(unit);
             }
 
@@ -354,9 +344,7 @@ fn spend_any_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
         if count > 0 {
             match best {
                 None => best = Some((color, count)),
-                Some((_, best_count)) if count < best_count => {
-                    best = Some((color, count))
-                }
+                Some((_, best_count)) if count < best_count => best = Some((color, count)),
                 _ => {}
             }
         }

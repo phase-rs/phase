@@ -47,20 +47,29 @@ mod tests {
     #[test]
     fn counter_removes_from_stack_and_moves_to_graveyard() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(1), "Spell".to_string(), Zone::Stack);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
         state.stack.push(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(1),
-            kind: StackEntryKind::Spell { card_id: CardId(1), ability: ResolvedAbility {
-                api_type: String::new(),
-                params: HashMap::new(),
-                targets: vec![],
-                source_id: obj_id,
-                controller: PlayerId(1),
-                sub_ability: None,
-                svars: HashMap::new(),
-            } },
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: ResolvedAbility {
+                    api_type: String::new(),
+                    params: HashMap::new(),
+                    targets: vec![],
+                    source_id: obj_id,
+                    controller: PlayerId(1),
+                    sub_ability: None,
+                    svars: HashMap::new(),
+                },
+            },
         });
 
         let ability = ResolvedAbility {
@@ -78,6 +87,8 @@ mod tests {
 
         assert!(state.stack.is_empty());
         assert!(state.players[1].graveyard.contains(&obj_id));
-        assert!(events.iter().any(|e| matches!(e, GameEvent::SpellCountered { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::SpellCountered { .. })));
     }
 }

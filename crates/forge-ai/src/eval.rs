@@ -87,9 +87,7 @@ fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32) {
 
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player
-                && obj.card_types.core_types.contains(&CoreType::Creature)
-            {
+            if obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature) {
                 creatures += 1;
                 total_power += obj.power.unwrap_or(0);
                 total_toughness += obj.toughness.unwrap_or(0);
@@ -195,8 +193,14 @@ mod tests {
         let score_p0 = evaluate_state(&state, PlayerId(0), &weights);
         let score_p1 = evaluate_state(&state, PlayerId(1), &weights);
 
-        assert!(score_p0 > 0.0, "Player with creatures should score positive");
-        assert!(score_p1 < 0.0, "Player without creatures should score negative");
+        assert!(
+            score_p0 > 0.0,
+            "Player with creatures should score positive"
+        );
+        assert!(
+            score_p1 < 0.0,
+            "Player without creatures should score negative"
+        );
         assert!(score_p0 > score_p1);
     }
 
@@ -219,7 +223,10 @@ mod tests {
 
         let plain_score = evaluate_creature(&state, plain);
         let flyer_score = evaluate_creature(&state, flyer);
-        assert!(flyer_score > plain_score, "Flying creature should score higher");
+        assert!(
+            flyer_score > plain_score,
+            "Flying creature should score higher"
+        );
     }
 
     #[test]

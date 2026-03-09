@@ -98,7 +98,12 @@ mod tests {
     fn layer_ordering_is_correct() {
         let all = Layer::all();
         for i in 1..all.len() {
-            assert!(all[i - 1] < all[i], "Layer {:?} should be before {:?}", all[i - 1], all[i]);
+            assert!(
+                all[i - 1] < all[i],
+                "Layer {:?} should be before {:?}",
+                all[i - 1],
+                all[i]
+            );
         }
     }
 

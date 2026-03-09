@@ -31,15 +31,37 @@ pub struct PendingCast {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
-    Priority { player: PlayerId },
-    MulliganDecision { player: PlayerId, mulligan_count: u8 },
-    MulliganBottomCards { player: PlayerId, count: u8 },
-    ManaPayment { player: PlayerId },
-    TargetSelection { player: PlayerId, pending_cast: PendingCast },
-    DeclareAttackers { player: PlayerId },
-    DeclareBlockers { player: PlayerId },
-    GameOver { winner: Option<PlayerId> },
-    ReplacementChoice { player: PlayerId, candidate_count: usize },
+    Priority {
+        player: PlayerId,
+    },
+    MulliganDecision {
+        player: PlayerId,
+        mulligan_count: u8,
+    },
+    MulliganBottomCards {
+        player: PlayerId,
+        count: u8,
+    },
+    ManaPayment {
+        player: PlayerId,
+    },
+    TargetSelection {
+        player: PlayerId,
+        pending_cast: PendingCast,
+    },
+    DeclareAttackers {
+        player: PlayerId,
+    },
+    DeclareBlockers {
+        player: PlayerId,
+    },
+    GameOver {
+        winner: Option<PlayerId>,
+    },
+    ReplacementChoice {
+        player: PlayerId,
+        candidate_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,9 +81,18 @@ pub struct StackEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StackEntryKind {
-    Spell { card_id: CardId, ability: ResolvedAbility },
-    ActivatedAbility { source_id: ObjectId, ability: ResolvedAbility },
-    TriggeredAbility { source_id: ObjectId, ability: ResolvedAbility },
+    Spell {
+        card_id: CardId,
+        ability: ResolvedAbility,
+    },
+    ActivatedAbility {
+        source_id: ObjectId,
+        ability: ResolvedAbility,
+    },
+    TriggeredAbility {
+        source_id: ObjectId,
+        ability: ResolvedAbility,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

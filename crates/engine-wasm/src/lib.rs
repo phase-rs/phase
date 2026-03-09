@@ -13,6 +13,7 @@ use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaT
 
 use forge_ai::choose_action;
 use forge_ai::config::{create_config, AiDifficulty, Platform};
+use forge_ai::legal_actions::get_legal_actions;
 
 thread_local! {
     static GAME_STATE: RefCell<Option<GameState>> = const { RefCell::new(None) };
@@ -90,6 +91,22 @@ pub fn get_game_state() -> JsValue {
                         engine::game::coverage::has_unimplemented_mechanics(obj);
                 }
                 serde_wasm_bindgen::to_value(state).unwrap()
+            }
+            None => JsValue::NULL,
+        }
+    })
+}
+
+/// Get the legal actions for the current game state.
+/// Returns a JS array of GameAction values.
+#[wasm_bindgen]
+pub fn get_legal_actions_js() -> JsValue {
+    GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
+        let state_ref = gs.borrow();
+        match state_ref.as_ref() {
+            Some(state) => {
+                let actions = get_legal_actions(state);
+                serde_wasm_bindgen::to_value(&actions).unwrap()
             }
             None => JsValue::NULL,
         }

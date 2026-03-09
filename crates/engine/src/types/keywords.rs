@@ -373,8 +373,14 @@ mod tests {
         assert_eq!(Keyword::from_str("flying").unwrap(), Keyword::Flying);
         assert_eq!(Keyword::from_str("FLYING").unwrap(), Keyword::Flying);
         assert_eq!(Keyword::from_str("Haste").unwrap(), Keyword::Haste);
-        assert_eq!(Keyword::from_str("Deathtouch").unwrap(), Keyword::Deathtouch);
-        assert_eq!(Keyword::from_str("Indestructible").unwrap(), Keyword::Indestructible);
+        assert_eq!(
+            Keyword::from_str("Deathtouch").unwrap(),
+            Keyword::Deathtouch
+        );
+        assert_eq!(
+            Keyword::from_str("Indestructible").unwrap(),
+            Keyword::Indestructible
+        );
         assert_eq!(Keyword::from_str("Hexproof").unwrap(), Keyword::Hexproof);
         assert_eq!(Keyword::from_str("Shroud").unwrap(), Keyword::Shroud);
         assert_eq!(Keyword::from_str("Flash").unwrap(), Keyword::Flash);
@@ -382,12 +388,30 @@ mod tests {
 
     #[test]
     fn parse_multi_word_keywords() {
-        assert_eq!(Keyword::from_str("First Strike").unwrap(), Keyword::FirstStrike);
-        assert_eq!(Keyword::from_str("first strike").unwrap(), Keyword::FirstStrike);
-        assert_eq!(Keyword::from_str("Double Strike").unwrap(), Keyword::DoubleStrike);
-        assert_eq!(Keyword::from_str("Living Weapon").unwrap(), Keyword::LivingWeapon);
-        assert_eq!(Keyword::from_str("Totem Armor").unwrap(), Keyword::TotemArmor);
-        assert_eq!(Keyword::from_str("Split Second").unwrap(), Keyword::SplitSecond);
+        assert_eq!(
+            Keyword::from_str("First Strike").unwrap(),
+            Keyword::FirstStrike
+        );
+        assert_eq!(
+            Keyword::from_str("first strike").unwrap(),
+            Keyword::FirstStrike
+        );
+        assert_eq!(
+            Keyword::from_str("Double Strike").unwrap(),
+            Keyword::DoubleStrike
+        );
+        assert_eq!(
+            Keyword::from_str("Living Weapon").unwrap(),
+            Keyword::LivingWeapon
+        );
+        assert_eq!(
+            Keyword::from_str("Totem Armor").unwrap(),
+            Keyword::TotemArmor
+        );
+        assert_eq!(
+            Keyword::from_str("Split Second").unwrap(),
+            Keyword::SplitSecond
+        );
         assert_eq!(Keyword::from_str("Battle Cry").unwrap(), Keyword::Battlecry);
     }
 
@@ -413,14 +437,8 @@ mod tests {
             Keyword::from_str("Equip:3").unwrap(),
             Keyword::Equip("3".to_string())
         );
-        assert_eq!(
-            Keyword::from_str("Crew:3").unwrap(),
-            Keyword::Crew(3)
-        );
-        assert_eq!(
-            Keyword::from_str("Rampage:2").unwrap(),
-            Keyword::Rampage(2)
-        );
+        assert_eq!(Keyword::from_str("Crew:3").unwrap(), Keyword::Crew(3));
+        assert_eq!(Keyword::from_str("Rampage:2").unwrap(), Keyword::Rampage(2));
     }
 
     #[test]
@@ -441,7 +459,10 @@ mod tests {
 
     #[test]
     fn parse_partner_variants() {
-        assert_eq!(Keyword::from_str("Partner").unwrap(), Keyword::Partner(None));
+        assert_eq!(
+            Keyword::from_str("Partner").unwrap(),
+            Keyword::Partner(None)
+        );
         assert_eq!(
             Keyword::from_str("Partner:Brallin, Skyshark Rider").unwrap(),
             Keyword::Partner(Some("Brallin, Skyshark Rider".to_string()))
@@ -480,17 +501,61 @@ mod tests {
     fn keyword_count_over_fifty() {
         // Ensure we have 50+ keyword variants (excluding Unknown)
         let test_keywords = vec![
-            "Flying", "First Strike", "Double Strike", "Trample", "Deathtouch",
-            "Lifelink", "Vigilance", "Haste", "Reach", "Defender",
-            "Menace", "Indestructible", "Hexproof", "Shroud", "Flash",
-            "Fear", "Intimidate", "Skulk", "Shadow", "Horsemanship",
-            "Wither", "Infect", "Afflict", "Prowess", "Undying",
-            "Persist", "Cascade", "Convoke", "Delve", "Devoid",
-            "Exalted", "Flanking", "Changeling", "Phasing", "Battle Cry",
-            "Decayed", "Unleash", "Riot", "Living Weapon", "Totem Armor",
-            "Evolve", "Extort", "Exploit", "Explore", "Ascend",
-            "Soulbond", "Partner", "Banding", "Epic", "Fuse",
-            "Improvise", "Ingest", "Melee", "Mentor", "Myriad",
+            "Flying",
+            "First Strike",
+            "Double Strike",
+            "Trample",
+            "Deathtouch",
+            "Lifelink",
+            "Vigilance",
+            "Haste",
+            "Reach",
+            "Defender",
+            "Menace",
+            "Indestructible",
+            "Hexproof",
+            "Shroud",
+            "Flash",
+            "Fear",
+            "Intimidate",
+            "Skulk",
+            "Shadow",
+            "Horsemanship",
+            "Wither",
+            "Infect",
+            "Afflict",
+            "Prowess",
+            "Undying",
+            "Persist",
+            "Cascade",
+            "Convoke",
+            "Delve",
+            "Devoid",
+            "Exalted",
+            "Flanking",
+            "Changeling",
+            "Phasing",
+            "Battle Cry",
+            "Decayed",
+            "Unleash",
+            "Riot",
+            "Living Weapon",
+            "Totem Armor",
+            "Evolve",
+            "Extort",
+            "Exploit",
+            "Explore",
+            "Ascend",
+            "Soulbond",
+            "Partner",
+            "Banding",
+            "Epic",
+            "Fuse",
+            "Improvise",
+            "Ingest",
+            "Melee",
+            "Mentor",
+            "Myriad",
         ];
         let mut non_unknown = 0;
         for kw in &test_keywords {
@@ -499,6 +564,9 @@ mod tests {
                 non_unknown += 1;
             }
         }
-        assert!(non_unknown >= 50, "Expected 50+ known keywords, got {non_unknown}");
+        assert!(
+            non_unknown >= 50,
+            "Expected 50+ known keywords, got {non_unknown}"
+        );
     }
 }

@@ -562,9 +562,7 @@ fn discard_applier(
 ) -> ApplyResult {
     if params.get("Exile").map(|v| v == "True").unwrap_or(false) {
         if let ProposedEvent::Discard {
-            object_id,
-            applied,
-            ..
+            object_id, applied, ..
         } = event
         {
             return ApplyResult::Modified(ProposedEvent::ZoneChange {
@@ -650,9 +648,7 @@ fn sacrifice_applier(
     }
     if params.get("Exile").map(|v| v == "True").unwrap_or(false) {
         if let ProposedEvent::Sacrifice {
-            object_id,
-            applied,
-            ..
+            object_id, applied, ..
         } = event
         {
             return ApplyResult::Modified(ProposedEvent::ZoneChange {
@@ -1024,13 +1020,7 @@ mod tests {
         replacements: Vec<ReplacementDefinition>,
     ) -> GameState {
         let mut state = GameState::new_two_player(42);
-        let mut obj = GameObject::new(
-            obj_id,
-            CardId(1),
-            PlayerId(0),
-            "Test".to_string(),
-            zone,
-        );
+        let mut obj = GameObject::new(obj_id, CardId(1), PlayerId(0), "Test".to_string(), zone);
         obj.replacement_definitions = replacements;
         state.objects.insert(obj_id, obj);
         if zone == Zone::Battlefield {
@@ -1098,8 +1088,7 @@ mod tests {
                 ("NewDestination$".to_string(), "Hand".to_string()),
             ]),
         };
-        let mut state =
-            test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::ZoneChange {
@@ -1203,8 +1192,7 @@ mod tests {
             ]),
         };
 
-        let mut state =
-            test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::ZoneChange {
@@ -1242,10 +1230,7 @@ mod tests {
         // This just verifies the depth cap mechanism exists.
         let repl = ReplacementDefinition {
             event: "Moved".to_string(),
-            params: HashMap::from([(
-                "NewDestination$".to_string(),
-                "Exile".to_string(),
-            )]),
+            params: HashMap::from([("NewDestination$".to_string(), "Exile".to_string())]),
         };
 
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -1310,7 +1295,10 @@ mod tests {
             }
             other => panic!("expected Execute passthrough, got {:?}", other),
         }
-        assert!(events.is_empty(), "no events should be emitted for passthrough");
+        assert!(
+            events.is_empty(),
+            "no events should be emitted for passthrough"
+        );
     }
 
     #[test]
@@ -1361,11 +1349,7 @@ mod tests {
             "Planeswalk",
         ];
         for key in expected {
-            assert!(
-                registry.contains_key(key),
-                "registry missing key: {}",
-                key
-            );
+            assert!(registry.contains_key(key), "registry missing key: {}", key);
         }
     }
 }

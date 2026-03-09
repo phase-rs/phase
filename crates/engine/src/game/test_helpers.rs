@@ -77,8 +77,14 @@ pub fn spawn_creature(state: &mut GameState, name: &str, owner: PlayerId) -> Opt
     obj.keywords = parse_keywords(&face.keywords);
 
     // Set power/toughness
-    obj.power = face.power.as_ref().and_then(|s: &String| s.parse::<i32>().ok());
-    obj.toughness = face.toughness.as_ref().and_then(|s: &String| s.parse::<i32>().ok());
+    obj.power = face
+        .power
+        .as_ref()
+        .and_then(|s: &String| s.parse::<i32>().ok());
+    obj.toughness = face
+        .toughness
+        .as_ref()
+        .and_then(|s: &String| s.parse::<i32>().ok());
 
     // Set color: use explicit color_override if present, otherwise derive from mana cost
     let color = face

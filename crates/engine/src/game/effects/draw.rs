@@ -29,14 +29,22 @@ pub fn resolve(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::Draw { player_id, count, .. } = event {
+            if let ProposedEvent::Draw {
+                player_id, count, ..
+            } = event
+            {
                 let player = state
                     .players
                     .iter()
                     .find(|p| p.id == player_id)
                     .ok_or(EffectError::PlayerNotFound)?;
 
-                let cards_to_draw: Vec<_> = player.library.iter().take(count as usize).copied().collect();
+                let cards_to_draw: Vec<_> = player
+                    .library
+                    .iter()
+                    .take(count as usize)
+                    .copied()
+                    .collect();
 
                 for obj_id in cards_to_draw {
                     zones::move_to_zone(state, obj_id, Zone::Hand, events);
@@ -95,7 +103,13 @@ mod tests {
     #[test]
     fn draw_moves_top_card_to_hand() {
         let mut state = GameState::new_two_player(42);
-        let card_id = create_object(&mut state, CardId(1), PlayerId(0), "Card A".to_string(), Zone::Library);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
         let mut events = Vec::new();
 
         let ability = make_ability(1);
@@ -108,8 +122,20 @@ mod tests {
     #[test]
     fn draw_multiple_cards() {
         let mut state = GameState::new_two_player(42);
-        let c1 = create_object(&mut state, CardId(1), PlayerId(0), "A".to_string(), Zone::Library);
-        let c2 = create_object(&mut state, CardId(2), PlayerId(0), "B".to_string(), Zone::Library);
+        let c1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Library,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Library,
+        );
         let mut events = Vec::new();
 
         let ability = make_ability(2);
@@ -122,12 +148,22 @@ mod tests {
     #[test]
     fn draw_emits_card_drawn_and_effect_resolved() {
         let mut state = GameState::new_two_player(42);
-        create_object(&mut state, CardId(1), PlayerId(0), "A".to_string(), Zone::Library);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Library,
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &make_ability(1), &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::CardDrawn { .. })));
-        assert!(events.iter().any(|e| matches!(e, GameEvent::EffectResolved { api_type, .. } if api_type == "Draw")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::CardDrawn { .. })));
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::EffectResolved { api_type, .. } if api_type == "Draw")
+        ));
     }
 }
