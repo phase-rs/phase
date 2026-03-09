@@ -5,11 +5,14 @@ import type { StepEffect } from "../../animation/types.ts";
 import { SPEED_MULTIPLIERS } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
+import { fetchCardImageUrl } from "../../services/scryfall.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
+import { CastArcAnimation } from "./CastArcAnimation.tsx";
 import { DamageVignette } from "./DamageVignette.tsx";
+import { DeathShatter } from "./DeathShatter.tsx";
 import { FloatingNumber } from "./FloatingNumber.tsx";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
@@ -35,12 +38,28 @@ interface ActiveReveal {
   colors: string[];
 }
 
+interface ActiveShatter {
+  id: number;
+  position: { x: number; y: number; width: number; height: number };
+  imageUrl: string;
+}
+
+interface ActiveCastArc {
+  id: number;
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  cardName: string;
+  mode: "cast" | "resolve-permanent" | "resolve-spell";
+}
+
 interface AnimationOverlayProps {
   containerRef: RefObject<HTMLDivElement | null>;
 }
 
 let floatIdCounter = 0;
 let revealIdCounter = 0;
+let shatterIdCounter = 0;
+let castArcIdCounter = 0;
 
 export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const steps = useAnimationStore((s) => s.steps);
@@ -58,6 +77,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     damageAmount: number;
   } | null>(null);
   const [activeReveals, setActiveReveals] = useState<ActiveReveal[]>([]);
+  const [activeShatters, setActiveShatters] = useState<ActiveShatter[]>([]);
+  const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
   const processingRef = useRef(false);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
@@ -158,17 +179,41 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               particleRef.current?.emitBurst(pos.x, pos.y, "#ef4444", 16);
             }
 
-            // Death clone
+            // Death shatter (full/reduced quality) or death clone (minimal)
             const snapshotRect = currentSnapshot.get(objectId);
             const registryRect = getPosition(objectId);
             const rect = snapshotRect ?? registryRect;
             if (rect) {
               const gameState = useGameStore.getState().gameState;
               const cardName = gameState?.objects[objectId]?.name ?? "Unknown";
-              setActiveDeathClones((prev) => [
-                ...prev,
-                { id: objectId, position: rect, cardName },
-              ]);
+
+              if (vfxQuality !== "minimal" && effect.type === "CreatureDestroyed") {
+                // Fetch art_crop image for shatter effect
+                const shatterId = ++shatterIdCounter;
+                fetchCardImageUrl(cardName, 0, "art_crop")
+                  .then((url) => {
+                    setActiveShatters((prev) => [
+                      ...prev,
+                      {
+                        id: shatterId,
+                        position: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                        imageUrl: url,
+                      },
+                    ]);
+                  })
+                  .catch(() => {
+                    // Fallback to death clone if image fetch fails
+                    setActiveDeathClones((prev) => [
+                      ...prev,
+                      { id: objectId, position: rect, cardName },
+                    ]);
+                  });
+              } else {
+                setActiveDeathClones((prev) => [
+                  ...prev,
+                  { id: objectId, position: rect, cardName },
+                ]);
+              }
             }
           }
           break;
@@ -184,6 +229,18 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               const colors = gameState?.objects[cardId]?.color ?? [];
               const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
               particleRef.current?.emitBurst(pos.x, pos.y, burstColor, 12);
+
+              // Cast arc animation (hand -> stack)
+              if (vfxQuality !== "minimal") {
+                const cardName = gameState?.objects[cardId]?.name ?? "";
+                // Stack position is roughly right-center
+                const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
+                const id = ++castArcIdCounter;
+                setActiveCastArcs((prev) => [
+                  ...prev,
+                  { id, from: pos, to: stackPos, cardName, mode: "cast" },
+                ]);
+              }
             }
           }
           break;
@@ -217,6 +274,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
         case "ZoneChanged": {
           const toZone = data.to as string | undefined;
+          const fromZone = data.from as string | undefined;
           if (toZone === "Battlefield") {
             const objectId = data.object_id as number | undefined;
             if (objectId != null) {
@@ -228,6 +286,32 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 setActiveReveals((prev) => [
                   ...prev,
                   { id, position: pos, colors: getCardColors(colors) },
+                ]);
+
+                // Resolve-permanent arc (stack -> battlefield)
+                if (fromZone === "Stack" && vfxQuality !== "minimal") {
+                  const cardName = gameState?.objects[objectId]?.name ?? "";
+                  const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
+                  const arcId = ++castArcIdCounter;
+                  setActiveCastArcs((prev) => [
+                    ...prev,
+                    { id: arcId, from: stackPos, to: pos, cardName, mode: "resolve-permanent" },
+                  ]);
+                }
+              }
+            }
+          } else if (fromZone === "Stack" && toZone === "Graveyard") {
+            // Non-permanent spell resolved (instant/sorcery -> graveyard)
+            if (vfxQuality !== "minimal") {
+              const objectId = data.object_id as number | undefined;
+              if (objectId != null) {
+                const gameState = useGameStore.getState().gameState;
+                const cardName = gameState?.objects[objectId]?.name ?? "";
+                const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
+                const arcId = ++castArcIdCounter;
+                setActiveCastArcs((prev) => [
+                  ...prev,
+                  { id: arcId, from: stackPos, to: stackPos, cardName, mode: "resolve-spell" },
                 ]);
               }
             }
@@ -300,6 +384,14 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     setActiveReveals((prev) => prev.filter((r) => r.id !== id));
   }, []);
 
+  const handleShatterComplete = useCallback((id: number) => {
+    setActiveShatters((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+
+  const handleCastArcComplete = useCallback((id: number) => {
+    setActiveCastArcs((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
   return (
     <>
       {/* Death clones overlay (z-45) */}
@@ -347,6 +439,28 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           ))}
         </AnimatePresence>
       </div>
+
+      {/* Death shatter effects (z-46) */}
+      {activeShatters.map((shatter) => (
+        <DeathShatter
+          key={`shatter-${shatter.id}`}
+          position={shatter.position}
+          imageUrl={shatter.imageUrl}
+          onComplete={() => handleShatterComplete(shatter.id)}
+        />
+      ))}
+
+      {/* Cast arc animations (z-45) */}
+      {activeCastArcs.map((arc) => (
+        <CastArcAnimation
+          key={`arc-${arc.id}`}
+          from={arc.from}
+          to={arc.to}
+          cardName={arc.cardName}
+          mode={arc.mode}
+          onComplete={() => handleCastArcComplete(arc.id)}
+        />
+      ))}
 
       {/* Damage vignette (z-45) */}
       <DamageVignette
