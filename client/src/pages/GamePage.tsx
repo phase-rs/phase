@@ -5,8 +5,8 @@ import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
+import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
-import { PassButton } from "../components/controls/PassButton.tsx";
 import { PhaseStopBar } from "../components/controls/PhaseStopBar.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
@@ -16,7 +16,6 @@ import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.t
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
-import { CombatOverlay } from "../components/combat/CombatOverlay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
@@ -257,7 +256,6 @@ function GamePageContent({
         <div className="flex items-center gap-2 px-4 py-1">
           <PlayerHud onSettingsClick={() => setShowPreferences(true)} />
           <div className="ml-auto flex items-center gap-2">
-            <PassButton />
             <FullControlToggle />
           </div>
         </div>
@@ -349,13 +347,14 @@ function GamePageContent({
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
 
+      {/* Unified action button (combat + priority controls) */}
+      <ActionButton />
+
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} />
 
       {/* WaitingFor-driven prompt overlays */}
       {waitingFor?.type === "TargetSelection" && <TargetingOverlay />}
-      {waitingFor?.type === "DeclareAttackers" && <CombatOverlay mode="attackers" />}
-      {waitingFor?.type === "DeclareBlockers" && <CombatOverlay mode="blockers" />}
       {waitingFor?.type === "ManaPayment" && <ManaPaymentUI />}
       {waitingFor?.type === "ReplacementChoice" && <ReplacementModal />}
 
