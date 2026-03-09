@@ -51,7 +51,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
           {cardName}
         </div>
         <div
-          className="rounded-md bg-gray-700 animate-pulse"
+          className="rounded-b-md bg-gray-700 animate-pulse"
           style={{
             width: "var(--art-crop-w)",
             height: "var(--art-crop-h)",
@@ -74,7 +74,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
       </div>
 
       <div
-        className="relative rounded-md overflow-hidden"
+        className="relative rounded-b-md overflow-hidden"
         style={{
           width: "var(--art-crop-w)",
           height: "var(--art-crop-h)",

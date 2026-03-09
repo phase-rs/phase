@@ -14,7 +14,7 @@
 @media (min-width: 768px) {
   :root {
     --card-base: 12vw;
-    --art-crop-base: 15vw;
+    --art-crop-base: 18vw;
   }
 }
 
@@ -22,6 +22,6 @@
   :root {
     --card-base: 7vw;
     --card-radius: 8px;
-    --art-crop-base: 10vw;
+    --art-crop-base: 12vw;
   }
 }

@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 
 interface ZoneViewerProps {
   zone: "graveyard" | "exile";
@@ -17,6 +18,7 @@ const ZONE_TITLES: Record<string, string> = {
 
 export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const gameState = useGameStore((s) => s.gameState);
+  const inspectObject = useUiStore((s) => s.inspectObject);
 
   const cards = useMemo(() => {
     if (!gameState) return [];
@@ -74,7 +76,12 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
             ) : (
               <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5">
                 {cards.map((obj) => (
-                  <div key={obj.id} className="rounded-lg border border-gray-700 bg-gray-800/60 p-1">
+                  <div
+                    key={obj.id}
+                    className="cursor-pointer rounded-lg border border-gray-700 bg-gray-800/60 p-1 transition-colors hover:border-gray-500"
+                    onMouseEnter={() => inspectObject(obj.id)}
+                    onMouseLeave={() => inspectObject(null)}
+                  >
                     <CardImage cardName={obj.name} size="normal" className="!w-[120px] !h-[168px]" />
                   </div>
                 ))}
