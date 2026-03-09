@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 18-01-PLAN.md
-last_updated: "2026-03-09T15:09:59.574Z"
+stopped_at: Completed 18-02-PLAN.md
+last_updated: "2026-03-09T15:13:42.417Z"
 last_activity: 2026-03-09 — Completed 18-01 combat evasion keywords
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 17
-  completed_plans: 13
+  completed_plans: 15
   percent: 76
 ---
 
@@ -58,6 +58,7 @@ Progress: [████████░░] 76%
 | Phase 15 P02 | 2min | 2 tasks | 3 files |
 | Phase 15 P03 | 5min | 2 tasks | 4 files |
 | Phase 18 P01 | 5min | 1 tasks | 4 files |
+| Phase 18 P02 | 8min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 15-03]: Turn indicator badge with cyan/red color coding for your/opponent turn
 - [Phase 18]: test_helpers module is always public (not cfg(test)-gated) for integration test and coverage access
 - [Phase 18]: derive_colors_from_mana_cost made pub(crate) in deck_loading for reuse in test_helpers
+- [Phase 18]: Scry simplified: all scryed cards go to bottom (TODO: WaitingFor::ScryChoice)
+- [Phase 18]: Shared matches_filter() in effects/mod.rs handles Forge Valid patterns (type.controller)
 
 ### Roadmap Evolution
 
@@ -118,5 +121,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 15-02 game loop controller & GameProvider
-Stopped at: Completed 18-01-PLAN.md
+Stopped at: Completed 18-02-PLAN.md
 Resume file: None
