@@ -12,6 +12,8 @@ describe("preferencesStore", () => {
         hudLayout: "inline",
         logDefaultState: "closed",
         boardBackground: "auto-wubrg",
+        vfxQuality: "full",
+        animationSpeed: "normal",
       });
     });
     localStorage.clear();
@@ -56,6 +58,43 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().boardBackground).toBe("blue");
+  });
+
+  it("has correct default vfxQuality", () => {
+    expect(usePreferencesStore.getState().vfxQuality).toBe("full");
+  });
+
+  it("has correct default animationSpeed", () => {
+    expect(usePreferencesStore.getState().animationSpeed).toBe("normal");
+  });
+
+  it("setVfxQuality updates the value", () => {
+    act(() => {
+      usePreferencesStore.getState().setVfxQuality("minimal");
+    });
+
+    expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+  });
+
+  it("setAnimationSpeed updates the value", () => {
+    act(() => {
+      usePreferencesStore.getState().setAnimationSpeed("fast");
+    });
+
+    expect(usePreferencesStore.getState().animationSpeed).toBe("fast");
+  });
+
+  it("existing preferences are unchanged after setting animation prefs", () => {
+    act(() => {
+      usePreferencesStore.getState().setVfxQuality("reduced");
+      usePreferencesStore.getState().setAnimationSpeed("slow");
+    });
+
+    const state = usePreferencesStore.getState();
+    expect(state.cardSize).toBe("medium");
+    expect(state.hudLayout).toBe("inline");
+    expect(state.logDefaultState).toBe("closed");
+    expect(state.boardBackground).toBe("auto-wubrg");
   });
 
   it("persists to localStorage with forge-preferences key", () => {

@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import type { AnimationSpeed, VfxQuality } from "../animation/types";
+
 export type CardSizePreference = "small" | "medium" | "large";
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
@@ -18,6 +20,8 @@ interface PreferencesState {
   hudLayout: HudLayout;
   logDefaultState: LogDefaultState;
   boardBackground: BoardBackground;
+  vfxQuality: VfxQuality;
+  animationSpeed: AnimationSpeed;
 }
 
 interface PreferencesActions {
@@ -25,6 +29,8 @@ interface PreferencesActions {
   setHudLayout: (layout: HudLayout) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
+  setVfxQuality: (quality: VfxQuality) => void;
+  setAnimationSpeed: (speed: AnimationSpeed) => void;
 }
 
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
@@ -34,11 +40,15 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       hudLayout: "inline",
       logDefaultState: "closed",
       boardBackground: "auto-wubrg",
+      vfxQuality: "full",
+      animationSpeed: "normal",
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
+      setVfxQuality: (quality) => set({ vfxQuality: quality }),
+      setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
     }),
     { name: "forge-preferences" },
   ),
