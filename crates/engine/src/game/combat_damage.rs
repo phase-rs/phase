@@ -333,21 +333,17 @@ fn apply_combat_damage(
     events: &mut Vec<GameEvent>,
 ) {
     for (source_id, assignment) in assignments {
-        let source_has_deathtouch = state
+        let (source_has_deathtouch, source_has_lifelink, source_has_wither, source_has_infect, source_controller) = state
             .objects
             .get(source_id)
-            .map(|o| o.has_keyword(&Keyword::Deathtouch))
-            .unwrap_or(false);
-        let source_has_lifelink = state
-            .objects
-            .get(source_id)
-            .map(|o| o.has_keyword(&Keyword::Lifelink))
-            .unwrap_or(false);
-        let source_controller = state
-            .objects
-            .get(source_id)
-            .map(|o| o.controller)
-            .unwrap_or(crate::types::player::PlayerId(0));
+            .map(|o| (
+                o.has_keyword(&Keyword::Deathtouch),
+                o.has_keyword(&Keyword::Lifelink),
+                o.has_keyword(&Keyword::Wither),
+                o.has_keyword(&Keyword::Infect),
+                o.controller,
+            ))
+            .unwrap_or((false, false, false, false, crate::types::player::PlayerId(0)));
 
         let target_ref = match &assignment.target {
             DamageTarget::Object(id) => TargetRef::Object(*id),
@@ -372,10 +368,23 @@ fn apply_combat_damage(
                 {
                     match t {
                         TargetRef::Object(target_id) => {
-                            if let Some(target_obj) = state.objects.get_mut(target_id) {
-                                target_obj.damage_marked += amount;
-                                if source_has_deathtouch {
-                                    target_obj.dealt_deathtouch_damage = true;
+                            if source_has_wither || source_has_infect {
+                                // Wither/Infect: apply -1/-1 counters instead of damage
+                                if let Some(target_obj) = state.objects.get_mut(target_id) {
+                                    let counter = crate::game::game_object::CounterType::Minus1Minus1;
+                                    let entry = target_obj.counters.entry(counter).or_insert(0);
+                                    *entry += amount;
+                                    if source_has_deathtouch {
+                                        target_obj.dealt_deathtouch_damage = true;
+                                    }
+                                }
+                                state.layers_dirty = true;
+                            } else {
+                                if let Some(target_obj) = state.objects.get_mut(target_id) {
+                                    target_obj.damage_marked += amount;
+                                    if source_has_deathtouch {
+                                        target_obj.dealt_deathtouch_damage = true;
+                                    }
                                 }
                             }
                             events.push(GameEvent::DamageDealt {
@@ -385,19 +394,28 @@ fn apply_combat_damage(
                             });
                         }
                         TargetRef::Player(player_id) => {
-                            if let Some(player) =
-                                state.players.iter_mut().find(|p| p.id == *player_id)
-                            {
-                                player.life -= amount as i32;
+                            if source_has_infect {
+                                // Infect: poison counters instead of life loss
+                                if let Some(player) =
+                                    state.players.iter_mut().find(|p| p.id == *player_id)
+                                {
+                                    player.poison_counters += amount;
+                                }
+                            } else {
+                                if let Some(player) =
+                                    state.players.iter_mut().find(|p| p.id == *player_id)
+                                {
+                                    player.life -= amount as i32;
+                                }
+                                events.push(GameEvent::LifeChanged {
+                                    player_id: *player_id,
+                                    amount: -(amount as i32),
+                                });
                             }
                             events.push(GameEvent::DamageDealt {
                                 source_id: *source_id,
                                 target: TargetRef::Player(*player_id),
                                 amount,
-                            });
-                            events.push(GameEvent::LifeChanged {
-                                player_id: *player_id,
-                                amount: -(amount as i32),
                             });
                         }
                     }

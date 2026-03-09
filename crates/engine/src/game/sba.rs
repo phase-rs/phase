@@ -28,6 +28,14 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             return;
         }
 
+        // 704.5c: Player with 10 or more poison counters loses the game
+        check_poison_counters(state, events, &mut any_performed);
+
+        // If game is over, stop immediately
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return;
+        }
+
         // 704.5f: Creature with 0 or less toughness goes to graveyard
         check_zero_toughness(state, events, &mut any_performed);
 
@@ -49,6 +57,28 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 fn check_player_life(state: &mut GameState, events: &mut Vec<GameEvent>, any_performed: &mut bool) {
     for i in 0..state.players.len() {
         if state.players[i].life <= 0 {
+            let loser = state.players[i].id;
+            let winner_id = PlayerId(1 - loser.0);
+            events.push(GameEvent::PlayerLost { player_id: loser });
+            events.push(GameEvent::GameOver {
+                winner: Some(winner_id),
+            });
+            state.waiting_for = WaitingFor::GameOver {
+                winner: Some(winner_id),
+            };
+            *any_performed = true;
+            return;
+        }
+    }
+}
+
+fn check_poison_counters(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    for i in 0..state.players.len() {
+        if state.players[i].poison_counters >= 10 {
             let loser = state.players[i].id;
             let winner_id = PlayerId(1 - loser.0);
             events.push(GameEvent::PlayerLost { player_id: loser });
