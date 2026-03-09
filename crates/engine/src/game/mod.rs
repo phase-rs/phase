@@ -9,6 +9,7 @@ pub mod filter;
 pub mod game_object;
 pub mod keywords;
 pub mod layers;
+pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mulligan;
 pub mod priority;
