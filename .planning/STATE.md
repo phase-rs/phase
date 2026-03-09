@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 17-01-PLAN.md
-last_updated: "2026-03-09T17:50:00.000Z"
+stopped_at: Completed 17-04-PLAN.md
+last_updated: "2026-03-09T17:54:41.141Z"
 last_activity: 2026-03-09 — Completed 17-01 foundation utilities & visual polish
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 22
-  completed_plans: 19
+  completed_plans: 21
   percent: 86
 ---
 
@@ -64,6 +64,7 @@ Progress: [████████░░] 86%
 | Phase 18 P05 | 5min | 2 tasks | 7 files |
 | Phase 17 P01 | 3min | 2 tasks | 10 files |
 | Phase 17 P02 | 2min | 1 tasks | 3 files |
+| Phase 17 P04 | 2min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -121,6 +122,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 17-01]: LifeTotal accepts size prop for context-aware rendering (lg in HUD, default elsewhere)
 - [Phase 17-01]: OpponentHand upgraded from static divs to motion.div with AnimatePresence for fan animation
 - [Phase 17]: StackDisplay moved from inline center-divider to fixed right-column overlay for Arena-style presentation
+- [Phase 17-04]: Auto-pay via PassPriority useEffect for non-ambiguous costs
+- [Phase 17-04]: Cost inference from top stack entry source_id mana_cost
+- [Phase 17-04]: Phyrexian toggle between mana icon and heart with 2-life label
 
 ### Roadmap Evolution
 
@@ -139,5 +143,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 18-05 coverage report & UI warning badge
-Stopped at: Completed 17-01-PLAN.md
+Stopped at: Completed 17-04-PLAN.md
 Resume file: None

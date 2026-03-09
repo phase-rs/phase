@@ -76,9 +76,9 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Mana Payment
 
-- [ ] **MANA-01**: Mana payment UI displays required cost with WUBRG symbols and allows manual color selection
-- [ ] **MANA-02**: Mana payment handles hybrid, phyrexian, and X costs with appropriate UI affordances
-- [ ] **MANA-03**: Mana pool display updates in real-time as mana is produced and spent
+- [x] **MANA-01**: Mana payment UI displays required cost with WUBRG symbols and allows manual color selection
+- [x] **MANA-02**: Mana payment handles hybrid, phyrexian, and X costs with appropriate UI affordances
+- [x] **MANA-03**: Mana pool display updates in real-time as mana is produced and spent
 
 ### Combat
 
@@ -209,9 +209,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STACK-02 | Phase 17 | Complete |
 | STACK-03 | Phase 17 | Complete |
 | STACK-04 | Phase 17 | Complete |
-| MANA-01 | Phase 17 | Pending |
-| MANA-02 | Phase 17 | Pending |
-| MANA-03 | Phase 17 | Pending |
+| MANA-01 | Phase 17 | Complete |
+| MANA-02 | Phase 17 | Complete |
+| MANA-03 | Phase 17 | Complete |
 | COMBAT-01 | Phase 17 | Pending |
 | COMBAT-02 | Phase 17 | Pending |
 | COMBAT-03 | Phase 17 | Pending |
