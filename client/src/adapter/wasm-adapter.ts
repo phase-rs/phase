@@ -89,7 +89,8 @@ export class WasmAdapter implements EngineAdapter {
   /** Initialize a new game and return the initial events. */
   initializeGame(deckData?: unknown): GameEvent[] {
     this.assertInitialized();
-    const result = initialize_game(deckData ?? null);
+    const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+    const result = initialize_game(deckData ?? null, seed);
     return result.events ?? [];
   }
 

@@ -36,8 +36,9 @@ pub fn create_initial_state() -> JsValue {
 /// Accepts deck_data as a DeckPayload JSON (or null/undefined for empty libraries).
 /// Returns the initial ActionResult (events + waiting_for).
 #[wasm_bindgen]
-pub fn initialize_game(deck_data: JsValue) -> JsValue {
-    let mut state = GameState::new_two_player(42);
+pub fn initialize_game(deck_data: JsValue, seed: Option<f64>) -> JsValue {
+    let seed = seed.map(|s| s as u64).unwrap_or(42);
+    let mut state = GameState::new_two_player(seed);
 
     // Load deck data if provided
     if !deck_data.is_null() && !deck_data.is_undefined() {

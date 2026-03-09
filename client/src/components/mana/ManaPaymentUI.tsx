@@ -123,6 +123,10 @@ export function ManaPaymentUI() {
     dispatch({ type: "PassPriority" });
   }, [dispatch]);
 
+  const handleCancel = useCallback(() => {
+    dispatch({ type: "CancelCast" });
+  }, [dispatch]);
+
   // Total life cost from phyrexian choices
   const lifeCost = useMemo(() => {
     let cost = 0;
@@ -260,13 +264,19 @@ export function ManaPaymentUI() {
             )}
           </div>
 
-          {/* Confirm button */}
-          <div className="flex justify-center">
+          {/* Confirm / Cancel buttons */}
+          <div className="flex justify-center gap-3">
             <button
               onClick={handlePay}
               className={gameButtonClass({ tone: "emerald", size: "md" })}
             >
               Pay
+            </button>
+            <button
+              onClick={handleCancel}
+              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+            >
+              Cancel
             </button>
           </div>
         </div>

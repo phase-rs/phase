@@ -39,6 +39,7 @@ pub enum GameAction {
     ChooseReplacement {
         index: usize,
     },
+    CancelCast,
 }
 
 #[cfg(test)]

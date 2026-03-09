@@ -182,7 +182,7 @@ export type WaitingFor =
   | { type: "MulliganDecision"; data: { player: PlayerId; mulligan_count: number } }
   | { type: "MulliganBottomCards"; data: { player: PlayerId; count: number } }
   | { type: "ManaPayment"; data: { player: PlayerId } }
-  | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast } }
+  | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; legal_targets: TargetRef[] } }
   | { type: "DeclareAttackers"; data: { player: PlayerId } }
   | { type: "DeclareBlockers"; data: { player: PlayerId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
@@ -208,7 +208,8 @@ export type GameAction =
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
-  | { type: "ChooseReplacement"; data: { index: number } };
+  | { type: "ChooseReplacement"; data: { index: number } }
+  | { type: "CancelCast" };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 

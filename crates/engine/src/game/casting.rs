@@ -124,6 +124,7 @@ pub fn handle_cast_spell(
                     ability: resolved,
                     cost: mana_cost,
                 },
+                legal_targets: legal,
             });
         }
     }
@@ -259,6 +260,7 @@ pub fn handle_activate_ability(
                     ability: resolved,
                     cost: crate::types::mana::ManaCost::NoCost,
                 },
+                legal_targets: legal,
             });
         }
     }
@@ -286,6 +288,26 @@ pub fn handle_activate_ability(
     state.priority_pass_count = 0;
 
     Ok(WaitingFor::Priority { player })
+}
+
+/// Cancel a pending cast, reverting any side effects (e.g. untapping a source tapped for cost).
+pub fn handle_cancel_cast(
+    state: &mut GameState,
+    pending: &PendingCast,
+    events: &mut Vec<GameEvent>,
+) {
+    // For activated abilities (card_id == CardId(0)), the source may have been
+    // tapped as part of the activation cost. Untap it on cancel.
+    if pending.card_id == CardId(0) {
+        if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+            if obj.tapped {
+                obj.tapped = false;
+                events.push(GameEvent::PermanentUntapped {
+                    object_id: pending.object_id,
+                });
+            }
+        }
+    }
 }
 
 /// Pay the mana cost, move card to stack, push stack entry, emit events.
@@ -666,5 +688,49 @@ mod tests {
         let mut events = Vec::new();
         let result = handle_cast_spell(&mut state, PlayerId(0), CardId(20), &mut events);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cancel_cast_during_target_selection_returns_to_priority() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let mut state = setup_game_at_main_phase();
+        let _obj_id = create_instant_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        // Create two creatures so targeting is ambiguous (not auto-targeted)
+        for card_id_val in [50, 51] {
+            let cid = create_object(
+                &mut state,
+                CardId(card_id_val),
+                PlayerId(1),
+                "Goblin".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&cid)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // Cast the spell → should enter TargetSelection
+        let result = apply(&mut state, GameAction::CastSpell {
+            card_id: CardId(10),
+            targets: vec![],
+        })
+        .unwrap();
+        assert!(matches!(result.waiting_for, WaitingFor::TargetSelection { .. }));
+        // Card should still be in hand
+        assert!(!state.players[0].hand.is_empty());
+
+        // Cancel → should return to Priority
+        let result = apply(&mut state, GameAction::CancelCast).unwrap();
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        // Card should still be in hand after cancel
+        assert!(!state.players[0].hand.is_empty());
     }
 }

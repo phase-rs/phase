@@ -10,10 +10,7 @@ import { PLAYER_ID } from "../constants/game";
  * 2. Only auto-pass Priority prompts for the local player
  * 3. If stack is empty, respect phase stops (initial priority in that phase)
  * 4. Auto-pass if no meaningful actions exist (only PassPriority available)
- *
- * Phase stops only apply to initial priority (empty stack). When responding
- * to a spell/ability on the stack, only legal actions matter — matching
- * MTGA behavior where your own creature resolves without a click.
+ * 5. MTGA-style: auto-pass when own spell/ability is on top of the stack
  */
 export function shouldAutoPass(
   state: GameState,
@@ -29,6 +26,19 @@ export function shouldAutoPass(
   // Phase stops only gate initial priority (empty stack)
   if (state.stack.length === 0 && phaseStops.includes(state.phase)) return false;
 
-  // If the only legal action is PassPriority, auto-pass
-  return !legalActions.some((a) => a.type !== "PassPriority");
+  // If the only legal action is PassPriority, always auto-pass.
+  // The engine gates combat correctly via has_potential_attackers at BeginCombat,
+  // so the frontend doesn't need to duplicate that check here.
+  const onlyPassAvailable = !legalActions.some((a) => a.type !== "PassPriority");
+  if (onlyPassAvailable) return true;
+
+  // MTGA-style: auto-pass when our own spell/ability is on top of the stack.
+  // The player almost never wants to respond to their own spell (e.g. counter
+  // their own creature). Full control mode disables this (checked above).
+  if (state.stack.length > 0) {
+    const topEntry = state.stack[state.stack.length - 1];
+    if (topEntry.controller === PLAYER_ID) return true;
+  }
+
+  return false;
 }

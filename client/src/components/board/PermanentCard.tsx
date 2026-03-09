@@ -96,10 +96,10 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   const handleClick = () => {
     if (combatMode === "attackers") {
-      toggleAttacker(objectId);
+      if (isCreature && !obj.tapped) toggleAttacker(objectId);
     } else if (combatMode === "blockers" && combatClickHandler) {
       combatClickHandler(objectId);
-    } else if (targetingMode) {
+    } else if (targetingMode && isValidTarget) {
       addTarget(objectId);
     } else {
       selectObject(isSelected ? null : objectId);

@@ -75,6 +75,13 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             casting::handle_select_targets(state, *player, targets, &mut events)?
         }
+        (WaitingFor::TargetSelection { player, pending_cast, .. }, GameAction::CancelCast) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
+        (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         (
             WaitingFor::MulliganDecision {
                 player,

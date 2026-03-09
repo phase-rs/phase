@@ -5,6 +5,7 @@ import { WasmAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
+import { STARTER_DECKS } from "../data/starterDecks";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction } from "../game/dispatch";
 import type { ParsedDeck } from "../services/deckParser";
@@ -50,6 +51,33 @@ interface DeckPayload {
   opponent_deck: Array<{ card: CardFace; count: number }>;
 }
 
+function resolveEntries(
+  deckCards: Array<{ name: string; count: number }>,
+  cardDb: Record<string, CardFace>,
+): Array<{ card: CardFace; count: number }> {
+  const entries: Array<{ card: CardFace; count: number }> = [];
+  for (const entry of deckCards) {
+    const card = cardDb[entry.name];
+    if (card) {
+      entries.push({ card, count: entry.count });
+    } else {
+      console.warn(`Card not found in card-data.json: ${entry.name}`);
+    }
+  }
+  return entries;
+}
+
+function pickOpponentDeck(playerDeck: ParsedDeck): Array<{ name: string; count: number }> {
+  const playerNames = new Set(playerDeck.main.map((e) => e.name));
+  const candidates = STARTER_DECKS.filter(
+    (s) => !s.cards.every((c) => playerNames.has(c.name)),
+  );
+  const pick = candidates.length > 0
+    ? candidates[Math.floor(Math.random() * candidates.length)]
+    : STARTER_DECKS[Math.floor(Math.random() * STARTER_DECKS.length)];
+  return pick.cards;
+}
+
 async function buildDeckPayload(deck: ParsedDeck): Promise<DeckPayload | null> {
   try {
     const resp = await fetch("/card-data.json");
@@ -59,17 +87,11 @@ async function buildDeckPayload(deck: ParsedDeck): Promise<DeckPayload | null> {
     }
     const cardDb = (await resp.json()) as Record<string, CardFace>;
 
-    const entries: Array<{ card: CardFace; count: number }> = [];
-    for (const entry of deck.main) {
-      const card = cardDb[entry.name];
-      if (card) {
-        entries.push({ card, count: entry.count });
-      } else {
-        console.warn(`Card not found in card-data.json: ${entry.name}`);
-      }
-    }
+    const playerEntries = resolveEntries(deck.main, cardDb);
+    const opponentCards = pickOpponentDeck(deck);
+    const opponentEntries = resolveEntries(opponentCards, cardDb);
 
-    return { player_deck: entries, opponent_deck: entries };
+    return { player_deck: playerEntries, opponent_deck: opponentEntries };
   } catch (err) {
     console.warn("Failed to load card-data.json:", err);
     return null;

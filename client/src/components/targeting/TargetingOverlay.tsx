@@ -22,13 +22,16 @@ export function TargetingOverlay() {
   const isTargetSelection = waitingFor?.type === "TargetSelection";
   const pendingCast = isTargetSelection ? waitingFor.data.pending_cast : null;
 
+  const legalTargets = isTargetSelection ? waitingFor.data.legal_targets : null;
+
   // Activate targeting mode when engine requests target selection
   useEffect(() => {
-    if (!isTargetSelection || !gameState) return;
+    if (!isTargetSelection || !gameState || !legalTargets) return;
 
-    // Collect all battlefield object IDs + player IDs as potential targets
-    // Engine validates on submission; client highlights all as valid
-    const validIds = gameState.battlefield.slice();
+    // Extract object IDs from engine's legal targets (filter out Player refs)
+    const validIds = legalTargets
+      .filter((t): t is { Object: ObjectId } => "Object" in t)
+      .map((t) => t.Object);
     const sourceId = pendingCast?.object_id ?? null;
 
     startTargeting(validIds, sourceId);
@@ -36,7 +39,7 @@ export function TargetingOverlay() {
     return () => {
       clearTargets();
     };
-  }, [isTargetSelection, gameState, pendingCast, startTargeting, clearTargets]);
+  }, [isTargetSelection, gameState, legalTargets, pendingCast, startTargeting, clearTargets]);
 
   // Track source element position for arrow drawing
   useEffect(() => {
@@ -59,8 +62,7 @@ export function TargetingOverlay() {
 
   const handleCancel = useCallback(() => {
     clearTargets();
-    // Pass priority to cancel (no explicit cancel action exists)
-    dispatch({ type: "PassPriority" });
+    dispatch({ type: "CancelCast" });
   }, [clearTargets, dispatch]);
 
   // Get target element positions for arrows

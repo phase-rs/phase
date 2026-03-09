@@ -21,9 +21,8 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
 
   const center = (cardCount - 1) / 2;
 
-  // Base offset pushes cards partially offscreen; rotation compensation keeps fan arc smooth
+  // Base offset pushes cards partially offscreen
   const BASE_Y = -25;
-  const ROTATION_COMPENSATION = 0.8;
 
   return (
     <div
@@ -42,7 +41,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
               initial={{ opacity: 0, y: -60 }}
               animate={{
                 opacity: 1,
-                y: BASE_Y - Math.abs(rotation) * ROTATION_COMPENSATION,
+                y: BASE_Y - Math.abs(i - center) ** 2 * 6,
                 rotate: rotation,
               }}
               exit={{ opacity: 0, y: -60 }}

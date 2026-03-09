@@ -225,11 +225,18 @@ function GamePageContent({
 
         {/* Center divider with phase/stack/zone indicators */}
         <div className="flex items-center justify-center gap-4 border-y border-gray-800 px-4 py-1">
-          <ZoneIndicator
-            zone="graveyard"
-            playerId={0}
-            onClick={() => setViewingZone({ zone: "graveyard", playerId: 0 })}
-          />
+          <div className="flex items-center gap-1">
+            <ZoneIndicator
+              zone="graveyard"
+              playerId={1}
+              onClick={() => setViewingZone({ zone: "graveyard", playerId: 1 })}
+            />
+            <ZoneIndicator
+              zone="exile"
+              playerId={1}
+              onClick={() => setViewingZone({ zone: "exile", playerId: 1 })}
+            />
+          </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-500">
               T{gameState?.turn_number ?? 0}
@@ -247,19 +254,23 @@ function GamePageContent({
             )}
             <PhaseStopBar />
           </div>
-          <ZoneIndicator
-            zone="exile"
-            playerId={0}
-            onClick={() => setViewingZone({ zone: "exile", playerId: 0 })}
-          />
+          <div className="flex items-center gap-1">
+            <ZoneIndicator
+              zone="graveyard"
+              playerId={0}
+              onClick={() => setViewingZone({ zone: "graveyard", playerId: 0 })}
+            />
+            <ZoneIndicator
+              zone="exile"
+              playerId={0}
+              onClick={() => setViewingZone({ zone: "exile", playerId: 0 })}
+            />
+          </div>
         </div>
 
         {/* Player area */}
         <div className="flex items-center gap-2 px-4 py-1">
           <PlayerHud onSettingsClick={() => setShowPreferences(true)} />
-          <div className="ml-auto flex items-center gap-2">
-            <FullControlToggle />
-          </div>
         </div>
         <PlayerHand />
       </div>
@@ -357,6 +368,9 @@ function GamePageContent({
 
       {/* Unified action button (combat + priority controls) */}
       <ActionButton />
+      <div className="fixed bottom-20 right-4 z-30">
+        <FullControlToggle />
+      </div>
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} />

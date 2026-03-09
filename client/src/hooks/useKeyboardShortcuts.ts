@@ -10,6 +10,7 @@ import { useUiStore } from "../stores/uiStore";
  * - Z: Undo last unrevealed-info action
  * - T: Tap all untapped lands (when in ManaPayment)
  * - Escape: Cancel current action
+ * - D: Copy game state JSON to clipboard (debug)
  */
 export function useKeyboardShortcuts(): void {
   useEffect(() => {
@@ -83,6 +84,23 @@ export function useKeyboardShortcuts(): void {
         case "Escape":
           e.preventDefault();
           uiState.clearTargets();
+          break;
+
+        case "d":
+        case "D":
+          if (!e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (gameState) {
+              const debug = {
+                gameState,
+                waitingFor,
+                legalActions: useGameStore.getState().legalActions,
+              };
+              navigator.clipboard.writeText(JSON.stringify(debug, null, 2))
+                .then(() => console.log("[Debug] Game state copied to clipboard"))
+                .catch((err) => console.error("[Debug] Failed to copy:", err));
+            }
+          }
           break;
       }
     };

@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use super::ability::ResolvedAbility;
+use super::ability::{ResolvedAbility, TargetRef};
 use super::events::GameEvent;
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaCost;
@@ -48,6 +48,7 @@ pub enum WaitingFor {
     TargetSelection {
         player: PlayerId,
         pending_cast: PendingCast,
+        legal_targets: Vec<TargetRef>,
     },
     DeclareAttackers {
         player: PlayerId,

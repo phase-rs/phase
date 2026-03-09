@@ -38,7 +38,13 @@ pub fn move_to_zone(
     remove_from_zone(state, object_id, from, owner);
     add_to_zone(state, object_id, to, owner);
 
-    state.objects.get_mut(&object_id).unwrap().zone = to;
+    let obj_mut = state.objects.get_mut(&object_id).unwrap();
+    obj_mut.zone = to;
+
+    // Track when objects enter the battlefield (for summoning sickness)
+    if to == Zone::Battlefield {
+        obj_mut.entered_battlefield_turn = Some(state.turn_number);
+    }
 
     // Mark layers dirty when objects enter or leave the battlefield
     if from == Zone::Battlefield || to == Zone::Battlefield {

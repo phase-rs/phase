@@ -45,6 +45,7 @@ export function PlayerHand() {
       if (!hasPriority || !objects) return;
       const obj = objects[objectId];
       if (!obj) return;
+      if (!playableCardIds.has(Number(obj.card_id))) return;
 
       if (obj.card_types.core_types.includes("Land")) {
         dispatchAction({ type: "PlayLand", data: { card_id: obj.card_id } });
@@ -52,7 +53,7 @@ export function PlayerHand() {
         dispatchAction({ type: "CastSpell", data: { card_id: obj.card_id, targets: [] } });
       }
     },
-    [hasPriority, objects],
+    [hasPriority, objects, playableCardIds],
   );
 
   const handleDragEnd = useCallback(
@@ -121,6 +122,7 @@ export function PlayerHand() {
               cardName={obj.name}
               hasUnimplementedMechanics={obj.has_unimplemented_mechanics}
               index={i}
+              handSize={handObjects.length}
               rotation={rotation}
               expanded={expanded}
               isPlayable={isPlayable}
@@ -143,6 +145,7 @@ interface HandCardProps {
   cardName: string;
   hasUnimplementedMechanics?: boolean;
   index: number;
+  handSize: number;
   rotation: number;
   expanded: boolean;
   isPlayable: boolean;
@@ -159,6 +162,7 @@ function HandCard({
   cardName,
   hasUnimplementedMechanics,
   index,
+  handSize,
   rotation,
   expanded,
   isPlayable,
@@ -183,23 +187,21 @@ function HandCard({
       : "opacity-60"
     : "";
 
-  // Rotation compensation: outer cards pushed down to form a natural arc (smile curve)
-  const arcOffset = Math.abs(rotation) * 1.6;
+  // Quadratic arc: cards further from center drop more, forming a natural parabola
+  const distFromCenter = Math.abs(index - (handSize - 1) / 2);
+  const arcOffset = distFromCenter * distFromCenter * 6;
 
   return (
     <motion.div
       layout
       initial={{ opacity: 0, y: 40 }}
-      animate={playedRef.current
-        ? { opacity: 0, scale: 0.8 }
-        : {
-            opacity: 1,
-            y: (expanded ? -20 : 30) + arcOffset,
-            rotate: rotation,
-          }
-      }
+      animate={{
+        opacity: 1,
+        y: (expanded ? -20 : 30) + arcOffset,
+        rotate: rotation,
+      }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: -50, scale: 1.08, rotateX: 5, zIndex: 30 }}
+      whileHover={{ y: -30 + arcOffset, rotate: 0, scale: 1.08, rotateX: 5, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 50 }}
       transition={{ delay: index * 0.03, duration: 0.25 }}
       drag
@@ -225,7 +227,7 @@ function HandCard({
       }}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className={`relative cursor-pointer rounded-lg ${glowClass} ${
+      className={`relative cursor-pointer rounded-lg leading-[0] ${glowClass} ${
         isSelected ? "ring-2 ring-cyan-400" : ""
       }`}
       style={{
