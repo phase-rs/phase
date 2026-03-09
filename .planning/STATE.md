@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 19-03-PLAN.md
-last_updated: "2026-03-09T23:03:47.833Z"
-last_activity: 2026-03-09 — Completed 19-03 Board & HUD Layout
+stopped_at: Completed 19-05-PLAN.md
+last_updated: "2026-03-09T23:02:53Z"
+last_activity: 2026-03-09 — Completed 19-05 Cinematic Animations
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 33
-  completed_plans: 31
-  percent: 37
+  completed_plans: 33
+  percent: 62
 ---
 
 # Project State
@@ -75,6 +75,7 @@ Progress: [██████----] 62%
 | Phase 19 P07 | 2min | 2 tasks | 5 files |
 | Phase 19 P08 | 2min | 2 tasks | 4 files |
 | Phase 19 P03 | 3min | 2 tasks | 6 files |
+| Phase 19 P05 | 3min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -164,6 +165,10 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19-08]: Hover state lifted from DeckBuilder to DeckBuilderPage via onCardHover callback prop
 - [Phase 19-03]: HUD always centered (removed floating option) -- MTGA does not have a floating HUD
 - [Phase 19-03]: CombatPhaseIndicator placed near ActionButton (fixed right side) per MTGA layout
+- [Phase 19-05]: DeathShatter uses canvas with 3x4 fragment grid for 12 organic-looking pieces
+- [Phase 19-05]: CastArcAnimation uses Framer Motion keyframe arrays for parabolic arc trajectory
+- [Phase 19-05]: Death shatter fetches art_crop image imperatively via fetchCardImageUrl, falls back to death clone on failure
+- [Phase 19-05]: Stack position estimated at 75% viewport width, 40% height for cast arc endpoints
 
 ### Roadmap Evolution
 
@@ -183,6 +188,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 19-01 Art-Crop Card & Image Infrastructure
-Stopped at: Completed 19-03-PLAN.md
+Last activity: 2026-03-09 - Completed 19-05 Cinematic Animations
+Stopped at: Completed 19-05-PLAN.md
 Resume file: None

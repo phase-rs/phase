@@ -126,8 +126,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **ARENA-04**: MTGA-faithful board layout with creatures near center, lands far, centered avatars, and phase indicators flanking player avatar
 - [x] **ARENA-05**: No visible zone borders, bars, or background overlays -- everything floats over battlefield images
 - [ ] **ARENA-06**: Golden curved SVG targeting arcs, orange glow on selected attackers/blockers, attacker slide-forward on declare
-- [ ] **ARENA-07**: Cinematic layered turn banner (light burst, banner strip, diamond accents, triple-glow text) with amber/slate theming
-- [ ] **ARENA-08**: Canvas death shatter (8-12 art fragments scatter/fade in 0.6s) and card flight arcs for cast/resolve
+- [x] **ARENA-07**: Cinematic layered turn banner (light burst, banner strip, diamond accents, triple-glow text) with amber/slate theming
+- [x] **ARENA-08**: Canvas death shatter (8-12 art fragments scatter/fade in 0.6s) and card flight arcs for cast/resolve
 - [ ] **ARENA-09**: Full-screen MTGA-style mulligan with large card images and dramatic VICTORY/DEFEAT game over screens
 - [x] **ARENA-10**: Mode-first menu flow (Play vs AI, Play Online, Deck Builder), deck gallery with Scryfall art tiles, animated particle background, splash screen with logo
 - [x] **ARENA-11**: Deck builder art-crop image grid with instant card preview panel and visual color/type filtering
