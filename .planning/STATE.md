@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
-status: completed
-stopped_at: Phase 16 context gathered
-last_updated: "2026-03-09T21:58:06.243Z"
-last_activity: 2026-03-09 — Completed 17-05 Combat Visualization
+status: in-progress
+stopped_at: Completed 16-01-PLAN.md
+last_updated: "2026-03-09T22:20:50Z"
+last_activity: 2026-03-09 — Completed 16-01 Core Audio System
 progress:
   total_phases: 7
   completed_phases: 5
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 17 - MTG-Specific UI
+**Current focus:** Phase 16 - Audio System
 
 ## Current Position
 
-Phase: 17 of 18 (MTG-Specific UI)
-Plan: 5 of 5 in current phase
-Status: Phase Complete
-Last activity: 2026-03-09 — Completed 17-05 Combat Visualization
+Phase: 16 of 18 (Audio System)
+Plan: 1 of 3 in current phase
+Status: In Progress
+Last activity: 2026-03-09 — Completed 16-01 Core Audio System
 
 Progress: [██████████] 100%
 
@@ -67,6 +67,7 @@ Progress: [██████████] 100%
 | Phase 17 P03 | 2min | 2 tasks | 2 files |
 | Phase 17 P04 | 2min | 2 tasks | 3 files |
 | Phase 17 P05 | 2min | 2 tasks | 3 files |
+| Phase 16 P01 | 4min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -133,6 +134,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 17-05]: RAF polling stabilizes after 10 identical frames to avoid infinite animation loops
 - [Phase 17-05]: DamageAssignmentModal is read-only review with user-triggered open (not auto-shown)
 - [Phase 17-05]: BlockAssignmentLines merges UI blockerAssignments with engine blocker_to_attacker for both phases
+- [Phase 16-01]: AudioManager is a plain TypeScript singleton, not a React component -- matches dispatch.ts pattern
+- [Phase 16-01]: Module-level usePreferencesStore.subscribe() wires real-time volume updates automatically
+- [Phase 16-01]: dispose() fully resets AudioManager state for clean test isolation without vi.resetModules()
 
 ### Roadmap Evolution
 
@@ -151,6 +155,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 17-05 Combat Visualization
-Stopped at: Phase 16 context gathered
-Resume file: .planning/phases/16-audio-system/16-CONTEXT.md
+Last activity: 2026-03-09 - Completed 16-01 Core Audio System
+Stopped at: Completed 16-01-PLAN.md
+Resume file: .planning/phases/16-audio-system/16-01-SUMMARY.md

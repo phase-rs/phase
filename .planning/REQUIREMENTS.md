@@ -54,11 +54,11 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Audio
 
-- [ ] **AUDIO-01**: SFX play on game events using Forge's 39 sound effect assets via Web Audio API
-- [ ] **AUDIO-02**: Background music plays during matches using Forge's battle music tracks (CC-BY 3.0)
-- [ ] **AUDIO-03**: Music auto-selects WUBRG-themed tracks based on player's deck colors when available
-- [ ] **AUDIO-04**: Independent volume controls for SFX and music with mute toggles
-- [ ] **AUDIO-05**: iOS/iPadOS AudioContext warm-up on first user interaction
+- [x] **AUDIO-01**: SFX play on game events using Forge's 39 sound effect assets via Web Audio API
+- [x] **AUDIO-02**: Background music plays during matches using Forge's battle music tracks (CC-BY 3.0)
+- [x] **AUDIO-03**: Music auto-selects WUBRG-themed tracks based on player's deck colors when available
+- [x] **AUDIO-04**: Independent volume controls for SFX and music with mute toggles
+- [x] **AUDIO-05**: iOS/iPadOS AudioContext warm-up on first user interaction
 
 ### Game Loop
 
@@ -200,11 +200,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LOOP-02 | Phase 15 | Complete |
 | LOOP-03 | Phase 15 | Complete |
 | LOOP-04 | Phase 15 | Complete |
-| AUDIO-01 | Phase 16 | Pending |
-| AUDIO-02 | Phase 16 | Pending |
-| AUDIO-03 | Phase 16 | Pending |
-| AUDIO-04 | Phase 16 | Pending |
-| AUDIO-05 | Phase 16 | Pending |
+| AUDIO-01 | Phase 16 | Complete |
+| AUDIO-02 | Phase 16 | Complete |
+| AUDIO-03 | Phase 16 | Complete |
+| AUDIO-04 | Phase 16 | Complete |
+| AUDIO-05 | Phase 16 | Complete |
 | STACK-01 | Phase 17 | Complete |
 | STACK-02 | Phase 17 | Complete |
 | STACK-03 | Phase 17 | Complete |
