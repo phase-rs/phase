@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import type { AnimationSpeed, VfxQuality } from "../../animation/types.ts";
 import type {
   CardSizePreference,
   HudLayout,
@@ -15,6 +16,8 @@ interface PreferencesModalProps {
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const HUD_LAYOUTS: HudLayout[] = ["inline", "floating"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
+const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
+const ANIMATION_SPEEDS: AnimationSpeed[] = ["slow", "normal", "fast", "instant"];
 const BOARD_BACKGROUNDS: { value: BoardBackground; label: string }[] = [
   { value: "auto-wubrg", label: "Auto (WUBRG)" },
   { value: "white", label: "White" },
@@ -30,10 +33,14 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
   const hudLayout = usePreferencesStore((s) => s.hudLayout);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
+  const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
+  const animationSpeed = usePreferencesStore((s) => s.animationSpeed);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
   const setHudLayout = usePreferencesStore((s) => s.setHudLayout);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
+  const setVfxQuality = usePreferencesStore((s) => s.setVfxQuality);
+  const setAnimationSpeed = usePreferencesStore((s) => s.setAnimationSpeed);
 
   return (
     <AnimatePresence>
@@ -110,6 +117,24 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                   </option>
                 ))}
               </select>
+            </SettingGroup>
+
+            {/* VFX Quality */}
+            <SettingGroup label="VFX Quality">
+              <SegmentedControl
+                options={VFX_QUALITIES}
+                value={vfxQuality}
+                onChange={setVfxQuality}
+              />
+            </SettingGroup>
+
+            {/* Animation Speed */}
+            <SettingGroup label="Animation Speed">
+              <SegmentedControl
+                options={ANIMATION_SPEEDS}
+                value={animationSpeed}
+                onChange={setAnimationSpeed}
+              />
             </SettingGroup>
           </div>
         </motion.div>

@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+
 interface BlockerArrowProps {
   blockerId: number;
   attackerId: number;
 }
 
 export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
+  const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const [positions, setPositions] = useState<{
     from: { x: number; y: number };
     to: { x: number; y: number };
@@ -41,6 +44,7 @@ export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
   const dx = positions.to.x - positions.from.x;
   const dy = positions.to.y - positions.from.y;
   const length = Math.sqrt(dx * dx + dy * dy);
+  const isMinimal = vfxQuality === "minimal";
 
   return (
     <svg
@@ -60,21 +64,33 @@ export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
           <path d="M0,0 L8,3 L0,6 Z" fill="rgba(249,115,22,0.8)" />
         </marker>
       </defs>
-      <motion.line
-        x1={positions.from.x}
-        y1={positions.from.y}
-        x2={positions.to.x}
-        y2={positions.to.y}
-        stroke="rgba(249,115,22,0.6)"
-        strokeWidth={2.5}
-        markerEnd={`url(#blocker-arrow-${blockerId})`}
-        initial={{ pathLength: 0, opacity: 0 }}
-        animate={{ pathLength: 1, opacity: 1 }}
-        transition={{
-          duration: Math.min(length / 800, 0.4),
-          ease: "easeOut",
-        }}
-      />
+      {isMinimal ? (
+        <line
+          x1={positions.from.x}
+          y1={positions.from.y}
+          x2={positions.to.x}
+          y2={positions.to.y}
+          stroke="rgba(249,115,22,0.5)"
+          strokeWidth={1.5}
+          markerEnd={`url(#blocker-arrow-${blockerId})`}
+        />
+      ) : (
+        <motion.line
+          x1={positions.from.x}
+          y1={positions.from.y}
+          x2={positions.to.x}
+          y2={positions.to.y}
+          stroke="rgba(249,115,22,0.6)"
+          strokeWidth={2.5}
+          markerEnd={`url(#blocker-arrow-${blockerId})`}
+          initial={{ pathLength: 0, opacity: 0 }}
+          animate={{ pathLength: 1, opacity: 1 }}
+          transition={{
+            duration: Math.min(length / 800, 0.4),
+            ease: "easeOut",
+          }}
+        />
+      )}
     </svg>
   );
 }
