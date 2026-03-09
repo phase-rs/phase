@@ -84,7 +84,13 @@ mod tests {
     fn mill_3_moves_top_3_from_library_to_graveyard() {
         let mut state = GameState::new_two_player(42);
         for i in 0..5 {
-            create_object(&mut state, CardId(i + 1), PlayerId(1), format!("Card {}", i), Zone::Library);
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(1),
+                format!("Card {}", i),
+                Zone::Library,
+            );
         }
         let top_3: Vec<_> = state.players[1].library[..3].to_vec();
 
@@ -117,7 +123,13 @@ mod tests {
     fn mill_with_fewer_cards_than_requested_mills_available() {
         let mut state = GameState::new_two_player(42);
         for i in 0..2 {
-            create_object(&mut state, CardId(i + 1), PlayerId(1), format!("Card {}", i), Zone::Library);
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(1),
+                format!("Card {}", i),
+                Zone::Library,
+            );
         }
 
         let ability = make_mill_ability(5, vec![TargetRef::Player(PlayerId(1))]);

@@ -31,7 +31,12 @@ pub fn resolve(
 
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
-                if let ProposedEvent::Damage { target: ref t, amount, .. } = event {
+                if let ProposedEvent::Damage {
+                    target: ref t,
+                    amount,
+                    ..
+                } = event
+                {
                     match t {
                         TargetRef::Object(obj_id) => {
                             let obj = state
@@ -160,7 +165,13 @@ mod tests {
     #[test]
     fn deal_damage_to_creature() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(1), "Bear".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
         let ability = make_ability(3, vec![TargetRef::Object(obj_id)]);
         let mut events = Vec::new();
 
@@ -188,8 +199,12 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::DamageDealt { amount: 2, .. })));
-        assert!(events.iter().any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamageDealt { amount: 2, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
     }
 
     #[test]
@@ -212,11 +227,35 @@ mod tests {
     #[test]
     fn damage_all_creatures() {
         let mut state = GameState::new_two_player(42);
-        let bear1 = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&bear1).unwrap().card_types.core_types.push(CoreType::Creature);
+        let bear1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bear1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
-        let bear2 = create_object(&mut state, CardId(2), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&bear2).unwrap().card_types.core_types.push(CoreType::Creature);
+        let bear2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bear2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         let ability = ResolvedAbility {
             api_type: "DamageAll".to_string(),

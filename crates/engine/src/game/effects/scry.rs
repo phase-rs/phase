@@ -78,7 +78,13 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         // Create library: [Card0(top), Card1, Card2, Card3, Card4(bottom)]
         for i in 0..5 {
-            create_object(&mut state, CardId(i + 1), PlayerId(0), format!("Card {}", i), Zone::Library);
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
         }
         let original_top_2: Vec<_> = state.players[0].library[..2].to_vec();
         let original_bottom_3: Vec<_> = state.players[0].library[2..].to_vec();

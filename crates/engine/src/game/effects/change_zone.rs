@@ -147,7 +147,13 @@ mod tests {
     #[test]
     fn move_from_hand_to_battlefield() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Card".to_string(), Zone::Hand);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
         let ability = ResolvedAbility {
             api_type: "ChangeZone".to_string(),
             params: HashMap::from([
@@ -171,7 +177,13 @@ mod tests {
     #[test]
     fn move_to_exile() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Card".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Battlefield,
+        );
         let ability = ResolvedAbility {
             api_type: "ChangeZone".to_string(),
             params: HashMap::from([
@@ -194,15 +206,51 @@ mod tests {
     #[test]
     fn change_zone_all_bounce_opponent_creatures() {
         let mut state = GameState::new_two_player(42);
-        let opp1 = create_object(&mut state, CardId(1), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&opp1).unwrap().card_types.core_types.push(CoreType::Creature);
+        let opp1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opp Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
-        let opp2 = create_object(&mut state, CardId(2), PlayerId(1), "Opp Wolf".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&opp2).unwrap().card_types.core_types.push(CoreType::Creature);
+        let opp2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         // Controller's creature should stay
-        let mine = create_object(&mut state, CardId(3), PlayerId(0), "My Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&mine).unwrap().card_types.core_types.push(CoreType::Creature);
+        let mine = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "My Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&mine)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         let ability = ResolvedAbility {
             api_type: "ChangeZoneAll".to_string(),

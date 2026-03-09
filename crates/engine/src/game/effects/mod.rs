@@ -343,7 +343,13 @@ mod tests {
         let registry = build_registry();
         let mut state = GameState::new_two_player(42);
         // Add a card in library so Draw has something to draw
-        create_object(&mut state, CardId(1), PlayerId(0), "Card".to_string(), Zone::Library);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Library,
+        );
 
         let ability = ResolvedAbility {
             api_type: "Draw".to_string(),
@@ -366,7 +372,13 @@ mod tests {
         let registry = build_registry();
         let mut state = GameState::new_two_player(42);
         // Add cards to draw
-        create_object(&mut state, CardId(1), PlayerId(0), "Card A".to_string(), Zone::Library);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
 
         let ability = ResolvedAbility {
             api_type: "DealDamage".to_string(),
@@ -378,9 +390,7 @@ mod tests {
             source_id: ObjectId(100),
             controller: PlayerId(0),
             sub_ability: None,
-            svars: HashMap::from([
-                ("DBDraw".to_string(), "DB$ Draw | NumCards$ 1".to_string()),
-            ]),
+            svars: HashMap::from([("DBDraw".to_string(), "DB$ Draw | NumCards$ 1".to_string())]),
         };
         let mut events = Vec::new();
 
@@ -406,14 +416,24 @@ mod tests {
     #[test]
     fn condition_present_creature_on_battlefield_passes() {
         let mut state = GameState::new_two_player(42);
-        let creature_id = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&creature_id).unwrap().card_types.core_types.push(CoreType::Creature);
+        let creature_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         let ability = ResolvedAbility {
             api_type: "Draw".to_string(),
-            params: HashMap::from([
-                ("ConditionPresent".to_string(), "Creature".to_string()),
-            ]),
+            params: HashMap::from([("ConditionPresent".to_string(), "Creature".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -430,9 +450,7 @@ mod tests {
 
         let ability = ResolvedAbility {
             api_type: "Draw".to_string(),
-            params: HashMap::from([
-                ("ConditionPresent".to_string(), "Creature".to_string()),
-            ]),
+            params: HashMap::from([("ConditionPresent".to_string(), "Creature".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -447,15 +465,30 @@ mod tests {
     fn condition_compare_ge2_with_3_creatures_passes() {
         let mut state = GameState::new_two_player(42);
         for i in 0..3 {
-            let id = create_object(&mut state, CardId(i + 1), PlayerId(0), format!("Creature {}", i), Zone::Battlefield);
-            state.objects.get_mut(&id).unwrap().card_types.core_types.push(CoreType::Creature);
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Creature {}", i),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
         }
 
         let ability = ResolvedAbility {
             api_type: "Draw".to_string(),
             params: HashMap::from([
                 ("ConditionCompare".to_string(), "GE2".to_string()),
-                ("ConditionSVarCompare".to_string(), "CreatureCount".to_string()),
+                (
+                    "ConditionSVarCompare".to_string(),
+                    "CreatureCount".to_string(),
+                ),
             ]),
             targets: vec![],
             source_id: ObjectId(100),
@@ -470,14 +503,29 @@ mod tests {
     #[test]
     fn condition_compare_eq0_with_1_creature_fails() {
         let mut state = GameState::new_two_player(42);
-        let id = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&id).unwrap().card_types.core_types.push(CoreType::Creature);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         let ability = ResolvedAbility {
             api_type: "Draw".to_string(),
             params: HashMap::from([
                 ("ConditionCompare".to_string(), "EQ0".to_string()),
-                ("ConditionSVarCompare".to_string(), "CreatureCount".to_string()),
+                (
+                    "ConditionSVarCompare".to_string(),
+                    "CreatureCount".to_string(),
+                ),
             ]),
             targets: vec![],
             source_id: ObjectId(100),

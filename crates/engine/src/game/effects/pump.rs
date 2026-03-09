@@ -76,7 +76,9 @@ pub fn resolve_all(
             state
                 .objects
                 .get(id)
-                .map(|obj| obj.zone == Zone::Battlefield && matches_filter(obj, filter, ability.controller))
+                .map(|obj| {
+                    obj.zone == Zone::Battlefield && matches_filter(obj, filter, ability.controller)
+                })
                 .unwrap_or(false)
         })
         .copied()
@@ -114,7 +116,13 @@ mod tests {
     #[test]
     fn pump_increases_power_and_toughness() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
         state.objects.get_mut(&obj_id).unwrap().power = Some(2);
         state.objects.get_mut(&obj_id).unwrap().toughness = Some(2);
 
@@ -141,7 +149,13 @@ mod tests {
     #[test]
     fn pump_with_negative_values() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
         state.objects.get_mut(&obj_id).unwrap().power = Some(3);
         state.objects.get_mut(&obj_id).unwrap().toughness = Some(3);
 
@@ -169,21 +183,57 @@ mod tests {
     fn pump_all_your_creatures() {
         let mut state = GameState::new_two_player(42);
         // Controller's creatures
-        let bear1 = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        let bear1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
         state.objects.get_mut(&bear1).unwrap().power = Some(2);
         state.objects.get_mut(&bear1).unwrap().toughness = Some(2);
-        state.objects.get_mut(&bear1).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&bear1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
-        let bear2 = create_object(&mut state, CardId(2), PlayerId(0), "Bear 2".to_string(), Zone::Battlefield);
+        let bear2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear 2".to_string(),
+            Zone::Battlefield,
+        );
         state.objects.get_mut(&bear2).unwrap().power = Some(1);
         state.objects.get_mut(&bear2).unwrap().toughness = Some(1);
-        state.objects.get_mut(&bear2).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&bear2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         // Opponent's creature (should NOT be pumped)
-        let opp = create_object(&mut state, CardId(3), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
+        let opp = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opp Bear".to_string(),
+            Zone::Battlefield,
+        );
         state.objects.get_mut(&opp).unwrap().power = Some(3);
         state.objects.get_mut(&opp).unwrap().toughness = Some(3);
-        state.objects.get_mut(&opp).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&opp)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         let ability = ResolvedAbility {
             api_type: "PumpAll".to_string(),

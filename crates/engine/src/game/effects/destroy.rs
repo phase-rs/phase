@@ -42,7 +42,9 @@ pub fn resolve(
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     match event {
-                        ProposedEvent::Destroy { object_id, source, .. } => {
+                        ProposedEvent::Destroy {
+                            object_id, source, ..
+                        } => {
                             // Destruction resolved -- now create a ZoneChange proposal
                             // so Moved replacements can intercept the actual zone transfer
                             let zone_proposed = ProposedEvent::ZoneChange {
@@ -54,7 +56,10 @@ pub fn resolve(
                             };
                             match replacement::replace_event(state, zone_proposed, events) {
                                 ReplacementResult::Execute(zone_event) => {
-                                    if let ProposedEvent::ZoneChange { object_id: oid, to, .. } = zone_event {
+                                    if let ProposedEvent::ZoneChange {
+                                        object_id: oid, to, ..
+                                    } = zone_event
+                                    {
                                         zones::move_to_zone(state, oid, to, events);
                                         state.layers_dirty = true;
                                     }
@@ -66,10 +71,11 @@ pub fn resolve(
                                         .as_ref()
                                         .map(|p| p.candidates.len())
                                         .unwrap_or(0);
-                                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                                        player,
-                                        candidate_count,
-                                    };
+                                    state.waiting_for =
+                                        crate::types::game_state::WaitingFor::ReplacementChoice {
+                                            player,
+                                            candidate_count,
+                                        };
                                     return Ok(());
                                 }
                             }
@@ -165,7 +171,13 @@ mod tests {
     #[test]
     fn destroy_moves_to_graveyard() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
         let ability = ResolvedAbility {
             api_type: "Destroy".to_string(),
             params: HashMap::new(),
@@ -186,8 +198,19 @@ mod tests {
     #[test]
     fn destroy_skips_indestructible() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "God".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&obj_id).unwrap().keywords.push(crate::types::keywords::Keyword::Indestructible);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "God".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Indestructible);
 
         let ability = ResolvedAbility {
             api_type: "Destroy".to_string(),
@@ -208,7 +231,13 @@ mod tests {
     #[test]
     fn destroy_emits_creature_destroyed_event() {
         let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
         let ability = ResolvedAbility {
             api_type: "Destroy".to_string(),
             params: HashMap::new(),
@@ -222,26 +251,56 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == obj_id)));
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == obj_id)
+        ));
     }
 
     #[test]
     fn destroy_all_creatures() {
         let mut state = GameState::new_two_player(42);
-        let bear1 = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&bear1).unwrap().card_types.core_types.push(CoreType::Creature);
+        let bear1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bear1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
-        let bear2 = create_object(&mut state, CardId(2), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
-        state.objects.get_mut(&bear2).unwrap().card_types.core_types.push(CoreType::Creature);
+        let bear2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bear2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         // Non-creature should survive
-        let _land = create_object(&mut state, CardId(3), PlayerId(0), "Forest".to_string(), Zone::Battlefield);
+        let _land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
 
         let ability = ResolvedAbility {
             api_type: "DestroyAll".to_string(),
-            params: HashMap::from([
-                ("Valid".to_string(), "Creature".to_string()),
-            ]),
+            params: HashMap::from([("Valid".to_string(), "Creature".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
             controller: PlayerId(0),
