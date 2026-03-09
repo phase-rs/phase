@@ -235,13 +235,7 @@ export function GamePage() {
         if (cancelled) return;
 
         if (mode === "ai") {
-          const controller = createAIController(
-            () => useGameStore.getState().gameState,
-            async (action) => {
-              await useGameStore.getState().dispatch(action);
-            },
-            { difficulty },
-          );
+          const controller = createAIController({ difficulty });
           aiControllerRef.current = controller;
           controller.start();
         }

@@ -1,23 +1,21 @@
-import { get_ai_action } from "../../wasm/engine_wasm";
-import type { GameAction, GameState } from "../../adapter/types";
+import type { GameAction } from "../../adapter/types";
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, AI_PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
+import { get_ai_action } from "../../wasm/engine_wasm";
+import { dispatchAction } from "../dispatch";
+import type { OpponentController } from "./types";
 
 export interface AIControllerConfig {
   difficulty: string;
 }
 
-export interface AIController {
+export interface AIController extends OpponentController {
   start(): void;
   stop(): void;
   dispose(): void;
 }
 
-export function createAIController(
-  getState: () => GameState | null,
-  submitAction: (action: GameAction) => Promise<void>,
-  config: AIControllerConfig,
-): AIController {
+export function createAIController(config: AIControllerConfig): AIController {
   let active = false;
   let pending = false;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -26,7 +24,7 @@ export function createAIController(
   function checkAndSchedule() {
     if (!active || pending) return;
 
-    const state = getState();
+    const state = useGameStore.getState().gameState;
     if (!state) return;
 
     const waitingFor = state.waiting_for;
@@ -55,7 +53,7 @@ export function createAIController(
           return;
         }
         const action = actionValue as GameAction;
-        await submitAction(action);
+        await dispatchAction(action);
       } catch (e) {
         console.error("[AI] Error choosing action:", e);
       } finally {
