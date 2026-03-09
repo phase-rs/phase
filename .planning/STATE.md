@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Phase 19 context gathered
-last_updated: "2026-03-09T22:25:36.612Z"
+stopped_at: Completed 16-03-PLAN.md
+last_updated: "2026-03-09T22:25:44.412Z"
 last_activity: 2026-03-09 — Completed 16-01 Core Audio System
 progress:
   total_phases: 7
@@ -138,6 +138,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 16-01]: AudioManager is a plain TypeScript singleton, not a React component -- matches dispatch.ts pattern
 - [Phase 16-01]: Module-level usePreferencesStore.subscribe() wires real-time volume updates automatically
 - [Phase 16-01]: dispose() fully resets AudioManager state for clean test isolation without vi.resetModules()
+- [Phase 16-03]: Speaker icon placed left of settings gear for quick access without opening modal
+- [Phase 16-03]: Red icon color (text-red-400) for muted state provides clear visual feedback
+- [Phase 16-03]: Slider opacity dims when individually muted but remains interactive
 
 ### Roadmap Evolution
 
@@ -157,5 +160,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 16-01 Core Audio System
-Stopped at: Phase 19 context gathered
-Resume file: .planning/phases/19-recreate-the-mtga-ui-as-faithfully-as-possible/19-CONTEXT.md
+Stopped at: Completed 16-03-PLAN.md
+Resume file: None
