@@ -110,6 +110,7 @@ export function GamePage() {
   const mode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
   const joinCode = searchParams.get("code") ?? "";
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const initGame = useGameStore((s) => s.initGame);
   const gameState = useGameStore((s) => s.gameState);
@@ -286,7 +287,7 @@ export function GamePage() {
   }, []);
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-gray-950">
+    <div ref={containerRef} className="relative h-screen w-screen overflow-hidden bg-gray-950">
       {/* Reconnecting banner */}
       {reconnectState.status === "reconnecting" && (
         <div className="fixed left-0 right-0 top-0 z-40 bg-amber-600 px-4 py-2 text-center text-sm font-semibold text-white">
@@ -440,7 +441,7 @@ export function GamePage() {
       )}
 
       {/* Animation overlay (above board, below modals) */}
-      <AnimationOverlay />
+      <AnimationOverlay containerRef={containerRef} />
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} />
