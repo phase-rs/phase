@@ -152,6 +152,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19-01]: Tokens detected via card_id === 0 (no is_token field on GameObject)
 - [Phase 19-01]: Art crop aspect ratio 0.75 (width:height) matches Scryfall art_crop format
 - [Phase 19-01]: ImageSize type exported from scryfall.ts for reuse
+- [Phase 19-02]: ArtCropCard renders P/T, loyalty, counters internally -- PermanentCard skips those in art_crop mode
+- [Phase 19-02]: Tap opacity 0.85 only in MTGA mode for tapped non-attacking permanents
+- [Phase 19-02]: CardPreview uses normal size instead of large for faster loading via cache hits
 - [Phase 19]: Splash progress is cosmetic (1.5s rAF timer) since WASM loads on game start, not app start
 - [Phase 19]: DeckGallery uses first non-basic-land card name from deck for representative art tile
 - [Phase 19]: Difficulty selector is inline segmented control in DeckGallery, not a separate screen

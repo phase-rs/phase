@@ -122,9 +122,9 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 - [x] **ARENA-01**: Battlefield permanents display Scryfall art_crop images with WUBRG color-coded borders, card name labels, P/T overlays, loyalty shields, and circular counter badges
 - [x] **ARENA-02**: Dual Scryfall image fetching (art_crop for battlefield/deck builder, normal for hand/stack/preview) with IndexedDB caching
-- [ ] **ARENA-03**: Tapped permanents rotate 15-20 degrees clockwise (not 90) with 0.85 opacity dim
+- [x] **ARENA-03**: Tapped permanents rotate 15-20 degrees clockwise (not 90) with 0.85 opacity dim
 - [ ] **ARENA-04**: MTGA-faithful board layout with creatures near center, lands far, centered avatars, and phase indicators flanking player avatar
-- [ ] **ARENA-05**: No visible zone borders, bars, or background overlays -- everything floats over battlefield images
+- [x] **ARENA-05**: No visible zone borders, bars, or background overlays -- everything floats over battlefield images
 - [ ] **ARENA-06**: Golden curved SVG targeting arcs, orange glow on selected attackers/blockers, attacker slide-forward on declare
 - [ ] **ARENA-07**: Cinematic layered turn banner (light burst, banner strip, diamond accents, triple-glow text) with amber/slate theming
 - [ ] **ARENA-08**: Canvas death shatter (8-12 art fragments scatter/fade in 0.6s) and card flight arcs for cast/resolve
