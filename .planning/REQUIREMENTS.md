@@ -21,16 +21,16 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Hand
 
-- [ ] **HAND-01**: Player hand uses MTGA-style fan layout with peek/expand from bottom edge
-- [ ] **HAND-02**: Cards in hand support drag-to-play interaction with threshold to prevent accidental drags
-- [ ] **HAND-03**: Playable cards highlight based on legal actions from engine
-- [ ] **HAND-04**: Opponent hand displays card backs in compact fan
+- [x] **HAND-01**: Player hand uses MTGA-style fan layout with peek/expand from bottom edge
+- [x] **HAND-02**: Cards in hand support drag-to-play interaction with threshold to prevent accidental drags
+- [x] **HAND-03**: Playable cards highlight based on legal actions from engine
+- [x] **HAND-04**: Opponent hand displays card backs in compact fan
 
 ### Player HUD
 
-- [ ] **HUD-01**: Player HUD displays life total, mana pool summary, and active phase indicator
-- [ ] **HUD-02**: Opponent HUD displays life total and mana pool summary
-- [ ] **HUD-03**: Life total animates on change (damage flash red, gain flash green)
+- [x] **HUD-01**: Player HUD displays life total, mana pool summary, and active phase indicator
+- [x] **HUD-02**: Opponent HUD displays life total and mana pool summary
+- [x] **HUD-03**: Life total animates on change (damage flash red, gain flash green)
 
 ### Animation Pipeline
 
@@ -153,13 +153,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BOARD-07 | Phase 13 | Complete |
 | BOARD-08 | Phase 13 | Complete |
 | BOARD-09 | Phase 13 | Complete |
-| HAND-01 | Phase 13 | Pending |
-| HAND-02 | Phase 13 | Pending |
-| HAND-03 | Phase 13 | Pending |
-| HAND-04 | Phase 13 | Pending |
-| HUD-01 | Phase 13 | Pending |
-| HUD-02 | Phase 13 | Pending |
-| HUD-03 | Phase 13 | Pending |
+| HAND-01 | Phase 13 | Complete |
+| HAND-02 | Phase 13 | Complete |
+| HAND-03 | Phase 13 | Complete |
+| HAND-04 | Phase 13 | Complete |
+| HUD-01 | Phase 13 | Complete |
+| HUD-02 | Phase 13 | Complete |
+| HUD-03 | Phase 13 | Complete |
 | ZONE-01 | Phase 13 | Pending |
 | ZONE-02 | Phase 13 | Pending |
 | ZONE-03 | Phase 13 | Pending |

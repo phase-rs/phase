@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 13-03-PLAN.md
-last_updated: "2026-03-09T01:02:06Z"
-last_activity: 2026-03-09 — Completed 13-03 battlefield grouping and P/T display
+stopped_at: Completed 13-04-PLAN.md
+last_updated: "2026-03-09T01:02:44Z"
+last_activity: 2026-03-09 — Completed 13-04 hand fan and HUD components
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 0
   total_plans: 5
-  completed_plans: 3
-  percent: 60
+  completed_plans: 4
+  percent: 80
 ---
 
 # Project State
@@ -26,26 +26,27 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 13 of 17 (Foundation & Board Layout)
-Plan: 3 of 3 in current phase (COMPLETE)
+Plan: 4 of 5 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 13-03 battlefield grouping and P/T display
+Last activity: 2026-03-09 — Completed 13-04 hand fan and HUD components
 
-Progress: [██████░░░░] 60%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3 (v1.1)
+- Total plans completed: 4 (v1.1)
 - Average duration: 3min
-- Total execution time: 9min
+- Total execution time: 12min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 13-foundation-board-layout | 3/3 | 9min | 3min |
+| 13-foundation-board-layout | 4/5 | 12min | 3min |
 | Phase 13 P01 | 5min | 2 tasks | 11 files |
 | Phase 13 P03 | 2min | 2 tasks | 5 files |
+| Phase 13 P04 | 3min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -62,6 +63,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 13-03]: P/T box replaces damage overlay for creatures; non-creatures keep damage overlay
 - [Phase 13-03]: Counter badges at top-right to avoid P/T box overlap at bottom-right
 - [Phase 13-03]: Attachment tuck uses 15px offset per attachment with marginTop reservation
+- [Phase 13-04]: All hand cards highlighted as playable when player has priority (engine legal action filtering deferred)
+- [Phase 13-04]: HUD layout toggle between inline and floating via preferencesStore hudLayout
 
 ### Blockers/Concerns
 
@@ -75,6 +78,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 13-03 battlefield grouping and P/T display
-Stopped at: Completed 13-03-PLAN.md
+Last activity: 2026-03-09 - Completed 13-04 hand fan and HUD components
+Stopped at: Completed 13-04-PLAN.md
 Resume file: None
