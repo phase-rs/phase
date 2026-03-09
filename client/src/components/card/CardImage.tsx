@@ -17,7 +17,7 @@ export function CardImage({
 }: CardImageProps) {
   const { src, isLoading } = useCardImage(cardName, { size, faceIndex });
 
-  const tappedStyle = tapped ? "rotate-[30deg]" : "";
+  const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
   const baseClasses = `w-[var(--card-w)] h-[var(--card-h)] rounded-lg transition-transform duration-200 ${tappedStyle} ${className}`;
 
   if (isLoading || !src) {
