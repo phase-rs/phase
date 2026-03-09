@@ -25,22 +25,15 @@ pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>)
         state
             .objects
             .get(&a.object_id)
-            .map(|o| {
-                o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike)
-            })
+            .map(|o| o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike))
             .unwrap_or(false)
-    }) || combat
-        .blocker_to_attacker
-        .keys()
-        .any(|blocker_id| {
-            state
-                .objects
-                .get(blocker_id)
-                .map(|o| {
-                    o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike)
-                })
-                .unwrap_or(false)
-        });
+    }) || combat.blocker_to_attacker.keys().any(|blocker_id| {
+        state
+            .objects
+            .get(blocker_id)
+            .map(|o| o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike))
+            .unwrap_or(false)
+    });
 
     if has_first_or_double {
         // First strike damage step
@@ -90,8 +83,14 @@ fn first_strike_damage_step(state: &mut GameState, events: &mut Vec<GameEvent>) 
         }
         let has_deathtouch = obj.has_keyword(&Keyword::Deathtouch);
         let has_trample = obj.has_keyword(&Keyword::Trample);
-        let assignments =
-            assign_attacker_damage(state, attacker_info.object_id, &combat, power, has_deathtouch, has_trample);
+        let assignments = assign_attacker_damage(
+            state,
+            attacker_info.object_id,
+            &combat,
+            power,
+            has_deathtouch,
+            has_trample,
+        );
         for a in assignments {
             all_assignments.push((attacker_info.object_id, a));
         }
@@ -159,8 +158,14 @@ fn regular_damage_step(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
         let has_deathtouch = obj.has_keyword(&Keyword::Deathtouch);
         let has_trample = obj.has_keyword(&Keyword::Trample);
-        let assignments =
-            assign_attacker_damage(state, attacker_info.object_id, &combat, power, has_deathtouch, has_trample);
+        let assignments = assign_attacker_damage(
+            state,
+            attacker_info.object_id,
+            &combat,
+            power,
+            has_deathtouch,
+            has_trample,
+        );
         for a in assignments {
             all_assignments.push((attacker_info.object_id, a));
         }
@@ -301,7 +306,11 @@ fn assign_attacker_damage(
 }
 
 /// How much damage is needed to kill this creature.
-fn lethal_damage_needed(state: &GameState, object_id: ObjectId, source_has_deathtouch: bool) -> u32 {
+fn lethal_damage_needed(
+    state: &GameState,
+    object_id: ObjectId,
+    source_has_deathtouch: bool,
+) -> u32 {
     if source_has_deathtouch {
         // With deathtouch, 1 damage is lethal
         return 1;
@@ -355,7 +364,12 @@ fn apply_combat_damage(
 
         let actual_amount = match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
-                if let ProposedEvent::Damage { target: ref t, amount, .. } = event {
+                if let ProposedEvent::Damage {
+                    target: ref t,
+                    amount,
+                    ..
+                } = event
+                {
                     match t {
                         TargetRef::Object(target_id) => {
                             if let Some(target_obj) = state.objects.get_mut(target_id) {
@@ -371,7 +385,9 @@ fn apply_combat_damage(
                             });
                         }
                         TargetRef::Player(player_id) => {
-                            if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
+                            if let Some(player) =
+                                state.players.iter_mut().find(|p| p.id == *player_id)
+                            {
                                 player.life -= amount as i32;
                             }
                             events.push(GameEvent::DamageDealt {
@@ -399,11 +415,7 @@ fn apply_combat_damage(
 
         // Lifelink: source's controller gains life equal to damage dealt
         if source_has_lifelink && actual_amount > 0 {
-            if let Some(player) = state
-                .players
-                .iter_mut()
-                .find(|p| p.id == source_controller)
-            {
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == source_controller) {
                 player.life += actual_amount as i32;
             }
             events.push(GameEvent::LifeChanged {
@@ -686,5 +698,127 @@ mod tests {
         resolve_combat_damage(&mut state, &mut events);
 
         assert!(state.objects[&blocker].dealt_deathtouch_damage);
+    }
+
+    #[test]
+    fn wither_applies_minus_counters_to_creature_instead_of_damage() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Wither", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Wither);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 4);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Wither: 3 -1/-1 counters instead of damage_marked
+        assert_eq!(state.objects[&blocker].damage_marked, 0);
+        assert_eq!(
+            state.objects[&blocker]
+                .counters
+                .get(&crate::game::game_object::CounterType::Minus1Minus1)
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+    }
+
+    #[test]
+    fn wither_to_player_deals_normal_damage() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Wither", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Wither);
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Wither does NOT give poison to players, just normal damage
+        assert_eq!(state.players[1].life, 17);
+        assert_eq!(state.players[1].poison_counters, 0);
+    }
+
+    #[test]
+    fn infect_applies_minus_counters_to_creature() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Infector", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Infect);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 4);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Infect: -1/-1 counters on creature
+        assert_eq!(state.objects[&blocker].damage_marked, 0);
+        assert_eq!(
+            state.objects[&blocker]
+                .counters
+                .get(&crate::game::game_object::CounterType::Minus1Minus1)
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+    }
+
+    #[test]
+    fn infect_to_player_gives_poison_no_life_loss() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Infector", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Infect);
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Infect: poison counters, no life loss
+        assert_eq!(state.players[1].life, 20);
+        assert_eq!(state.players[1].poison_counters, 3);
+    }
+
+    #[test]
+    fn lifelink_works_with_infect() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "InfectLinker", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Infect);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Lifelink);
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Infect gives poison, but lifelink still triggers
+        assert_eq!(state.players[1].poison_counters, 3);
+        assert_eq!(state.players[0].life, 23); // gained 3 life
     }
 }

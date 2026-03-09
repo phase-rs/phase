@@ -4,6 +4,7 @@ use super::identifiers::ObjectId;
 use super::mana::ManaPool;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct PlayerId(pub u8);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +21,7 @@ pub struct Player {
     // Tracking
     pub has_drawn_this_turn: bool,
     pub lands_played_this_turn: u8,
+    pub poison_counters: u32,
 }
 
 impl Default for Player {
@@ -33,6 +35,7 @@ impl Default for Player {
             graveyard: Vec::new(),
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
+            poison_counters: 0,
         }
     }
 }

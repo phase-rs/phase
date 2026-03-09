@@ -46,18 +46,12 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
     }
 }
 
-fn check_player_life(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
+fn check_player_life(state: &mut GameState, events: &mut Vec<GameEvent>, any_performed: &mut bool) {
     for i in 0..state.players.len() {
         if state.players[i].life <= 0 {
             let loser = state.players[i].id;
             let winner_id = PlayerId(1 - loser.0);
-            events.push(GameEvent::PlayerLost {
-                player_id: loser,
-            });
+            events.push(GameEvent::PlayerLost { player_id: loser });
             events.push(GameEvent::GameOver {
                 winner: Some(winner_id),
             });
@@ -131,11 +125,7 @@ fn check_lethal_damage(
     }
 }
 
-fn check_legend_rule(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
+fn check_legend_rule(state: &mut GameState, events: &mut Vec<GameEvent>, any_performed: &mut bool) {
     for player_idx in 0..state.players.len() {
         let player_id = state.players[player_idx].id;
 
@@ -161,10 +151,7 @@ fn check_legend_rule(
             std::collections::HashMap::new();
         for id in legendaries {
             if let Some(obj) = state.objects.get(&id) {
-                by_name
-                    .entry(obj.name.clone())
-                    .or_default()
-                    .push(id);
+                by_name.entry(obj.name.clone()).or_default().push(id);
             }
         }
 
@@ -227,7 +214,10 @@ fn check_unattached_auras(
     }
 }
 
-fn is_valid_attachment_target(state: &GameState, target_id: crate::types::identifiers::ObjectId) -> bool {
+fn is_valid_attachment_target(
+    state: &GameState,
+    target_id: crate::types::identifiers::ObjectId,
+) -> bool {
     state
         .objects
         .get(&target_id)
@@ -277,9 +267,12 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::PlayerLost { player_id: PlayerId(0) })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerLost {
+                player_id: PlayerId(0)
+            }
+        )));
     }
 
     #[test]
@@ -340,13 +333,33 @@ mod tests {
         let mut state = setup();
         state.turn_number = 1;
         let id1 = create_creature(&mut state, CardId(1), PlayerId(0), "Thalia", 2, 1);
-        state.objects.get_mut(&id1).unwrap().card_types.supertypes.push(Supertype::Legendary);
-        state.objects.get_mut(&id1).unwrap().entered_battlefield_turn = Some(1);
+        state
+            .objects
+            .get_mut(&id1)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        state
+            .objects
+            .get_mut(&id1)
+            .unwrap()
+            .entered_battlefield_turn = Some(1);
 
         state.turn_number = 2;
         let id2 = create_creature(&mut state, CardId(2), PlayerId(0), "Thalia", 2, 1);
-        state.objects.get_mut(&id2).unwrap().card_types.supertypes.push(Supertype::Legendary);
-        state.objects.get_mut(&id2).unwrap().entered_battlefield_turn = Some(2);
+        state
+            .objects
+            .get_mut(&id2)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        state
+            .objects
+            .get_mut(&id2)
+            .unwrap()
+            .entered_battlefield_turn = Some(2);
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
@@ -404,6 +417,39 @@ mod tests {
         // Both should be in graveyard (creature dies, then aura detaches and dies)
         assert!(!state.battlefield.contains(&id));
         assert!(!state.battlefield.contains(&aura_id));
+    }
+
+    #[test]
+    fn sba_poison_10_player_loses() {
+        let mut state = setup();
+        state.players[0].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerLost {
+                player_id: PlayerId(0)
+            }
+        )));
+    }
+
+    #[test]
+    fn sba_poison_9_player_survives() {
+        let mut state = setup();
+        state.players[0].poison_counters = 9;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
     }
 
     #[test]
