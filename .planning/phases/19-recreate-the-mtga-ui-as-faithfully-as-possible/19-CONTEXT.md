@@ -57,6 +57,13 @@ Close the visual and interaction gap between the current Arena-inspired UI and t
 - 15-20° clockwise rotation (NOT 90° — MTGA never does 90° rotation)
 - Slight opacity dim (~0.85) on tapped cards
 - OVERRIDES Phase 13 decision of 90° rotation
+- User-toggleable preference: "mtga" (17°) vs "classic" (90°) tap rotation
+
+### Display preferences (toggleable)
+- Battlefield card display: toggle between art-crop (MTGA-style) and full card images
+- Tap rotation angle: toggle between 17° MTGA-style and 90° classic
+- Both settings live in preferencesStore (persisted to localStorage)
+- Default to MTGA-style for both
 
 ### Micro-interactions — combat
 - Legal attackers/blockers: cyan glow (existing, don't change)
