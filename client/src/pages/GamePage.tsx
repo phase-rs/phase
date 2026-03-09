@@ -9,7 +9,7 @@ import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
-import { PhaseStopBar } from "../components/controls/PhaseStopBar.tsx";
+import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
@@ -234,63 +234,50 @@ function GamePageContent({
 
       {/* Full-screen board layout */}
       <div className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}>
-        {/* Opponent area */}
-        <OpponentHud />
+        {/* Opponent hand at top */}
         <OpponentHand showCards={showAiHand} />
 
-        {/* Opponent battlefield */}
+        {/* Opponent avatar centered below their hand */}
+        <OpponentHud />
+
+        {/* Battlefield */}
         <GameBoard />
 
-        {/* Center divider with phase/stack/zone indicators */}
-        <div className="flex items-center justify-center gap-4 border-y border-gray-800 px-4 py-1">
-          <div className="flex items-center gap-1">
-            <ZoneIndicator
-              zone="graveyard"
-              playerId={1}
-              onClick={() => setViewingZone({ zone: "graveyard", playerId: 1 })}
-            />
-            <ZoneIndicator
-              zone="exile"
-              playerId={1}
-              onClick={() => setViewingZone({ zone: "exile", playerId: 1 })}
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-500">
-              T{gameState?.turn_number ?? 0}
-            </span>
-            {gameState && (
-              <span
-                className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                  gameState.active_player === 0
-                    ? "bg-cyan-900/60 text-cyan-300"
-                    : "bg-red-900/60 text-red-300"
-                }`}
-              >
-                {gameState.active_player === 0 ? "Your Turn" : "Opp Turn"}
-              </span>
-            )}
-            <PhaseStopBar />
-          </div>
-          <div className="flex items-center gap-1">
-            <ZoneIndicator
-              zone="graveyard"
-              playerId={0}
-              onClick={() => setViewingZone({ zone: "graveyard", playerId: 0 })}
-            />
-            <ZoneIndicator
-              zone="exile"
-              playerId={0}
-              onClick={() => setViewingZone({ zone: "exile", playerId: 0 })}
-            />
-          </div>
-        </div>
+        {/* Player avatar centered with flanking phase indicators */}
+        <PlayerHud onSettingsClick={() => setShowPreferences(true)} />
 
-        {/* Player area */}
-        <div className="flex items-center gap-2 px-4 py-1">
-          <PlayerHud onSettingsClick={() => setShowPreferences(true)} />
-        </div>
+        {/* Player hand at bottom */}
         <PlayerHand />
+      </div>
+
+      {/* Zone indicators at bottom-left */}
+      <div className="fixed bottom-4 left-4 z-30 flex items-center gap-2">
+        <ZoneIndicator
+          zone="graveyard"
+          playerId={0}
+          onClick={() => setViewingZone({ zone: "graveyard", playerId: 0 })}
+        />
+        <ZoneIndicator
+          zone="exile"
+          playerId={0}
+          onClick={() => setViewingZone({ zone: "exile", playerId: 0 })}
+        />
+        <span className="text-[10px] text-gray-500">|</span>
+        <ZoneIndicator
+          zone="graveyard"
+          playerId={1}
+          onClick={() => setViewingZone({ zone: "graveyard", playerId: 1 })}
+        />
+        <ZoneIndicator
+          zone="exile"
+          playerId={1}
+          onClick={() => setViewingZone({ zone: "exile", playerId: 1 })}
+        />
+      </div>
+
+      {/* Combat phase indicator near action button */}
+      <div className="fixed bottom-36 right-4 z-30">
+        <CombatPhaseIndicator />
       </div>
 
       {/* AI debug toggle + Concede */}

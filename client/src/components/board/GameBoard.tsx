@@ -51,27 +51,27 @@ export function GameBoard() {
 
   return (
     <div className="relative flex flex-1 flex-col">
-      {/* Opponent's battlefield (mirrored: lands at top, creatures middle, other nearest center) */}
-      <div className="relative flex flex-col gap-1 border-b border-white/10 bg-black/20 px-3 py-2">
+      {/* Opponent's battlefield: other (far) → lands → creatures (near center) */}
+      <div className="relative flex flex-1 flex-col justify-end gap-1 px-3 py-2">
         {opponent && (
           <>
+            <BattlefieldRow groups={opponent.other} rowType="other" />
             <BattlefieldRow groups={opponent.lands} rowType="lands" />
             <BattlefieldRow groups={opponent.creatures} rowType="creatures" />
-            <BattlefieldRow groups={opponent.other} rowType="other" />
           </>
         )}
       </div>
 
-      {/* Middle spacer */}
-      <div className="relative flex min-h-[60px] flex-1 items-center justify-center border-y border-white/5" />
+      {/* Minimal center gap */}
+      <div className="h-1" />
 
-      {/* Player's battlefield (lands, creatures, other from bottom) */}
-      <div className="relative flex flex-col gap-1 border-t border-white/10 px-3 py-2">
+      {/* Player's battlefield: creatures (near center) → lands → other (far) */}
+      <div className="relative flex flex-1 flex-col gap-1 px-3 py-2">
         {player && (
           <>
-            <BattlefieldRow groups={player.other} rowType="other" />
             <BattlefieldRow groups={player.creatures} rowType="creatures" />
             <BattlefieldRow groups={player.lands} rowType="lands" />
+            <BattlefieldRow groups={player.other} rowType="other" />
           </>
         )}
       </div>
