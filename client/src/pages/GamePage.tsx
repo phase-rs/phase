@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
+import { AnimatePresence, motion } from "framer-motion";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
@@ -446,6 +447,7 @@ function MulliganDecisionPrompt({
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
+  const [buttonsVisible, setButtonsVisible] = useState(false);
 
   if (!player || !objects) {
     return (
@@ -466,46 +468,83 @@ function MulliganDecisionPrompt({
 
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
   const nextHandSize = 7 - mulliganCount - 1;
+  const cardCount = handObjects.length;
+
+  // Calculate fan rotation for each card
+  const getFanRotation = (index: number) => {
+    if (cardCount <= 1) return 0;
+    const mid = (cardCount - 1) / 2;
+    return (index - mid) * 3;
+  };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60" />
-      <div className="relative z-10 w-[90vw] max-w-7xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
-        <h2 className="mb-2 text-center text-lg font-bold text-white">
-          Mulligan ({mulliganCount} cards)
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center"
+      style={{ background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)" }}
+    >
+      {/* Title */}
+      <motion.div
+        className="mb-8 text-center"
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5 }}
+      >
+        <h2
+          className="text-3xl font-black tracking-wide text-white"
+          style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
+        >
+          Opening Hand
         </h2>
-        <p className="mb-4 text-center text-sm text-gray-400">
-          Review your opening hand and choose to keep or mulligan.
-        </p>
+        {mulliganCount > 0 && (
+          <p className="mt-1 text-sm text-gray-400">Mulligan {mulliganCount}</p>
+        )}
+      </motion.div>
 
-        <div className="mb-6 flex flex-wrap justify-center gap-3">
-          {handObjects.map((obj) => (
-            <div
-              key={obj.id}
-              className="rounded-lg border border-gray-700 bg-gray-800/60 p-1"
-              onMouseEnter={() => inspectObject(obj.id)}
-              onMouseLeave={() => inspectObject(null)}
-            >
-              <CardImage cardName={obj.name} size="normal" className="!w-[130px] !h-[182px]" />
-            </div>
-          ))}
-        </div>
-
-        <div className="flex justify-center gap-3">
-          <button
-            onClick={() => onChoose("keep")}
-            className="rounded-lg bg-emerald-600 px-6 py-2 font-semibold text-white transition hover:bg-emerald-500"
+      {/* Card display — fanned row */}
+      <div className="mb-10 flex items-center justify-center gap-4">
+        {handObjects.map((obj, index) => (
+          <motion.div
+            key={obj.id}
+            className="cursor-pointer rounded-lg transition-shadow duration-200 hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
+            style={{ rotate: `${getFanRotation(index)}deg` }}
+            initial={{ opacity: 0, y: 80, scale: 0.8 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
+            whileHover={{ scale: 1.05, y: -8 }}
+            onAnimationComplete={() => {
+              if (index === cardCount - 1) setButtonsVisible(true);
+            }}
+            onMouseEnter={() => inspectObject(obj.id)}
+            onMouseLeave={() => inspectObject(null)}
           >
-            Keep Hand
-          </button>
-          <button
-            onClick={() => onChoose("mulligan")}
-            className="rounded-lg bg-gray-800 px-6 py-2 font-semibold text-white transition hover:bg-gray-700 hover:ring-1 hover:ring-cyan-400/50"
-          >
-            Mulligan (Draw {nextHandSize} cards)
-          </button>
-        </div>
+            <CardImage cardName={obj.name} size="normal" className="!w-[160px] !h-[224px]" />
+          </motion.div>
+        ))}
       </div>
+
+      {/* Buttons */}
+      <AnimatePresence>
+        {buttonsVisible && (
+          <motion.div
+            className="flex gap-4"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <button
+              onClick={() => onChoose("keep")}
+              className="rounded-lg bg-emerald-600 px-12 py-4 text-xl font-bold text-white shadow-lg transition hover:bg-emerald-500 hover:shadow-emerald-500/30"
+            >
+              Keep Hand
+            </button>
+            <button
+              onClick={() => onChoose("mulligan")}
+              className="rounded-lg border border-gray-500 bg-transparent px-12 py-4 text-xl font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white"
+            >
+              Mulligan (Draw {nextHandSize} cards)
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -531,56 +570,76 @@ function MulliganBottomCardsPrompt({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60" />
-      <div className="relative z-10 w-[90vw] max-w-7xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
-        <h2 className="mb-2 text-center text-lg font-bold text-white">
+    <div
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center"
+      style={{ background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)" }}
+    >
+      {/* Title */}
+      <motion.div
+        className="mb-8 text-center"
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5 }}
+      >
+        <h2
+          className="text-3xl font-black tracking-wide text-white"
+          style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
+        >
           Put {count} card{count > 1 ? "s" : ""} on bottom
         </h2>
-        <p className="mb-4 text-center text-sm text-gray-400">
-          Select {count} card{count > 1 ? "s" : ""} to put on the bottom of
-          your library
+        <p className="mt-2 text-sm text-gray-400">
+          Select {count} card{count > 1 ? "s" : ""} to put on the bottom of your library
         </p>
+      </motion.div>
 
-        <div className="mb-4 flex flex-wrap justify-center gap-2">
-          {handObjects.map((obj) => {
-            const isSelected = selectedTargets.includes(obj.id);
-            return (
-              <button
-                key={obj.id}
-                onClick={() => {
-                  if (!isSelected && selectedTargets.length < count) {
-                    addTarget(obj.id);
-                  }
-                }}
-                onMouseEnter={() => inspectObject(obj.id)}
-                onMouseLeave={() => inspectObject(null)}
-                className={`rounded-lg p-1 text-sm transition ${
-                  isSelected
-                    ? "bg-cyan-600 text-white ring-2 ring-cyan-400"
-                    : "bg-gray-800 text-gray-300 hover:bg-gray-700"
-                }`}
-              >
-                <CardImage cardName={obj.name} size="normal" className="!w-[130px] !h-[182px]" />
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex justify-center">
-          <button
-            onClick={handleConfirm}
-            disabled={!isReady}
-            className={`rounded-lg px-6 py-2 font-semibold transition ${
-              isReady
-                ? "bg-cyan-600 text-white hover:bg-cyan-500"
-                : "cursor-not-allowed bg-gray-700 text-gray-500"
-            }`}
-          >
-            Confirm ({selectedTargets.length}/{count})
-          </button>
-        </div>
+      {/* Card display */}
+      <div className="mb-10 flex items-center justify-center gap-4">
+        {handObjects.map((obj, index) => {
+          const isSelected = selectedTargets.includes(obj.id);
+          return (
+            <motion.button
+              key={obj.id}
+              onClick={() => {
+                if (!isSelected && selectedTargets.length < count) {
+                  addTarget(obj.id);
+                }
+              }}
+              className={`rounded-lg p-1 transition ${
+                isSelected
+                  ? "ring-3 ring-cyan-400 opacity-70"
+                  : "hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 80, scale: 0.8 }}
+              animate={{ opacity: isSelected ? 0.7 : 1, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
+              whileHover={{ scale: 1.05, y: -8 }}
+              onMouseEnter={() => inspectObject(obj.id)}
+              onMouseLeave={() => inspectObject(null)}
+            >
+              <CardImage cardName={obj.name} size="normal" className="!w-[160px] !h-[224px]" />
+            </motion.button>
+          );
+        })}
       </div>
+
+      {/* Confirm button */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.5, duration: 0.3 }}
+      >
+        <button
+          onClick={handleConfirm}
+          disabled={!isReady}
+          className={`rounded-lg px-12 py-4 text-xl font-bold transition ${
+            isReady
+              ? "bg-cyan-600 text-white shadow-lg hover:bg-cyan-500 hover:shadow-cyan-500/30"
+              : "cursor-not-allowed bg-gray-700 text-gray-500"
+          }`}
+        >
+          Confirm ({selectedTargets.length}/{count})
+        </button>
+      </motion.div>
     </div>
   );
 }
