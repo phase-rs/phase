@@ -60,6 +60,7 @@ Progress: [█████████░] 88%
 | Phase 18 P01 | 5min | 1 tasks | 4 files |
 | Phase 18 P02 | 8min | 2 tasks | 7 files |
 | Phase 18 P03 | 7min | 2 tasks | 4 files |
+| Phase 18 P04 | 4min | 2 tasks | 6 files |
 | Phase 18 P05 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context

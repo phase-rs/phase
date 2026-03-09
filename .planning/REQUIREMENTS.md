@@ -113,8 +113,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **MECH-04**: "All" effect variants (PumpAll, DamageAll, DestroyAll, ChangeZoneAll) handle Forge filter patterns
 - [x] **MECH-05**: Static abilities (Ward, Protection, CantBeBlocked) promoted from stubs with targeting/combat integration
 - [x] **MECH-06**: Prowess trigger fires on noncreature spell cast and resolves +1/+1 pump
-- [ ] **MECH-07**: Dig and GainControl effect handlers registered and functional
-- [ ] **MECH-08**: Wither/Infect modify damage application (counters instead of marked damage) with poison counter SBA
+- [x] **MECH-07**: Dig and GainControl effect handlers registered and functional
+- [x] **MECH-08**: Wither/Infect modify damage application (counters instead of marked damage) with poison counter SBA
 - [x] **MECH-09**: Mechanic coverage report quantifies Standard card support percentage
 - [x] **MECH-10**: Cards with unimplemented mechanics display visual warning indicator in game UI
 
@@ -222,8 +222,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MECH-04 | Phase 18 | Complete |
 | MECH-05 | Phase 18 | Complete |
 | MECH-06 | Phase 18 | Complete |
-| MECH-07 | Phase 18 | Pending |
-| MECH-08 | Phase 18 | Pending |
+| MECH-07 | Phase 18 | Complete |
+| MECH-08 | Phase 18 | Complete |
 | MECH-09 | Phase 18 | Complete |
 | MECH-10 | Phase 18 | Complete |
 
