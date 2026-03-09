@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Phase 18 context gathered
-last_updated: "2026-03-09T13:38:08.694Z"
-last_activity: 2026-03-09 — Completed 15-02 game loop controller & GameProvider
+stopped_at: Completed 18-01-PLAN.md
+last_updated: "2026-03-09T15:09:59.574Z"
+last_activity: 2026-03-09 — Completed 18-01 combat evasion keywords
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 12
-  completed_plans: 12
-  percent: 92
+  total_plans: 17
+  completed_plans: 13
+  percent: 76
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 15 - Game Loop & Controllers
+**Current focus:** Phase 18 - Stubbed Mechanics Implementation
 
 ## Current Position
 
-Phase: 15 of 17 (Game Loop & Controllers)
-Plan: 2 of 3 in current phase
+Phase: 18 of 18 (Stubbed Mechanics)
+Plan: 2 of 5 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 15-02 game loop controller & GameProvider
+Last activity: 2026-03-09 — Completed 18-01 combat evasion keywords
 
-Progress: [█████████░] 92%
+Progress: [████████░░] 76%
 
 ## Performance Metrics
 
@@ -57,6 +57,7 @@ Progress: [█████████░] 92%
 | Phase 15 P01 | 2min | 2 tasks | 7 files |
 | Phase 15 P02 | 2min | 2 tasks | 3 files |
 | Phase 15 P03 | 5min | 2 tasks | 4 files |
+| Phase 18 P01 | 5min | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -97,6 +98,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 15-02]: Auto-pass uses setTimeout with 200ms beat, re-triggered by store subscription
 - [Phase 15-03]: PassButton uses MTGA terminology: Done (empty stack) / Resolve (stack has items)
 - [Phase 15-03]: Turn indicator badge with cyan/red color coding for your/opponent turn
+- [Phase 18]: test_helpers module is always public (not cfg(test)-gated) for integration test and coverage access
+- [Phase 18]: derive_colors_from_mana_cost made pub(crate) in deck_loading for reuse in test_helpers
 
 ### Roadmap Evolution
 
@@ -115,5 +118,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 15-02 game loop controller & GameProvider
-Stopped at: Phase 18 context gathered
-Resume file: .planning/phases/18-select-candidates-to-support-and-implement-stubbed-mechanics/18-CONTEXT.md
+Stopped at: Completed 18-01-PLAN.md
+Resume file: None

@@ -107,8 +107,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Mechanic Implementation (Phase 18)
 
-- [ ] **MECH-01**: Reusable test helper loads Forge card definitions and spawns game objects for integration testing
-- [ ] **MECH-02**: Combat evasion keywords (Fear, Intimidate, Skulk, Horsemanship) enforce correct blocking restrictions
+- [x] **MECH-01**: Reusable test helper loads Forge card definitions and spawns game objects for integration testing
+- [x] **MECH-02**: Combat evasion keywords (Fear, Intimidate, Skulk, Horsemanship) enforce correct blocking restrictions
 - [ ] **MECH-03**: New effect handlers (Mill, Scry) registered and functional with unit tests
 - [ ] **MECH-04**: "All" effect variants (PumpAll, DamageAll, DestroyAll, ChangeZoneAll) handle Forge filter patterns
 - [ ] **MECH-05**: Static abilities (Ward, Protection, CantBeBlocked) promoted from stubs with targeting/combat integration
@@ -216,8 +216,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COMBAT-02 | Phase 17 | Pending |
 | COMBAT-03 | Phase 17 | Pending |
 | COMBAT-04 | Phase 17 | Pending |
-| MECH-01 | Phase 18 | Pending |
-| MECH-02 | Phase 18 | Pending |
+| MECH-01 | Phase 18 | Complete |
+| MECH-02 | Phase 18 | Complete |
 | MECH-03 | Phase 18 | Pending |
 | MECH-04 | Phase 18 | Pending |
 | MECH-05 | Phase 18 | Pending |
