@@ -264,45 +264,51 @@ export function ActionButton() {
               >
                 {selectedAttackers.length > 0 ? "Clear Attackers" : "All Attack"}
               </button>
-              <button
-                onClick={handleConfirmAttackers}
-                className={gameButtonClass({ tone: "emerald", size: "md" })}
-              >
-                Confirm Attackers ({selectedAttackers.length})
-              </button>
-              <button
-                onClick={() => handleSkipConfirm("attackers")}
-                className={gameButtonClass({ tone: "slate", size: "md" })}
-              >
-                {skipArmed === "attackers"
-                  ? "Tap again: No Attacks"
-                  : "No Attacks"}
-              </button>
+              {selectedAttackers.length > 0 ? (
+                <button
+                  onClick={handleConfirmAttackers}
+                  className={gameButtonClass({ tone: "emerald", size: "md" })}
+                >
+                  Confirm Attackers ({selectedAttackers.length})
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleSkipConfirm("attackers")}
+                  className={gameButtonClass({ tone: "slate", size: "md" })}
+                >
+                  {skipArmed === "attackers"
+                    ? "Tap again: No Attacks"
+                    : "No Attacks"}
+                </button>
+              )}
             </>
           )}
 
           {mode === "combat-blockers" && (
             <>
-              <button
-                onClick={handleConfirmBlockers}
-                className={gameButtonClass({ tone: "emerald", size: "md" })}
-              >
-                Confirm Blockers ({blockerAssignments.size})
-              </button>
-              <button
-                onClick={() => handleSkipConfirm("blockers")}
-                className={gameButtonClass({ tone: "slate", size: "md" })}
-              >
-                {skipArmed === "blockers"
-                  ? "Tap again: No Blocks"
-                  : "No Blocks"}
-              </button>
-              {blockerAssignments.size > 0 && (
+              {blockerAssignments.size > 0 ? (
+                <>
+                  <button
+                    onClick={handleConfirmBlockers}
+                    className={gameButtonClass({ tone: "emerald", size: "md" })}
+                  >
+                    Confirm Blockers ({blockerAssignments.size})
+                  </button>
+                  <button
+                    onClick={handleClearBlockers}
+                    className={gameButtonClass({ tone: "neutral", size: "md" })}
+                  >
+                    Clear Blocks
+                  </button>
+                </>
+              ) : (
                 <button
-                  onClick={handleClearBlockers}
-                  className={gameButtonClass({ tone: "neutral", size: "md" })}
+                  onClick={() => handleSkipConfirm("blockers")}
+                  className={gameButtonClass({ tone: "slate", size: "md" })}
                 >
-                  Clear Blocks
+                  {skipArmed === "blockers"
+                    ? "Tap again: No Blocks"
+                    : "No Blocks"}
                 </button>
               )}
               {pendingBlocker !== null && (

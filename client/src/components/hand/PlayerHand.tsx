@@ -184,7 +184,7 @@ function HandCard({
     : "";
 
   // Rotation compensation: outer cards pushed down to form a natural arc (smile curve)
-  const arcOffset = Math.abs(rotation) * 1.2;
+  const arcOffset = Math.abs(rotation) * 1.6;
 
   return (
     <motion.div
