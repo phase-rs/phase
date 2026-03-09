@@ -2,9 +2,9 @@ use crate::types::ability::TargetRef;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
 
 /// Parse ValidTgts$ filter string and return all legal targets.
 pub fn find_legal_targets(
@@ -128,7 +128,7 @@ fn add_creatures(
                 }
             }
         }
-        if !can_target(obj, source_controller, source_id) {
+        if !can_target(obj, source_controller, source_id, state) {
             continue;
         }
         targets.push(TargetRef::Object(obj_id));
@@ -155,7 +155,7 @@ fn add_creatures_color_filter(
                 continue;
             }
         }
-        if !can_target(obj, source_controller, source_id) {
+        if !can_target(obj, source_controller, source_id, state) {
             continue;
         }
         targets.push(TargetRef::Object(obj_id));
@@ -179,18 +179,28 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>) {
 fn can_target(
     obj: &crate::game::game_object::GameObject,
     source_controller: PlayerId,
-    _source_id: ObjectId,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
     // Shroud: can't be targeted by anyone
-    if obj.has_keyword(&crate::types::keywords::Keyword::Shroud) {
+    if obj.has_keyword(&Keyword::Shroud) {
         return false;
     }
     // Hexproof: can't be targeted by opponents
-    if obj.has_keyword(&crate::types::keywords::Keyword::Hexproof) {
-        if obj.controller != source_controller {
-            return false;
+    if obj.has_keyword(&Keyword::Hexproof) && obj.controller != source_controller {
+        return false;
+    }
+    // Protection: can't be targeted by sources with the protected quality
+    for kw in &obj.keywords {
+        if let Keyword::Protection(ProtectionTarget::Color(color)) = kw {
+            if let Some(source_obj) = state.objects.get(&source_id) {
+                if source_obj.color.contains(color) {
+                    return false;
+                }
+            }
         }
     }
+    // Ward: targeting is legal, cost enforcement deferred to mana payment UI
     true
 }
 
@@ -210,7 +220,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
-    use crate::types::keywords::Keyword;
+    use crate::types::zones::Zone;
 
     fn setup_with_creatures() -> (GameState, ObjectId, ObjectId) {
         let mut state = GameState::new_two_player(42);
@@ -343,5 +353,92 @@ mod tests {
         let original: Vec<TargetRef> = vec![];
         let legal: Vec<TargetRef> = vec![];
         assert!(!check_fizzle(&original, &legal));
+    }
+
+    #[test]
+    fn protection_from_red_prevents_red_source_targeting() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let (mut state, _c0, c1) = setup_with_creatures();
+
+        // Give c1 protection from red
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+
+        // Create a red source spell
+        let red_source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&red_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+
+        // Red source cannot target creature with protection from red
+        let targets = find_legal_targets(&state, "Creature", PlayerId(0), red_source);
+        assert!(!targets.contains(&TargetRef::Object(c1)));
+    }
+
+    #[test]
+    fn protection_from_red_allows_blue_source_targeting() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let (mut state, _c0, c1) = setup_with_creatures();
+
+        // Give c1 protection from red
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+
+        // Create a blue source spell
+        let blue_source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Unsummon".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&blue_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        // Blue source CAN target creature with protection from red
+        let targets = find_legal_targets(&state, "Creature", PlayerId(0), blue_source);
+        assert!(targets.contains(&TargetRef::Object(c1)));
+    }
+
+    #[test]
+    fn ward_does_not_prevent_targeting() {
+        // Ward should be recognized but not block targeting (cost enforcement deferred)
+        let (mut state, _c0, c1) = setup_with_creatures();
+
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Ward("2".to_string()));
+
+        // Ward creature can still be targeted (cost enforcement is separate)
+        let targets = find_legal_targets(&state, "Creature", PlayerId(0), ObjectId(99));
+        assert!(targets.contains(&TargetRef::Object(c1)));
     }
 }

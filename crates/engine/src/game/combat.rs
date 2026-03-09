@@ -158,18 +158,12 @@ pub fn validate_blockers(
         // Protection: creature with protection from a color can't be blocked by
         // creatures of that color
         for kw in &attacker.keywords {
-            if let Keyword::Protection(ref target) = kw {
-                match target {
-                    ProtectionTarget::Color(color) => {
-                        if blocker.color.contains(color) {
-                            return Err(format!(
-                                "{:?} cannot block {:?} (protection from {:?})",
-                                blocker_id, attacker_id, color
-                            ));
-                        }
-                    }
-                    // TODO: CardType and Quality protection blocking restrictions
-                    _ => {}
+            if let Keyword::Protection(ProtectionTarget::Color(color)) = kw {
+                if blocker.color.contains(color) {
+                    return Err(format!(
+                        "{:?} cannot block {:?} (protection from {:?})",
+                        blocker_id, attacker_id, color
+                    ));
                 }
             }
         }

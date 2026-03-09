@@ -58,14 +58,19 @@ pub fn build_static_registry() -> HashMap<String, StaticAbilityHandler> {
     registry.insert("Panharmonicon".to_string(), handle_rule_mod);
     registry.insert("IgnoreHexproof".to_string(), handle_rule_mod);
 
+    // Promoted static ability handlers
+    registry.insert("CantBeBlocked".to_string(), handle_cant_be_blocked);
+    registry.insert("Ward".to_string(), handle_ward);
+    registry.insert("Protection".to_string(), handle_protection);
+
     // Stub modes -- recognized but no-op until needed
     let stubs = [
         "CantBeCountered", "CantBeDestroyed", "CantBeSacrificed", "CantBeEnchanted",
-        "CantTransform", "CantBeEquipped", "CantBeBlocked", "CantRegenerate",
+        "CantTransform", "CantBeEquipped", "CantRegenerate",
         "CantPlaneswalkerRedirect", "Devoid", "FlashBack", "Forecast",
         "ReduceCostEach", "SetCost", "AlternateCost", "CantPlayLand",
         "CantShuffle", "CantTap", "CantUntap", "ETBReplacement",
-        "Indestructible", "Shroud", "Ward", "Protection",
+        "Indestructible", "Shroud",
         "CantDealDamage", "CantBeDealtDamage", "DamageReduction", "PreventDamage",
         "DealtDamageInsteadExile", "AssignNoCombatDamage", "CantAttackAlone",
         "CantBlockAlone", "MustBeBlocked", "AttackRestriction", "BlockRestriction",
@@ -101,6 +106,43 @@ fn handle_rule_mod(
     // For rule mods, we return the effect so callers can check applicability.
     let mode = params.get("Mode").cloned().unwrap_or_default();
     vec![StaticEffect::RuleModification { mode }]
+}
+
+/// Handler for CantBeBlocked -- creature cannot be blocked.
+pub fn handle_cant_be_blocked(
+    _state: &GameState,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+) -> Vec<StaticEffect> {
+    vec![StaticEffect::RuleModification {
+        mode: "CantBeBlocked".to_string(),
+    }]
+}
+
+/// Handler for Ward -- opponent must pay additional cost or spell/ability is countered.
+/// Cost enforcement is deferred to mana payment UI; this marks the static as active.
+pub fn handle_ward(
+    _state: &GameState,
+    params: &HashMap<String, String>,
+    _source_id: ObjectId,
+) -> Vec<StaticEffect> {
+    let cost = params.get("Cost").cloned().unwrap_or_default();
+    vec![StaticEffect::RuleModification {
+        mode: format!("Ward:{}", cost),
+    }]
+}
+
+/// Handler for Protection -- prevents damage, blocking, targeting, and enchanting
+/// by sources with the specified quality.
+pub fn handle_protection(
+    _state: &GameState,
+    params: &HashMap<String, String>,
+    _source_id: ObjectId,
+) -> Vec<StaticEffect> {
+    let target = params.get("Target").cloned().unwrap_or_default();
+    vec![StaticEffect::RuleModification {
+        mode: format!("Protection:{}", target),
+    }]
 }
 
 /// Stub handler for recognized but unimplemented modes.
@@ -321,6 +363,50 @@ mod tests {
             ..Default::default()
         };
         assert!(!check_static_ability(&state, "CantAttack", &ctx));
+    }
+
+    #[test]
+    fn test_cant_be_blocked_returns_rule_modification() {
+        let state = setup();
+        let params = HashMap::new();
+        let effects = handle_cant_be_blocked(&state, &params, ObjectId(1));
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            StaticEffect::RuleModification { mode } => {
+                assert_eq!(mode, "CantBeBlocked");
+            }
+            _ => panic!("Expected RuleModification effect"),
+        }
+    }
+
+    #[test]
+    fn test_ward_returns_rule_modification_with_cost() {
+        let state = setup();
+        let mut params = HashMap::new();
+        params.insert("Cost".to_string(), "2".to_string());
+        let effects = handle_ward(&state, &params, ObjectId(1));
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            StaticEffect::RuleModification { mode } => {
+                assert!(mode.starts_with("Ward:"));
+            }
+            _ => panic!("Expected RuleModification effect"),
+        }
+    }
+
+    #[test]
+    fn test_protection_returns_rule_modification_with_target() {
+        let state = setup();
+        let mut params = HashMap::new();
+        params.insert("Target".to_string(), "Red".to_string());
+        let effects = handle_protection(&state, &params, ObjectId(1));
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            StaticEffect::RuleModification { mode } => {
+                assert!(mode.starts_with("Protection:"));
+            }
+            _ => panic!("Expected RuleModification effect"),
+        }
     }
 
     #[test]
