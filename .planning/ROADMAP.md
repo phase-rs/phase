@@ -191,7 +191,7 @@ Plans:
   6. Day/night tracks globally with Daybound/Nightbound auto-transformation
   7. Morph/manifest create face-down 2/2 creatures that can be turned face up
   8. Coverage report confirms 100% Standard-legal card support with CI gate preventing regressions
-**Plans:** 9 plans
+**Plans:** 10 plans
 
 Plans:
 - [ ] 20-01-PLAN.md — Mana abilities (Rule 605 instant resolution, ManaPayment activation)
@@ -201,5 +201,6 @@ Plans:
 - [ ] 20-05-PLAN.md — Transform/DFC (face switching, zone reset, hover-to-peek UI)
 - [ ] 20-06-PLAN.md — Static ability + trigger matcher batch promotion (Indestructible, CantBeCountered, FlashBack, AttackerBlocked, etc.)
 - [ ] 20-07-PLAN.md — Effect handlers (Fight, Bounce, Explore, Proliferate, CopySpell) + replacement promotions
-- [ ] 20-08-PLAN.md — Day/Night + Morph/Manifest/Disguise complex subsystems
-- [ ] 20-09-PLAN.md — Standard card data curation + coverage CI gate
+- [ ] 20-08-PLAN.md — Day/Night global state with Daybound/Nightbound transformation
+- [ ] 20-09-PLAN.md — Morph/Manifest/Disguise face-down mechanics
+- [ ] 20-10-PLAN.md — Standard card data curation + coverage CI gate
