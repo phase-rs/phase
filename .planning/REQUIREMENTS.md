@@ -82,9 +82,9 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Combat
 
-- [ ] **COMBAT-01**: Attacker declaration UI highlights legal attackers and supports click-to-toggle
-- [ ] **COMBAT-02**: Blocker declaration UI highlights legal blockers and supports click-to-assign
-- [ ] **COMBAT-03**: Combat math bubbles preview P/T trade outcomes before damage resolution
+- [x] **COMBAT-01**: Attacker declaration UI highlights legal attackers and supports click-to-toggle
+- [x] **COMBAT-02**: Blocker declaration UI highlights legal blockers and supports click-to-assign
+- [x] **COMBAT-03**: Combat math bubbles preview P/T trade outcomes before damage resolution
 - [ ] **COMBAT-04**: Combat damage assignment modal distributes damage across multiple blockers (trample, multi-block)
 
 ### Zones
@@ -212,9 +212,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MANA-01 | Phase 17 | Complete |
 | MANA-02 | Phase 17 | Complete |
 | MANA-03 | Phase 17 | Complete |
-| COMBAT-01 | Phase 17 | Pending |
-| COMBAT-02 | Phase 17 | Pending |
-| COMBAT-03 | Phase 17 | Pending |
+| COMBAT-01 | Phase 17 | Complete |
+| COMBAT-02 | Phase 17 | Complete |
+| COMBAT-03 | Phase 17 | Complete |
 | COMBAT-04 | Phase 17 | Pending |
 | MECH-01 | Phase 18 | Complete |
 | MECH-02 | Phase 18 | Complete |

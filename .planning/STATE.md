@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 17-04-PLAN.md
+stopped_at: Completed 17-03-PLAN.md
 last_updated: "2026-03-09T17:54:41.141Z"
-last_activity: 2026-03-09 — Completed 17-01 foundation utilities & visual polish
+last_activity: 2026-03-09 — Completed 17-03 ActionButton orchestrator
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 22
   completed_plans: 21
-  percent: 86
+  percent: 95
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 17 of 18 (MTG-Specific UI)
-Plan: 2 of 5 in current phase
+Plan: 4 of 5 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 17-01 foundation utilities & visual polish
+Last activity: 2026-03-09 — Completed 17-03 ActionButton orchestrator
 
-Progress: [████████░░] 86%
+Progress: [█████████░] 95%
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Progress: [████████░░] 86%
 | Phase 18 P05 | 5min | 2 tasks | 7 files |
 | Phase 17 P01 | 3min | 2 tasks | 10 files |
 | Phase 17 P02 | 2min | 1 tasks | 3 files |
+| Phase 17 P03 | 2min | 2 tasks | 2 files |
 | Phase 17 P04 | 2min | 2 tasks | 3 files |
 
 ## Accumulated Context
@@ -122,6 +123,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 17-01]: LifeTotal accepts size prop for context-aware rendering (lg in HUD, default elsewhere)
 - [Phase 17-01]: OpponentHand upgraded from static divs to motion.div with AnimatePresence for fan animation
 - [Phase 17]: StackDisplay moved from inline center-divider to fixed right-column overlay for Arena-style presentation
+- [Phase 17-03]: ActionButton uses dispatchAction directly for Resolve All async loop (outside React lifecycle)
+- [Phase 17-03]: Skip-confirm guard pattern with 1200ms armed timer for No Attacks / No Blocks
+- [Phase 17-03]: Old PassButton/CombatOverlay files kept to avoid breaking test imports
 - [Phase 17-04]: Auto-pay via PassPriority useEffect for non-ambiguous costs
 - [Phase 17-04]: Cost inference from top stack entry source_id mana_cost
 - [Phase 17-04]: Phyrexian toggle between mana icon and heart with 2-life label
@@ -142,6 +146,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 18-05 coverage report & UI warning badge
-Stopped at: Completed 17-04-PLAN.md
+Last activity: 2026-03-09 - Completed 17-03 ActionButton orchestrator
+Stopped at: Completed 17-03-PLAN.md
 Resume file: None
