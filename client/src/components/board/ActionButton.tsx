@@ -203,6 +203,23 @@ export function ActionButton() {
     setCombatMode("blockers");
   }
 
+  const endTurnRef = useRef(false);
+
+  async function endTurn() {
+    endTurnRef.current = true;
+    const startTurn = useGameStore.getState().gameState?.turn_number ?? 0;
+    for (let i = 0; i < 50; i++) {
+      if (!endTurnRef.current) break;
+      const current = useGameStore.getState();
+      const currentTurn = current.gameState?.turn_number ?? 0;
+      if (currentTurn !== startTurn) break;
+      if (current.waitingFor?.type !== "Priority") break;
+      if (current.waitingFor.data.player !== PLAYER_ID) break;
+      await dispatchAction({ type: "PassPriority" });
+    }
+    endTurnRef.current = false;
+  }
+
   async function resolveAll() {
     resolveAllRef.current = true;
     const initialStackLength =
@@ -236,10 +253,16 @@ export function ActionButton() {
           {mode === "combat-attackers" && (
             <>
               <button
-                onClick={() => selectAllAttackers(validAttackerIds)}
+                onClick={() => {
+                  if (selectedAttackers.length > 0) {
+                    handleClearAttackers();
+                  } else {
+                    selectAllAttackers(validAttackerIds);
+                  }
+                }}
                 className={gameButtonClass({ tone: "amber", size: "md" })}
               >
-                All Attack
+                {selectedAttackers.length > 0 ? "Clear Attackers" : "All Attack"}
               </button>
               <button
                 onClick={handleConfirmAttackers}
@@ -255,14 +278,6 @@ export function ActionButton() {
                   ? "Tap again: No Attacks"
                   : "No Attacks"}
               </button>
-              {selectedAttackers.length > 0 && (
-                <button
-                  onClick={handleClearAttackers}
-                  className={gameButtonClass({ tone: "neutral", size: "md" })}
-                >
-                  Clear Attackers
-                </button>
-              )}
             </>
           )}
 
@@ -316,15 +331,23 @@ export function ActionButton() {
           )}
 
           {mode === "priority-empty" && (
-            <button
-              onClick={() => dispatchAction({ type: "PassPriority" })}
-              className={gameButtonClass({
-                tone: advanceLabel === "Done" ? "blue" : "emerald",
-                size: "md",
-              })}
-            >
-              {advanceLabel}
-            </button>
+            <>
+              <button
+                onClick={() => dispatchAction({ type: "PassPriority" })}
+                className={gameButtonClass({
+                  tone: advanceLabel === "Done" ? "blue" : "emerald",
+                  size: "md",
+                })}
+              >
+                {advanceLabel}
+              </button>
+              <button
+                onClick={endTurn}
+                className={gameButtonClass({ tone: "slate", size: "md" })}
+              >
+                {">> End Turn"}
+              </button>
+            </>
           )}
         </motion.div>
       )}

@@ -21,19 +21,24 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
 
   return (
     <div
-      className="flex items-center justify-center px-4 py-1"
+      className="flex items-start justify-center px-4 py-1"
       style={{ perspective: "800px" }}
     >
       <AnimatePresence>
         {opponent.hand.map((id, i) => {
           const obj = showCards && objects ? objects[id] : null;
-          const rotation = (i - center) * 6;
+          // Negate rotation so fan opens toward opponent (top of screen)
+          const rotation = -((i - center) * 6);
 
           return (
             <motion.div
               key={id}
               initial={{ opacity: 0, y: -30 }}
-              animate={{ opacity: 1, y: 0, rotate: rotation }}
+              animate={{
+                opacity: 1,
+                y: -Math.abs(rotation) * 0.8,
+                rotate: rotation,
+              }}
               exit={{ opacity: 0, y: -30 }}
               transition={{ delay: i * 0.03, duration: 0.25 }}
               style={{ marginLeft: i > 0 ? "-16px" : undefined, zIndex: i }}

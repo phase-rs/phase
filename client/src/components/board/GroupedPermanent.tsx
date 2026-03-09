@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { GroupedPermanent as GroupedPermanentType } from "../../viewmodel/battlefieldProps";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { PermanentCard } from "./PermanentCard.tsx";
 
 interface GroupedPermanentProps {
@@ -9,6 +10,9 @@ interface GroupedPermanentProps {
 
 export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
   const [expanded, setExpanded] = useState(false);
+  const representativeObj = useGameStore(
+    (s) => s.gameState?.objects[group.ids[0]],
+  );
 
   if (group.count === 1) {
     return <PermanentCard objectId={group.ids[0]} />;
@@ -30,16 +34,19 @@ export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
     );
   }
 
+  // When any card in the group is tapped, the container rotates 90° — hide shadow layers to avoid silhouette
+  const isTapped = representativeObj?.tapped ?? false;
+
   return (
     <div
       className="relative cursor-pointer"
       onClick={() => setExpanded(true)}
     >
-      {/* Stacked shadow layers behind */}
-      {group.count >= 3 && (
+      {/* Stacked shadow layers behind (hidden when tapped to avoid silhouette) */}
+      {!isTapped && group.count >= 3 && (
         <div className="absolute left-[4px] top-[4px] z-0 h-full w-full rounded-lg bg-gray-700/40" />
       )}
-      {group.count >= 2 && (
+      {!isTapped && group.count >= 2 && (
         <div className="absolute left-[2px] top-[2px] z-[1] h-full w-full rounded-lg bg-gray-600/50" />
       )}
 

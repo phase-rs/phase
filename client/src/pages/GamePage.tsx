@@ -361,10 +361,10 @@ function GamePageContent({
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} />
 
-      {/* WaitingFor-driven prompt overlays */}
-      {waitingFor?.type === "TargetSelection" && <TargetingOverlay />}
-      {waitingFor?.type === "ManaPayment" && <ManaPaymentUI />}
-      {waitingFor?.type === "ReplacementChoice" && <ReplacementModal />}
+      {/* WaitingFor-driven prompt overlays (only for human player) */}
+      {waitingFor?.type === "TargetSelection" && waitingFor.data.player === PLAYER_ID && <TargetingOverlay />}
+      {waitingFor?.type === "ManaPayment" && waitingFor.data.player === PLAYER_ID && <ManaPaymentUI />}
+      {waitingFor?.type === "ReplacementChoice" && waitingFor.data.player === PLAYER_ID && <ReplacementModal />}
 
       {waitingFor?.type === "MulliganDecision" && waitingFor.data.player === PLAYER_ID && (
         <MulliganDecisionPrompt

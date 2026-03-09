@@ -72,10 +72,10 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
                 No cards in {ZONE_TITLES[zone].toLowerCase()}
               </p>
             ) : (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+              <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5">
                 {cards.map((obj) => (
                   <div key={obj.id} className="rounded-lg border border-gray-700 bg-gray-800/60 p-1">
-                    <CardImage cardName={obj.name} size="small" />
+                    <CardImage cardName={obj.name} size="normal" className="!w-[120px] !h-[168px]" />
                   </div>
                 ))}
               </div>

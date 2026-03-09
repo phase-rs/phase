@@ -9,7 +9,8 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { GameAction } from "../../adapter/types.ts";
 
-const DRAG_PLAY_THRESHOLD = -50;
+/** Cards are played when dragged above their starting position (any upward drag counts). */
+const DRAG_PLAY_THRESHOLD = -20;
 
 export function PlayerHand() {
   const player = useGameStore((s) => s.gameState?.players[0]);
@@ -188,7 +189,7 @@ function HandCard({
       initial={{ opacity: 0, y: 40 }}
       animate={{
         opacity: 1,
-        y: expanded ? -20 : 30,
+        y: (expanded ? -20 : 30) + Math.abs(rotation) * 0.8,
         rotate: rotation,
       }}
       exit={{ opacity: 0, y: 40 }}
@@ -196,8 +197,8 @@ function HandCard({
       whileDrag={{ scale: 1.05, zIndex: 50 }}
       transition={{ delay: index * 0.03, duration: 0.25 }}
       drag
-      dragConstraints={{ top: -300, bottom: 0, left: -200, right: 200 }}
-      dragElastic={0.3}
+      dragConstraints={false}
+      dragElastic={0}
       dragSnapToOrigin
       onDragStart={() => {
         setDragging(true);

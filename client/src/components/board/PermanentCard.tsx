@@ -3,7 +3,7 @@ import { useCallback } from "react";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
-import { COMBAT_TILT_DEGREES } from "../../constants/ui.ts";
+// COMBAT_TILT_DEGREES no longer needed — attacking creatures use standard 90° tap
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -121,11 +121,11 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
             ? `${obj.attachments.length * ATTACHMENT_OFFSET_PX}px`
             : undefined,
       }}
-      animate={{ rotate: isAttacking ? COMBAT_TILT_DEGREES : 0 }}
+      animate={{ rotate: isAttacking || obj.tapped ? 90 : 0 }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
-      onMouseEnter={() => hoverObject(objectId)}
-      onMouseLeave={() => hoverObject(null)}
+      onMouseEnter={() => { hoverObject(objectId); inspectObject(objectId); }}
+      onMouseLeave={() => { hoverObject(null); inspectObject(null); }}
       {...longPressHandlers}
     >
       {/* Attachments rendered behind, tucked with top edge visible */}
@@ -143,7 +143,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
       {/* Main card */}
       <div className="relative z-10">
-        <CardImage cardName={obj.name} tapped={obj.tapped} size="small" hasUnimplementedMechanics={obj.has_unimplemented_mechanics} />
+        <CardImage cardName={obj.name} size="small" hasUnimplementedMechanics={obj.has_unimplemented_mechanics} />
       </div>
 
       {/* P/T box for creatures */}

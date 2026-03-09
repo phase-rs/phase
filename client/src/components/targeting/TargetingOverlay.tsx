@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef } from "react";
 
 import type { ObjectId, TargetRef } from "../../adapter/types.ts";
+import { PLAYER_ID } from "../../constants/game.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { TargetArrow } from "./TargetArrow.tsx";
@@ -72,27 +73,30 @@ export function TargetingOverlay() {
 
   if (!targetingMode || !isTargetSelection) return null;
 
+  // Only show targeting UI for the human player
+  if (waitingFor.data.player !== PLAYER_ID) return null;
+
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-0 z-40"
+        className="pointer-events-none fixed inset-0 z-40"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         transition={{ duration: 0.2 }}
       >
-        {/* Semi-transparent overlay */}
-        <div className="pointer-events-none absolute inset-0 bg-black/30" />
+        {/* Semi-transparent overlay (click-through so board cards remain clickable) */}
+        <div className="absolute inset-0 bg-black/30" />
 
         {/* Instruction text */}
-        <div className="pointer-events-none absolute left-0 right-0 top-4 flex justify-center">
+        <div className="absolute left-0 right-0 top-4 flex justify-center">
           <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
             Choose a target
           </div>
         </div>
 
-        {/* Action buttons */}
-        <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4">
+        {/* Action buttons (must be clickable) */}
+        <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
           {selectedTargets.length > 0 && (
             <button
               onClick={handleConfirm}

@@ -97,13 +97,13 @@ export function GameBoard() {
 
   return (
     <div className={`flex flex-1 flex-col ${gradientClass}`}>
-      {/* Opponent's battlefield (other, creatures, lands from top) */}
+      {/* Opponent's battlefield (mirrored: lands at top, creatures middle, other nearest center) */}
       <div className="flex flex-col gap-1 border-b border-gray-800 bg-black/20 px-3 py-2">
         {opponent && (
           <>
-            <BattlefieldRow groups={opponent.other} rowType="other" />
-            <BattlefieldRow groups={opponent.creatures} rowType="creatures" />
             <BattlefieldRow groups={opponent.lands} rowType="lands" />
+            <BattlefieldRow groups={opponent.creatures} rowType="creatures" />
+            <BattlefieldRow groups={opponent.other} rowType="other" />
           </>
         )}
       </div>
