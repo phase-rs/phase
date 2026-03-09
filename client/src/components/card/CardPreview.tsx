@@ -1,4 +1,3 @@
-import { AnimatePresence, motion } from "framer-motion";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 
 interface CardPreviewProps {
@@ -12,16 +11,14 @@ export function CardPreview({
   faceIndex,
   position,
 }: CardPreviewProps) {
+  if (!cardName) return null;
+
   return (
-    <AnimatePresence>
-      {cardName && (
-        <CardPreviewInner
-          cardName={cardName}
-          faceIndex={faceIndex}
-          position={position}
-        />
-      )}
-    </AnimatePresence>
+    <CardPreviewInner
+      cardName={cardName}
+      faceIndex={faceIndex}
+      position={position}
+    />
   );
 }
 
@@ -35,7 +32,7 @@ function CardPreviewInner({
   position?: { x: number; y: number };
 }) {
   const { src, isLoading } = useCardImage(cardName, {
-    size: "large",
+    size: "normal",
     faceIndex,
   });
 
@@ -50,13 +47,9 @@ function CardPreviewInner({
       };
 
   return (
-    <motion.div
+    <div
       className="fixed z-[60] pointer-events-none"
       style={style}
-      initial={{ opacity: 0, scale: 0.9 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.9 }}
-      transition={{ duration: 0.15 }}
     >
       {isLoading || !src ? (
         <div className="w-[472px] h-[659px] rounded-xl bg-gray-700 border border-gray-600 shadow-2xl animate-pulse" />
@@ -68,6 +61,6 @@ function CardPreviewInner({
           draggable={false}
         />
       )}
-    </motion.div>
+    </div>
   );
 }

@@ -25,7 +25,7 @@ function resolveBattlefieldImage(
   return BATTLEFIELD_MAP[boardBackground]?.image ?? null;
 }
 
-/** Full-screen battlefield background image with dark overlay. */
+/** Full-screen battlefield background image. */
 export function BattlefieldBackground() {
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const autoImageRef = useRef<string | null>(null);
@@ -44,8 +44,6 @@ export function BattlefieldBackground() {
     <div
       className="fixed inset-0 bg-cover bg-center"
       style={{ backgroundImage: `url(${bgImage})` }}
-    >
-      <div className="absolute inset-0 bg-black/40" />
-    </div>
+    />
   );
 }
