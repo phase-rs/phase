@@ -105,6 +105,19 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **INTEG-02**: GameObject view model maps deep Forge.rs engine objects to flat props for UI components
 - [x] **INTEG-03**: Preferences store persists display, audio, and gameplay settings to localStorage
 
+### Mechanic Implementation (Phase 18)
+
+- [ ] **MECH-01**: Reusable test helper loads Forge card definitions and spawns game objects for integration testing
+- [ ] **MECH-02**: Combat evasion keywords (Fear, Intimidate, Skulk, Horsemanship) enforce correct blocking restrictions
+- [ ] **MECH-03**: New effect handlers (Mill, Scry) registered and functional with unit tests
+- [ ] **MECH-04**: "All" effect variants (PumpAll, DamageAll, DestroyAll, ChangeZoneAll) handle Forge filter patterns
+- [ ] **MECH-05**: Static abilities (Ward, Protection, CantBeBlocked) promoted from stubs with targeting/combat integration
+- [ ] **MECH-06**: Prowess trigger fires on noncreature spell cast and resolves +1/+1 pump
+- [ ] **MECH-07**: Dig and GainControl effect handlers registered and functional
+- [ ] **MECH-08**: Wither/Infect modify damage application (counters instead of marked damage) with poison counter SBA
+- [ ] **MECH-09**: Mechanic coverage report quantifies Standard card support percentage
+- [ ] **MECH-10**: Cards with unimplemented mechanics display visual warning indicator in game UI
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -203,12 +216,22 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COMBAT-02 | Phase 17 | Pending |
 | COMBAT-03 | Phase 17 | Pending |
 | COMBAT-04 | Phase 17 | Pending |
+| MECH-01 | Phase 18 | Pending |
+| MECH-02 | Phase 18 | Pending |
+| MECH-03 | Phase 18 | Pending |
+| MECH-04 | Phase 18 | Pending |
+| MECH-05 | Phase 18 | Pending |
+| MECH-06 | Phase 18 | Pending |
+| MECH-07 | Phase 18 | Pending |
+| MECH-08 | Phase 18 | Pending |
+| MECH-09 | Phase 18 | Pending |
+| MECH-10 | Phase 18 | Pending |
 
 **Coverage:**
-- v1.1 requirements: 46 total
-- Mapped to phases: 46
+- v1.1 requirements: 56 total
+- Mapped to phases: 56
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-08*
-*Last updated: 2026-03-08 after roadmap creation*
+*Last updated: 2026-03-09 after Phase 18 planning*

@@ -130,3 +130,17 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 | 15. Game Loop & Controllers | 3/3 | Complete    | 2026-03-09 | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
 | 17. MTG-Specific UI | v1.1 | 0/2 | Not started | - |
+
+### Phase 18: Select candidates to support and implement stubbed mechanics
+
+**Goal:** Implement stubbed game mechanics in tiered batches -- combat keywords, effect handlers, static abilities, and damage mechanics -- with test infrastructure, coverage reporting, and UI warnings for remaining gaps
+**Requirements**: MECH-01, MECH-02, MECH-03, MECH-04, MECH-05, MECH-06, MECH-07, MECH-08, MECH-09, MECH-10
+**Depends on:** Phase 15
+**Plans:** 5 plans
+
+Plans:
+- [ ] 18-01-PLAN.md — Test helper infrastructure and combat evasion keywords (Fear, Intimidate, Skulk, Horsemanship)
+- [ ] 18-02-PLAN.md — Core effect handlers (Mill, Scry, PumpAll, DamageAll, DestroyAll, ChangeZoneAll)
+- [ ] 18-03-PLAN.md — Static abilities (Ward, Protection, CantBeBlocked) and Prowess trigger
+- [ ] 18-04-PLAN.md — Dig, GainControl effects and Wither/Infect damage with poison counters
+- [ ] 18-05-PLAN.md — Mechanic coverage report and UI warning badge
