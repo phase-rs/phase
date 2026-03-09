@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 
@@ -171,6 +171,7 @@ function HandCard({
 }: HandCardProps) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setDragging = useUiStore((s) => s.setDragging);
+  const playedRef = useRef(false);
 
   const longPressHandlers = useLongPress(() => {
     inspectObject(objectId);
@@ -189,25 +190,33 @@ function HandCard({
     <motion.div
       layout
       initial={{ opacity: 0, y: 40 }}
-      animate={{
-        opacity: 1,
-        y: (expanded ? -20 : 30) + arcOffset,
-        rotate: rotation,
-      }}
-      exit={{ opacity: 0, y: 40 }}
+      animate={playedRef.current
+        ? { opacity: 0, scale: 0.8 }
+        : {
+            opacity: 1,
+            y: (expanded ? -20 : 30) + arcOffset,
+            rotate: rotation,
+          }
+      }
+      exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ y: -50, scale: 1.08, rotateX: 5, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 50 }}
       transition={{ delay: index * 0.03, duration: 0.25 }}
       drag
       dragConstraints={false}
       dragElastic={0}
-      dragSnapToOrigin
+      dragSnapToOrigin={!playedRef.current}
       onDragStart={() => {
+        playedRef.current = false;
         setDragging(true);
         inspectObject(null);
       }}
       onDragEnd={(event, info) => {
         setDragging(false);
+        const willPlay = info.offset.y < DRAG_PLAY_THRESHOLD && hasPriority && isPlayable;
+        if (willPlay) {
+          playedRef.current = true;
+        }
         onDragEnd(objectId, event, info);
       }}
       onClick={(e) => {
