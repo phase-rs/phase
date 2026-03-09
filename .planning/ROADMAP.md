@@ -95,12 +95,14 @@ Plans:
 **Requirements**: AUDIO-01, AUDIO-02, AUDIO-03, AUDIO-04, AUDIO-05
 **Success Criteria** (what must be TRUE):
   1. Sound effects play on game events (damage, spells, combat, life changes) using Forge's audio assets via Web Audio API
-  2. Background music plays during matches with WUBRG-themed track selection based on player's deck colors
+  2. Background music plays during matches with track rotation through available tracks
   3. Player can independently control SFX and music volume with mute toggles, and audio initializes correctly on iOS/iPadOS after first user interaction
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 16-01: TBD
+- [ ] 16-01-PLAN.md — AudioManager singleton, SFX map, preferences store audio extension
+- [ ] 16-02-PLAN.md — Dispatch pipeline SFX integration, music auto-start, AudioContext warm-up
+- [ ] 16-03-PLAN.md — HUD master mute toggle, PreferencesModal audio controls
 
 ### Phase 17: MTG-Specific UI
 **Goal**: Players interact with MTG-specific mechanics through polished UI -- stack visualization, mana payment, combat assignment, priority controls, and MTGA-quality visual polish (board sizing, hand fan, HUD)
@@ -132,7 +134,7 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 | 13. Foundation & Board Layout | 5/5 | Complete    | 2026-03-09 | - |
 | 14. Animation Pipeline | 4/4 | Complete    | 2026-03-09 | - |
 | 15. Game Loop & Controllers | 3/3 | Complete    | 2026-03-09 | - |
-| 16. Audio System | v1.1 | 0/1 | Not started | - |
+| 16. Audio System | v1.1 | 0/3 | Not started | - |
 | 17. MTG-Specific UI | 5/5 | Complete   | 2026-03-09 | - |
 
 ### Phase 18: Select candidates to support and implement stubbed mechanics
@@ -148,3 +150,13 @@ Plans:
 - [ ] 18-03-PLAN.md — Static abilities (Ward, Protection, CantBeBlocked) and Prowess trigger
 - [ ] 18-04-PLAN.md — Dig, GainControl effects and Wither/Infect damage with poison counters
 - [ ] 18-05-PLAN.md — Mechanic coverage report and UI warning badge
+
+### Phase 19: Recreate the MTGA UI as faithfully as possible
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 18
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 19 to break down)
