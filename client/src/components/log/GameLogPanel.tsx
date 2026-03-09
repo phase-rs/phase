@@ -71,7 +71,7 @@ export function GameLogPanel() {
         {isOpen && (
           <motion.div
             ref={panelRef}
-            className="fixed bottom-0 right-0 top-0 z-30 flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl"
+            className="fixed bottom-0 right-0 top-0 z-40 flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl"
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}

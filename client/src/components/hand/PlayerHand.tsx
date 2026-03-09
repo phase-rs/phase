@@ -24,6 +24,13 @@ export function PlayerHand() {
 
   const legalActions = useGameStore((s) => s.legalActions);
 
+  // Hide the card being cast (shown on stack as preview during TargetSelection)
+  const pendingObjectId = useGameStore((s) => {
+    const wf = s.waitingFor;
+    if (wf?.type === "TargetSelection") return wf.data.pending_cast.object_id;
+    return null;
+  });
+
   const hasPriority =
     waitingFor?.type === "Priority" && waitingFor.data.player === 0;
 
@@ -96,7 +103,7 @@ export function PlayerHand() {
 
   const handObjects = player.hand
     .map((id) => objects[id])
-    .filter(Boolean);
+    .filter((obj) => obj && obj.id !== pendingObjectId);
 
   const center = (handObjects.length - 1) / 2;
 

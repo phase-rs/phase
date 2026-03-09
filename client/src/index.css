@@ -1,22 +1,22 @@
 @import "tailwindcss";
 
 :root {
-  --card-w: 18vw;
-  --card-h: calc(18vw * 1.4);
+  --card-size-scale: 1;
+  --card-base: 18vw;
+  --card-w: calc(var(--card-base) * var(--card-size-scale));
+  --card-h: calc(var(--card-w) * 1.4);
   --card-radius: 6px;
 }
 
 @media (min-width: 768px) {
   :root {
-    --card-w: 12vw;
-    --card-h: calc(12vw * 1.4);
+    --card-base: 12vw;
   }
 }
 
 @media (min-width: 1200px) {
   :root {
-    --card-w: 7vw;
-    --card-h: calc(7vw * 1.4);
+    --card-base: 7vw;
     --card-radius: 8px;
   }
 }

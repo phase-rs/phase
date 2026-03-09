@@ -12,11 +12,12 @@ interface StackEntryProps {
   entry: StackEntryType;
   index: number;
   isTop: boolean;
+  isPending?: boolean;
   cardSize: { width: number; height: number };
   style?: CSSProperties;
 }
 
-export function StackEntry({ entry, index, isTop, cardSize, style }: StackEntryProps) {
+export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: StackEntryProps) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
 
@@ -62,8 +63,12 @@ export function StackEntry({ entry, index, isTop, cardSize, style }: StackEntryP
         )}
       </div>
 
-      {/* "Resolves Next" badge */}
-      {isTop && (
+      {/* Badge: "Casting..." for pending spells, "Next" for top of stack */}
+      {isPending ? (
+        <span className="absolute -right-1 -top-2 animate-pulse rounded-full bg-cyan-500 px-2 py-0.5 text-[10px] font-bold text-black shadow-md">
+          Casting…
+        </span>
+      ) : isTop && (
         <span className="absolute -right-1 -top-2 rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-black shadow-md">
           Next
         </span>

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
@@ -29,6 +29,7 @@ import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { PLAYER_ID } from "../constants/game.ts";
 
@@ -169,6 +170,14 @@ function GamePageContent({
       : null;
 
   useKeyboardShortcuts();
+
+  // Sync card size preference to CSS custom properties
+  const cardSize = usePreferencesStore((s) => s.cardSize);
+  useEffect(() => {
+    const root = document.documentElement;
+    const scale = cardSize === "small" ? 0.8 : cardSize === "large" ? 1.25 : 1;
+    root.style.setProperty("--card-size-scale", String(scale));
+  }, [cardSize]);
 
   const handleMulliganChoice = useCallback(
     (id: string) => {

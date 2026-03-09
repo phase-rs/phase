@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { StackEntry } from "./StackEntry.tsx";
@@ -21,11 +22,31 @@ function computeCardSize(stackCount: number) {
 
 export function StackDisplay() {
   const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
-  if (stack.length === 0) return null;
+  // During TargetSelection, show the pending spell as a preview on top of the stack
+  const pendingEntry: StackEntryType | null = useMemo(() => {
+    if (waitingFor?.type !== "TargetSelection") return null;
+    const pc = waitingFor.data.pending_cast;
+    // Activated abilities use card_id 0 — don't show them as stack spells
+    if (pc.card_id === 0) return null;
+    return {
+      id: pc.object_id,
+      source_id: pc.object_id,
+      controller: waitingFor.data.player,
+      kind: { type: "Spell", data: { card_id: pc.card_id, ability: pc.ability } },
+    };
+  }, [waitingFor]);
 
-  const displayStack = [...stack].reverse();
-  const cardSize = computeCardSize(stack.length);
+  const fullStack = useMemo(() => {
+    if (!pendingEntry) return stack;
+    return [...stack, pendingEntry];
+  }, [stack, pendingEntry]);
+
+  if (fullStack.length === 0) return null;
+
+  const displayStack = [...fullStack].reverse();
+  const cardSize = computeCardSize(fullStack.length);
 
   const pileWidth = cardSize.width + STAGGER_X * (displayStack.length - 1);
   const pileHeight = cardSize.height + STAGGER_Y * (displayStack.length - 1);
@@ -52,6 +73,7 @@ export function StackDisplay() {
                 entry={entry}
                 index={index}
                 isTop={index === 0}
+                isPending={pendingEntry != null && entry.id === pendingEntry.id}
                 cardSize={cardSize}
                 style={{
                   position: "absolute",
