@@ -72,8 +72,8 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
         draggable={false}
       />
 
-      {/* Card name label */}
-      <div className="absolute bottom-0 left-0 right-0 bg-black/70 px-1 py-0.5 text-[9px] text-white truncate">
+      {/* Card name label — top edge, semi-transparent so art shows through */}
+      <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-black/60 to-transparent px-1 pt-0.5 pb-2 text-[9px] text-white/90 truncate">
         {cardName}
       </div>
 

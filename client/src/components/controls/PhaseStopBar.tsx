@@ -52,7 +52,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
           ? "text-white shadow-[0_0_6px_rgba(34,211,238,0.5)]"
           : hasStop
             ? "text-gray-300 hover:text-white"
-            : "text-gray-600 hover:text-gray-400"
+            : "text-gray-400 hover:text-gray-200"
       }`}
     >
       {PHASE_LABELS[phase]}

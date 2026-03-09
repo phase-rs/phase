@@ -22,6 +22,8 @@ import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
+import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
+import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
@@ -250,24 +252,27 @@ function GamePageContent({
         <PlayerHand />
       </div>
 
-      {/* Zone indicators at bottom-left */}
-      <div className="fixed bottom-4 left-4 z-30 flex items-center gap-2">
-        <ZoneIndicator
-          zone="graveyard"
+      {/* Player zones — bottom-left: graveyard pile, library pile, exile badge */}
+      <div className="fixed bottom-4 left-4 z-30 flex items-end gap-2">
+        <GraveyardPile
           playerId={0}
           onClick={() => setViewingZone({ zone: "graveyard", playerId: 0 })}
         />
+        <LibraryPile playerId={0} />
         <ZoneIndicator
           zone="exile"
           playerId={0}
           onClick={() => setViewingZone({ zone: "exile", playerId: 0 })}
         />
-        <span className="text-[10px] text-gray-500">|</span>
-        <ZoneIndicator
-          zone="graveyard"
+      </div>
+
+      {/* Opponent zones — upper-right: graveyard pile, library pile, exile badge */}
+      <div className="fixed right-2 top-12 z-30 flex items-start gap-2">
+        <GraveyardPile
           playerId={1}
           onClick={() => setViewingZone({ zone: "graveyard", playerId: 1 })}
         />
+        <LibraryPile playerId={1} />
         <ZoneIndicator
           zone="exile"
           playerId={1}
