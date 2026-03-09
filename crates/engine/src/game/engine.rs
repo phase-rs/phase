@@ -10,6 +10,7 @@ use crate::types::zones::Zone;
 
 use super::casting;
 use super::effects;
+use super::mana_abilities;
 use super::mana_payment;
 use super::mulligan;
 use super::priority;
@@ -70,7 +71,32 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
             }
-            casting::handle_activate_ability(state, *player, source_id, ability_index, &mut events)?
+            // Check if this is a mana ability -- resolve instantly without the stack
+            let obj = state
+                .objects
+                .get(&source_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if ability_index < obj.abilities.len()
+                && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
+            {
+                let ability_text = obj.abilities[ability_index].clone();
+                mana_abilities::resolve_mana_ability(
+                    state,
+                    source_id,
+                    *player,
+                    &ability_text,
+                    &mut events,
+                )?;
+                WaitingFor::Priority { player: *player }
+            } else {
+                casting::handle_activate_ability(
+                    state,
+                    *player,
+                    source_id,
+                    ability_index,
+                    &mut events,
+                )?
+            }
         }
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             casting::handle_select_targets(state, *player, targets, &mut events)?
@@ -81,6 +107,41 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
         }
         (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
+        }
+        // Allow mana abilities during mana payment (mid-cast)
+        (
+            WaitingFor::ManaPayment { player },
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ) => {
+            let obj = state
+                .objects
+                .get(&source_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if ability_index < obj.abilities.len()
+                && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
+            {
+                let ability_text = obj.abilities[ability_index].clone();
+                mana_abilities::resolve_mana_ability(
+                    state,
+                    source_id,
+                    *player,
+                    &ability_text,
+                    &mut events,
+                )?;
+                WaitingFor::ManaPayment { player: *player }
+            } else {
+                return Err(EngineError::ActionNotAllowed(
+                    "Only mana abilities can be activated during mana payment".to_string(),
+                ));
+            }
+        }
+        // Allow basic land tapping during mana payment
+        (WaitingFor::ManaPayment { player }, GameAction::TapLandForMana { object_id }) => {
+            handle_tap_land_for_mana(state, object_id, &mut events)?;
+            WaitingFor::ManaPayment { player: *player }
         }
         (
             WaitingFor::MulliganDecision {
@@ -162,6 +223,121 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                     player: state.active_player,
                 },
             }
+        }
+        (
+            WaitingFor::EquipTarget {
+                player,
+                equipment_id,
+                valid_targets,
+            },
+            GameAction::Equip {
+                equipment_id: eq_id,
+                target_id,
+            },
+        ) => {
+            if eq_id != *equipment_id {
+                return Err(EngineError::InvalidAction(
+                    "Equipment ID mismatch".to_string(),
+                ));
+            }
+            if !valid_targets.contains(&target_id) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid equip target".to_string(),
+                ));
+            }
+            let p = *player;
+            effects::attach::attach_to(state, eq_id, target_id);
+            events.push(GameEvent::EffectResolved {
+                api_type: "Equip".to_string(),
+                source_id: eq_id,
+            });
+            WaitingFor::Priority { player: p }
+        }
+        (WaitingFor::Priority { player }, GameAction::Equip { equipment_id, .. }) => {
+            let p = *player;
+            handle_equip_activation(state, p, equipment_id, &mut events)?
+        }
+        // Scry: player selects cards to put on TOP (in order), rest go to bottom
+        (
+            WaitingFor::ScryChoice { player, cards },
+            GameAction::SelectCards { cards: top_cards },
+        ) => {
+            let p = *player;
+            let all_cards = cards.clone();
+            // top_cards = ObjectIds the player wants on top, rest go to bottom
+            let bottom_cards: Vec<_> = all_cards
+                .iter()
+                .filter(|id| !top_cards.contains(id))
+                .copied()
+                .collect();
+            // Remove all scryed cards from library, then re-insert: top cards first, then bottom
+            let player_state = state
+                .players
+                .iter_mut()
+                .find(|pl| pl.id == p)
+                .expect("player exists");
+            player_state.library.retain(|id| !all_cards.contains(id));
+            // Insert top cards at front (index 0) in reverse order so first selected = top
+            for (i, &card_id) in top_cards.iter().enumerate() {
+                player_state.library.insert(i, card_id);
+            }
+            // Bottom cards go to end
+            for &card_id in &bottom_cards {
+                player_state.library.push(card_id);
+            }
+            WaitingFor::Priority { player: p }
+        }
+        // Dig: player selects keep_count cards for hand, rest go to graveyard
+        (
+            WaitingFor::DigChoice {
+                player,
+                cards: all_cards,
+                keep_count,
+            },
+            GameAction::SelectCards { cards: kept },
+        ) => {
+            let p = *player;
+            let kc = *keep_count;
+            let all = all_cards.clone();
+            if kept.len() != kc {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly {} cards, got {}",
+                    kc,
+                    kept.len()
+                )));
+            }
+            let to_graveyard: Vec<_> = all
+                .iter()
+                .filter(|id| !kept.contains(id))
+                .copied()
+                .collect();
+            // Move kept cards to hand
+            for &obj_id in &kept {
+                zones::move_to_zone(state, obj_id, Zone::Hand, &mut events);
+            }
+            // Move rest to graveyard
+            for &obj_id in &to_graveyard {
+                zones::move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
+            }
+            WaitingFor::Priority { player: p }
+        }
+        // Surveil: player selects cards to put in GRAVEYARD, rest stay on top
+        (
+            WaitingFor::SurveilChoice { player, cards },
+            GameAction::SelectCards {
+                cards: to_graveyard,
+            },
+        ) => {
+            let p = *player;
+            let all_cards = cards.clone();
+            // Move selected cards to graveyard
+            for &obj_id in &to_graveyard {
+                if all_cards.contains(&obj_id) {
+                    zones::move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
+                }
+            }
+            // Cards not in to_graveyard stay on top of library (already there)
+            WaitingFor::Priority { player: p }
         }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
@@ -342,6 +518,99 @@ fn handle_tap_land_for_mana(
 
     Ok(WaitingFor::Priority {
         player: state.priority_player,
+    })
+}
+
+fn handle_equip_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    equipment_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // Validate sorcery-speed timing: main phase, empty stack, active player
+    match state.phase {
+        Phase::PreCombatMain | Phase::PostCombatMain => {}
+        _ => {
+            return Err(EngineError::ActionNotAllowed(
+                "Equip can only be activated during main phases".to_string(),
+            ));
+        }
+    }
+    if !state.stack.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "Equip can only be activated when the stack is empty".to_string(),
+        ));
+    }
+    if state.active_player != player {
+        return Err(EngineError::ActionNotAllowed(
+            "Equip can only be activated by the active player".to_string(),
+        ));
+    }
+
+    let obj = state
+        .objects
+        .get(&equipment_id)
+        .ok_or_else(|| EngineError::InvalidAction("Equipment not found".to_string()))?;
+
+    // Validate it's an equipment on the battlefield controlled by player
+    if obj.zone != Zone::Battlefield {
+        return Err(EngineError::InvalidAction(
+            "Equipment is not on the battlefield".to_string(),
+        ));
+    }
+    if obj.controller != player {
+        return Err(EngineError::InvalidAction(
+            "You don't control this equipment".to_string(),
+        ));
+    }
+    if !obj.card_types.subtypes.contains(&"Equipment".to_string()) {
+        return Err(EngineError::InvalidAction(
+            "Object is not an equipment".to_string(),
+        ));
+    }
+
+    // Find valid targets: creatures controlled by the equipping player on battlefield
+    let valid_targets: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|o| {
+                    o.controller == player
+                        && o.card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Creature)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if valid_targets.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "No valid creatures to equip".to_string(),
+        ));
+    }
+
+    // If only one target, auto-equip
+    if valid_targets.len() == 1 {
+        let target_id = valid_targets[0];
+        effects::attach::attach_to(state, equipment_id, target_id);
+        events.push(GameEvent::EffectResolved {
+            api_type: "Equip".to_string(),
+            source_id: equipment_id,
+        });
+        state.priority_pass_count = 0;
+        return Ok(WaitingFor::Priority { player });
+    }
+
+    state.priority_pass_count = 0;
+    Ok(WaitingFor::EquipTarget {
+        player,
+        equipment_id,
+        valid_targets,
     })
 }
 
@@ -1950,6 +2219,377 @@ mod tests {
                 }
                 _ => panic!("expected TriggeredAbility on stack"),
             }
+        }
+    }
+
+    #[test]
+    fn test_mana_ability_during_priority_does_not_push_stack() {
+        let mut state = setup_game_at_main_phase();
+
+        // Create a creature with a mana ability on the battlefield
+        let obj_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.abilities
+                .push("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.".to_string());
+        }
+
+        let result = apply(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: obj_id,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+
+        // Stack should remain empty (mana abilities don't use the stack)
+        assert!(
+            state.stack.is_empty(),
+            "mana ability should not push to stack"
+        );
+        // Should stay in Priority
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        // Object should be tapped
+        assert!(state.objects.get(&obj_id).unwrap().tapped);
+        // Player should have green mana
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            1
+        );
+    }
+
+    #[test]
+    fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
+        let mut state = setup_game_at_main_phase();
+        // Set up ManaPayment state
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+        };
+
+        // Create a creature with a mana ability on the battlefield
+        let obj_id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Birds of Paradise".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.abilities
+                .push("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.".to_string());
+        }
+
+        let result = apply(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: obj_id,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+
+        // Should stay in ManaPayment
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::ManaPayment {
+                    player: PlayerId(0)
+                }
+            ),
+            "should remain in ManaPayment after mana ability"
+        );
+        // Stack should remain empty
+        assert!(state.stack.is_empty());
+        // Object should be tapped
+        assert!(state.objects.get(&obj_id).unwrap().tapped);
+    }
+
+    mod equip_tests {
+        use super::*;
+
+        fn setup_equip_game() -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+            state.phase = Phase::PreCombatMain;
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            state
+        }
+
+        fn create_equipment(state: &mut GameState, player: PlayerId) -> ObjectId {
+            let id = zones::create_object(
+                state,
+                CardId(100),
+                player,
+                "Bonesplitter".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.controller = player;
+            id
+        }
+
+        fn create_creature_on_bf(
+            state: &mut GameState,
+            player: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = zones::create_object(
+                state,
+                CardId(state.next_object_id),
+                player,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.controller = player;
+            id
+        }
+
+        #[test]
+        fn test_equip_creates_equip_target_with_valid_creatures() {
+            let mut state = setup_equip_game();
+            let equipment_id = create_equipment(&mut state, PlayerId(0));
+            let creature_a = create_creature_on_bf(&mut state, PlayerId(0), "Bear A");
+            let creature_b = create_creature_on_bf(&mut state, PlayerId(0), "Bear B");
+
+            let result = apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            )
+            .unwrap();
+
+            match result.waiting_for {
+                WaitingFor::EquipTarget {
+                    player,
+                    equipment_id: eq_id,
+                    valid_targets,
+                } => {
+                    assert_eq!(player, PlayerId(0));
+                    assert_eq!(eq_id, equipment_id);
+                    assert!(valid_targets.contains(&creature_a));
+                    assert!(valid_targets.contains(&creature_b));
+                }
+                other => panic!("Expected EquipTarget, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn test_equip_selects_target_attaches_equipment() {
+            let mut state = setup_equip_game();
+            let equipment_id = create_equipment(&mut state, PlayerId(0));
+            let creature_a = create_creature_on_bf(&mut state, PlayerId(0), "Bear A");
+            let _creature_b = create_creature_on_bf(&mut state, PlayerId(0), "Bear B");
+
+            // Activate equip
+            let result = apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            )
+            .unwrap();
+            assert!(matches!(result.waiting_for, WaitingFor::EquipTarget { .. }));
+
+            // Select target
+            let result = apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: creature_a,
+                },
+            )
+            .unwrap();
+
+            assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+            assert_eq!(
+                state.objects.get(&equipment_id).unwrap().attached_to,
+                Some(creature_a)
+            );
+            assert!(state
+                .objects
+                .get(&creature_a)
+                .unwrap()
+                .attachments
+                .contains(&equipment_id));
+        }
+
+        #[test]
+        fn test_equip_re_equip_moves_to_new_creature() {
+            let mut state = setup_equip_game();
+            let equipment_id = create_equipment(&mut state, PlayerId(0));
+            let creature_a = create_creature_on_bf(&mut state, PlayerId(0), "Bear A");
+            let creature_b = create_creature_on_bf(&mut state, PlayerId(0), "Bear B");
+
+            // First equip to creature A
+            apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            )
+            .unwrap();
+            apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: creature_a,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                state.objects.get(&equipment_id).unwrap().attached_to,
+                Some(creature_a)
+            );
+
+            // Re-equip to creature B
+            apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            )
+            .unwrap();
+            apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: creature_b,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                state.objects.get(&equipment_id).unwrap().attached_to,
+                Some(creature_b)
+            );
+            assert!(state
+                .objects
+                .get(&creature_b)
+                .unwrap()
+                .attachments
+                .contains(&equipment_id));
+            assert!(!state
+                .objects
+                .get(&creature_a)
+                .unwrap()
+                .attachments
+                .contains(&equipment_id));
+        }
+
+        #[test]
+        fn test_equip_only_at_sorcery_speed() {
+            let mut state = setup_equip_game();
+            let equipment_id = create_equipment(&mut state, PlayerId(0));
+            let _creature = create_creature_on_bf(&mut state, PlayerId(0), "Bear");
+
+            // Try during combat phase - should fail
+            state.phase = Phase::DeclareAttackers;
+            let result = apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            );
+            assert!(result.is_err());
+
+            // Try with non-empty stack - should fail
+            state.phase = Phase::PreCombatMain;
+            state.stack.push(crate::types::game_state::StackEntry {
+                id: ObjectId(99),
+                source_id: ObjectId(99),
+                controller: PlayerId(1),
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(99),
+                    ability: crate::types::ability::ResolvedAbility {
+                        api_type: String::new(),
+                        params: std::collections::HashMap::new(),
+                        targets: vec![],
+                        source_id: ObjectId(99),
+                        controller: PlayerId(1),
+                        sub_ability: None,
+                        svars: std::collections::HashMap::new(),
+                    },
+                },
+            });
+            let result = apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            );
+            assert!(result.is_err());
+
+            // Try when not active player - should fail
+            state.stack.clear();
+            state.active_player = PlayerId(1);
+            let result = apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            );
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_equip_auto_targets_single_creature() {
+            let mut state = setup_equip_game();
+            let equipment_id = create_equipment(&mut state, PlayerId(0));
+            let creature = create_creature_on_bf(&mut state, PlayerId(0), "Bear");
+
+            let result = apply(
+                &mut state,
+                GameAction::Equip {
+                    equipment_id,
+                    target_id: ObjectId(0),
+                },
+            )
+            .unwrap();
+
+            assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+            assert_eq!(
+                state.objects.get(&equipment_id).unwrap().attached_to,
+                Some(creature)
+            );
         }
     }
 }
