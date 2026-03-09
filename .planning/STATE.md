@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 19-05-PLAN.md
-last_updated: "2026-03-09T23:02:53Z"
-last_activity: 2026-03-09 — Completed 19-05 Cinematic Animations
+stopped_at: Completed 19-04-PLAN.md
+last_updated: "2026-03-09T23:10:00Z"
+last_activity: 2026-03-09 — Completed 19-04 Targeting & Combat Visuals
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 33
   completed_plans: 33
-  percent: 62
+  percent: 97
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 19 of 20 (Recreate MTGA UI)
-Plan: 5 of 8 in current phase
+Plan: 7 of 8 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 19-05 Cinematic Animations
+Last activity: 2026-03-09 — Completed 19-04 Targeting & Combat Visuals
 
-Progress: [██████----] 62%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -76,6 +76,7 @@ Progress: [██████----] 62%
 | Phase 19 P08 | 2min | 2 tasks | 4 files |
 | Phase 19 P03 | 3min | 2 tasks | 6 files |
 | Phase 19 P05 | 3min | 2 tasks | 4 files |
+| Phase 19 P04 | 2min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -169,6 +170,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19-05]: CastArcAnimation uses Framer Motion keyframe arrays for parabolic arc trajectory
 - [Phase 19-05]: Death shatter fetches art_crop image imperatively via fetchCardImageUrl, falls back to death clone on failure
 - [Phase 19-05]: Stack position estimated at 75% viewport width, 40% height for cast arc endpoints
+- [Phase 19-04]: Blocker glow matches attacker glow (both orange) per MTGA convention
+- [Phase 19-04]: Valid target glow uses amber-400 with gold rgba for Arena-style golden highlight
+- [Phase 19-04]: Attack slide direction determined by controller ID (0=up, 1=down)
 
 ### Roadmap Evolution
 
@@ -188,6 +192,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 19-05 Cinematic Animations
-Stopped at: Completed 19-05-PLAN.md
+Last activity: 2026-03-09 - Completed 19-04 Targeting & Combat Visuals
+Stopped at: Completed 19-04-PLAN.md
 Resume file: None
