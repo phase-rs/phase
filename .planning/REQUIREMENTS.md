@@ -44,13 +44,13 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 ### Visual Effects
 
 - [x] **VFX-01**: Canvas particle system renders 9+ effect types (explosion, projectile, spellImpact, etc.) with WUBRG color mapping
-- [ ] **VFX-02**: Floating damage/heal numbers animate with scale-in, float-up, fade-out per step
-- [ ] **VFX-03**: Screen shake triggers on combat damage at 3 intensity levels
-- [ ] **VFX-04**: Card reveal animation plays on creature/spell entry with burst effect
-- [ ] **VFX-05**: Damage vignette (red screen flash) on player damage
+- [x] **VFX-02**: Floating damage/heal numbers animate with scale-in, float-up, fade-out per step
+- [x] **VFX-03**: Screen shake triggers on combat damage at 3 intensity levels
+- [x] **VFX-04**: Card reveal animation plays on creature/spell entry with burst effect
+- [x] **VFX-05**: Damage vignette (red screen flash) on player damage
 - [ ] **VFX-06**: Block assignment lines (SVG) connect attacker/blocker pairs during combat
 - [ ] **VFX-07**: Targeting arcs connect spells/abilities to their targets during resolution
-- [ ] **VFX-08**: Turn/phase banner overlay animates on phase transitions
+- [x] **VFX-08**: Turn/phase banner overlay animates on phase transitions
 
 ### Audio
 
@@ -176,13 +176,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ANIM-05 | Phase 14 | Complete |
 | ANIM-06 | Phase 14 | Complete |
 | VFX-01 | Phase 14 | Complete |
-| VFX-02 | Phase 14 | Pending |
-| VFX-03 | Phase 14 | Pending |
-| VFX-04 | Phase 14 | Pending |
-| VFX-05 | Phase 14 | Pending |
+| VFX-02 | Phase 14 | Complete |
+| VFX-03 | Phase 14 | Complete |
+| VFX-04 | Phase 14 | Complete |
+| VFX-05 | Phase 14 | Complete |
 | VFX-06 | Phase 14 | Pending |
 | VFX-07 | Phase 14 | Pending |
-| VFX-08 | Phase 14 | Pending |
+| VFX-08 | Phase 14 | Complete |
 | LOOP-01 | Phase 15 | Pending |
 | LOOP-02 | Phase 15 | Pending |
 | LOOP-03 | Phase 15 | Pending |
