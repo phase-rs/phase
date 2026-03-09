@@ -82,10 +82,12 @@ Plans:
   1. AI opponent makes decisions automatically via WASM, and the same controller abstraction supports network opponents via WebSocket
   2. Game auto-advances through phases, waits for animations to complete before proceeding, and skips trivial priority windows (e.g. upkeep with no triggers)
   3. All components access dispatch and controller through React context (GameDispatchProvider) without prop drilling
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 15-01: TBD
+- [ ] 15-01-PLAN.md — Standalone dispatch, OpponentController types, auto-pass heuristics, phase stop preferences
+- [ ] 15-02-PLAN.md — Game loop controller factory, GameProvider context, useGameDispatch simplification
+- [ ] 15-03-PLAN.md — PhaseStopBar UI, GamePage simplification with GameProvider integration
 
 ### Phase 16: Audio System
 **Goal**: Game events produce sound effects and background music plays during matches, all configurable by the player
@@ -125,6 +127,6 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13. Foundation & Board Layout | 5/5 | Complete    | 2026-03-09 | - |
 | 14. Animation Pipeline | 4/4 | Complete    | 2026-03-09 | - |
-| 15. Game Loop & Controllers | v1.1 | 0/1 | Not started | - |
+| 15. Game Loop & Controllers | v1.1 | 0/3 | Not started | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
 | 17. MTG-Specific UI | v1.1 | 0/2 | Not started | - |
