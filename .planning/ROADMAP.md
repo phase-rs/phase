@@ -66,12 +66,13 @@ Plans:
   3. Screen shakes on combat damage, card reveal bursts play on creature/spell entry, damage vignette flashes on player damage, and turn/phase banners animate on transitions
   4. SVG block assignment lines connect attacker/blocker pairs during combat, and targeting arcs connect spells to their targets during resolution
   5. Player can configure VFX quality level (full/reduced/minimal) and animation speed in preferences
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 14-01: TBD
-- [ ] 14-02: TBD
-- [ ] 14-03: TBD
+- [ ] 14-01-PLAN.md — Animation types, WUBRG colors, event normalizer, preferences extensions
+- [ ] 14-02-PLAN.md — Step-based animation store refactor, snapshot-before-dispatch wrapper
+- [ ] 14-03-PLAN.md — VFX components: particles, screen shake, vignette, turn banner, card reveal
+- [ ] 14-04-PLAN.md — AnimationOverlay wiring, combat VFX, preferences controls
 
 ### Phase 15: Game Loop & Controllers
 **Goal**: The game plays smoothly end-to-end -- AI opponent acts automatically, trivial priority windows auto-pass, and dispatch flows through a React context without prop drilling
@@ -123,7 +124,7 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13. Foundation & Board Layout | 5/5 | Complete    | 2026-03-09 | - |
-| 14. Animation Pipeline | v1.1 | 0/3 | Not started | - |
+| 14. Animation Pipeline | v1.1 | 0/4 | Not started | - |
 | 15. Game Loop & Controllers | v1.1 | 0/1 | Not started | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
 | 17. MTG-Specific UI | v1.1 | 0/2 | Not started | - |
