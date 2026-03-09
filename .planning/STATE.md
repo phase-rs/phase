@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 13-02-PLAN.md
-last_updated: "2026-03-09T00:55:10.940Z"
-last_activity: 2026-03-08 — Roadmap created for v1.1
+stopped_at: Completed 13-01-PLAN.md
+last_updated: "2026-03-09T00:58:32.111Z"
+last_activity: 2026-03-09 — Completed 13-02 CSS card sizing and event history
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
-  percent: 0
+  completed_plans: 2
+  percent: 20
 ---
 
 # Project State
@@ -44,6 +44,7 @@ Progress: [██░░░░░░░░] 20%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 13-foundation-board-layout | 1/3 | 2min | 2min |
+| Phase 13 P01 | 5min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -55,6 +56,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - Preserve EngineAdapter abstraction during UI port (pending validation)
 - [13-02] Use vw units for card sizing to scale with viewport width across breakpoints
 - [13-02] Cap eventHistory at 1000 entries to prevent unbounded memory growth
+- [Phase 13-01]: View model functions are pure mappers from GameObject to flat props, no store coupling
+- [Phase 13-01]: Permanent grouping requires same name + same tapped state + no attachments + no counters
 
 ### Blockers/Concerns
 
@@ -69,5 +72,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 13-02 CSS card sizing and event history
-Stopped at: Completed 13-02-PLAN.md
-Resume file: .planning/phases/13-foundation-board-layout/13-02-SUMMARY.md
+Stopped at: Completed 13-01-PLAN.md
+Resume file: None

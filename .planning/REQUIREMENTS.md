@@ -10,14 +10,14 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 ### Board Layout
 
 - [x] **BOARD-01**: Game board uses CSS custom properties for responsive card sizing across mobile, tablet, and desktop breakpoints
-- [ ] **BOARD-02**: Battlefield renders permanents in dynamic multi-row layout grouped by type (creatures, non-creatures, lands)
-- [ ] **BOARD-03**: Same-name tokens stack with count badge, expandable on click
-- [ ] **BOARD-04**: Same-name lands group together with count badge
+- [x] **BOARD-02**: Battlefield renders permanents in dynamic multi-row layout grouped by type (creatures, non-creatures, lands)
+- [x] **BOARD-03**: Same-name tokens stack with count badge, expandable on click
+- [x] **BOARD-04**: Same-name lands group together with count badge
 - [x] **BOARD-05**: Tapped permanents render at 90 degree rotation
 - [ ] **BOARD-06**: Auras and equipment render visually attached to their host permanent
-- [ ] **BOARD-07**: Counter overlays display on permanents (e.g. +1/+1, loyalty) with count
-- [ ] **BOARD-08**: Persistent damage number displays on damaged creatures
-- [ ] **BOARD-09**: Battlefield backgrounds auto-select based on player's dominant mana color (WUBRG) using Forge assets
+- [x] **BOARD-07**: Counter overlays display on permanents (e.g. +1/+1, loyalty) with count
+- [x] **BOARD-08**: Persistent damage number displays on damaged creatures
+- [x] **BOARD-09**: Battlefield backgrounds auto-select based on player's dominant mana color (WUBRG) using Forge assets
 
 ### Hand
 
@@ -96,14 +96,14 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 ### Game Log
 
 - [ ] **LOG-01**: Scrollable game log panel displays game events in chronological order
-- [ ] **LOG-02**: Log entries are color-coded by event type (combat, spells, life changes, etc.)
-- [ ] **LOG-03**: Log verbosity is filterable (full/compact/minimal)
+- [x] **LOG-02**: Log entries are color-coded by event type (combat, spells, life changes, etc.)
+- [x] **LOG-03**: Log verbosity is filterable (full/compact/minimal)
 
 ### Integration
 
 - [x] **INTEG-01**: All UI components wire through EngineAdapter interface preserving WASM, Tauri, and WebSocket support
-- [ ] **INTEG-02**: GameObject view model maps deep Forge.rs engine objects to flat props for UI components
-- [ ] **INTEG-03**: Preferences store persists display, audio, and gameplay settings to localStorage
+- [x] **INTEG-02**: GameObject view model maps deep Forge.rs engine objects to flat props for UI components
+- [x] **INTEG-03**: Preferences store persists display, audio, and gameplay settings to localStorage
 
 ## v2 Requirements
 
@@ -145,14 +145,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | BOARD-01 | Phase 13 | Complete |
-| BOARD-02 | Phase 13 | Pending |
-| BOARD-03 | Phase 13 | Pending |
-| BOARD-04 | Phase 13 | Pending |
+| BOARD-02 | Phase 13 | Complete |
+| BOARD-03 | Phase 13 | Complete |
+| BOARD-04 | Phase 13 | Complete |
 | BOARD-05 | Phase 13 | Complete |
 | BOARD-06 | Phase 13 | Pending |
-| BOARD-07 | Phase 13 | Pending |
-| BOARD-08 | Phase 13 | Pending |
-| BOARD-09 | Phase 13 | Pending |
+| BOARD-07 | Phase 13 | Complete |
+| BOARD-08 | Phase 13 | Complete |
+| BOARD-09 | Phase 13 | Complete |
 | HAND-01 | Phase 13 | Pending |
 | HAND-02 | Phase 13 | Pending |
 | HAND-03 | Phase 13 | Pending |
@@ -164,11 +164,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ZONE-02 | Phase 13 | Pending |
 | ZONE-03 | Phase 13 | Pending |
 | LOG-01 | Phase 13 | Pending |
-| LOG-02 | Phase 13 | Pending |
-| LOG-03 | Phase 13 | Pending |
+| LOG-02 | Phase 13 | Complete |
+| LOG-03 | Phase 13 | Complete |
 | INTEG-01 | Phase 13 | Complete |
-| INTEG-02 | Phase 13 | Pending |
-| INTEG-03 | Phase 13 | Pending |
+| INTEG-02 | Phase 13 | Complete |
+| INTEG-03 | Phase 13 | Complete |
 | ANIM-01 | Phase 14 | Pending |
 | ANIM-02 | Phase 14 | Pending |
 | ANIM-03 | Phase 14 | Pending |
