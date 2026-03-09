@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 15-01-PLAN.md
-last_updated: "2026-03-09T04:41:59.908Z"
-last_activity: 2026-03-09 — Completed 15-01 foundation modules
+stopped_at: Completed 15-02-PLAN.md
+last_updated: "2026-03-09T04:45:00.000Z"
+last_activity: 2026-03-09 — Completed 15-02 game loop controller & GameProvider
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 12
-  completed_plans: 10
-  percent: 83
+  completed_plans: 11
+  percent: 92
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 15 of 17 (Game Loop & Controllers)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 15-01 foundation modules
+Last activity: 2026-03-09 — Completed 15-02 game loop controller & GameProvider
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
@@ -53,8 +53,9 @@ Progress: [████████░░] 83%
 | Phase 14 P02 | 3min | 2 tasks | 5 files |
 | Phase 14 P03 | 3min | 2 tasks | 8 files |
 | Phase 14 P04 | 2min | 2 tasks | 5 files |
-| 15-game-loop-controllers | 1/3 | 2min | 2min |
+| 15-game-loop-controllers | 2/3 | 4min | 2min |
 | Phase 15 P01 | 2min | 2 tasks | 7 files |
+| Phase 15 P02 | 2min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -91,6 +92,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 15-01]: Module-level boolean mutex replaces useRef for dispatch pipeline
 - [Phase 15-01]: AI controller reads gameStore directly instead of injected callbacks
 - [Phase 15-01]: Auto-pass conservative heuristic: stops when player has mana + instants/flash/abilities
+- [Phase 15-02]: GameProvider accepts mode/difficulty as props, does not own game initialization
+- [Phase 15-02]: Auto-pass uses setTimeout with 200ms beat, re-triggered by store subscription
 
 ### Blockers/Concerns
 
@@ -104,6 +107,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 15-01 foundation modules
-Stopped at: Completed 15-01-PLAN.md
+Last activity: 2026-03-09 - Completed 15-02 game loop controller & GameProvider
+Stopped at: Completed 15-02-PLAN.md
 Resume file: None
