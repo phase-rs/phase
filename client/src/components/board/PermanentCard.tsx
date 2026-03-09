@@ -2,10 +2,12 @@ import { motion } from "framer-motion";
 import { useCallback } from "react";
 
 import { CardImage } from "../card/CardImage.tsx";
+import { PTBox } from "./PTBox.tsx";
 import { COMBAT_TILT_DEGREES } from "../../constants/ui.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { computePTDisplay } from "../../viewmodel/cardProps.ts";
 
 interface PermanentCardProps {
   objectId: number;
@@ -16,6 +18,8 @@ const COUNTER_COLORS: Record<string, string> = {
   Minus1Minus1: "bg-red-600",
   Loyalty: "bg-amber-600",
 };
+
+const ATTACHMENT_OFFSET_PX = 15;
 
 export function PermanentCard({ objectId }: PermanentCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -32,6 +36,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const toggleAttacker = useUiStore((s) => s.toggleAttacker);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const combatClickHandler = useUiStore((s) => s.combatClickHandler);
+  const validTargetIds = useUiStore((s) => s.validTargetIds);
 
   const longPressHandlers = useLongPress(
     useCallback(() => {
@@ -47,7 +52,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     obj.entered_battlefield_turn === turnNumber &&
     !obj.keywords.some((k) => k.toLowerCase() === "haste");
 
-  const validTargetIds = useUiStore((s) => s.validTargetIds);
+  const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
   const isTarget = selectedTargets.includes(objectId);
   const isValidTarget = targetingMode && validTargetIds.includes(objectId);
@@ -104,6 +109,11 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       style={{
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
+        // Reserve space above for tucked attachments
+        marginTop:
+          obj.attachments.length > 0
+            ? `${obj.attachments.length * ATTACHMENT_OFFSET_PX}px`
+            : undefined,
       }}
       animate={{ rotate: isAttacking ? COMBAT_TILT_DEGREES : 0 }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
@@ -112,12 +122,14 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       onMouseLeave={() => hoverObject(null)}
       {...longPressHandlers}
     >
-      {/* Attachments rendered behind */}
+      {/* Attachments rendered behind, tucked with top edge visible */}
       {obj.attachments.map((attachId, i) => (
         <div
           key={attachId}
-          className="absolute left-0 top-0 z-0"
-          style={{ transform: `translateY(${-(i + 1) * 10}px)` }}
+          className="absolute left-0 z-0"
+          style={{
+            top: `${-(i + 1) * ATTACHMENT_OFFSET_PX}px`,
+          }}
         >
           <PermanentCard objectId={attachId} />
         </div>
@@ -128,16 +140,26 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
         <CardImage cardName={obj.name} tapped={obj.tapped} size="small" />
       </div>
 
-      {/* Damage overlay */}
-      {obj.damage_marked > 0 && (
+      {/* P/T box for creatures */}
+      {ptDisplay && <PTBox ptDisplay={ptDisplay} />}
+
+      {/* Damage overlay for non-creatures only (creatures use P/T box) */}
+      {!ptDisplay && obj.damage_marked > 0 && (
         <div className="absolute inset-x-0 bottom-0 z-20 flex h-6 items-center justify-center rounded-b-lg bg-red-600/60 text-xs font-bold text-white">
           -{obj.damage_marked}
         </div>
       )}
 
-      {/* Counter badges */}
+      {/* Loyalty shield for planeswalkers */}
+      {obj.loyalty != null && (
+        <div className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 rounded-t bg-gray-900/90 px-1.5 py-0.5 text-xs font-bold text-amber-300">
+          {obj.loyalty}
+        </div>
+      )}
+
+      {/* Counter badges (top-right to avoid overlap with P/T box) */}
       {counters.length > 0 && (
-        <div className="absolute bottom-1 right-1 z-20 flex flex-col gap-0.5">
+        <div className="absolute right-1 top-1 z-20 flex flex-col gap-0.5">
           {counters.map(([type, count]) => (
             <span
               key={type}
