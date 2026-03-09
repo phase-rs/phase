@@ -1,10 +1,26 @@
 import type { GameAction, GameEvent } from "../adapter/types";
 import { normalizeEvents } from "../animation/eventNormalizer";
+import type { AnimationStep } from "../animation/types";
 import { SPEED_MULTIPLIERS } from "../animation/types";
+import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { useAnimationStore } from "../stores/animationStore";
 import { useGameStore } from "../stores/gameStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+
+/** Schedule SFX for each animation step, offset to sync with visual timing. */
+function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
+  let offset = 0;
+  for (const step of steps) {
+    if (offset === 0) {
+      audioManager.playSfxForStep(step.effects);
+    } else {
+      const delay = offset;
+      setTimeout(() => audioManager.playSfxForStep(step.effects), delay);
+    }
+    offset += step.duration * multiplier;
+  }
+}
 
 /**
  * Module-level position snapshot for AnimationOverlay position lookups.
@@ -49,12 +65,20 @@ async function processAction(action: GameAction): Promise<void> {
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().enqueueSteps(steps);
 
+    // Schedule SFX synced with each step's visual timing
+    scheduleSfxForSteps(steps, multiplier);
+
     // Wait for total animation duration
     const totalDuration = steps.reduce(
       (sum, step) => sum + step.duration * multiplier,
       0,
     );
     await new Promise<void>((resolve) => setTimeout(resolve, totalDuration));
+  } else if (steps.length > 0) {
+    // Instant speed: fire all SFX immediately
+    for (const step of steps) {
+      audioManager.playSfxForStep(step.effects);
+    }
   }
 
   // 6. Update game state (deferred after animations)
@@ -75,6 +99,11 @@ async function processAction(action: GameAction): Promise<void> {
       stateHistory: newHistory,
     };
   });
+
+  // Fade out music on GameOver
+  if (events.some((e) => e.type === "GameOver")) {
+    audioManager.stopMusic(2.0);
+  }
 }
 
 async function processQueue(): Promise<void> {
