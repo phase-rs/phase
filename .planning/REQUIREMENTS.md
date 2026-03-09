@@ -129,7 +129,7 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [ ] **ARENA-07**: Cinematic layered turn banner (light burst, banner strip, diamond accents, triple-glow text) with amber/slate theming
 - [ ] **ARENA-08**: Canvas death shatter (8-12 art fragments scatter/fade in 0.6s) and card flight arcs for cast/resolve
 - [ ] **ARENA-09**: Full-screen MTGA-style mulligan with large card images and dramatic VICTORY/DEFEAT game over screens
-- [ ] **ARENA-10**: Mode-first menu flow (Play vs AI, Play Online, Deck Builder), deck gallery with Scryfall art tiles, animated particle background, splash screen with logo
+- [x] **ARENA-10**: Mode-first menu flow (Play vs AI, Play Online, Deck Builder), deck gallery with Scryfall art tiles, animated particle background, splash screen with logo
 - [ ] **ARENA-11**: Deck builder art-crop image grid with instant card preview panel and visual color/type filtering
 - [x] **ARENA-12**: Forge.rs logo converted to WebP for splash screen and menu branding
 

@@ -165,7 +165,7 @@ Plans:
   6. Full-screen MTGA-style mulligan with large card images, dramatic VICTORY/DEFEAT game over screens
   7. Mode-first menu flow with splash screen, deck gallery with art tiles, animated particle background
   8. Deck builder displays art-crop grid with instant card preview and visual color/type filtering
-**Plans:** 1/8 plans executed
+**Plans:** 4/8 plans executed
 
 Plans:
 - [ ] 19-01-PLAN.md — Image infrastructure (art_crop type extension, CSS vars) and ArtCropCard component

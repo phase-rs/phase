@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 19-01-PLAN.md
-last_updated: "2026-03-09T22:56:25Z"
-last_activity: 2026-03-09 — Completed 19-01 Art-Crop Card & Image Infrastructure
+stopped_at: Completed 19-07-PLAN.md
+last_updated: "2026-03-09T23:02:38.904Z"
+last_activity: 2026-03-09 — Completed 19-02 Battlefield Rendering
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 6
-  total_plans: 25
-  completed_plans: 25
-  percent: 100
+  total_plans: 33
+  completed_plans: 29
+  percent: 25
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 19 of 20 (Recreate MTGA UI)
-Plan: 1 of 8 in current phase
+Plan: 2 of 8 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 19-01 Art-Crop Card & Image Infrastructure
+Last activity: 2026-03-09 — Completed 19-02 Battlefield Rendering
 
-Progress: [█---------] 12%
+Progress: [███-------] 25%
 
 ## Performance Metrics
 
@@ -71,6 +71,9 @@ Progress: [█---------] 12%
 | Phase 16 P03 | 2min | 2 tasks | 2 files |
 | Phase 16 P02 | 2min | 2 tasks | 3 files |
 | Phase 19 P01 | 2min | 2 tasks | 7 files |
+| Phase 19 P02 | 2min | 2 tasks | 4 files |
+| Phase 19 P07 | 2min | 2 tasks | 5 files |
+| Phase 19 P08 | 2min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -149,6 +152,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19-01]: Tokens detected via card_id === 0 (no is_token field on GameObject)
 - [Phase 19-01]: Art crop aspect ratio 0.75 (width:height) matches Scryfall art_crop format
 - [Phase 19-01]: ImageSize type exported from scryfall.ts for reuse
+- [Phase 19]: Splash progress is cosmetic (1.5s rAF timer) since WASM loads on game start, not app start
+- [Phase 19]: DeckGallery uses first non-basic-land card name from deck for representative art tile
+- [Phase 19]: Difficulty selector is inline segmented control in DeckGallery, not a separate screen
 
 ### Roadmap Evolution
 
@@ -169,5 +175,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 19-01 Art-Crop Card & Image Infrastructure
-Stopped at: Completed 19-01-PLAN.md
+Stopped at: Completed 19-07-PLAN.md
 Resume file: None
