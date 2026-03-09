@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import type { Phase } from "../adapter/types";
 import type { AnimationSpeed, VfxQuality } from "../animation/types";
 
 export type CardSizePreference = "small" | "medium" | "large";
@@ -22,6 +23,7 @@ interface PreferencesState {
   boardBackground: BoardBackground;
   vfxQuality: VfxQuality;
   animationSpeed: AnimationSpeed;
+  phaseStops: Phase[];
 }
 
 interface PreferencesActions {
@@ -31,6 +33,7 @@ interface PreferencesActions {
   setBoardBackground: (bg: BoardBackground) => void;
   setVfxQuality: (quality: VfxQuality) => void;
   setAnimationSpeed: (speed: AnimationSpeed) => void;
+  setPhaseStops: (stops: Phase[]) => void;
 }
 
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
@@ -42,6 +45,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       boardBackground: "auto-wubrg",
       vfxQuality: "full",
       animationSpeed: "normal",
+      phaseStops: ["PreCombatMain", "PostCombatMain", "DeclareBlockers"],
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
@@ -49,6 +53,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
       setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
+      setPhaseStops: (stops) => set({ phaseStops: stops }),
     }),
     { name: "forge-preferences" },
   ),
