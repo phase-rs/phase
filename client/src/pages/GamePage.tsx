@@ -229,6 +229,17 @@ function GamePageContent({
             <span className="text-xs text-gray-500">
               T{gameState?.turn_number ?? 0}
             </span>
+            {gameState && (
+              <span
+                className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                  gameState.active_player === 0
+                    ? "bg-cyan-900/60 text-cyan-300"
+                    : "bg-red-900/60 text-red-300"
+                }`}
+              >
+                {gameState.active_player === 0 ? "Your Turn" : "Opp Turn"}
+              </span>
+            )}
             <PhaseStopBar />
             {gameState && gameState.stack.length > 0 && (
               <div className="max-w-xs">
