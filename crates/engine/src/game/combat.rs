@@ -346,7 +346,7 @@ pub fn has_summoning_sickness(obj: &GameObject, turn_number: u32) -> bool {
     if obj.has_keyword(&Keyword::Haste) {
         return false;
     }
-    obj.entered_battlefield_turn.map_or(false, |etb| etb >= turn_number)
+    obj.entered_battlefield_turn.is_some_and(|etb| etb >= turn_number)
 }
 
 /// Return the IDs of all creatures the active player could legally declare as attackers.
@@ -364,7 +364,7 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                 && !obj.tapped
                 && !obj.has_keyword(&Keyword::Defender)
                 && (obj.has_keyword(&Keyword::Haste)
-                    || obj.entered_battlefield_turn.map_or(false, |etb| etb < turn))
+                    || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             {
                 Some(*id)
             } else {
@@ -412,7 +412,7 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                     && !obj.tapped
                     && !obj.has_keyword(&Keyword::Defender)
                     && (obj.has_keyword(&Keyword::Haste)
-                        || obj.entered_battlefield_turn.map_or(false, |etb| etb < turn))
+                        || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             })
             .unwrap_or(false)
     })

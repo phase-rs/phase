@@ -21,6 +21,7 @@ export function PlayerHand() {
 
   const [expanded, setExpanded] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
+  const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
 
   const legalActions = useGameStore((s) => s.legalActions);
 
@@ -52,15 +53,16 @@ export function PlayerHand() {
       if (!hasPriority || !objects) return;
       const obj = objects[objectId];
       if (!obj) return;
-      if (!playableCardIds.has(Number(obj.card_id))) return;
 
-      if (obj.card_types.core_types.includes("Land")) {
-        dispatchAction({ type: "PlayLand", data: { card_id: obj.card_id } });
-      } else {
-        dispatchAction({ type: "CastSpell", data: { card_id: obj.card_id, targets: [] } });
-      }
+      // Find the matching legal action from the engine — no frontend rule logic needed
+      const action = legalActions.find(
+        (a) =>
+          (a.type === "PlayLand" || a.type === "CastSpell") &&
+          Number((a as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.card_id) === Number(obj.card_id),
+      );
+      if (action) dispatchAction(action);
     },
-    [hasPriority, objects, playableCardIds],
+    [hasPriority, objects, legalActions],
   );
 
   const handleDragEnd = useCallback(
@@ -137,6 +139,9 @@ export function PlayerHand() {
               hasPriority={hasPriority}
               onDragEnd={handleDragEnd}
               onClick={handleCardClick}
+              isDragging={draggingCardId === obj.id}
+              onDragStart={() => setDraggingCardId(obj.id)}
+              onDragStop={() => setDraggingCardId(null)}
               onMouseEnter={() => { setExpanded(true); inspectObject(obj.id); }}
               onMouseLeave={() => inspectObject(null)}
             />
@@ -157,7 +162,10 @@ interface HandCardProps {
   expanded: boolean;
   isPlayable: boolean;
   isSelected: boolean;
+  isDragging: boolean;
   hasPriority: boolean;
+  onDragStart: () => void;
+  onDragStop: () => void;
   onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => void;
   onClick: (objectId: number) => void;
   onMouseEnter: () => void;
@@ -174,7 +182,10 @@ function HandCard({
   expanded,
   isPlayable,
   isSelected,
+  isDragging,
   hasPriority,
+  onDragStart: onDragStartProp,
+  onDragStop,
   onDragEnd,
   onClick,
   onMouseEnter,
@@ -219,9 +230,11 @@ function HandCard({
         playedRef.current = false;
         setDragging(true);
         inspectObject(null);
+        onDragStartProp();
       }}
       onDragEnd={(event, info) => {
         setDragging(false);
+        onDragStop();
         const willPlay = info.offset.y < DRAG_PLAY_THRESHOLD && hasPriority && isPlayable;
         if (willPlay) {
           playedRef.current = true;
@@ -239,7 +252,7 @@ function HandCard({
       }`}
       style={{
         marginLeft: index === 0 ? 0 : "-16px",
-        zIndex: isSelected ? 20 : index,
+        zIndex: isDragging ? 50 : isSelected ? 20 : index,
       }}
       {...longPressHandlers}
     >

@@ -243,7 +243,7 @@ fn can_attack(state: &GameState, obj_id: ObjectId) -> bool {
         return true;
     }
     obj.entered_battlefield_turn
-        .map_or(false, |etb| etb < state.turn_number)
+        .is_some_and(|etb| etb < state.turn_number)
 }
 
 /// Check if a blocker can legally block an attacker (flying/reach, shadow checks).

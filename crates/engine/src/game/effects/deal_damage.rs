@@ -112,11 +112,13 @@ pub fn resolve_all(
         .battlefield
         .iter()
         .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| super::matches_filter(obj, filter, ability.controller))
-                .unwrap_or(false)
+            crate::game::filter::object_matches_filter_controlled(
+                state,
+                **id,
+                filter,
+                ability.source_id,
+                ability.controller,
+            )
         })
         .copied()
         .collect();

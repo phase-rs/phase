@@ -97,7 +97,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             let p = *player;
             let c = *count;
             mulligan::handle_mulligan_bottom(state, p, cards, c, &mut events)
-                .map_err(|e| EngineError::InvalidAction(e))?
+                .map_err(EngineError::InvalidAction)?
         }
         (
             WaitingFor::DeclareAttackers { player, .. },
@@ -107,7 +107,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                 return Err(EngineError::WrongPlayer);
             }
             super::combat::declare_attackers(state, &attacker_ids, &mut events)
-                .map_err(|e| EngineError::InvalidAction(e))?;
+                .map_err(EngineError::InvalidAction)?;
 
             // Process triggers for AttackersDeclared
             triggers::process_triggers(state, &events);
@@ -133,7 +133,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                 return Err(EngineError::WrongPlayer);
             }
             super::combat::declare_blockers(state, &assignments, &mut events)
-                .map_err(|e| EngineError::InvalidAction(e))?;
+                .map_err(EngineError::InvalidAction)?;
 
             // Process triggers for BlockersDeclared
             triggers::process_triggers(state, &events);
@@ -413,7 +413,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::ResolvedAbility;
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use std::collections::HashMap;
 
@@ -605,7 +605,7 @@ mod tests {
         let mut state = new_game(42);
 
         // Start game (turn 1, player 0)
-        let result = start_game(&mut state);
+        let _result = start_game(&mut state);
         assert_eq!(state.phase, Phase::PreCombatMain);
         assert_eq!(state.turn_number, 1);
 
@@ -619,19 +619,19 @@ mod tests {
         ));
 
         // Pass priority from player 1 (both passed, stack empty -> advance)
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
         // Should skip combat phases and land at PostCombatMain
         assert_eq!(state.phase, Phase::PostCombatMain);
 
         // Pass through post-combat main
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
         // Should advance to End step
         assert_eq!(state.phase, Phase::End);
 
         // Pass through end step
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
         // Should advance through cleanup to next turn, then auto-advance to PreCombatMain
         assert_eq!(state.phase, Phase::PreCombatMain);
         assert_eq!(state.turn_number, 2);
@@ -916,7 +916,7 @@ mod tests {
 
         // Play a land from hand
         let land_card_id = state.objects[&state.players[0].hand[0]].card_id;
-        let result = apply(
+        let _result = apply(
             &mut state,
             GameAction::PlayLand {
                 card_id: land_card_id,
@@ -940,7 +940,7 @@ mod tests {
             .unwrap();
 
         // Tap land for mana
-        let result = apply(
+        let _result = apply(
             &mut state,
             GameAction::TapLandForMana {
                 object_id: land_on_bf,
@@ -1627,7 +1627,6 @@ mod tests {
         use crate::game::combat::{AttackerInfo, CombatState};
         use crate::game::combat_damage;
         use crate::game::layers;
-        use crate::game::replacement;
         use crate::game::sba;
         use crate::game::triggers;
         use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefinition};
@@ -1797,11 +1796,13 @@ mod tests {
                 });
 
             // Set up combat: attacker unblocked
-            let mut combat = CombatState::default();
-            combat.attackers = vec![AttackerInfo {
-                object_id: attacker,
-                defending_player: PlayerId(1),
-            }];
+            let combat = CombatState {
+                attackers: vec![AttackerInfo {
+                    object_id: attacker,
+                    defending_player: PlayerId(1),
+                }],
+                ..Default::default()
+            };
             state.combat = Some(combat);
 
             let mut events = Vec::new();
@@ -1884,7 +1885,7 @@ mod tests {
             // Creature B with "when a creature is exiled, draw a card" trigger
             let creature_b = make_creature(&mut state, PlayerId(0), "Observer B", 1, 1);
             // Add a card to draw from
-            let draw_card = zones::create_object(
+            let _draw_card = zones::create_object(
                 &mut state,
                 CardId(99),
                 PlayerId(0),

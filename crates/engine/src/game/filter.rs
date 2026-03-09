@@ -20,7 +20,8 @@ use crate::types::player::PlayerId;
 
 /// Check if an object matches a Forge-style filter string.
 ///
-/// `source_id` is the object that owns the ability (used for Self/Other/YouCtrl resolution).
+/// `source_id` is the object that owns the ability (used for Self/Other resolution).
+/// The source's controller is looked up from `state` (for YouCtrl/OppCtrl).
 ///
 /// Returns `true` if every component of the filter is satisfied.
 pub fn object_matches_filter(
@@ -28,6 +29,31 @@ pub fn object_matches_filter(
     object_id: ObjectId,
     filter: &str,
     source_id: ObjectId,
+) -> bool {
+    let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+    filter_inner(state, object_id, filter, source_id, source_controller)
+}
+
+/// Like [`object_matches_filter`], but with an explicit controller.
+///
+/// Use this when resolving effects from the stack where the source object
+/// may no longer exist (e.g. sacrificed as a cost).
+pub fn object_matches_filter_controlled(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &str,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    filter_inner(state, object_id, filter, source_id, Some(controller))
+}
+
+fn filter_inner(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &str,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
 ) -> bool {
     if filter.is_empty() {
         return true;
@@ -61,8 +87,6 @@ pub fn object_matches_filter(
 
     // --- Property restrictions (+ or . separated, per Forge convention) ---
     if let Some(props) = props_part {
-        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-
         for prop in props.split(['+', '.']) {
             if !matches_property(prop, obj, object_id, source_id, source_controller) {
                 return false;

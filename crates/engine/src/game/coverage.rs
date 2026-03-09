@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::str::FromStr;
-
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
@@ -11,9 +10,6 @@ use crate::game::triggers::build_trigger_registry;
 use crate::parser::ability::{parse_ability, parse_static, parse_trigger};
 use crate::types::keywords::Keyword;
 use crate::types::triggers::TriggerMode;
-
-/// Current Standard-legal set codes (2024-2025 Standard rotation).
-const STANDARD_SETS: &[&str] = &["MKM", "OTJ", "BLB", "DSK", "FDN"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {
@@ -105,7 +101,7 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
             check_statics(&face.static_abilities, &static_registry, &mut missing);
 
             // Check SVar-referenced sub-abilities
-            for (_name, svar_val) in &face.svars {
+            for svar_val in face.svars.values() {
                 if svar_val.contains("$ ") {
                     if let Ok(def) = parse_ability(svar_val) {
                         if !def.api_type.is_empty() && !effect_registry.contains_key(&def.api_type)

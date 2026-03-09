@@ -7,7 +7,6 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 /// Returns all legal actions for the current game state based on `waiting_for`.
 pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
@@ -107,7 +106,7 @@ fn can_cast(
     let is_instant =
         obj.card_types.core_types.contains(&CoreType::Instant) || obj.has_keyword(&Keyword::Flash);
 
-    if !is_instant && !(is_main_phase && stack_empty && is_active) {
+    if !(is_instant || is_main_phase && stack_empty && is_active) {
         return false;
     }
 
@@ -392,7 +391,7 @@ fn attacker_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
                 && (obj.has_keyword(&Keyword::Haste)
                     || obj
                         .entered_battlefield_turn
-                        .map_or(false, |etb| etb < state.turn_number))
+                        .is_some_and(|etb| etb < state.turn_number))
             {
                 candidates.push(obj_id);
             }
@@ -479,6 +478,7 @@ mod tests {
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::zones::Zone;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -904,7 +904,7 @@ mod tests {
         };
         state.waiting_for = WaitingFor::TargetSelection {
             player: PlayerId(0),
-            pending_cast: pending,
+            pending_cast: Box::new(pending),
             legal_targets: vec![],
         };
         add_creature_to_battlefield(&mut state, PlayerId(1), "Bear", 2, 2);

@@ -132,15 +132,19 @@ pub fn resolve_all(
         .battlefield
         .iter()
         .filter(|id| {
-            state
+            let is_indestructible = state
                 .objects
                 .get(id)
-                .map(|obj| {
-                    obj.zone == Zone::Battlefield
-                        && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
-                        && super::matches_filter(obj, filter, ability.controller)
-                })
-                .unwrap_or(false)
+                .map(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Indestructible))
+                .unwrap_or(false);
+            !is_indestructible
+                && crate::game::filter::object_matches_filter_controlled(
+                    state,
+                    **id,
+                    filter,
+                    ability.source_id,
+                    ability.controller,
+                )
         })
         .copied()
         .collect();

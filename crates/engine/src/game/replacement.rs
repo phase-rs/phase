@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
-use crate::types::ability::TargetRef;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement};
 use crate::types::identifiers::ObjectId;
@@ -542,41 +541,6 @@ fn create_token_applier(
     }
 }
 
-// --- 10. Discard ---
-
-fn discard_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    matches!(event, ProposedEvent::Discard { .. })
-}
-
-fn discard_applier(
-    event: ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    if params.get("Exile").map(|v| v == "True").unwrap_or(false) {
-        if let ProposedEvent::Discard {
-            object_id, applied, ..
-        } = event
-        {
-            return ApplyResult::Modified(ProposedEvent::ZoneChange {
-                object_id,
-                from: Zone::Hand,
-                to: Zone::Exile,
-                cause: None,
-                applied,
-            });
-        }
-    }
-    ApplyResult::Modified(event)
-}
-
 // --- 11. Tap ---
 
 fn tap_matcher(
@@ -621,44 +585,6 @@ fn untap_applier(
 ) -> ApplyResult {
     if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
         return ApplyResult::Prevented;
-    }
-    ApplyResult::Modified(event)
-}
-
-// --- 13. Sacrifice ---
-
-fn sacrifice_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    matches!(event, ProposedEvent::Sacrifice { .. })
-}
-
-fn sacrifice_applier(
-    event: ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-        return ApplyResult::Prevented;
-    }
-    if params.get("Exile").map(|v| v == "True").unwrap_or(false) {
-        if let ProposedEvent::Sacrifice {
-            object_id, applied, ..
-        } = event
-        {
-            return ApplyResult::Modified(ProposedEvent::ZoneChange {
-                object_id,
-                from: Zone::Battlefield,
-                to: Zone::Exile,
-                cause: None,
-                applied,
-            });
-        }
     }
     ApplyResult::Modified(event)
 }
@@ -1009,7 +935,7 @@ pub fn continue_replacement(
 mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::ReplacementDefinition;
+    use crate::types::ability::{ReplacementDefinition, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use std::collections::HashSet;

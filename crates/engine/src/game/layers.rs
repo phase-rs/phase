@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::str::FromStr;
-
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 
@@ -168,7 +166,7 @@ fn order_with_dependencies(
     }
 
     // Start with timestamp ordering as fallback
-    let mut sorted: Vec<&ActiveContinuousEffect> = effects.iter().copied().collect();
+    let mut sorted: Vec<&ActiveContinuousEffect> = effects.to_vec();
     sorted.sort_by_key(|e| (e.timestamp, e.source_id.0, e.def_index));
 
     let mut graph = DiGraph::<usize, ()>::new();
@@ -222,10 +220,10 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     }
 
     // If b adds/removes abilities and a checks for abilities
-    if b.params.contains_key("AddAbility") || b.params.contains_key("RemoveAllAbilities") {
-        if a.affected_filter.contains("withAbility") {
-            return true;
-        }
+    if (b.params.contains_key("AddAbility") || b.params.contains_key("RemoveAllAbilities"))
+        && a.affected_filter.contains("withAbility")
+    {
+        return true;
     }
 
     false
@@ -344,7 +342,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::StaticDefinition;
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;

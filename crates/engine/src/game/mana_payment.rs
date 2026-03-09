@@ -82,13 +82,6 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
                             spend_any(&mut sim);
                         }
                     }
-                    ShardRequirement::Generic(n) => {
-                        for _ in 0..n {
-                            if !spend_any(&mut sim) {
-                                return false;
-                            }
-                        }
-                    }
                     ShardRequirement::Snow => {
                         if !spend_snow(&mut sim) {
                             return false;
@@ -162,13 +155,6 @@ pub fn pay_cost(
                             }
                         }
                     }
-                    ShardRequirement::Generic(n) => {
-                        for _ in 0..n {
-                            let unit =
-                                spend_any_unit(pool).ok_or(PaymentError::InsufficientMana)?;
-                            spent.push(unit);
-                        }
-                    }
                     ShardRequirement::Snow => {
                         let unit = spend_snow_unit(pool).ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
@@ -240,7 +226,6 @@ enum ShardRequirement {
     Hybrid(ManaType, ManaType),
     Phyrexian(ManaType),
     TwoGenericHybrid(ManaType),
-    Generic(u32),
     Snow,
     X,
     ColorlessHybrid(ManaType),

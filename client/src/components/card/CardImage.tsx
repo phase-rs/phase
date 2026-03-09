@@ -32,7 +32,7 @@ export function CardImage({
   }
 
   return (
-    <div className="relative inline-block">
+    <div className="relative block">
       <img
         src={src}
         alt={cardName}

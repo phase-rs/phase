@@ -240,7 +240,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 let has_attackers = state
                     .combat
                     .as_ref()
-                    .map_or(false, |c| !c.attackers.is_empty());
+                    .is_some_and(|c| !c.attackers.is_empty());
                 if has_attackers {
                     let defending = PlayerId(1 - state.active_player.0);
                     let valid_blocker_ids = super::combat::get_valid_blocker_ids(state);

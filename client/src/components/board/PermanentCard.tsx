@@ -39,6 +39,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const combatAttackers = useGameStore(
     (s) => s.gameState?.combat?.attackers,
   );
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   const longPressHandlers = useLongPress(
     useCallback(() => {
@@ -48,7 +49,6 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   if (!obj) return null;
 
-  const isCreature = obj.card_types.core_types.includes("Creature");
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
 
   const ptDisplay = computePTDisplay(obj);
@@ -91,9 +91,14 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   const counters = Object.entries(obj.counters);
 
+  const validAttackerIds =
+    waitingFor?.type === "DeclareAttackers"
+      ? (waitingFor.data.valid_attacker_ids ?? [])
+      : [];
+
   const handleClick = () => {
     if (combatMode === "attackers") {
-      if (isCreature && !obj.tapped) toggleAttacker(objectId);
+      if (validAttackerIds.includes(objectId)) toggleAttacker(objectId);
     } else if (combatMode === "blockers" && combatClickHandler) {
       combatClickHandler(objectId);
     } else if (targetingMode && isValidTarget) {

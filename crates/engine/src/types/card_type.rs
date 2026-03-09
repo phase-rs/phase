@@ -62,19 +62,9 @@ impl FromStr for CoreType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardType {
     pub supertypes: Vec<Supertype>,
     pub core_types: Vec<CoreType>,
     pub subtypes: Vec<String>,
-}
-
-impl Default for CardType {
-    fn default() -> Self {
-        CardType {
-            supertypes: Vec::new(),
-            core_types: Vec::new(),
-            subtypes: Vec::new(),
-        }
-    }
 }

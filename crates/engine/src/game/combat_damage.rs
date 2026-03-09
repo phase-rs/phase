@@ -5,7 +5,6 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::sba;
 use crate::game::triggers;
 use crate::types::ability::TargetRef;
-use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -488,14 +487,16 @@ mod tests {
         attackers: Vec<ObjectId>,
         blocker_assignments: Vec<(ObjectId, Vec<ObjectId>)>,
     ) {
-        let mut combat = CombatState::default();
-        combat.attackers = attackers
-            .iter()
-            .map(|&id| AttackerInfo {
-                object_id: id,
-                defending_player: PlayerId(1),
-            })
-            .collect();
+        let mut combat = CombatState {
+            attackers: attackers
+                .iter()
+                .map(|&id| AttackerInfo {
+                    object_id: id,
+                    defending_player: PlayerId(1),
+                })
+                .collect(),
+            ..Default::default()
+        };
         for (attacker_id, blockers) in blocker_assignments {
             for &blocker_id in &blockers {
                 combat.blocker_to_attacker.insert(blocker_id, attacker_id);

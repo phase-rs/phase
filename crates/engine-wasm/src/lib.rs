@@ -117,11 +117,12 @@ pub fn get_legal_actions_js() -> JsValue {
     })
 }
 
-/// Restore the game state from a serialized GameState (for undo support).
-/// Replaces the thread-local GAME_STATE and reconstructs the RNG from seed.
+/// Restore the game state from a JSON string.
+/// Uses serde_json which handles string-keyed maps (from localStorage round-trip)
+/// correctly deserializing into HashMap<ObjectId, V>.
 #[wasm_bindgen]
-pub fn restore_game_state(state_js: JsValue) -> Result<(), JsValue> {
-    let mut state: GameState = serde_wasm_bindgen::from_value(state_js)
+pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
+    let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
     state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
     GAME_STATE.with(|gs| {

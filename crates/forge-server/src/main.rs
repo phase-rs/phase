@@ -57,7 +57,7 @@ async fn main() {
                         winner: None,
                         reason: "Opponent disconnected (grace period expired)".to_string(),
                     };
-                    for (_, sender) in players {
+                    for sender in players.values() {
                         let _ = sender.send(msg.clone());
                     }
                 }

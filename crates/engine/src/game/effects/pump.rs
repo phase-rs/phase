@@ -1,8 +1,7 @@
-use crate::game::effects::matches_filter;
+use crate::game::filter::object_matches_filter_controlled;
 use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::zones::Zone;
 
 /// Temporarily pump target creatures' power and toughness.
 /// Reads `NumAtt` and `NumDef` params (default "0").
@@ -73,13 +72,13 @@ pub fn resolve_all(
         .battlefield
         .iter()
         .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| {
-                    obj.zone == Zone::Battlefield && matches_filter(obj, filter, ability.controller)
-                })
-                .unwrap_or(false)
+            object_matches_filter_controlled(
+                state,
+                **id,
+                filter,
+                ability.source_id,
+                ability.controller,
+            )
         })
         .copied()
         .collect();

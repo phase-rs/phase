@@ -67,7 +67,7 @@ describe("gameStore", () => {
     const state = createMockState();
     const adapter = createMockAdapter(state);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
 
     const store = useGameStore.getState();
     expect(store.adapter).toBe(adapter);
@@ -82,7 +82,7 @@ describe("gameStore", () => {
     const events: GameEvent[] = [{ type: "PriorityPassed", data: { player_id: 0 } }];
 
     const adapter = createMockAdapter(state1);
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
 
     // Update mock for next calls
     (adapter.submitAction as ReturnType<typeof vi.fn>).mockResolvedValue(events);
@@ -101,7 +101,7 @@ describe("gameStore", () => {
     const state2 = createMockState({ turn_number: 2 });
     const adapter = createMockAdapter(state1);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
     (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(state2);
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
@@ -115,7 +115,7 @@ describe("gameStore", () => {
     const state2 = createMockState({ turn_number: 2 });
     const adapter = createMockAdapter(state1);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
     (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(state2);
 
     // PlayLand is NOT in UNDOABLE_ACTIONS
@@ -131,7 +131,7 @@ describe("gameStore", () => {
     const state2 = createMockState({ turn_number: 2 });
     const adapter = createMockAdapter(state1);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
     (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(state2);
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
@@ -151,7 +151,7 @@ describe("gameStore", () => {
     const state2 = createMockState({ turn_number: 2 });
     const adapter = createMockAdapter(state1);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
     (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(state2);
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
@@ -178,7 +178,7 @@ describe("gameStore", () => {
   it("undo is unavailable when stateHistory is empty", async () => {
     const state = createMockState();
     const adapter = createMockAdapter(state);
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
 
     act(() => useGameStore.getState().undo());
     expect(adapter.restoreState).not.toHaveBeenCalled();
@@ -190,7 +190,7 @@ describe("gameStore", () => {
     );
     const adapter = createMockAdapter(states[0]);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
 
     for (let i = 1; i < states.length; i++) {
       (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(states[i]);
@@ -207,7 +207,7 @@ describe("gameStore", () => {
     const state = createMockState();
     const adapter = createMockAdapter(state);
 
-    await act(() => useGameStore.getState().initGame(adapter));
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
     act(() => useGameStore.getState().reset());
 
     const store = useGameStore.getState();

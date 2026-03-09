@@ -30,7 +30,7 @@ pub fn resolve(
                 None
             }
         })
-        .unwrap_or_else(|| {
+        .unwrap_or({
             // Default to opponent: if controller is 0, target is 1, and vice versa
             PlayerId(if ability.controller.0 == 0 { 1 } else { 0 })
         });

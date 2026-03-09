@@ -917,10 +917,9 @@ fn zone_matches(param: &str, zone: &Zone) -> bool {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::game::game_object::GameObject;
     use crate::game::zones::create_object;
     use crate::types::ability::TriggerDefinition;
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1026,7 +1025,7 @@ pub mod tests {
         let registry = build_trigger_registry();
         let unknown = TriggerMode::Unknown("FakeMode".to_string());
         // Unknown modes are not in the registry
-        assert!(registry.get(&unknown).is_none());
+        assert!(!registry.contains_key(&unknown));
     }
 
     #[test]

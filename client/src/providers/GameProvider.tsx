@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 
 import type { GameAction } from "../adapter/types";
 import { WasmAdapter } from "../adapter/wasm-adapter";
@@ -9,7 +9,7 @@ import { STARTER_DECKS } from "../data/starterDecks";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction } from "../game/dispatch";
 import type { ParsedDeck } from "../services/deckParser";
-import { useGameStore } from "../stores/gameStore";
+import { useGameStore, loadGame } from "../stores/gameStore";
 
 const DEFAULT_WS_URL = "ws://localhost:8080/ws";
 
@@ -105,6 +105,7 @@ const GameDispatchContext = createContext<(action: GameAction) => Promise<void>>
 );
 
 export interface GameProviderProps {
+  gameId: string;
   mode: "ai" | "online" | "local";
   difficulty?: string;
   joinCode?: string;
@@ -116,6 +117,7 @@ export interface GameProviderProps {
 }
 
 export function GameProvider({
+  gameId,
   mode,
   difficulty,
   joinCode,
@@ -125,10 +127,20 @@ export function GameProvider({
   onNoDeck,
   children,
 }: GameProviderProps) {
-  const initGame = useGameStore((s) => s.initGame);
-  const reset = useGameStore((s) => s.reset);
+  // Refs for callback props — these are notifications that should never
+  // cause the game setup effect to re-run.
+  const onWsEventRef = useRef(onWsEvent);
+  const onReadyRef = useRef(onReady);
+  const onCardDataMissingRef = useRef(onCardDataMissing);
+  const onNoDeckRef = useRef(onNoDeck);
+  onWsEventRef.current = onWsEvent;
+  onReadyRef.current = onReady;
+  onCardDataMissingRef.current = onCardDataMissing;
+  onNoDeckRef.current = onNoDeck;
 
   useEffect(() => {
+    const { initGame, resumeGame, reset } = useGameStore.getState();
+
     const isOnline = mode === "online";
     const hasSession = sessionStorage.getItem("forge-ws-session") !== null;
     const isReconnect = isOnline && !joinCode && hasSession;
@@ -151,16 +163,16 @@ export function GameProvider({
         wsMode === "join" ? joinCode : undefined,
       );
 
-      if (onWsEvent) {
-        wsUnsubscribe = wsAdapter.onEvent(onWsEvent);
+      if (onWsEventRef.current) {
+        wsUnsubscribe = wsAdapter.onEvent(onWsEventRef.current);
       }
 
       if (isReconnect) {
         wsAdapter.tryReconnect();
       } else {
-        initGame(wsAdapter).then(() => {
+        initGame(gameId, wsAdapter).then(() => {
           if (cancelled) return;
-          onReady?.();
+          onReadyRef.current?.();
         });
       }
 
@@ -171,23 +183,38 @@ export function GameProvider({
       };
     }
 
-    // AI or local mode
-    const parsedDeck = loadActiveDeck();
-    if (!parsedDeck) {
-      onNoDeck?.();
-      return;
+    // AI or local mode — check for a saved game for this ID
+    const savedState = loadGame(gameId);
+    const adapter = new WasmAdapter();
+
+    if (savedState) {
+      resumeGame(gameId, adapter, savedState).then(() => {
+        if (cancelled) return;
+        controller = createGameLoopController({ mode, difficulty });
+        controller.start();
+      });
+      return () => {
+        cancelled = true;
+        if (controller) controller.dispose();
+        reset();
+      };
     }
 
-    const adapter = new WasmAdapter();
+    // No saved state — start a new game
+    const parsedDeck = loadActiveDeck();
+    if (!parsedDeck) {
+      onNoDeckRef.current?.();
+      return;
+    }
 
     buildDeckPayload(parsedDeck).then((deckPayload) => {
       if (cancelled) return;
 
       if (deckPayload === null) {
-        onCardDataMissing?.();
+        onCardDataMissingRef.current?.();
       }
 
-      initGame(adapter, deckPayload).then(() => {
+      initGame(gameId, adapter, deckPayload).then(() => {
         if (cancelled) return;
 
         controller = createGameLoopController({ mode, difficulty });
@@ -202,7 +229,7 @@ export function GameProvider({
       }
       reset();
     };
-  }, [initGame, reset, mode, difficulty, joinCode, onWsEvent, onReady, onCardDataMissing, onNoDeck]);
+  }, [gameId, mode, difficulty, joinCode]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

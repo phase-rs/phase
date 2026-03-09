@@ -2,6 +2,7 @@ use rand::Rng;
 
 use engine::game::engine::apply;
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
@@ -50,6 +51,16 @@ pub fn choose_action(
     }
     if actions.len() == 1 {
         return Some(actions.into_iter().next().unwrap());
+    }
+
+    // Mulligan decisions: use hand-quality heuristic (search can't evaluate these)
+    if let WaitingFor::MulliganDecision {
+        player,
+        mulligan_count,
+    } = &state.waiting_for
+    {
+        let keep = should_keep_hand(state, *player, *mulligan_count);
+        return Some(GameAction::MulliganDecision { keep });
     }
 
     // Combat decisions: delegate to specialized combat AI
@@ -208,6 +219,40 @@ fn search_value(
     }
 }
 
+/// Decide whether to keep the current hand based on land/spell ratio.
+/// Always keeps at 4 or fewer cards. For larger hands, keeps if land count
+/// is in the acceptable range (roughly 2-5 for 7 cards, scaled down).
+fn should_keep_hand(state: &GameState, player: PlayerId, _mulligan_count: u8) -> bool {
+    let hand_size = state.players[player.0 as usize].hand.len();
+
+    // Always keep at 4 or fewer cards
+    if hand_size <= 4 {
+        return true;
+    }
+
+    let land_count = state.players[player.0 as usize]
+        .hand
+        .iter()
+        .filter(|&&oid| {
+            state
+                .objects
+                .get(&oid)
+                .map(|o| o.card_types.core_types.contains(&CoreType::Land))
+                .unwrap_or(false)
+        })
+        .count();
+
+    let spell_count = hand_size - land_count;
+
+    // Keep if we have 2-5 lands (for 7 cards) or at least 1 land + 1 spell (smaller hands)
+    if hand_size >= 6 {
+        (2..=5).contains(&land_count)
+    } else {
+        // 5 card hand: keep with 1-4 lands; already kept <=4 above
+        land_count >= 1 && spell_count >= 1
+    }
+}
+
 fn softmax_select(
     scored: &[ScoredAction],
     temperature: f64,
@@ -263,7 +308,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
-    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    use engine::types::mana::{ManaType, ManaUnit};
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;

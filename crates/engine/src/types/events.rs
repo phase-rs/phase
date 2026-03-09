@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::TargetRef;
 use super::identifiers::{CardId, ObjectId};
-use super::mana::{ManaColor, ManaType};
+use super::mana::ManaType;
 use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;

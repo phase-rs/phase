@@ -72,7 +72,7 @@ export class WasmAdapter implements EngineAdapter {
 
   restoreState(state: GameState): void {
     this.assertInitialized();
-    restore_game_state(state);
+    restore_game_state(JSON.stringify(state));
   }
 
   dispose(): void {

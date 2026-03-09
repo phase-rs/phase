@@ -118,12 +118,12 @@ pub fn handle_cast_spell(
             // Need target selection from player
             return Ok(WaitingFor::TargetSelection {
                 player,
-                pending_cast: PendingCast {
+                pending_cast: Box::new(PendingCast {
                     object_id,
                     card_id,
                     ability: resolved,
                     cost: mana_cost,
-                },
+                }),
                 legal_targets: legal,
             });
         }
@@ -144,7 +144,7 @@ pub fn handle_select_targets(
 ) -> Result<WaitingFor, EngineError> {
     // Extract PendingCast from WaitingFor::TargetSelection
     let pending = match &state.waiting_for {
-        WaitingFor::TargetSelection { pending_cast, .. } => pending_cast.clone(),
+        WaitingFor::TargetSelection { pending_cast, .. } => *pending_cast.clone(),
         _ => {
             return Err(EngineError::InvalidAction(
                 "Not waiting for target selection".to_string(),
@@ -254,12 +254,12 @@ pub fn handle_activate_ability(
             // Use a PendingCast with a dummy card_id
             return Ok(WaitingFor::TargetSelection {
                 player,
-                pending_cast: PendingCast {
+                pending_cast: Box::new(PendingCast {
                     object_id: source_id,
                     card_id: CardId(0),
                     ability: resolved,
                     cost: crate::types::mana::ManaCost::NoCost,
-                },
+                }),
                 legal_targets: legal,
             });
         }

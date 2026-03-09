@@ -3,3 +3,9 @@ export const STORAGE_KEY_PREFIX = "forge-deck:";
 
 /** Key for the currently selected/active deck name in localStorage */
 export const ACTIVE_DECK_KEY = "forge-active-deck";
+
+/** Prefix for per-game saved state. Full key: `${GAME_KEY_PREFIX}${gameId}` */
+export const GAME_KEY_PREFIX = "forge-game:";
+
+/** Key for the active game metadata (id, mode, difficulty) */
+export const ACTIVE_GAME_KEY = "forge-active-game";

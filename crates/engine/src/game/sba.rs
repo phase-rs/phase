@@ -109,7 +109,7 @@ fn check_zero_toughness(
                 .get(id)
                 .map(|obj| {
                     obj.card_types.core_types.contains(&CoreType::Creature)
-                        && obj.toughness.map_or(false, |t| t <= 0)
+                        && obj.toughness.is_some_and(|t| t <= 0)
                 })
                 .unwrap_or(false)
         })
@@ -138,7 +138,7 @@ fn check_lethal_damage(
                     obj.card_types.core_types.contains(&CoreType::Creature)
                         && (
                             // Normal lethal damage: damage >= toughness
-                            obj.toughness.map_or(false, |t| obj.damage_marked >= t as u32 && t > 0)
+                            obj.toughness.is_some_and(|t| obj.damage_marked >= t as u32 && t > 0)
                             // Deathtouch: any amount of damage from a deathtouch source is lethal
                             || (obj.dealt_deathtouch_damage && obj.damage_marked > 0)
                         )
@@ -259,7 +259,6 @@ fn is_valid_attachment_target(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
 
     fn setup() -> GameState {

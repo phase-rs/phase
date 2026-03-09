@@ -47,7 +47,7 @@ pub enum WaitingFor {
     },
     TargetSelection {
         player: PlayerId,
-        pending_cast: PendingCast,
+        pending_cast: Box<PendingCast>,
         legal_targets: Vec<TargetRef>,
     },
     DeclareAttackers {

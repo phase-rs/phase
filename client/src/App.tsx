@@ -9,7 +9,7 @@ export function App() {
       <div className="min-h-screen bg-gray-950 text-white">
         <Routes>
           <Route path="/" element={<MenuPage />} />
-          <Route path="/game" element={<GamePage />} />
+          <Route path="/game/:id" element={<GamePage />} />
           <Route path="/deck-builder" element={<DeckBuilderPage />} />
         </Routes>
       </div>

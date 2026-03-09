@@ -3,7 +3,6 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 /// Weights for board evaluation heuristics.
 #[derive(Debug, Clone)]
@@ -155,6 +154,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
 
     fn make_state() -> GameState {
         GameState::new_two_player(42)

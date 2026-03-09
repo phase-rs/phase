@@ -200,52 +200,6 @@ fn evaluate_compare(compare_str: &str, count: u32) -> bool {
     }
 }
 
-use crate::game::game_object::GameObject;
-use crate::types::player::PlayerId;
-
-/// Match a Forge "Valid" filter string against a game object.
-/// Handles common patterns:
-/// - "Creature" / "Land" / "Artifact" / "Enchantment" / "Planeswalker" - type check
-/// - "Creature.YouCtrl" - type + controller matches ability controller
-/// - "Creature.OppCtrl" - type + controller is opponent
-/// - "Permanent" - any permanent type on battlefield
-/// - "Permanent.YouCtrl" / "Permanent.OppCtrl" - permanent with controller filter
-///
-/// Returns true if the object matches the filter for the given controller context.
-pub fn matches_filter(obj: &GameObject, filter: &str, controller: PlayerId) -> bool {
-    let parts: Vec<&str> = filter.split('.').collect();
-    let type_part = parts[0];
-    let ctrl_part = parts.get(1).copied();
-
-    // Type matching
-    let type_matches = match type_part {
-        "Creature" => obj.card_types.core_types.contains(&CoreType::Creature),
-        "Land" => obj.card_types.core_types.contains(&CoreType::Land),
-        "Artifact" => obj.card_types.core_types.contains(&CoreType::Artifact),
-        "Enchantment" => obj.card_types.core_types.contains(&CoreType::Enchantment),
-        "Planeswalker" => obj.card_types.core_types.contains(&CoreType::Planeswalker),
-        "Permanent" => {
-            obj.card_types.core_types.contains(&CoreType::Creature)
-                || obj.card_types.core_types.contains(&CoreType::Artifact)
-                || obj.card_types.core_types.contains(&CoreType::Enchantment)
-                || obj.card_types.core_types.contains(&CoreType::Land)
-                || obj.card_types.core_types.contains(&CoreType::Planeswalker)
-        }
-        _ => true, // Unknown type, default match
-    };
-
-    if !type_matches {
-        return false;
-    }
-
-    // Controller matching
-    match ctrl_part {
-        Some("YouCtrl") => obj.controller == controller,
-        Some("OppCtrl") => obj.controller != controller,
-        _ => true, // No controller restriction
-    }
-}
-
 /// Evaluate ConditionPresent: check if any card matching the filter exists in the zone.
 fn evaluate_present(filter: &str, zone_str: &str, state: &GameState) -> bool {
     let check_type = match filter {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
@@ -28,7 +28,7 @@ import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
-import { useGameStore } from "../stores/gameStore.ts";
+import { useGameStore, clearGame } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
@@ -36,6 +36,7 @@ import { PLAYER_ID } from "../constants/game.ts";
 
 export function GamePage() {
   const navigate = useNavigate();
+  const { id: gameId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const rawMode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
@@ -101,8 +102,11 @@ export function GamePage() {
     setShowCardDataMissing(true);
   }, []);
 
+  if (!gameId) return null;
+
   return (
     <GameProvider
+      gameId={gameId}
       mode={mode}
       difficulty={difficulty}
       joinCode={joinCode || undefined}
@@ -112,6 +116,7 @@ export function GamePage() {
       onNoDeck={handleNoDeck}
     >
       <GamePageContent
+        gameId={gameId}
         mode={rawMode}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
@@ -126,6 +131,7 @@ export function GamePage() {
 }
 
 interface GamePageContentProps {
+  gameId: string;
   mode: string | null;
   hostGameCode: string | null;
   waitingForOpponent: boolean;
@@ -140,6 +146,7 @@ interface GamePageContentProps {
 }
 
 function GamePageContent({
+  gameId,
   mode,
   hostGameCode,
   waitingForOpponent,
@@ -226,7 +233,7 @@ function GamePageContent({
       )}
 
       {/* Full-screen board layout */}
-      <div className={`flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}>
+      <div className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}>
         {/* Opponent area */}
         <OpponentHud />
         <OpponentHand showCards={showAiHand} />
@@ -286,15 +293,26 @@ function GamePageContent({
         <PlayerHand />
       </div>
 
-      {/* AI debug toggle */}
-      {mode === "ai" && (
+      {/* AI debug toggle + Concede */}
+      <div className="fixed right-2 top-2 z-40 flex gap-2">
+        {mode === "ai" && (
+          <button
+            onClick={() => setShowAiHand((v) => !v)}
+            className="rounded bg-gray-800/80 px-2 py-1 text-xs text-gray-400 hover:text-gray-200"
+          >
+            {showAiHand ? "Hide AI Hand" : "Show AI Hand"}
+          </button>
+        )}
         <button
-          onClick={() => setShowAiHand((v) => !v)}
-          className="fixed right-2 top-2 z-40 rounded bg-gray-800/80 px-2 py-1 text-xs text-gray-400 hover:text-gray-200"
+          onClick={() => {
+            clearGame(gameId);
+            navigate("/");
+          }}
+          className="rounded bg-gray-800/80 px-2 py-1 text-xs text-red-400 hover:text-red-300"
         >
-          {showAiHand ? "Hide AI Hand" : "Show AI Hand"}
+          Concede
         </button>
-      )}
+      </div>
 
       {/* Host game: show game code while waiting */}
       {waitingForOpponent && hostGameCode && (
@@ -460,7 +478,7 @@ function MulliganDecisionPrompt({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60" />
-      <div className="relative z-10 w-full max-w-5xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+      <div className="relative z-10 w-[90vw] max-w-7xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
         <h2 className="mb-2 text-center text-lg font-bold text-white">
           Mulligan ({mulliganCount} cards)
         </h2>
@@ -523,7 +541,7 @@ function MulliganBottomCardsPrompt({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60" />
-      <div className="relative z-10 w-full max-w-5xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+      <div className="relative z-10 w-[90vw] max-w-7xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
         <h2 className="mb-2 text-center text-lg font-bold text-white">
           Put {count} card{count > 1 ? "s" : ""} on bottom
         </h2>
@@ -578,18 +596,25 @@ function MulliganBottomCardsPrompt({
 // ── Game Over Screen ──────────────────────────────────────────────────────
 
 function GameOverScreen({ winner }: { winner: number | null }) {
+  const navigate = useNavigate();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70" />
       <div className="relative z-10 rounded-xl bg-gray-900 p-8 text-center shadow-2xl ring-1 ring-gray-700">
         <h2 className="mb-2 text-2xl font-bold text-white">Game Over</h2>
-        <p className="text-lg text-gray-300">
+        <p className="mb-4 text-lg text-gray-300">
           {winner != null
             ? winner === 0
               ? "You Win!"
               : "Opponent Wins"
             : "Draw"}
         </p>
+        <button
+          onClick={() => navigate("/")}
+          className="rounded-lg bg-indigo-600 px-6 py-2 font-semibold text-white transition hover:bg-indigo-500"
+        >
+          Return to Menu
+        </button>
       </div>
     </div>
   );

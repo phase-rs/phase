@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn counter_type_covers_required_variants() {
-        let counters = vec![
+        let counters = [
             CounterType::Plus1Plus1,
             CounterType::Minus1Minus1,
             CounterType::Loyalty,

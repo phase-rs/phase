@@ -5,6 +5,14 @@ import { CardCoverageDashboard } from "../components/controls/CardCoverageDashbo
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import type { ParsedDeck, DeckEntry } from "../services/deckParser";
+import {
+  loadActiveGame,
+  clearActiveGame,
+  clearGame,
+  saveActiveGame,
+  useGameStore,
+} from "../stores/gameStore";
+import type { ActiveGameMeta } from "../stores/gameStore";
 
 const DIFFICULTIES = [
   { id: "VeryEasy", label: "Very Easy" },
@@ -61,6 +69,30 @@ function getDeckCardCount(deckName: string): number {
   return totalCards(deck.main);
 }
 
+function startNewGame(
+  navigate: ReturnType<typeof useNavigate>,
+  difficulty: string,
+): void {
+  const gameId = crypto.randomUUID();
+  const meta: ActiveGameMeta = { id: gameId, mode: "ai", difficulty };
+  saveActiveGame(meta);
+
+  // Set gameId in store before navigating so GamePage sees a match
+  // and doesn't redirect back. GameProvider handles actual initialization.
+  useGameStore.setState({ gameId });
+
+  navigate(`/game/${gameId}?mode=ai&difficulty=${difficulty}`);
+}
+
+function resumeGame(
+  navigate: ReturnType<typeof useNavigate>,
+  meta: ActiveGameMeta,
+): void {
+  // Set gameId in store so GamePage sees a match and doesn't redirect
+  useGameStore.setState({ gameId: meta.id });
+  navigate(`/game/${meta.id}?mode=${meta.mode}&difficulty=${meta.difficulty}`);
+}
+
 type MenuView = "main" | "difficulty" | "online" | "join";
 
 export function MenuPage() {
@@ -70,6 +102,7 @@ export function MenuPage() {
   const [joinCode, setJoinCode] = useState("");
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [savedDeckNames, setSavedDeckNames] = useState<string[]>([]);
+  const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
 
   // On mount: seed starter decks if needed, scan for saved decks, read active deck
   useEffect(() => {
@@ -80,6 +113,7 @@ export function MenuPage() {
     }
     setSavedDeckNames(names);
     setActiveDeckName(localStorage.getItem(ACTIVE_DECK_KEY));
+    setActiveGame(loadActiveGame());
   }, []);
 
   const handleSelectDeck = (name: string) => {
@@ -90,11 +124,14 @@ export function MenuPage() {
   const handleJoinSubmit = () => {
     const code = joinCode.trim().toUpperCase();
     if (code) {
-      navigate(`/game?mode=join&code=${code}`);
+      const gameId = crypto.randomUUID();
+      useGameStore.setState({ gameId });
+      navigate(`/game/${gameId}?mode=join&code=${code}`);
     }
   };
 
   const noDeckSelected = activeDeckName == null;
+  const hasSavedGame = activeGame !== null;
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-8">
@@ -157,8 +194,23 @@ export function MenuPage() {
       <div className="flex flex-col gap-4">
         {menuView === "main" && (
           <>
+            {hasSavedGame && (
+              <button
+                onClick={() => resumeGame(navigate, activeGame!)}
+                className="rounded-lg bg-amber-600 px-8 py-3 text-lg font-semibold transition-colors hover:bg-amber-500"
+              >
+                Resume Game
+              </button>
+            )}
             <button
-              onClick={() => setMenuView("difficulty")}
+              onClick={() => {
+                if (activeGame) {
+                  clearGame(activeGame.id);
+                  clearActiveGame();
+                  setActiveGame(null);
+                }
+                setMenuView("difficulty");
+              }}
               disabled={noDeckSelected}
               className={`rounded-lg px-8 py-3 text-lg font-semibold transition-colors ${
                 noDeckSelected
@@ -166,7 +218,7 @@ export function MenuPage() {
                   : "bg-indigo-600 hover:bg-indigo-500"
               }`}
             >
-              Play vs AI
+              {hasSavedGame ? "New Game vs AI" : "Play vs AI"}
             </button>
             <button
               onClick={() => setMenuView("online")}
@@ -203,9 +255,7 @@ export function MenuPage() {
               {DIFFICULTIES.map((d) => (
                 <button
                   key={d.id}
-                  onClick={() =>
-                    navigate(`/game?mode=ai&difficulty=${d.id}`)
-                  }
+                  onClick={() => startNewGame(navigate, d.id)}
                   className="rounded-lg bg-indigo-600 px-8 py-2 text-base font-semibold transition-colors hover:bg-indigo-500"
                 >
                   {d.label}
@@ -227,7 +277,11 @@ export function MenuPage() {
               Multiplayer
             </p>
             <button
-              onClick={() => navigate("/game?mode=host")}
+              onClick={() => {
+                const gameId = crypto.randomUUID();
+                useGameStore.setState({ gameId });
+                navigate(`/game/${gameId}?mode=host`);
+              }}
               className="rounded-lg bg-emerald-600 px-8 py-3 text-base font-semibold transition-colors hover:bg-emerald-500"
             >
               Host Game

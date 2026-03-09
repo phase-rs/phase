@@ -114,8 +114,15 @@ pub fn resolve_all(
     let matching: Vec<_> = state
         .objects
         .iter()
-        .filter(|(_, obj)| {
-            obj.zone == origin_zone && super::matches_filter(obj, filter, ability.controller)
+        .filter(|(&id, obj)| {
+            obj.zone == origin_zone
+                && crate::game::filter::object_matches_filter_controlled(
+                    state,
+                    id,
+                    filter,
+                    ability.source_id,
+                    ability.controller,
+                )
         })
         .map(|(id, _)| *id)
         .collect();

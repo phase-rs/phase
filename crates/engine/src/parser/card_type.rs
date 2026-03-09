@@ -49,9 +49,8 @@ pub fn parse(input: &str) -> CardType {
 
 fn check_multiword_type(input: &str) -> Option<&'static str> {
     for &mw in MULTIWORD_TYPES {
-        if input.starts_with(mw) {
+        if let Some(rest) = input.strip_prefix(mw) {
             // Ensure it's a complete match (followed by space or end)
-            let rest = &input[mw.len()..];
             if rest.is_empty() || rest.starts_with(' ') {
                 return Some(mw);
             }
