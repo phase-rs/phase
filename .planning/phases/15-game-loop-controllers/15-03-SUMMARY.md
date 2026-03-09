@@ -107,6 +107,7 @@ These issues were reported during verification but are outside the scope of this
 - Card dragging is restricted to vertical only (no horizontal mobility)
 - "Show AI Hand" button does not work
 - Playing a Scry card does not show the dialog with top card and action choices
+- Mulligan dialog shows opponent's hand and mulligan process (should be hidden)
 
 ## Issues Encountered
 None - plan executed as expected after checkpoint feedback.
