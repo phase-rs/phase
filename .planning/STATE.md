@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 19-07-PLAN.md
-last_updated: "2026-03-09T23:02:38.904Z"
+stopped_at: Completed 19-08-PLAN.md
+last_updated: "2026-03-09T23:02:48.718Z"
 last_activity: 2026-03-09 — Completed 19-02 Battlefield Rendering
 progress:
   total_phases: 8
@@ -155,6 +155,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19]: Splash progress is cosmetic (1.5s rAF timer) since WASM loads on game start, not app start
 - [Phase 19]: DeckGallery uses first non-basic-land card name from deck for representative art tile
 - [Phase 19]: Difficulty selector is inline segmented control in DeckGallery, not a separate screen
+- [Phase 19-08]: CardSearch already provides WUBRG filters and type dropdown -- no duplicate filter UI added
+- [Phase 19-08]: Art crop URL extracted from ScryfallCard.image_uris directly, not via useCardImage hook
+- [Phase 19-08]: Hover state lifted from DeckBuilder to DeckBuilderPage via onCardHover callback prop
 
 ### Roadmap Evolution
 
@@ -175,5 +178,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 19-01 Art-Crop Card & Image Infrastructure
-Stopped at: Completed 19-07-PLAN.md
+Stopped at: Completed 19-08-PLAN.md
 Resume file: None
