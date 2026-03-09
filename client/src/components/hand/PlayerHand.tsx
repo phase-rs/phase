@@ -101,6 +101,7 @@ export function PlayerHand() {
   return (
     <div
       className="relative flex items-end justify-center px-4 py-1"
+      style={{ perspective: "800px" }}
       onClick={handleContainerClick}
       onMouseEnter={() => setExpanded(true)}
       onMouseLeave={() => {
@@ -110,7 +111,7 @@ export function PlayerHand() {
     >
       <AnimatePresence>
         {handObjects.map((obj, i) => {
-          const rotation = (i - center) * 3;
+          const rotation = (i - center) * 6;
           const isPlayable = hasPriority && playableCardIds.has(Number(obj.card_id));
 
           return (
@@ -177,7 +178,7 @@ function HandCard({
 
   const glowClass = hasPriority
     ? isPlayable
-      ? "shadow-[0_0_12px_3px_rgba(34,211,238,0.6)] ring-2 ring-cyan-400"
+      ? "shadow-[0_0_16px_4px_rgba(34,211,238,0.6)] ring-2 ring-cyan-400"
       : "opacity-60"
     : "";
 
@@ -191,9 +192,9 @@ function HandCard({
         rotate: rotation,
       }}
       exit={{ opacity: 0, y: 40 }}
-      whileHover={{ y: -40, scale: 1.08, zIndex: 30 }}
+      whileHover={{ y: -50, scale: 1.08, rotateX: 5, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 50 }}
-      transition={{ duration: 0.2 }}
+      transition={{ delay: index * 0.03, duration: 0.25 }}
       drag
       dragConstraints={{ top: -300, bottom: 0, left: -200, right: 200 }}
       dragElastic={0.3}
@@ -216,7 +217,7 @@ function HandCard({
         isSelected ? "ring-2 ring-cyan-400" : ""
       }`}
       style={{
-        marginLeft: index === 0 ? 0 : "-12px",
+        marginLeft: index === 0 ? 0 : "-16px",
         zIndex: isSelected ? 20 : index,
       }}
       {...longPressHandlers}

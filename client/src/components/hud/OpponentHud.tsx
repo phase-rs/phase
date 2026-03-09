@@ -6,8 +6,8 @@ export function OpponentHud() {
   const hudLayout = usePreferencesStore((s) => s.hudLayout);
 
   const content = (
-    <div className="flex items-center gap-3">
-      <LifeTotal playerId={1} />
+    <div className="flex items-center gap-3 rounded-full bg-gray-800/60 px-4 py-1">
+      <LifeTotal playerId={1} size="lg" />
       <ManaPoolSummary playerId={1} />
     </div>
   );

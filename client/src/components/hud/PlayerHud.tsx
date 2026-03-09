@@ -1,38 +1,21 @@
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
-import { useGameStore } from "../../stores/gameStore.ts";
+import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-
-const PHASE_LABELS: Record<string, string> = {
-  Untap: "Untap",
-  Upkeep: "Upkeep",
-  Draw: "Draw",
-  PreCombatMain: "Main 1",
-  BeginCombat: "Combat",
-  DeclareAttackers: "Attackers",
-  DeclareBlockers: "Blockers",
-  CombatDamage: "Damage",
-  EndCombat: "End Combat",
-  PostCombatMain: "Main 2",
-  End: "End",
-  Cleanup: "Cleanup",
-};
 
 interface PlayerHudProps {
   onSettingsClick?: () => void;
 }
 
 export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
-  const phase = useGameStore((s) => s.gameState?.phase ?? "Untap");
+  const { phaseLabel } = usePhaseInfo();
   const hudLayout = usePreferencesStore((s) => s.hudLayout);
 
-  const phaseLabel = PHASE_LABELS[phase] ?? phase;
-
   const content = (
-    <div className="flex items-center gap-3">
-      <LifeTotal playerId={0} />
+    <div className="flex items-center gap-3 rounded-full bg-gray-800/60 px-4 py-1">
+      <LifeTotal playerId={0} size="lg" />
       <ManaPoolSummary playerId={0} />
-      <span className="rounded bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-gray-300">
+      <span className="rounded bg-white/10 px-2 py-0.5 text-xs font-semibold text-gray-300">
         {phaseLabel}
       </span>
       <button

@@ -39,7 +39,7 @@ export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
       {entries.map(({ color, count }) => (
         <span
           key={color}
-          className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-bold ${MANA_COLORS[color]}`}
+          className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-xs font-bold shadow-[0_0_8px_2px_rgba(255,255,255,0.15)] ${MANA_COLORS[color]}`}
         >
           {count}
         </span>

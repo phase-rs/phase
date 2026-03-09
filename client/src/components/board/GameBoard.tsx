@@ -98,7 +98,7 @@ export function GameBoard() {
   return (
     <div className={`flex flex-1 flex-col ${gradientClass}`}>
       {/* Opponent's battlefield (other, creatures, lands from top) */}
-      <div className="flex flex-col gap-1 border-b border-gray-800 py-1">
+      <div className="flex flex-col gap-1 border-b border-gray-800 bg-black/20 px-3 py-2">
         {opponent && (
           <>
             <BattlefieldRow groups={opponent.other} rowType="other" />
@@ -109,10 +109,10 @@ export function GameBoard() {
       </div>
 
       {/* Middle spacer */}
-      <div className="flex min-h-[40px] flex-1 items-center justify-center" />
+      <div className="flex min-h-[60px] flex-1 items-center justify-center border-y border-white/5 shadow-[inset_0_0_20px_rgba(255,255,255,0.03)]" />
 
       {/* Player's battlefield (lands, creatures, other from bottom) */}
-      <div className="flex flex-col gap-1 border-t border-gray-800 py-1">
+      <div className="flex flex-col gap-1 border-t border-gray-800 px-3 py-2">
         {player && (
           <>
             <BattlefieldRow groups={player.other} rowType="other" />
