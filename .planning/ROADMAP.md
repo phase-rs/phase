@@ -47,12 +47,14 @@
   3. Both player and opponent HUDs display life totals and mana pool summaries, with life total changes flashing red (damage) or green (gain)
   4. Player can open graveyard and exile zone viewer modals, zone indicators show card counts, and a scrollable game log displays color-coded events with verbosity filtering
   5. All UI components communicate through the EngineAdapter interface, with a GameObject view model mapping deep engine objects to flat component props, and preferences persisting to localStorage
-**Plans**: TBD
+**Plans**: 5 plans
 
 Plans:
-- [ ] 13-01: TBD
-- [ ] 13-02: TBD
-- [ ] 13-03: TBD
+- [ ] 13-01-PLAN.md — View model layer and preferences store
+- [ ] 13-02-PLAN.md — CSS responsive card sizing, tap rotation fix, event history
+- [ ] 13-03-PLAN.md — Battlefield grouping, P/T display, attachment rendering
+- [ ] 13-04-PLAN.md — Hand fan layout with drag-to-play, HUD components
+- [ ] 13-05-PLAN.md — Full-screen layout, game log panel, zone viewers, WUBRG backgrounds
 
 ### Phase 14: Animation Pipeline
 **Goal**: Game state changes produce fluid visual feedback -- particles, floating numbers, screen shake, card reveals, targeting arcs, and death animations -- driven by an event-normalized animation queue
@@ -120,7 +122,7 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
-| 13. Foundation & Board Layout | v1.1 | 0/3 | Not started | - |
+| 13. Foundation & Board Layout | v1.1 | 0/5 | Not started | - |
 | 14. Animation Pipeline | v1.1 | 0/3 | Not started | - |
 | 15. Game Loop & Controllers | v1.1 | 0/1 | Not started | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
