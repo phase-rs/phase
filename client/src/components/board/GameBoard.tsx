@@ -2,25 +2,8 @@ import { useMemo } from "react";
 
 import type { GameObject } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { partitionByType, groupByName } from "../../viewmodel/battlefieldProps.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
-
-function partitionByType(objects: GameObject[]) {
-  const creatures: number[] = [];
-  const lands: number[] = [];
-  const other: number[] = [];
-
-  for (const obj of objects) {
-    if (obj.card_types.core_types.includes("Land")) {
-      lands.push(obj.id);
-    } else if (obj.card_types.core_types.includes("Creature")) {
-      creatures.push(obj.id);
-    } else {
-      other.push(obj.id);
-    }
-  }
-
-  return { creatures, lands, other };
-}
 
 export function GameBoard() {
   const gameState = useGameStore((s) => s.gameState);
@@ -39,9 +22,22 @@ export function GameBoard() {
       (obj) => obj.controller === 1,
     );
 
+    const partitionAndGroup = (objects: GameObject[]) => {
+      const partition = partitionByType(objects);
+      const objectMap = new Map(objects.map((o) => [o.id, o]));
+      const resolveObjects = (ids: number[]) =>
+        ids.map((id) => objectMap.get(id)).filter(Boolean) as GameObject[];
+
+      return {
+        creatures: groupByName(resolveObjects(partition.creatures)),
+        lands: groupByName(resolveObjects(partition.lands)),
+        other: groupByName(resolveObjects(partition.other)),
+      };
+    };
+
     return {
-      player: partitionByType(playerObjects),
-      opponent: partitionByType(opponentObjects),
+      player: partitionAndGroup(playerObjects),
+      opponent: partitionAndGroup(opponentObjects),
     };
   }, [gameState]);
 
@@ -59,9 +55,9 @@ export function GameBoard() {
       <div className="flex flex-col gap-1 border-b border-gray-800 py-1">
         {opponent && (
           <>
-            <BattlefieldRow objectIds={opponent.other} rowType="other" />
-            <BattlefieldRow objectIds={opponent.creatures} rowType="creatures" />
-            <BattlefieldRow objectIds={opponent.lands} rowType="lands" />
+            <BattlefieldRow groups={opponent.other} rowType="other" />
+            <BattlefieldRow groups={opponent.creatures} rowType="creatures" />
+            <BattlefieldRow groups={opponent.lands} rowType="lands" />
           </>
         )}
       </div>
@@ -77,9 +73,9 @@ export function GameBoard() {
       <div className="flex flex-col gap-1 border-t border-gray-800 py-1">
         {player && (
           <>
-            <BattlefieldRow objectIds={player.other} rowType="other" />
-            <BattlefieldRow objectIds={player.creatures} rowType="creatures" />
-            <BattlefieldRow objectIds={player.lands} rowType="lands" />
+            <BattlefieldRow groups={player.other} rowType="other" />
+            <BattlefieldRow groups={player.creatures} rowType="creatures" />
+            <BattlefieldRow groups={player.lands} rowType="lands" />
           </>
         )}
       </div>
