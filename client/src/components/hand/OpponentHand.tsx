@@ -10,12 +10,16 @@ export function OpponentHand() {
   if (cardCount === 0) return null;
 
   return (
-    <div className="flex items-center justify-center gap-1 border-b border-gray-800 bg-gray-900/80 px-4 py-2">
+    <div className="flex items-center justify-center px-4 py-1">
       {Array.from({ length: cardCount }, (_, i) => (
         <div
           key={i}
-          className="h-[var(--card-h)] w-[var(--card-w)] rounded-lg border border-gray-600 bg-gradient-to-br from-gray-800 via-gray-700 to-gray-800 shadow-md"
-          style={{ marginLeft: i > 0 ? "-12px" : undefined }}
+          className="rounded-lg border border-gray-600 bg-gradient-to-br from-gray-800 via-gray-700 to-gray-800 shadow-md"
+          style={{
+            width: "calc(var(--card-w) * 0.6)",
+            height: "calc(var(--card-h) * 0.6)",
+            marginLeft: i > 0 ? "-14px" : undefined,
+          }}
         >
           <div className="flex h-full items-center justify-center">
             <div className="h-[70%] w-[70%] rounded border border-gray-500 bg-gradient-to-br from-amber-900/40 via-amber-800/30 to-amber-900/40" />
