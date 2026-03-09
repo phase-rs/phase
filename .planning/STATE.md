@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 13-04-PLAN.md
-last_updated: "2026-03-09T01:02:44Z"
+stopped_at: Completed 13-05-PLAN.md
+last_updated: "2026-03-09T01:55:25.659Z"
 last_activity: 2026-03-09 — Completed 13-04 hand fan and HUD components
 progress:
   total_phases: 5
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 4
+  completed_plans: 5
   percent: 80
 ---
 
@@ -47,6 +47,7 @@ Progress: [████████░░] 80%
 | Phase 13 P01 | 5min | 2 tasks | 11 files |
 | Phase 13 P03 | 2min | 2 tasks | 5 files |
 | Phase 13 P04 | 3min | 2 tasks | 6 files |
+| Phase 13 P05 | 49min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -65,6 +66,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 13-03]: Attachment tuck uses 15px offset per attachment with marginTop reservation
 - [Phase 13-04]: All hand cards highlighted as playable when player has priority (engine legal action filtering deferred)
 - [Phase 13-04]: HUD layout toggle between inline and floating via preferencesStore hudLayout
+- [Phase 13-05]: GameLogPanel reads eventHistory (cumulative) for full game log
+- [Phase 13-05]: WUBRG background gradients use subtle opacity to avoid overwhelming battlefield
+- [Phase 13-05]: Module-level empty array constants for Zustand selectors prevent re-render loops
 
 ### Blockers/Concerns
 
@@ -79,5 +83,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 13-04 hand fan and HUD components
-Stopped at: Completed 13-04-PLAN.md
+Stopped at: Completed 13-05-PLAN.md
 Resume file: None

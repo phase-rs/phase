@@ -89,13 +89,13 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Zones
 
-- [ ] **ZONE-01**: Graveyard viewer modal displays all cards in graveyard with scrolling
-- [ ] **ZONE-02**: Exile zone viewer displays exiled cards
-- [ ] **ZONE-03**: Zone card counts display on zone indicators (e.g. "Graveyard (7)")
+- [x] **ZONE-01**: Graveyard viewer modal displays all cards in graveyard with scrolling
+- [x] **ZONE-02**: Exile zone viewer displays exiled cards
+- [x] **ZONE-03**: Zone card counts display on zone indicators (e.g. "Graveyard (7)")
 
 ### Game Log
 
-- [ ] **LOG-01**: Scrollable game log panel displays game events in chronological order
+- [x] **LOG-01**: Scrollable game log panel displays game events in chronological order
 - [x] **LOG-02**: Log entries are color-coded by event type (combat, spells, life changes, etc.)
 - [x] **LOG-03**: Log verbosity is filterable (full/compact/minimal)
 
@@ -160,10 +160,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HUD-01 | Phase 13 | Complete |
 | HUD-02 | Phase 13 | Complete |
 | HUD-03 | Phase 13 | Complete |
-| ZONE-01 | Phase 13 | Pending |
-| ZONE-02 | Phase 13 | Pending |
-| ZONE-03 | Phase 13 | Pending |
-| LOG-01 | Phase 13 | Pending |
+| ZONE-01 | Phase 13 | Complete |
+| ZONE-02 | Phase 13 | Complete |
+| ZONE-03 | Phase 13 | Complete |
+| LOG-01 | Phase 13 | Complete |
 | LOG-02 | Phase 13 | Complete |
 | LOG-03 | Phase 13 | Complete |
 | INTEG-01 | Phase 13 | Complete |
