@@ -52,9 +52,11 @@ pub enum WaitingFor {
     },
     DeclareAttackers {
         player: PlayerId,
+        valid_attacker_ids: Vec<ObjectId>,
     },
     DeclareBlockers {
         player: PlayerId,
+        valid_blocker_ids: Vec<ObjectId>,
     },
     GameOver {
         winner: Option<PlayerId>,
@@ -333,6 +335,14 @@ mod tests {
             WaitingFor::ManaPayment {
                 player: PlayerId(0),
             },
+            WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                valid_attacker_ids: vec![],
+            },
+            WaitingFor::DeclareBlockers {
+                player: PlayerId(0),
+                valid_blocker_ids: vec![],
+            },
             WaitingFor::GameOver {
                 winner: Some(PlayerId(0)),
             },
@@ -341,7 +351,7 @@ mod tests {
                 candidate_count: 2,
             },
         ];
-        assert_eq!(variants.len(), 6);
+        assert_eq!(variants.len(), 8);
     }
 
     #[test]

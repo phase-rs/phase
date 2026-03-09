@@ -100,7 +100,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                 .map_err(|e| EngineError::InvalidAction(e))?
         }
         (
-            WaitingFor::DeclareAttackers { player },
+            WaitingFor::DeclareAttackers { player, .. },
             GameAction::DeclareAttackers { attacker_ids },
         ) => {
             if state.active_player != *player {
@@ -127,7 +127,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                 turns::auto_advance(state, &mut events)
             }
         }
-        (WaitingFor::DeclareBlockers { player }, GameAction::DeclareBlockers { assignments }) => {
+        (WaitingFor::DeclareBlockers { player, .. }, GameAction::DeclareBlockers { assignments }) => {
             let defending = PlayerId(1 - state.active_player.0);
             if defending != *player {
                 return Err(EngineError::WrongPlayer);

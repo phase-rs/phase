@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::game::filter::{object_matches_filter, player_matches_filter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -222,94 +223,16 @@ fn static_filter_matches(
     filter: &str,
     source_id: ObjectId,
 ) -> bool {
-    // If we have a target_id, check if it matches the filter
     if let Some(target_id) = context.target_id {
-        return object_matches_static_filter(state, target_id, filter, source_id);
+        return object_matches_filter(state, target_id, filter, source_id);
     }
 
-    // If we have a player_id, check player-based filters
     if let Some(player_id) = context.player_id {
         let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-        for part in filter.split('.') {
-            match part {
-                "You" => {
-                    if source_controller != Some(player_id) {
-                        return false;
-                    }
-                }
-                "Opp" => {
-                    if source_controller == Some(player_id) {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
-        }
-        return true;
+        return player_matches_filter(player_id, filter, source_controller);
     }
 
     // No specific target -- matches by default
-    true
-}
-
-/// Check if an object matches a static ability filter (similar to layer filter).
-fn object_matches_static_filter(
-    state: &GameState,
-    object_id: ObjectId,
-    filter: &str,
-    source_id: ObjectId,
-) -> bool {
-    use crate::types::card_type::CoreType;
-
-    let obj = match state.objects.get(&object_id) {
-        Some(o) => o,
-        None => return false,
-    };
-
-    for part in filter.split('.') {
-        match part {
-            "Creature" => {
-                if !obj.card_types.core_types.contains(&CoreType::Creature) {
-                    return false;
-                }
-            }
-            "Land" => {
-                if !obj.card_types.core_types.contains(&CoreType::Land) {
-                    return false;
-                }
-            }
-            "Artifact" => {
-                if !obj.card_types.core_types.contains(&CoreType::Artifact) {
-                    return false;
-                }
-            }
-            "Enchantment" => {
-                if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
-                    return false;
-                }
-            }
-            "Card" | "Permanent" | "Any" => {}
-            "YouCtrl" => {
-                let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-                if source_controller != Some(obj.controller) {
-                    return false;
-                }
-            }
-            "OppCtrl" => {
-                let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-                if source_controller == Some(obj.controller) {
-                    return false;
-                }
-            }
-            "Self" => {
-                if object_id != source_id {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-
     true
 }
 

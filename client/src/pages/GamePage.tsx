@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
+import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
@@ -201,6 +202,7 @@ function GamePageContent({
 
   return (
     <div ref={containerRef} className="relative h-screen w-screen overflow-hidden bg-gray-950">
+      <BattlefieldBackground />
       <StackDisplay />
 
       {/* Reconnecting banner */}

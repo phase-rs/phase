@@ -5,6 +5,7 @@ pub mod coverage;
 pub mod deck_loading;
 pub mod effects;
 pub mod engine;
+pub mod filter;
 pub mod game_object;
 pub mod keywords;
 pub mod layers;

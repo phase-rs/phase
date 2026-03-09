@@ -163,8 +163,8 @@ fn search_value(
     // Determine if this is a maximizing or minimizing node
     let is_maximizing = match &state.waiting_for {
         WaitingFor::Priority { player } => *player == ai_player,
-        WaitingFor::DeclareAttackers { player } => *player == ai_player,
-        WaitingFor::DeclareBlockers { player } => *player == ai_player,
+        WaitingFor::DeclareAttackers { player, .. } => *player == ai_player,
+        WaitingFor::DeclareBlockers { player, .. } => *player == ai_player,
         WaitingFor::MulliganDecision { player, .. } => *player == ai_player,
         _ => true,
     };

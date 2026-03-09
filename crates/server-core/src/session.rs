@@ -141,8 +141,8 @@ impl SessionManager {
             WaitingFor::MulliganBottomCards { player, .. } => *player,
             WaitingFor::ManaPayment { player } => *player,
             WaitingFor::TargetSelection { player, .. } => *player,
-            WaitingFor::DeclareAttackers { player } => *player,
-            WaitingFor::DeclareBlockers { player } => *player,
+            WaitingFor::DeclareAttackers { player, .. } => *player,
+            WaitingFor::DeclareBlockers { player, .. } => *player,
             WaitingFor::ReplacementChoice { player, .. } => *player,
             WaitingFor::GameOver { .. } => {
                 return Err("Game is over".to_string());

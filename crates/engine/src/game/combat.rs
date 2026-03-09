@@ -349,6 +349,54 @@ pub fn has_summoning_sickness(obj: &GameObject, turn_number: u32) -> bool {
     obj.entered_battlefield_turn.map_or(false, |etb| etb >= turn_number)
 }
 
+/// Return the IDs of all creatures the active player could legally declare as attackers.
+pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
+    let active = state.active_player;
+    let turn = state.turn_number;
+
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| {
+            let obj = state.objects.get(id)?;
+            if obj.controller == active
+                && obj.card_types.core_types.contains(&CoreType::Creature)
+                && !obj.tapped
+                && !obj.has_keyword(&Keyword::Defender)
+                && (obj.has_keyword(&Keyword::Haste)
+                    || obj.entered_battlefield_turn.map_or(false, |etb| etb < turn))
+            {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Return the IDs of all creatures the defending player could legally assign as blockers.
+/// A creature is a valid blocker if it's an untapped creature controlled by the defending player.
+/// (Per-attacker blocking restrictions like Flying are checked during validate_blockers.)
+pub fn get_valid_blocker_ids(state: &GameState) -> Vec<ObjectId> {
+    let defending = PlayerId(1 - state.active_player.0);
+
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| {
+            let obj = state.objects.get(id)?;
+            if obj.controller == defending
+                && obj.card_types.core_types.contains(&CoreType::Creature)
+                && !obj.tapped
+            {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Check if the active player controls any creatures that could legally attack.
 pub fn has_potential_attackers(state: &GameState) -> bool {
     let active = state.active_player;

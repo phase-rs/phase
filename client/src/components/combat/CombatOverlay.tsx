@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -22,7 +22,14 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
   const assignBlocker = useUiStore((s) => s.assignBlocker);
   const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
 
-  const gameState = useGameStore((s) => s.gameState);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const combatAttackers = useGameStore(
+    (s) => s.gameState?.combat?.attackers,
+  );
+  const combatAttackerIds = useMemo(
+    () => combatAttackers?.map((a) => a.object_id) ?? [],
+    [combatAttackers],
+  );
 
   // Blocker mode: track which blocker is pending assignment
   const [pendingBlocker, setPendingBlocker] = useState<ObjectId | null>(null);
@@ -34,50 +41,35 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
     };
   }, [mode, setCombatMode, clearCombatSelection]);
 
-  // Compute valid attacker IDs (player 0's untapped creatures on battlefield)
-  const validAttackerIds = (() => {
-    if (!gameState) return [];
-    const ids: ObjectId[] = [];
-    for (const idStr of gameState.battlefield) {
-      const obj = gameState.objects[idStr];
-      if (
-        obj &&
-        obj.controller === 0 &&
-        obj.card_types.core_types.includes("Creature") &&
-        !obj.tapped
-      ) {
-        ids.push(obj.id);
-      }
-    }
-    return ids;
-  })();
+  // Valid attacker IDs from engine
+  const validAttackerIds =
+    waitingFor?.type === "DeclareAttackers"
+      ? (waitingFor.data.valid_attacker_ids ?? [])
+      : [];
+
+  // Valid blocker IDs from engine
+  const validBlockerIds =
+    waitingFor?.type === "DeclareBlockers"
+      ? (waitingFor.data.valid_blocker_ids ?? [])
+      : [];
 
   // Register blocker click handler
   const handleBlockerClick = useCallback(
     (objectId: ObjectId) => {
-      if (!gameState) return;
-
       if (pendingBlocker === null) {
-        // First click: select a blocker (player 0's creature on battlefield)
-        const obj = gameState.objects[objectId];
-        if (
-          obj &&
-          obj.controller === 0 &&
-          obj.card_types.core_types.includes("Creature")
-        ) {
+        // First click: select a valid blocker (engine-validated)
+        if (validBlockerIds.includes(objectId)) {
           setPendingBlocker(objectId);
         }
       } else {
-        // Second click: assign to an attacker (opponent's attacking creature)
-        const attackers =
-          gameState.combat?.attackers.map((a) => a.object_id) ?? [];
-        if (attackers.includes(objectId)) {
+        // Second click: assign to an attacker
+        if (combatAttackerIds.includes(objectId)) {
           assignBlocker(pendingBlocker, objectId);
           setPendingBlocker(null);
         }
       }
     },
-    [pendingBlocker, gameState, assignBlocker],
+    [pendingBlocker, validBlockerIds, combatAttackerIds, assignBlocker],
   );
 
   useEffect(() => {

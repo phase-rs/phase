@@ -1,37 +1,12 @@
-import { useMemo, useRef } from "react";
+import { useMemo } from "react";
 
-import type { GameObject, ManaColor } from "../../adapter/types.ts";
+import type { GameObject } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import type { BoardBackground } from "../../stores/preferencesStore.ts";
 import { partitionByType, groupByName } from "../../viewmodel/battlefieldProps.ts";
-import { getDominantManaColor } from "../../viewmodel/dominantColor.ts";
-import { BATTLEFIELD_MAP, getRandomBattlefield } from "./battlefields.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
-
-function resolveBattlefieldImage(
-  boardBackground: BoardBackground,
-  dominantColor: ManaColor | null,
-  autoRef: React.RefObject<string | null>,
-): string | null {
-  if (boardBackground === "none") return null;
-
-  if (boardBackground === "auto-wubrg") {
-    if (!dominantColor) return null;
-    // Persist auto-selected battlefield for session to avoid flickering
-    if (!autoRef.current) {
-      autoRef.current = getRandomBattlefield(dominantColor).image;
-    }
-    return autoRef.current;
-  }
-
-  return BATTLEFIELD_MAP[boardBackground]?.image ?? null;
-}
 
 export function GameBoard() {
   const gameState = useGameStore((s) => s.gameState);
-  const boardBackground = usePreferencesStore((s) => s.boardBackground);
-  const autoImageRef = useRef<string | null>(null);
 
   const { opponent, player } = useMemo(() => {
     if (!gameState) return { opponent: null, player: null };
@@ -66,13 +41,6 @@ export function GameBoard() {
     };
   }, [gameState]);
 
-  const dominantColor = useMemo(() => {
-    if (!gameState) return null;
-    return getDominantManaColor(gameState.battlefield, gameState.objects, 0);
-  }, [gameState]);
-
-  const bgImage = resolveBattlefieldImage(boardBackground, dominantColor, autoImageRef);
-
   if (!gameState) {
     return (
       <div className="flex flex-1 items-center justify-center">
@@ -83,19 +51,6 @@ export function GameBoard() {
 
   return (
     <div className="relative flex flex-1 flex-col">
-      {/* Background image layer */}
-      {bgImage ? (
-        <div
-          className="absolute inset-0 bg-cover bg-center"
-          style={{ backgroundImage: `url(${bgImage})` }}
-        >
-          {/* Dark overlay so cards remain readable */}
-          <div className="absolute inset-0 bg-black/40" />
-        </div>
-      ) : (
-        <div className="absolute inset-0 bg-gray-950" />
-      )}
-
       {/* Opponent's battlefield (mirrored: lands at top, creatures middle, other nearest center) */}
       <div className="relative flex flex-col gap-1 border-b border-white/10 bg-black/20 px-3 py-2">
         {opponent && (

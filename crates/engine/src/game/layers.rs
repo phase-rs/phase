@@ -4,6 +4,7 @@ use std::str::FromStr;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 
+use crate::game::filter::object_matches_filter;
 use crate::game::game_object::CounterType;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
@@ -337,79 +338,6 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     }
 }
 
-/// Check if an object matches a Forge-style dot-separated filter.
-/// Replicates the logic from triggers.rs card_matches_filter.
-fn object_matches_filter(
-    state: &GameState,
-    object_id: ObjectId,
-    filter: &str,
-    source_id: ObjectId,
-) -> bool {
-    if filter.is_empty() {
-        return true;
-    }
-
-    let obj = match state.objects.get(&object_id) {
-        Some(o) => o,
-        None => return false,
-    };
-
-    for part in filter.split('.') {
-        match part {
-            "Creature" => {
-                if !obj.card_types.core_types.contains(&CoreType::Creature) {
-                    return false;
-                }
-            }
-            "Land" => {
-                if !obj.card_types.core_types.contains(&CoreType::Land) {
-                    return false;
-                }
-            }
-            "Artifact" => {
-                if !obj.card_types.core_types.contains(&CoreType::Artifact) {
-                    return false;
-                }
-            }
-            "Enchantment" => {
-                if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
-                    return false;
-                }
-            }
-            "Planeswalker" => {
-                if !obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                    return false;
-                }
-            }
-            "Card" | "Permanent" | "Any" => {}
-            "YouCtrl" => {
-                let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-                if source_controller != Some(obj.controller) {
-                    return false;
-                }
-            }
-            "OppCtrl" => {
-                let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-                if source_controller == Some(obj.controller) {
-                    return false;
-                }
-            }
-            "Self" => {
-                if object_id != source_id {
-                    return false;
-                }
-            }
-            "Other" => {
-                if object_id == source_id {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    true
-}
 
 #[cfg(test)]
 mod tests {

@@ -24,8 +24,8 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
         }
         WaitingFor::ManaPayment { player } => mana_payment_actions(state, *player),
         WaitingFor::TargetSelection { player, .. } => target_selection_actions(state, *player),
-        WaitingFor::DeclareAttackers { player } => attacker_actions(state, *player),
-        WaitingFor::DeclareBlockers { player } => blocker_actions(state, *player),
+        WaitingFor::DeclareAttackers { player, .. } => attacker_actions(state, *player),
+        WaitingFor::DeclareBlockers { player, .. } => blocker_actions(state, *player),
         WaitingFor::ReplacementChoice {
             candidate_count, ..
         } => (0..*candidate_count)
@@ -666,6 +666,7 @@ mod tests {
         let mut state = make_state();
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
+            valid_attacker_ids: vec![],
         };
         add_creature_to_battlefield(&mut state, PlayerId(0), "Bear", 2, 2);
         let actions = get_legal_actions(&state);
@@ -679,6 +680,7 @@ mod tests {
         let mut state = make_state();
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
+            valid_attacker_ids: vec![],
         };
         let id = add_creature_to_battlefield(&mut state, PlayerId(0), "Bear", 2, 2);
         let actions = get_legal_actions(&state);
@@ -693,6 +695,7 @@ mod tests {
         let mut state = make_state();
         state.waiting_for = WaitingFor::DeclareBlockers {
             player: PlayerId(1),
+            valid_blocker_ids: vec![],
         };
         let actions = get_legal_actions(&state);
         assert!(actions.contains(&GameAction::DeclareBlockers {

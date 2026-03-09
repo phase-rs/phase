@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use crate::game::filter::object_matches_filter;
 use crate::types::ability::{ResolvedAbility, TriggerDefinition};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -398,7 +399,7 @@ fn match_changes_zone(
             }
         }
         if let Some(filter) = params.get("ValidCard") {
-            if !card_matches_filter(state, *object_id, filter, source_id) {
+            if !object_matches_filter(state, *object_id, filter, source_id) {
                 return false;
             }
         }
@@ -432,7 +433,7 @@ fn match_damage_done(
     {
         // Check if trigger requires damage from a specific source
         if let Some(filter) = params.get("ValidSource") {
-            if !card_matches_filter(state, *dmg_source, filter, source_id) {
+            if !object_matches_filter(state, *dmg_source, filter, source_id) {
                 return false;
             }
         }
@@ -470,7 +471,7 @@ fn match_spell_cast(
                 .find(|(_, obj)| obj.card_id == *card_id)
                 .map(|(id, _)| *id);
             if let Some(oid) = obj_id {
-                if !card_matches_filter(state, oid, filter, source_id) {
+                if !object_matches_filter(state, oid, filter, source_id) {
                     return false;
                 }
             }
@@ -509,7 +510,7 @@ fn match_attacks(
         if let Some(filter) = params.get("ValidCard") {
             attacker_ids
                 .iter()
-                .any(|id| card_matches_filter(state, *id, filter, source_id))
+                .any(|id| object_matches_filter(state, *id, filter, source_id))
         } else {
             // No filter: trigger if source itself is among attackers
             attacker_ids.contains(&source_id)
@@ -559,7 +560,7 @@ fn match_countered(
 ) -> bool {
     if let GameEvent::SpellCountered { object_id, .. } = event {
         if let Some(filter) = params.get("ValidCard") {
-            card_matches_filter(state, *object_id, filter, source_id)
+            object_matches_filter(state, *object_id, filter, source_id)
         } else {
             true
         }
@@ -586,7 +587,7 @@ fn match_counter_added(
             }
         }
         if let Some(filter) = params.get("ValidCard") {
-            if !card_matches_filter(state, *object_id, filter, source_id) {
+            if !object_matches_filter(state, *object_id, filter, source_id) {
                 return false;
             }
         }
@@ -614,7 +615,7 @@ fn match_counter_removed(
             }
         }
         if let Some(filter) = params.get("ValidCard") {
-            if !card_matches_filter(state, *object_id, filter, source_id) {
+            if !object_matches_filter(state, *object_id, filter, source_id) {
                 return false;
             }
         }
@@ -632,7 +633,7 @@ fn match_taps(
 ) -> bool {
     if let GameEvent::PermanentTapped { object_id } = event {
         if let Some(filter) = params.get("ValidCard") {
-            card_matches_filter(state, *object_id, filter, source_id)
+            object_matches_filter(state, *object_id, filter, source_id)
         } else {
             *object_id == source_id
         }
@@ -649,7 +650,7 @@ fn match_untaps(
 ) -> bool {
     if let GameEvent::PermanentUntapped { object_id } = event {
         if let Some(filter) = params.get("ValidCard") {
-            card_matches_filter(state, *object_id, filter, source_id)
+            object_matches_filter(state, *object_id, filter, source_id)
         } else {
             *object_id == source_id
         }
@@ -742,7 +743,7 @@ fn match_discarded(
     } = event
     {
         if let Some(filter) = params.get("ValidCard") {
-            if !card_matches_filter(state, *object_id, filter, source_id) {
+            if !object_matches_filter(state, *object_id, filter, source_id) {
                 return false;
             }
         }
@@ -768,7 +769,7 @@ fn match_sacrificed(
 ) -> bool {
     if let GameEvent::PermanentSacrificed { object_id, .. } = event {
         if let Some(filter) = params.get("ValidCard") {
-            card_matches_filter(state, *object_id, filter, source_id)
+            object_matches_filter(state, *object_id, filter, source_id)
         } else {
             true
         }
@@ -785,7 +786,7 @@ fn match_destroyed(
 ) -> bool {
     if let GameEvent::CreatureDestroyed { object_id } = event {
         if let Some(filter) = params.get("ValidCard") {
-            card_matches_filter(state, *object_id, filter, source_id)
+            object_matches_filter(state, *object_id, filter, source_id)
         } else {
             true
         }
@@ -847,7 +848,7 @@ fn match_becomes_target(
 ) -> bool {
     if let GameEvent::BecomesTarget { object_id, .. } = event {
         if let Some(filter) = params.get("ValidCard") {
-            card_matches_filter(state, *object_id, filter, source_id)
+            object_matches_filter(state, *object_id, filter, source_id)
         } else {
             *object_id == source_id
         }
@@ -864,7 +865,7 @@ fn match_land_played(
 ) -> bool {
     if let GameEvent::LandPlayed { object_id, .. } = event {
         if let Some(filter) = params.get("ValidCard") {
-            card_matches_filter(state, *object_id, filter, source_id)
+            object_matches_filter(state, *object_id, filter, source_id)
         } else {
             true
         }
@@ -911,86 +912,7 @@ fn zone_matches(param: &str, zone: &Zone) -> bool {
     }
 }
 
-/// Basic card filter matching for ValidCard params.
-/// Parse Forge-style dot-separated qualifiers.
-fn card_matches_filter(
-    state: &GameState,
-    object_id: ObjectId,
-    filter: &str,
-    source_id: ObjectId,
-) -> bool {
-    let obj = match state.objects.get(&object_id) {
-        Some(o) => o,
-        None => return false,
-    };
 
-    for part in filter.split('.') {
-        match part {
-            // Type checks
-            "Creature" => {
-                if !obj.card_types.core_types.contains(&CoreType::Creature) {
-                    return false;
-                }
-            }
-            "Land" => {
-                if !obj.card_types.core_types.contains(&CoreType::Land) {
-                    return false;
-                }
-            }
-            "Artifact" => {
-                if !obj.card_types.core_types.contains(&CoreType::Artifact) {
-                    return false;
-                }
-            }
-            "Enchantment" => {
-                if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
-                    return false;
-                }
-            }
-            "Instant" => {
-                if !obj.card_types.core_types.contains(&CoreType::Instant) {
-                    return false;
-                }
-            }
-            "Sorcery" => {
-                if !obj.card_types.core_types.contains(&CoreType::Sorcery) {
-                    return false;
-                }
-            }
-            "Planeswalker" => {
-                if !obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                    return false;
-                }
-            }
-            "Card" | "Permanent" | "Any" => {
-                // Matches anything
-            }
-            // Controller checks
-            "YouCtrl" => {
-                let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
-                if trigger_controller != Some(obj.controller) {
-                    return false;
-                }
-            }
-            "OppCtrl" => {
-                let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
-                if trigger_controller == Some(obj.controller) {
-                    return false;
-                }
-            }
-            // Self-reference
-            "Self" => {
-                if object_id != source_id {
-                    return false;
-                }
-            }
-            // Other (unrecognized) -- permissive fallback
-            _ => {}
-        }
-    }
-
-    true
-}
 
 #[cfg(test)]
 pub mod tests {
@@ -1226,10 +1148,10 @@ pub mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        assert!(card_matches_filter(&state, id, "Creature", ObjectId(99)));
-        assert!(!card_matches_filter(&state, id, "Land", ObjectId(99)));
-        assert!(card_matches_filter(&state, id, "Card", ObjectId(99)));
-        assert!(card_matches_filter(&state, id, "Any", ObjectId(99)));
+        assert!(object_matches_filter(&state, id, "Creature", ObjectId(99)));
+        assert!(!object_matches_filter(&state, id, "Land", ObjectId(99)));
+        assert!(object_matches_filter(&state, id, "Card", ObjectId(99)));
+        assert!(object_matches_filter(&state, id, "Any", ObjectId(99)));
     }
 
     #[test]
@@ -1271,13 +1193,13 @@ pub mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        assert!(card_matches_filter(
+        assert!(object_matches_filter(
             &state,
             target,
             "Creature.YouCtrl",
             source
         ));
-        assert!(!card_matches_filter(
+        assert!(!object_matches_filter(
             &state,
             opp_target,
             "Creature.YouCtrl",
@@ -1295,7 +1217,7 @@ pub mod tests {
             "Card".to_string(),
             Zone::Battlefield,
         );
-        assert!(card_matches_filter(&state, obj, "Card.Self", obj));
+        assert!(object_matches_filter(&state, obj, "Card.Self", obj));
         let other = create_object(
             &mut state,
             CardId(2),
@@ -1303,7 +1225,7 @@ pub mod tests {
             "Other".to_string(),
             Zone::Battlefield,
         );
-        assert!(!card_matches_filter(&state, obj, "Card.Self", other));
+        assert!(!object_matches_filter(&state, obj, "Card.Self", other));
     }
 
     #[test]
