@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Phase 15 context gathered
-last_updated: "2026-03-09T04:19:25.570Z"
-last_activity: 2026-03-09 — Completed 14-04 animation pipeline integration
+stopped_at: Completed 15-01-PLAN.md
+last_updated: "2026-03-09T04:41:59.908Z"
+last_activity: 2026-03-09 — Completed 15-01 foundation modules
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 9
-  completed_plans: 9
-  percent: 90
+  total_plans: 12
+  completed_plans: 10
+  percent: 83
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 14 - Animation Pipeline
+**Current focus:** Phase 15 - Game Loop & Controllers
 
 ## Current Position
 
-Phase: 14 of 17 (Animation Pipeline)
-Plan: 4 of 4 in current phase
+Phase: 15 of 17 (Game Loop & Controllers)
+Plan: 1 of 3 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 14-04 animation pipeline integration
+Last activity: 2026-03-09 — Completed 15-01 foundation modules
 
-Progress: [█████████░] 90%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
@@ -53,6 +53,8 @@ Progress: [█████████░] 90%
 | Phase 14 P02 | 3min | 2 tasks | 5 files |
 | Phase 14 P03 | 3min | 2 tasks | 8 files |
 | Phase 14 P04 | 2min | 2 tasks | 5 files |
+| 15-game-loop-controllers | 1/3 | 2min | 2min |
+| Phase 15 P01 | 2min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -86,6 +88,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 14-04]: Death clones use card name text overlay, not full card images
 - [Phase 14-04]: Screen shake only at full VFX quality to avoid motion sickness
 - [Phase 14-04]: getObjectPosition checks snapshot first, then live registry
+- [Phase 15-01]: Module-level boolean mutex replaces useRef for dispatch pipeline
+- [Phase 15-01]: AI controller reads gameStore directly instead of injected callbacks
+- [Phase 15-01]: Auto-pass conservative heuristic: stops when player has mana + instants/flash/abilities
 
 ### Blockers/Concerns
 
@@ -99,6 +104,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 14-04 animation pipeline integration
-Stopped at: Phase 15 context gathered
-Resume file: .planning/phases/15-game-loop-controllers/15-CONTEXT.md
+Last activity: 2026-03-09 - Completed 15-01 foundation modules
+Stopped at: Completed 15-01-PLAN.md
+Resume file: None

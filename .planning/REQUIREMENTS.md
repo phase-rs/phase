@@ -62,10 +62,10 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Game Loop
 
-- [ ] **LOOP-01**: OpponentController abstraction supports AI (via WASM) and network (via WebSocket) opponents
+- [x] **LOOP-01**: OpponentController abstraction supports AI (via WASM) and network (via WebSocket) opponents
 - [ ] **LOOP-02**: useGameLoop hook auto-advances game phases, waits for animations, and delegates to controller
 - [ ] **LOOP-03**: GameDispatchProvider context provides dispatch + controller to all components (no prop drilling)
-- [ ] **LOOP-04**: Auto-priority-pass skips trivial priority windows (e.g. upkeep with no triggers, empty stack)
+- [x] **LOOP-04**: Auto-priority-pass skips trivial priority windows (e.g. upkeep with no triggers, empty stack)
 
 ### Stack & Priority
 
@@ -183,10 +183,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | VFX-06 | Phase 14 | Complete |
 | VFX-07 | Phase 14 | Complete |
 | VFX-08 | Phase 14 | Complete |
-| LOOP-01 | Phase 15 | Pending |
+| LOOP-01 | Phase 15 | Complete |
 | LOOP-02 | Phase 15 | Pending |
 | LOOP-03 | Phase 15 | Pending |
-| LOOP-04 | Phase 15 | Pending |
+| LOOP-04 | Phase 15 | Complete |
 | AUDIO-01 | Phase 16 | Pending |
 | AUDIO-02 | Phase 16 | Pending |
 | AUDIO-03 | Phase 16 | Pending |
