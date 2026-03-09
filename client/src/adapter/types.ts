@@ -107,6 +107,7 @@ export interface GameObject {
   timestamp: number;
   entered_battlefield_turn: number | null;
   has_unimplemented_mechanics?: boolean;
+  has_summoning_sickness?: boolean;
 }
 
 // ── Player ───────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
+use super::game_object::GameObject;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
@@ -335,6 +336,17 @@ pub fn declare_blockers(
     });
 
     Ok(())
+}
+
+/// Check if a creature has summoning sickness (entered this turn without Haste).
+pub fn has_summoning_sickness(obj: &GameObject, turn_number: u32) -> bool {
+    if !obj.card_types.core_types.contains(&CoreType::Creature) {
+        return false;
+    }
+    if obj.has_keyword(&Keyword::Haste) {
+        return false;
+    }
+    obj.entered_battlefield_turn.map_or(false, |etb| etb >= turn_number)
 }
 
 /// Check if the active player controls any creatures that could legally attack.

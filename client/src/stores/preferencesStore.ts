@@ -7,14 +7,9 @@ import type { AnimationSpeed, VfxQuality } from "../animation/types";
 export type CardSizePreference = "small" | "medium" | "large";
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
-export type BoardBackground =
-  | "auto-wubrg"
-  | "white"
-  | "blue"
-  | "black"
-  | "red"
-  | "green"
-  | "none";
+/** "auto-wubrg" picks a random battlefield matching the dominant mana color.
+ *  "none" disables the background image. Any other string is a battlefield ID. */
+export type BoardBackground = "auto-wubrg" | "none" | (string & {});
 
 interface PreferencesState {
   cardSize: CardSizePreference;

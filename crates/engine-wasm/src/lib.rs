@@ -87,9 +87,12 @@ pub fn get_game_state() -> JsValue {
         let mut state_ref = gs.borrow_mut();
         match state_ref.as_mut() {
             Some(state) => {
+                let turn = state.turn_number;
                 for obj in state.objects.values_mut() {
                     obj.has_unimplemented_mechanics =
                         engine::game::coverage::has_unimplemented_mechanics(obj);
+                    obj.has_summoning_sickness =
+                        engine::game::combat::has_summoning_sickness(obj, turn);
                 }
                 serde_wasm_bindgen::to_value(state).unwrap()
             }

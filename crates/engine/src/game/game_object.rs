@@ -73,6 +73,11 @@ pub struct GameObject {
     // Coverage flag (computed for serialization, not persisted)
     #[serde(skip_deserializing, default)]
     pub has_unimplemented_mechanics: bool,
+
+    // Derived field: true when this creature can't attack/block due to summoning sickness.
+    // Computed before serialization, not persisted.
+    #[serde(skip_deserializing, default)]
+    pub has_summoning_sickness: bool,
 }
 
 impl GameObject {
@@ -112,6 +117,7 @@ impl GameObject {
             timestamp: 0,
             entered_battlefield_turn: None,
             has_unimplemented_mechanics: false,
+            has_summoning_sickness: false,
         }
     }
 

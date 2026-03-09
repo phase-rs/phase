@@ -6,8 +6,8 @@ import type {
   CardSizePreference,
   HudLayout,
   LogDefaultState,
-  BoardBackground,
 } from "../../stores/preferencesStore.ts";
+import { BATTLEFIELDS } from "../board/battlefields.ts";
 
 interface PreferencesModalProps {
   onClose: () => void;
@@ -18,13 +18,9 @@ const HUD_LAYOUTS: HudLayout[] = ["inline", "floating"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 const ANIMATION_SPEEDS: AnimationSpeed[] = ["slow", "normal", "fast", "instant"];
-const BOARD_BACKGROUNDS: { value: BoardBackground; label: string }[] = [
-  { value: "auto-wubrg", label: "Auto (WUBRG)" },
-  { value: "white", label: "White" },
-  { value: "blue", label: "Blue" },
-  { value: "black", label: "Black" },
-  { value: "red", label: "Red" },
-  { value: "green", label: "Green" },
+const BOARD_BACKGROUNDS: { value: string; label: string }[] = [
+  { value: "auto-wubrg", label: "Auto (match deck)" },
+  ...BATTLEFIELDS.map((bf) => ({ value: bf.id, label: `${bf.label} (${bf.color})` })),
   { value: "none", label: "None" },
 ];
 
@@ -108,7 +104,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
             <SettingGroup label="Board Background">
               <select
                 value={boardBackground}
-                onChange={(e) => setBoardBackground(e.target.value as BoardBackground)}
+                onChange={(e) => setBoardBackground(e.target.value)}
                 className="w-full rounded bg-gray-800 px-3 py-1.5 text-sm text-gray-200 ring-1 ring-gray-700 focus:outline-none focus:ring-cyan-500"
               >
                 {BOARD_BACKGROUNDS.map((bg) => (

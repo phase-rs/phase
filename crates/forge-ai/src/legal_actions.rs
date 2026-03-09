@@ -902,6 +902,7 @@ mod tests {
         state.waiting_for = WaitingFor::TargetSelection {
             player: PlayerId(0),
             pending_cast: pending,
+            legal_targets: vec![],
         };
         add_creature_to_battlefield(&mut state, PlayerId(1), "Bear", 2, 2);
         let actions = get_legal_actions(&state);

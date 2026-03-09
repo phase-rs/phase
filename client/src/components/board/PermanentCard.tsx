@@ -22,7 +22,7 @@ const ATTACHMENT_OFFSET_PX = 15;
 
 export function PermanentCard({ objectId }: PermanentCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
-  const turnNumber = useGameStore((s) => s.gameState?.turn_number ?? 0);
+
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
   const targetingMode = useUiStore((s) => s.targetingMode);
   const selectedTargets = useUiStore((s) => s.selectedTargets);
@@ -49,10 +49,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   if (!obj) return null;
 
   const isCreature = obj.card_types.core_types.includes("Creature");
-  const hasSummoningSickness =
-    isCreature &&
-    obj.entered_battlefield_turn === turnNumber &&
-    !obj.keywords.some((k) => k.toLowerCase() === "haste");
+  const hasSummoningSickness = obj.has_summoning_sickness ?? false;
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
