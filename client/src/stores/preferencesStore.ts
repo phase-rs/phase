@@ -45,7 +45,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       boardBackground: "auto-wubrg",
       vfxQuality: "full",
       animationSpeed: "normal",
-      phaseStops: ["PreCombatMain", "PostCombatMain", "DeclareBlockers"],
+      phaseStops: [],
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
