@@ -172,7 +172,7 @@ class AudioManager {
   private async loadBuffer(filename: string): Promise<void> {
     if (!this.ctx) return;
     try {
-      const response = await fetch(`/audio/sfx/${filename}.m4a`);
+      const response = await fetch(`/audio/sfx/${filename}.mp3`);
       const arrayBuffer = await response.arrayBuffer();
       const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
       this.sfxBuffers.set(filename, audioBuffer);
@@ -185,7 +185,7 @@ class AudioManager {
     if (!this.ctx || !this.musicGain) return;
 
     const trackName = this.trackOrder[this.trackIndex];
-    const audio = new Audio(`/audio/music/${trackName}.m4a`);
+    const audio = new Audio(`/audio/music/${trackName}.mp3`);
     const source = this.ctx.createMediaElementSource(audio);
     source.connect(this.musicGain);
 

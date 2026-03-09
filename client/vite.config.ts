@@ -14,7 +14,9 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       manifest: false, // Use public/manifest.json
+      includeAssets: ["**/*.{mp3,json}"],
       workbox: {
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/api\.scryfall\.com\//,
