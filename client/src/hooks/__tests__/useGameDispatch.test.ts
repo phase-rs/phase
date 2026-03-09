@@ -30,6 +30,7 @@ const mockAdapter = {
   initializeGame: vi.fn(),
   submitAction: vi.fn().mockResolvedValue(mockEvents),
   getState: vi.fn().mockResolvedValue(mockState),
+  getLegalActions: vi.fn().mockResolvedValue([]),
   restoreState: vi.fn(),
   dispose: vi.fn(),
 };

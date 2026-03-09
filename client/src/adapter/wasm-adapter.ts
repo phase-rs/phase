@@ -4,10 +4,37 @@ import init, {
   initialize_game,
   submit_action,
   get_game_state,
+  get_legal_actions_js,
   restore_game_state,
 } from "../wasm/engine_wasm";
 import type { EngineAdapter, GameAction, GameEvent, GameState } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+
+/**
+ * serde_wasm_bindgen serializes Rust HashMap<NonStringKey, V> as JS Map.
+ * The frontend expects plain objects with bracket access, so we recursively
+ * convert any Map instances to plain Record<string, V>.
+ */
+function convertMapsToRecords(value: unknown): unknown {
+  if (value instanceof Map) {
+    const obj: Record<string, unknown> = {};
+    for (const [k, v] of value) {
+      obj[String(k)] = convertMapsToRecords(v);
+    }
+    return obj;
+  }
+  if (Array.isArray(value)) {
+    return value.map(convertMapsToRecords);
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = convertMapsToRecords(v);
+    }
+    return out;
+  }
+  return value;
+}
 
 /**
  * WASM-backed implementation of EngineAdapter.
@@ -32,6 +59,15 @@ export class WasmAdapter implements EngineAdapter {
   async getState(): Promise<GameState> {
     this.assertInitialized();
     return this.enqueue(() => this.fetchState());
+  }
+
+  async getLegalActions(): Promise<GameAction[]> {
+    this.assertInitialized();
+    return this.enqueue(() => {
+      const actions = get_legal_actions_js();
+      if (actions === null) return [];
+      return convertMapsToRecords(actions) as GameAction[];
+    });
   }
 
   restoreState(state: GameState): void {
@@ -104,7 +140,7 @@ export class WasmAdapter implements EngineAdapter {
     if (state === null) {
       return create_initial_state() as GameState;
     }
-    return state as GameState;
+    return convertMapsToRecords(state) as GameState;
   }
 
   private normalizeError(error: unknown): AdapterError {

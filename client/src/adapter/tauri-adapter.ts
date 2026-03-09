@@ -54,6 +54,16 @@ export class TauriAdapter implements EngineAdapter {
     }
   }
 
+  async getLegalActions(): Promise<GameAction[]> {
+    this.assertInitialized();
+    try {
+      const actions = await this.invoke!("get_legal_actions");
+      return actions as GameAction[];
+    } catch {
+      return [];
+    }
+  }
+
   restoreState(_state: GameState): void {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,

@@ -41,7 +41,8 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
     if (!gameState) return;
 
-    if (shouldAutoPass(gameState, waitingFor, phaseStops, fullControl)) {
+    const { legalActions } = useGameStore.getState();
+    if (shouldAutoPass(gameState, waitingFor, phaseStops, fullControl, legalActions)) {
       scheduleAutoPass();
     }
   }

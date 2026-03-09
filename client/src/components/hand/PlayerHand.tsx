@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 
@@ -6,6 +6,8 @@ import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { dispatchAction } from "../../game/dispatch.ts";
+import type { GameAction } from "../../adapter/types.ts";
 
 const DRAG_PLAY_THRESHOLD = -50;
 
@@ -13,14 +15,29 @@ export function PlayerHand() {
   const player = useGameStore((s) => s.gameState?.players[0]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  // Use dispatchAction (animation pipeline) instead of store dispatch
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   const [expanded, setExpanded] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
 
+  const legalActions = useGameStore((s) => s.legalActions);
+
   const hasPriority =
     waitingFor?.type === "Priority" && waitingFor.data.player === 0;
+
+  // Build a set of card_ids that have PlayLand or CastSpell legal actions.
+  // Coerce to Number since serde_wasm_bindgen may serialize u64 as BigInt.
+  const playableCardIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const action of legalActions) {
+      if (action.type === "PlayLand" || action.type === "CastSpell") {
+        const cardId = (action as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.card_id;
+        ids.add(Number(cardId));
+      }
+    }
+    return ids;
+  }, [legalActions]);
 
   const playCard = useCallback(
     (objectId: number) => {
@@ -29,12 +46,12 @@ export function PlayerHand() {
       if (!obj) return;
 
       if (obj.card_types.core_types.includes("Land")) {
-        dispatch({ type: "PlayLand", data: { card_id: obj.card_id } });
+        dispatchAction({ type: "PlayLand", data: { card_id: obj.card_id } });
       } else {
-        dispatch({ type: "CastSpell", data: { card_id: obj.card_id, targets: [] } });
+        dispatchAction({ type: "CastSpell", data: { card_id: obj.card_id, targets: [] } });
       }
     },
-    [hasPriority, objects, dispatch],
+    [hasPriority, objects],
   );
 
   const handleDragEnd = useCallback(
@@ -94,7 +111,7 @@ export function PlayerHand() {
       <AnimatePresence>
         {handObjects.map((obj, i) => {
           const rotation = (i - center) * 3;
-          const isPlayable = hasPriority;
+          const isPlayable = hasPriority && playableCardIds.has(Number(obj.card_id));
 
           return (
             <HandCard
@@ -152,6 +169,7 @@ function HandCard({
   onMouseLeave,
 }: HandCardProps) {
   const inspectObject = useUiStore((s) => s.inspectObject);
+  const setDragging = useUiStore((s) => s.setDragging);
 
   const longPressHandlers = useLongPress(() => {
     inspectObject(objectId);
@@ -159,8 +177,8 @@ function HandCard({
 
   const glowClass = hasPriority
     ? isPlayable
-      ? "shadow-[0_0_12px_3px_rgba(34,197,94,0.7)]"
-      : "opacity-70"
+      ? "shadow-[0_0_12px_3px_rgba(34,211,238,0.6)] ring-2 ring-cyan-400"
+      : "opacity-60"
     : "";
 
   return (
@@ -176,11 +194,18 @@ function HandCard({
       whileHover={{ y: -40, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 50 }}
       transition={{ duration: 0.2 }}
-      drag="y"
-      dragConstraints={{ top: -300, bottom: 0 }}
+      drag
+      dragConstraints={{ top: -300, bottom: 0, left: -200, right: 200 }}
       dragElastic={0.3}
       dragSnapToOrigin
-      onDragEnd={(event, info) => onDragEnd(objectId, event, info)}
+      onDragStart={() => {
+        setDragging(true);
+        inspectObject(null);
+      }}
+      onDragEnd={(event, info) => {
+        setDragging(false);
+        onDragEnd(objectId, event, info);
+      }}
       onClick={(e) => {
         e.stopPropagation();
         onClick(objectId);

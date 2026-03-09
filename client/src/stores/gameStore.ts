@@ -9,6 +9,7 @@ interface GameStoreState {
   eventHistory: GameEvent[];
   adapter: EngineAdapter | null;
   waitingFor: WaitingFor | null;
+  legalActions: GameAction[];
   stateHistory: GameState[];
 }
 
@@ -27,6 +28,7 @@ const initialState: GameStoreState = {
   eventHistory: [],
   adapter: null,
   waitingFor: null,
+  legalActions: [],
   stateHistory: [],
 };
 
@@ -38,10 +40,12 @@ export const useGameStore = create<GameStore>()(
       await adapter.initialize();
       await adapter.initializeGame(deckData);
       const state = await adapter.getState();
+      const legalActions = await adapter.getLegalActions();
       set({
         adapter,
         gameState: state,
         waitingFor: state.waiting_for,
+        legalActions,
         events: [],
         eventHistory: [],
         stateHistory: [],
@@ -59,6 +63,7 @@ export const useGameStore = create<GameStore>()(
 
       const events = await adapter.submitAction(action);
       const newState = await adapter.getState();
+      const legalActions = await adapter.getLegalActions();
 
       set((prev) => {
         const newHistory = shouldSaveHistory
@@ -70,6 +75,7 @@ export const useGameStore = create<GameStore>()(
           events,
           eventHistory: [...prev.eventHistory, ...events].slice(-1000),
           waitingFor: newState.waiting_for,
+          legalActions,
           stateHistory: newHistory,
         };
       });

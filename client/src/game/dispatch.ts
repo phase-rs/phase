@@ -59,6 +59,7 @@ async function processAction(action: GameAction): Promise<void> {
 
   // 6. Update game state (deferred after animations)
   const newState = await adapter.getState();
+  const legalActions = await adapter.getLegalActions();
 
   useGameStore.setState((prev) => {
     const newHistory = shouldSaveHistory
@@ -70,6 +71,7 @@ async function processAction(action: GameAction): Promise<void> {
       events,
       eventHistory: [...prev.eventHistory, ...events].slice(-1000),
       waitingFor: newState.waiting_for,
+      legalActions,
       stateHistory: newHistory,
     };
   });

@@ -306,6 +306,7 @@ export interface EngineAdapter {
   initializeGame(deckData?: unknown): Promise<GameEvent[]> | GameEvent[];
   submitAction(action: GameAction): Promise<GameEvent[]>;
   getState(): Promise<GameState>;
+  getLegalActions(): Promise<GameAction[]>;
   restoreState(state: GameState): void;
   dispose(): void;
 }

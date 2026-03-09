@@ -162,6 +162,12 @@ export class WebSocketAdapter implements EngineAdapter {
     return this.gameState;
   }
 
+  async getLegalActions(): Promise<GameAction[]> {
+    // In multiplayer, legal actions would need server-side support.
+    // For now, return empty — auto-pass and highlights are WASM-only features.
+    return [];
+  }
+
   restoreState(_state: GameState): void {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
