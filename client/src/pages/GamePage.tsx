@@ -3,14 +3,13 @@ import { useNavigate, useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
+import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
-import { LifeTotal } from "../components/controls/LifeTotal.tsx";
 import { PassButton } from "../components/controls/PassButton.tsx";
-import { PhaseTracker } from "../components/controls/PhaseTracker.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
-import { GameLog } from "../components/log/GameLog.tsx";
+import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
@@ -18,6 +17,11 @@ import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { CombatOverlay } from "../components/combat/CombatOverlay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
+import { PlayerHud } from "../components/hud/PlayerHud.tsx";
+import { OpponentHud } from "../components/hud/OpponentHud.tsx";
+import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
+import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
+import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage.ts";
 import { WasmAdapter } from "../adapter/wasm-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
@@ -118,6 +122,11 @@ export function GamePage() {
   const wsAdapterRef = useRef<WebSocketAdapter | null>(null);
   const [showAiHand, setShowAiHand] = useState(false);
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
+  const [viewingZone, setViewingZone] = useState<{
+    zone: "graveyard" | "exile";
+    playerId: number;
+  } | null>(null);
+  const [showPreferences, setShowPreferences] = useState(false);
 
   // Online multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
@@ -277,7 +286,7 @@ export function GamePage() {
   }, []);
 
   return (
-    <div className="flex h-screen bg-gray-950">
+    <div className="relative h-screen w-screen overflow-hidden bg-gray-950">
       {/* Reconnecting banner */}
       {reconnectState.status === "reconnecting" && (
         <div className="fixed left-0 right-0 top-0 z-40 bg-amber-600 px-4 py-2 text-center text-sm font-semibold text-white">
@@ -304,35 +313,48 @@ export function GamePage() {
         </div>
       )}
 
-      {/* Main board area */}
-      <div className={`flex flex-1 flex-col overflow-hidden${isReconnecting ? " pointer-events-none" : ""}`}>
+      {/* Full-screen board layout */}
+      <div className={`flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}>
+        {/* Opponent area */}
+        <OpponentHud />
         <OpponentHand />
+
+        {/* Opponent battlefield */}
         <GameBoard />
-        <PlayerHand />
-      </div>
 
-      {/* Right side panel */}
-      <div className="flex w-64 flex-col gap-3 border-l border-gray-800 bg-gray-900/50 p-3 lg:w-72">
-        {/* Opponent life */}
-        <LifeTotal playerId={1} />
-
-        {/* Phase tracker */}
-        <PhaseTracker />
-
-        {/* Stack */}
-        <StackDisplay />
-
-        {/* Game log (fills remaining space) */}
-        <GameLog />
-
-        {/* Player life */}
-        <LifeTotal playerId={0} />
-
-        {/* Controls */}
-        <div className="flex items-center gap-2">
-          <PassButton />
-          <FullControlToggle />
+        {/* Center divider with phase/stack/zone indicators */}
+        <div className="flex items-center justify-center gap-4 border-y border-gray-800 px-4 py-1">
+          <ZoneIndicator
+            zone="graveyard"
+            playerId={0}
+            onClick={() => setViewingZone({ zone: "graveyard", playerId: 0 })}
+          />
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">
+              Turn {gameState?.turn_number ?? 0} | {gameState?.phase ?? "---"}
+            </span>
+            {gameState && gameState.stack.length > 0 && (
+              <div className="max-w-xs">
+                <StackDisplay />
+              </div>
+            )}
+          </div>
+          <ZoneIndicator
+            zone="exile"
+            playerId={0}
+            onClick={() => setViewingZone({ zone: "exile", playerId: 0 })}
+          />
         </div>
+
+        {/* Player area */}
+        <div className="flex items-center gap-2 px-4 py-1">
+          <PlayerHud onSettingsClick={() => setShowPreferences(true)} />
+          <div className="ml-auto flex items-center gap-2">
+            <PassButton />
+            <FullControlToggle />
+          </div>
+        </div>
+        <PlayerHand />
       </div>
 
       {/* AI debug toggle */}
@@ -402,6 +424,21 @@ export function GamePage() {
         <CardDataMissingModal onContinue={() => setShowCardDataMissing(false)} />
       )}
 
+      {/* Overlay layers */}
+      <GameLogPanel />
+
+      {viewingZone && (
+        <ZoneViewer
+          zone={viewingZone.zone}
+          playerId={viewingZone.playerId}
+          onClose={() => setViewingZone(null)}
+        />
+      )}
+
+      {showPreferences && (
+        <PreferencesModal onClose={() => setShowPreferences(false)} />
+      )}
+
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay />
 
@@ -416,16 +453,9 @@ export function GamePage() {
       {waitingFor?.type === "ReplacementChoice" && <ReplacementModal />}
 
       {waitingFor?.type === "MulliganDecision" && (
-        <ChoiceModal
-          title={`Mulligan (${waitingFor.data.mulligan_count} cards)`}
-          options={[
-            { id: "keep", label: "Keep Hand" },
-            {
-              id: "mulligan",
-              label: "Mulligan",
-              description: `Draw ${7 - waitingFor.data.mulligan_count - 1} cards`,
-            },
-          ]}
+        <MulliganDecisionPrompt
+          playerId={waitingFor.data.player}
+          mulliganCount={waitingFor.data.mulligan_count}
           onChoose={handleMulliganChoice}
         />
       )}
@@ -441,22 +471,6 @@ export function GamePage() {
       {waitingFor?.type === "GameOver" && (
         <GameOverScreen winner={waitingFor.data.winner} />
       )}
-
-      {/* Responsive: side panel collapses to bottom drawer on small screens */}
-      <style>{`
-        @media (max-width: 768px) {
-          .flex.h-screen {
-            flex-direction: column;
-          }
-          .flex.h-screen > .w-64,
-          .flex.h-screen > .lg\\:w-72 {
-            width: 100%;
-            max-height: 40vh;
-            border-left: none;
-            border-top: 1px solid rgb(31 41 55);
-          }
-        }
-      `}</style>
     </div>
   );
 }
@@ -467,6 +481,78 @@ interface MulliganBottomCardsPromptProps {
   playerId: number;
   count: number;
   onChoose: (id: string) => void;
+}
+
+interface MulliganDecisionPromptProps {
+  playerId: number;
+  mulliganCount: number;
+  onChoose: (id: string) => void;
+}
+
+function MulliganDecisionPrompt({
+  playerId,
+  mulliganCount,
+  onChoose,
+}: MulliganDecisionPromptProps) {
+  const player = useGameStore((s) => s.gameState?.players[playerId]);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (!player || !objects) {
+    return (
+      <ChoiceModal
+        title={`Mulligan (${mulliganCount} cards)`}
+        options={[
+          { id: "keep", label: "Keep Hand" },
+          {
+            id: "mulligan",
+            label: "Mulligan",
+            description: `Draw ${7 - mulliganCount - 1} cards`,
+          },
+        ]}
+        onChoose={onChoose}
+      />
+    );
+  }
+
+  const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
+  const nextHandSize = 7 - mulliganCount - 1;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/60" />
+      <div className="relative z-10 w-full max-w-5xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+        <h2 className="mb-2 text-center text-lg font-bold text-white">
+          Mulligan ({mulliganCount} cards)
+        </h2>
+        <p className="mb-4 text-center text-sm text-gray-400">
+          Review your opening hand and choose to keep or mulligan.
+        </p>
+
+        <div className="mb-6 flex flex-wrap justify-center gap-2">
+          {handObjects.map((obj) => (
+            <div key={obj.id} className="rounded-lg border border-gray-700 bg-gray-800/60 p-1">
+              <CardImage cardName={obj.name} size="small" />
+            </div>
+          ))}
+        </div>
+
+        <div className="flex justify-center gap-3">
+          <button
+            onClick={() => onChoose("keep")}
+            className="rounded-lg bg-emerald-600 px-6 py-2 font-semibold text-white transition hover:bg-emerald-500"
+          >
+            Keep Hand
+          </button>
+          <button
+            onClick={() => onChoose("mulligan")}
+            className="rounded-lg bg-gray-800 px-6 py-2 font-semibold text-white transition hover:bg-gray-700 hover:ring-1 hover:ring-cyan-400/50"
+          >
+            Mulligan (Draw {nextHandSize} cards)
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function MulliganBottomCardsPrompt({
@@ -511,13 +597,13 @@ function MulliganBottomCardsPrompt({
                     addTarget(obj.id);
                   }
                 }}
-                className={`rounded-lg px-3 py-2 text-sm transition ${
+                className={`rounded-lg p-1 text-sm transition ${
                   isSelected
                     ? "bg-cyan-600 text-white ring-2 ring-cyan-400"
                     : "bg-gray-800 text-gray-300 hover:bg-gray-700"
                 }`}
               >
-                {obj.name}
+                <CardImage cardName={obj.name} size="small" />
               </button>
             );
           })}

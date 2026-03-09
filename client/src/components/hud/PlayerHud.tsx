@@ -18,7 +18,11 @@ const PHASE_LABELS: Record<string, string> = {
   Cleanup: "Cleanup",
 };
 
-export function PlayerHud() {
+interface PlayerHudProps {
+  onSettingsClick?: () => void;
+}
+
+export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
   const phase = useGameStore((s) => s.gameState?.phase ?? "Untap");
   const hudLayout = usePreferencesStore((s) => s.hudLayout);
 
@@ -32,6 +36,7 @@ export function PlayerHud() {
         {phaseLabel}
       </span>
       <button
+        onClick={onSettingsClick}
         className="ml-auto rounded p-1 text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-300"
         aria-label="Settings"
       >

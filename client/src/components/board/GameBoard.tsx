@@ -1,12 +1,51 @@
 import { useMemo } from "react";
 
-import type { GameObject } from "../../adapter/types.ts";
+import type { GameObject, ManaColor } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import type { BoardBackground } from "../../stores/preferencesStore.ts";
 import { partitionByType, groupByName } from "../../viewmodel/battlefieldProps.ts";
+import { getDominantManaColor } from "../../viewmodel/dominantColor.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
+
+const COLOR_GRADIENTS: Record<ManaColor, string> = {
+  White: "from-amber-950/20 via-gray-950 to-amber-950/20",
+  Blue: "from-blue-950/30 via-gray-950 to-blue-950/30",
+  Black: "from-gray-950 via-gray-900/50 to-gray-950",
+  Red: "from-red-950/20 via-gray-950 to-red-950/20",
+  Green: "from-emerald-950/20 via-gray-950 to-emerald-950/20",
+};
+
+const BG_TO_MANA_COLOR: Record<string, ManaColor> = {
+  white: "White",
+  blue: "Blue",
+  black: "Black",
+  red: "Red",
+  green: "Green",
+};
+
+function getBoardGradient(
+  boardBackground: BoardBackground,
+  dominantColor: ManaColor | null,
+): string {
+  if (boardBackground === "none") return "bg-gray-950";
+
+  if (boardBackground === "auto-wubrg") {
+    if (!dominantColor) return "bg-gray-950";
+    return `bg-gradient-to-r ${COLOR_GRADIENTS[dominantColor]}`;
+  }
+
+  const manaColor = BG_TO_MANA_COLOR[boardBackground];
+  if (manaColor) {
+    return `bg-gradient-to-r ${COLOR_GRADIENTS[manaColor]}`;
+  }
+
+  return "bg-gray-950";
+}
 
 export function GameBoard() {
   const gameState = useGameStore((s) => s.gameState);
+  const boardBackground = usePreferencesStore((s) => s.boardBackground);
 
   const { opponent, player } = useMemo(() => {
     if (!gameState) return { opponent: null, player: null };
@@ -41,6 +80,13 @@ export function GameBoard() {
     };
   }, [gameState]);
 
+  const dominantColor = useMemo(() => {
+    if (!gameState) return null;
+    return getDominantManaColor(gameState.battlefield, gameState.objects, 0);
+  }, [gameState]);
+
+  const gradientClass = getBoardGradient(boardBackground, dominantColor);
+
   if (!gameState) {
     return (
       <div className="flex flex-1 items-center justify-center">
@@ -50,7 +96,7 @@ export function GameBoard() {
   }
 
   return (
-    <div className="flex flex-1 flex-col bg-gray-950">
+    <div className={`flex flex-1 flex-col ${gradientClass}`}>
       {/* Opponent's battlefield (other, creatures, lands from top) */}
       <div className="flex flex-col gap-1 border-b border-gray-800 py-1">
         {opponent && (
@@ -62,12 +108,8 @@ export function GameBoard() {
         )}
       </div>
 
-      {/* Middle spacer (stack/controls will go here in Plan 04) */}
-      <div className="flex min-h-[40px] flex-1 items-center justify-center">
-        <span className="text-xs text-gray-600">
-          Turn {gameState.turn_number} &middot; {gameState.phase}
-        </span>
-      </div>
+      {/* Middle spacer */}
+      <div className="flex min-h-[40px] flex-1 items-center justify-center" />
 
       {/* Player's battlefield (lands, creatures, other from bottom) */}
       <div className="flex flex-col gap-1 border-t border-gray-800 py-1">
