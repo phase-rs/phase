@@ -118,6 +118,21 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **MECH-09**: Mechanic coverage report quantifies Standard card support percentage
 - [x] **MECH-10**: Cards with unimplemented mechanics display visual warning indicator in game UI
 
+### MTGA Visual Fidelity (Phase 19)
+
+- [ ] **ARENA-01**: Battlefield permanents display Scryfall art_crop images with WUBRG color-coded borders, card name labels, P/T overlays, loyalty shields, and circular counter badges
+- [ ] **ARENA-02**: Dual Scryfall image fetching (art_crop for battlefield/deck builder, normal for hand/stack/preview) with IndexedDB caching
+- [ ] **ARENA-03**: Tapped permanents rotate 15-20 degrees clockwise (not 90) with 0.85 opacity dim
+- [ ] **ARENA-04**: MTGA-faithful board layout with creatures near center, lands far, centered avatars, and phase indicators flanking player avatar
+- [ ] **ARENA-05**: No visible zone borders, bars, or background overlays -- everything floats over battlefield images
+- [ ] **ARENA-06**: Golden curved SVG targeting arcs, orange glow on selected attackers/blockers, attacker slide-forward on declare
+- [ ] **ARENA-07**: Cinematic layered turn banner (light burst, banner strip, diamond accents, triple-glow text) with amber/slate theming
+- [ ] **ARENA-08**: Canvas death shatter (8-12 art fragments scatter/fade in 0.6s) and card flight arcs for cast/resolve
+- [ ] **ARENA-09**: Full-screen MTGA-style mulligan with large card images and dramatic VICTORY/DEFEAT game over screens
+- [ ] **ARENA-10**: Mode-first menu flow (Play vs AI, Play Online, Deck Builder), deck gallery with Scryfall art tiles, animated particle background, splash screen with logo
+- [ ] **ARENA-11**: Deck builder art-crop image grid with instant card preview panel and visual color/type filtering
+- [ ] **ARENA-12**: Forge.rs logo converted to WebP for splash screen and menu branding
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -148,7 +163,6 @@ Deferred to future release. Tracked but not in current roadmap.
 | Tutorial system | Deferred to v2 |
 | Easy-read mode / TTS | Not relevant to MTG gameplay |
 | Alchemy synthesis audio | Using Forge Java's proven SFX/music assets |
-| Deck builder redesign | Keeping existing Forge.rs deck builder for now |
 | MultiplayerLobby from Alchemy | Using Forge.rs WebSocket approach |
 
 ## Traceability
@@ -226,12 +240,24 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MECH-08 | Phase 18 | Complete |
 | MECH-09 | Phase 18 | Complete |
 | MECH-10 | Phase 18 | Complete |
+| ARENA-01 | Phase 19 | Planned |
+| ARENA-02 | Phase 19 | Planned |
+| ARENA-03 | Phase 19 | Planned |
+| ARENA-04 | Phase 19 | Planned |
+| ARENA-05 | Phase 19 | Planned |
+| ARENA-06 | Phase 19 | Planned |
+| ARENA-07 | Phase 19 | Planned |
+| ARENA-08 | Phase 19 | Planned |
+| ARENA-09 | Phase 19 | Planned |
+| ARENA-10 | Phase 19 | Planned |
+| ARENA-11 | Phase 19 | Planned |
+| ARENA-12 | Phase 19 | Planned |
 
 **Coverage:**
-- v1.1 requirements: 56 total
-- Mapped to phases: 56
+- v1.1 requirements: 68 total
+- Mapped to phases: 68
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-08*
-*Last updated: 2026-03-09 after Phase 18 planning*
+*Last updated: 2026-03-09 after Phase 19 planning*

@@ -153,10 +153,26 @@ Plans:
 
 ### Phase 19: Recreate the MTGA UI as faithfully as possible
 
-**Goal:** [To be planned]
-**Requirements**: TBD
-**Depends on:** Phase 18
-**Plans:** 0 plans
+**Goal:** Close the visual and interaction gap between the current Arena-inspired UI and the actual MTGA experience -- art-crop card presentation on battlefield, MTGA-faithful board layout with centered avatars and flanking phase indicators, cinematic animations (turn banner, death shatter, cast arcs), mode-first menu with deck gallery, and deck builder visual polish
+**Requirements**: ARENA-01, ARENA-02, ARENA-03, ARENA-04, ARENA-05, ARENA-06, ARENA-07, ARENA-08, ARENA-09, ARENA-10, ARENA-11, ARENA-12
+**Depends on:** Phase 17
+**Success Criteria** (what must be TRUE):
+  1. Battlefield permanents display Scryfall art_crop images with WUBRG color-coded borders, card name labels, P/T overlays for creatures, and loyalty shields for planeswalkers
+  2. Board layout matches MTGA: creatures near center, lands far, centered player/opponent avatars, phase indicators flanking player avatar, no visible borders or bars
+  3. Tapped permanents rotate 15-20 degrees (not 90) with slight opacity dim
+  4. Golden curved targeting arcs connect spells to targets, orange glow on selected attackers/blockers, attackers slide forward when declared
+  5. Cinematic layered turn banner (amber/slate), canvas death shatter fragments, card flight arcs for cast/resolve
+  6. Full-screen MTGA-style mulligan with large card images, dramatic VICTORY/DEFEAT game over screens
+  7. Mode-first menu flow with splash screen, deck gallery with art tiles, animated particle background
+  8. Deck builder displays art-crop grid with instant card preview and visual color/type filtering
+**Plans:** 8 plans
 
 Plans:
-- [ ] TBD (run /gsd:plan-phase 19 to break down)
+- [ ] 19-01-PLAN.md — Image infrastructure (art_crop type extension, CSS vars) and ArtCropCard component
+- [ ] 19-02-PLAN.md — Wire ArtCropCard into battlefield, 17deg tap rotation, instant CardPreview
+- [ ] 19-03-PLAN.md — MTGA board layout (zone reordering, centered avatars, split phase indicators)
+- [ ] 19-04-PLAN.md — Golden targeting arcs, orange combat glows, attacker slide-forward
+- [ ] 19-05-PLAN.md — Cinematic TurnBanner, DeathShatter, CastArcAnimation, AnimationOverlay wiring
+- [ ] 19-06-PLAN.md — Full-screen mulligan and dramatic game over screens
+- [ ] 19-07-PLAN.md — Splash screen, mode-first MenuPage, DeckGallery, menu particles
+- [ ] 19-08-PLAN.md — Deck builder art-crop grid, instant preview, color/type filtering
