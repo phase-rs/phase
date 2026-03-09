@@ -124,7 +124,7 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13. Foundation & Board Layout | 5/5 | Complete    | 2026-03-09 | - |
-| 14. Animation Pipeline | v1.1 | 0/4 | Not started | - |
+| 14. Animation Pipeline | 1/4 | In Progress|  | - |
 | 15. Game Loop & Controllers | v1.1 | 0/1 | Not started | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
 | 17. MTG-Specific UI | v1.1 | 0/2 | Not started | - |

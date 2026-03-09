@@ -4,13 +4,13 @@ milestone: v1.1
 milestone_name: Arena UI
 status: executing
 stopped_at: Phase 14 context gathered
-last_updated: "2026-03-09T02:54:32.207Z"
+last_updated: "2026-03-09T03:28:00.468Z"
 last_activity: 2026-03-09 — Completed 13-04 hand fan and HUD components
 progress:
   total_phases: 5
   completed_phases: 1
-  total_plans: 5
-  completed_plans: 5
+  total_plans: 9
+  completed_plans: 6
   percent: 80
 ---
 
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 13 - Foundation & Board Layout
+**Current focus:** Phase 14 - Animation Pipeline
 
 ## Current Position
 
-Phase: 13 of 17 (Foundation & Board Layout)
-Plan: 4 of 5 in current phase
+Phase: 14 of 17 (Animation Pipeline)
+Plan: 1 of 4 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 13-04 hand fan and HUD components
+Last activity: 2026-03-09 — Completed 14-01 animation pipeline foundation
 
-Progress: [████████░░] 80%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4 (v1.1)
+- Total plans completed: 6 (v1.1)
 - Average duration: 3min
-- Total execution time: 12min
+- Total execution time: 14min
 
 **By Phase:**
 
@@ -48,6 +48,8 @@ Progress: [████████░░] 80%
 | Phase 13 P03 | 2min | 2 tasks | 5 files |
 | Phase 13 P04 | 3min | 2 tasks | 6 files |
 | Phase 13 P05 | 49min | 3 tasks | 9 files |
+| 14-animation-pipeline | 1/4 | 2min | 2min |
+| Phase 14 P01 | 2min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -69,6 +71,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 13-05]: GameLogPanel reads eventHistory (cumulative) for full game log
 - [Phase 13-05]: WUBRG background gradients use subtle opacity to avoid overwhelming battlefield
 - [Phase 13-05]: Module-level empty array constants for Zustand selectors prevent re-render loops
+- [Phase 14-01]: Non-visual events defined as set of 12 event types skipped by normalizer
+- [Phase 14-01]: Groupable events (DamageDealt, CreatureDestroyed, PermanentSacrificed) merge consecutive same-type into one step
+- [Phase 14-01]: Merge types (ZoneChanged, LifeChanged) attach to preceding step
 
 ### Blockers/Concerns
 
@@ -82,6 +87,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 13-04 hand fan and HUD components
-Stopped at: Phase 14 context gathered
-Resume file: .planning/phases/14-animation-pipeline/14-CONTEXT.md
+Last activity: 2026-03-09 - Completed 14-01 animation pipeline foundation
+Stopped at: Completed 14-01-PLAN.md
+Resume file: .planning/phases/14-animation-pipeline/14-01-SUMMARY.md

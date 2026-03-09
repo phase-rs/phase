@@ -35,15 +35,15 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 ### Animation Pipeline
 
 - [ ] **ANIM-01**: Step-based animation queue processes engine events sequentially with configurable timing
-- [ ] **ANIM-02**: Event normalizer translates Forge.rs GameEvent types to animation-compatible format
+- [x] **ANIM-02**: Event normalizer translates Forge.rs GameEvent types to animation-compatible format
 - [ ] **ANIM-03**: Board snapshot system preserves dying creatures visually during death animation sequence
 - [ ] **ANIM-04**: Async dispatch wrapper captures positions before WASM call and serializes dispatch-animate flow
-- [ ] **ANIM-05**: VFX quality levels (full/reduced/minimal) configurable in preferences
-- [ ] **ANIM-06**: Animation speed slider configurable in preferences
+- [x] **ANIM-05**: VFX quality levels (full/reduced/minimal) configurable in preferences
+- [x] **ANIM-06**: Animation speed slider configurable in preferences
 
 ### Visual Effects
 
-- [ ] **VFX-01**: Canvas particle system renders 9+ effect types (explosion, projectile, spellImpact, etc.) with WUBRG color mapping
+- [x] **VFX-01**: Canvas particle system renders 9+ effect types (explosion, projectile, spellImpact, etc.) with WUBRG color mapping
 - [ ] **VFX-02**: Floating damage/heal numbers animate with scale-in, float-up, fade-out per step
 - [ ] **VFX-03**: Screen shake triggers on combat damage at 3 intensity levels
 - [ ] **VFX-04**: Card reveal animation plays on creature/spell entry with burst effect
@@ -170,12 +170,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INTEG-02 | Phase 13 | Complete |
 | INTEG-03 | Phase 13 | Complete |
 | ANIM-01 | Phase 14 | Pending |
-| ANIM-02 | Phase 14 | Pending |
+| ANIM-02 | Phase 14 | Complete |
 | ANIM-03 | Phase 14 | Pending |
 | ANIM-04 | Phase 14 | Pending |
-| ANIM-05 | Phase 14 | Pending |
-| ANIM-06 | Phase 14 | Pending |
-| VFX-01 | Phase 14 | Pending |
+| ANIM-05 | Phase 14 | Complete |
+| ANIM-06 | Phase 14 | Complete |
+| VFX-01 | Phase 14 | Complete |
 | VFX-02 | Phase 14 | Pending |
 | VFX-03 | Phase 14 | Pending |
 | VFX-04 | Phase 14 | Pending |
