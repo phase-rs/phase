@@ -1,13 +1,13 @@
-use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
-use crate::types::zones::Zone;
+use crate::types::game_state::{GameState, WaitingFor};
 
-/// Dig/Reveal effect: reveal top N cards, put ChangeNum in hand, rest to bottom of library.
+/// Dig/Reveal effect: reveal top N cards, player selects ChangeNum to keep (hand),
+/// rest go to graveyard.
+/// Sets WaitingFor::DigChoice so the player can select which cards to keep.
+///
 /// Reads `DigNum` or `NumCards` param for how many to reveal.
 /// Reads `ChangeNum` param for how many to keep (put in hand).
-// TODO: Full implementation needs WaitingFor::DigChoice for player to select which cards to keep
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -37,31 +37,14 @@ pub fn resolve(
         return Ok(());
     }
 
-    let revealed: Vec<_> = player.library[..count].to_vec();
+    let cards: Vec<_> = player.library[..count].to_vec();
+    let keep_count = change_num.min(cards.len());
 
-    // Simplified: first ChangeNum cards go to hand, rest to bottom of library
-    let keep_count = change_num.min(revealed.len());
-    let to_hand = &revealed[..keep_count];
-    let to_bottom = &revealed[keep_count..];
-
-    for &obj_id in to_hand {
-        zones::move_to_zone(state, obj_id, Zone::Hand, events);
-    }
-
-    // Move rest to bottom of library (they're already removed by move_to_zone above
-    // if they were moved; the remaining ones are still in library at original positions).
-    // We need to move them to the bottom: remove then re-add at end.
-    for &obj_id in to_bottom {
-        let player = state
-            .players
-            .iter_mut()
-            .find(|p| p.id == ability.controller)
-            .unwrap();
-        if let Some(pos) = player.library.iter().position(|&id| id == obj_id) {
-            player.library.remove(pos);
-            player.library.push(obj_id);
-        }
-    }
+    state.waiting_for = WaitingFor::DigChoice {
+        player: ability.controller,
+        cards,
+        keep_count,
+    };
 
     events.push(GameEvent::EffectResolved {
         api_type: ability.api_type.clone(),
@@ -96,9 +79,9 @@ mod tests {
     }
 
     #[test]
-    fn dig_3_keep_1_moves_1_to_hand_rest_to_bottom() {
+    fn test_dig_5_keep_2_sets_waiting_for_dig_choice() {
         let mut state = GameState::new_two_player(42);
-        for i in 0..5 {
+        for i in 0..7 {
             create_object(
                 &mut state,
                 CardId(i + 1),
@@ -107,23 +90,29 @@ mod tests {
                 Zone::Library,
             );
         }
-        let original_top_3: Vec<_> = state.players[0].library[..3].to_vec();
+        let top_5: Vec<_> = state.players[0].library[..5].to_vec();
 
-        let ability = make_dig_ability(3, 1);
+        let ability = make_dig_ability(5, 2);
         let mut events = Vec::new();
-
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // 1 card moved to hand
-        assert_eq!(state.players[0].hand.len(), 1);
-        // The card in hand should be one of the original top 3
-        assert!(original_top_3.contains(&state.players[0].hand[0]));
-        // Library should still have 4 cards (5 - 1 to hand, 2 to bottom)
-        assert_eq!(state.players[0].library.len(), 4);
+        match &state.waiting_for {
+            WaitingFor::DigChoice {
+                player,
+                cards,
+                keep_count,
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(cards.len(), 5);
+                assert_eq!(*cards, top_5);
+                assert_eq!(*keep_count, 2);
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        }
     }
 
     #[test]
-    fn dig_with_empty_library_does_nothing() {
+    fn test_dig_with_empty_library_does_nothing() {
         let mut state = GameState::new_two_player(42);
         assert!(state.players[0].library.is_empty());
 
@@ -132,6 +121,6 @@ mod tests {
 
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
-        assert!(state.players[0].hand.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

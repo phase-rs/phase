@@ -6,6 +6,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
+pub mod attach;
 pub mod change_zone;
 pub mod counter;
 pub mod counters;
@@ -20,6 +21,7 @@ pub mod mill;
 pub mod pump;
 pub mod sacrifice;
 pub mod scry;
+pub mod surveil;
 pub mod tap_untap;
 pub mod token;
 
@@ -56,6 +58,8 @@ pub fn build_registry() -> HashMap<String, EffectHandler> {
     registry.insert("ChangeZoneAll".to_string(), change_zone::resolve_all);
     registry.insert("Dig".to_string(), dig::resolve);
     registry.insert("GainControl".to_string(), gain_control::resolve);
+    registry.insert("Attach".to_string(), attach::resolve);
+    registry.insert("Surveil".to_string(), surveil::resolve);
     registry
 }
 
@@ -247,9 +251,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_23_entries() {
+    fn registry_has_25_entries() {
         let registry = build_registry();
-        assert_eq!(registry.len(), 23);
+        assert_eq!(registry.len(), 25);
     }
 
     #[test]
@@ -279,6 +283,8 @@ mod tests {
             "ChangeZoneAll",
             "Dig",
             "GainControl",
+            "Attach",
+            "Surveil",
         ];
         for name in &expected {
             assert!(registry.contains_key(*name), "missing: {}", name);

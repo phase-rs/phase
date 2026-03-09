@@ -65,6 +65,24 @@ pub enum WaitingFor {
         player: PlayerId,
         candidate_count: usize,
     },
+    EquipTarget {
+        player: PlayerId,
+        equipment_id: ObjectId,
+        valid_targets: Vec<ObjectId>,
+    },
+    ScryChoice {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+    DigChoice {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+        keep_count: usize,
+    },
+    SurveilChoice {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -350,8 +368,26 @@ mod tests {
                 player: PlayerId(0),
                 candidate_count: 2,
             },
+            WaitingFor::EquipTarget {
+                player: PlayerId(0),
+                equipment_id: ObjectId(1),
+                valid_targets: vec![],
+            },
+            WaitingFor::ScryChoice {
+                player: PlayerId(0),
+                cards: vec![ObjectId(1)],
+            },
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                cards: vec![ObjectId(1)],
+                keep_count: 1,
+            },
+            WaitingFor::SurveilChoice {
+                player: PlayerId(0),
+                cards: vec![ObjectId(1)],
+            },
         ];
-        assert_eq!(variants.len(), 8);
+        assert_eq!(variants.len(), 12);
     }
 
     #[test]

@@ -144,6 +144,10 @@ impl SessionManager {
             WaitingFor::DeclareAttackers { player, .. } => *player,
             WaitingFor::DeclareBlockers { player, .. } => *player,
             WaitingFor::ReplacementChoice { player, .. } => *player,
+            WaitingFor::EquipTarget { player, .. } => *player,
+            WaitingFor::ScryChoice { player, .. } => *player,
+            WaitingFor::DigChoice { player, .. } => *player,
+            WaitingFor::SurveilChoice { player, .. } => *player,
             WaitingFor::GameOver { .. } => {
                 return Err("Game is over".to_string());
             }

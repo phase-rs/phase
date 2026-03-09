@@ -31,6 +31,57 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
             .map(|i| GameAction::ChooseReplacement { index: i })
             .collect(),
         WaitingFor::GameOver { .. } => Vec::new(),
+        WaitingFor::EquipTarget { .. } => Vec::new(),
+        WaitingFor::ScryChoice { cards, .. } => {
+            // For scry, generate one action per possible subset of cards to put on top.
+            // Simplification: return two options -- all on top, or all on bottom.
+            // The AI search handles the choice via evaluation.
+            let mut actions = Vec::new();
+            // All on top
+            actions.push(GameAction::SelectCards {
+                cards: cards.clone(),
+            });
+            // All on bottom
+            actions.push(GameAction::SelectCards { cards: Vec::new() });
+            // Individual cards on top (for scry 2+)
+            if cards.len() > 1 {
+                for card in cards {
+                    actions.push(GameAction::SelectCards {
+                        cards: vec![*card],
+                    });
+                }
+            }
+            actions
+        }
+        WaitingFor::DigChoice {
+            cards, keep_count, ..
+        } => {
+            // Generate combinations of keep_count cards from the revealed set
+            let combos = combinations(cards, *keep_count);
+            combos
+                .into_iter()
+                .map(|combo| GameAction::SelectCards { cards: combo })
+                .collect()
+        }
+        WaitingFor::SurveilChoice { cards, .. } => {
+            // Generate options: all to graveyard, none to graveyard, individual cards
+            let mut actions = Vec::new();
+            // All to graveyard
+            actions.push(GameAction::SelectCards {
+                cards: cards.clone(),
+            });
+            // None to graveyard (all stay on top)
+            actions.push(GameAction::SelectCards { cards: Vec::new() });
+            // Individual cards to graveyard
+            if cards.len() > 1 {
+                for card in cards {
+                    actions.push(GameAction::SelectCards {
+                        cards: vec![*card],
+                    });
+                }
+            }
+            actions
+        }
     }
 }
 

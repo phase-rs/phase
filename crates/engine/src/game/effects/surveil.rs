@@ -2,20 +2,19 @@ use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
-/// Scry N: controller looks at top N cards of their library.
-/// Sets WaitingFor::ScryChoice so the player can choose which cards
-/// go to top vs bottom. The engine processes the SelectCards response
-/// in engine.rs to reorder the library.
+/// Surveil N: controller looks at top N cards of their library.
+/// Sets WaitingFor::SurveilChoice so the player can choose which cards
+/// go to graveyard vs stay on top of library.
 ///
-/// Reads `ScryNum` param (default 1).
+/// Reads `SurveilNum` param (default 1).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let scry_num: usize = ability
+    let surveil_num: usize = ability
         .params
-        .get("ScryNum")
+        .get("SurveilNum")
         .map(|v| v.parse().unwrap_or(1))
         .unwrap_or(1);
 
@@ -25,7 +24,7 @@ pub fn resolve(
         .find(|p| p.id == ability.controller)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    let count = scry_num.min(player.library.len());
+    let count = surveil_num.min(player.library.len());
     if count == 0 {
         events.push(GameEvent::EffectResolved {
             api_type: ability.api_type.clone(),
@@ -34,10 +33,9 @@ pub fn resolve(
         return Ok(());
     }
 
-    // Collect the top N card IDs for the player to choose from
     let cards: Vec<_> = player.library[..count].to_vec();
 
-    state.waiting_for = WaitingFor::ScryChoice {
+    state.waiting_for = WaitingFor::SurveilChoice {
         player: ability.controller,
         cards,
     };
@@ -59,10 +57,10 @@ mod tests {
     use crate::types::zones::Zone;
     use std::collections::HashMap;
 
-    fn make_scry_ability(scry_num: u32) -> ResolvedAbility {
+    fn make_surveil_ability(surveil_num: u32) -> ResolvedAbility {
         ResolvedAbility {
-            api_type: "Scry".to_string(),
-            params: HashMap::from([("ScryNum".to_string(), scry_num.to_string())]),
+            api_type: "Surveil".to_string(),
+            params: HashMap::from([("SurveilNum".to_string(), surveil_num.to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -72,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scry_2_sets_waiting_for_scry_choice() {
+    fn test_surveil_2_sets_waiting_for_surveil_choice() {
         let mut state = GameState::new_two_player(42);
         for i in 0..5 {
             create_object(
@@ -85,55 +83,30 @@ mod tests {
         }
         let top_2: Vec<_> = state.players[0].library[..2].to_vec();
 
-        let ability = make_scry_ability(2);
+        let ability = make_surveil_ability(2);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::ScryChoice { player, cards } => {
+            WaitingFor::SurveilChoice { player, cards } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(cards.len(), 2);
                 assert_eq!(*cards, top_2);
             }
-            other => panic!("Expected ScryChoice, got {:?}", other),
+            other => panic!("Expected SurveilChoice, got {:?}", other),
         }
     }
 
     #[test]
-    fn test_scry_1_single_card_still_requires_choice() {
-        let mut state = GameState::new_two_player(42);
-        create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Card 0".to_string(),
-            Zone::Library,
-        );
-
-        let ability = make_scry_ability(1);
-        let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        match &state.waiting_for {
-            WaitingFor::ScryChoice { player, cards } => {
-                assert_eq!(*player, PlayerId(0));
-                assert_eq!(cards.len(), 1);
-            }
-            other => panic!("Expected ScryChoice, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_scry_with_empty_library_does_nothing() {
+    fn test_surveil_with_empty_library_does_nothing() {
         let mut state = GameState::new_two_player(42);
         assert!(state.players[0].library.is_empty());
 
-        let ability = make_scry_ability(2);
+        let ability = make_surveil_ability(2);
         let mut events = Vec::new();
 
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
-        // Should NOT set ScryChoice when library is empty
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

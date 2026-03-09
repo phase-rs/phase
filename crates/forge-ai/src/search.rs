@@ -63,6 +63,51 @@ pub fn choose_action(
         return Some(GameAction::MulliganDecision { keep });
     }
 
+    // Scry/Dig/Surveil: use card evaluation heuristics
+    if let WaitingFor::ScryChoice { cards, .. } = &state.waiting_for {
+        // Put higher-value cards on top, lower-value on bottom
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_cards: Vec<_> = scored.iter().map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: top_cards });
+    }
+
+    if let WaitingFor::DigChoice {
+        cards, keep_count, ..
+    } = &state.waiting_for
+    {
+        // Keep the highest-value cards
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let kept: Vec<_> = scored.iter().take(*keep_count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: kept });
+    }
+
+    if let WaitingFor::SurveilChoice { cards, .. } = &state.waiting_for {
+        // Send lowest-value cards to graveyard
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Send bottom half to graveyard (heuristic: keep better cards on top)
+        let graveyard_count = scored.len().div_ceil(2);
+        let to_graveyard: Vec<_> = scored
+            .iter()
+            .take(graveyard_count)
+            .map(|(id, _)| *id)
+            .collect();
+        return Some(GameAction::SelectCards {
+            cards: to_graveyard,
+        });
+    }
+
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
         let selected = choose_attackers(state, ai_player);
@@ -251,6 +296,45 @@ fn should_keep_hand(state: &GameState, player: PlayerId, _mulligan_count: u8) ->
         // 5 card hand: keep with 1-4 lands; already kept <=4 above
         land_count >= 1 && spell_count >= 1
     }
+}
+
+/// Evaluate a card's value for scry/dig/surveil decisions.
+/// Higher values mean the card is more desirable to keep/draw.
+fn evaluate_card_value(state: &GameState, obj_id: engine::types::identifiers::ObjectId) -> f64 {
+    let obj = match state.objects.get(&obj_id) {
+        Some(o) => o,
+        None => return 0.0,
+    };
+
+    let mut value = 0.0;
+
+    // Creatures: value based on power + toughness
+    if obj
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature)
+    {
+        let power = obj.power.unwrap_or(0) as f64;
+        let toughness = obj.toughness.unwrap_or(0) as f64;
+        value += power * 1.5 + toughness;
+    }
+
+    // Lands: moderate value (mana development)
+    if obj
+        .card_types
+        .core_types
+        .contains(&CoreType::Land)
+    {
+        value += 3.0;
+    }
+
+    // Instants/Sorceries: base value from mana cost (proxy for power)
+    if let engine::types::mana::ManaCost::Cost { shards, generic } = &obj.mana_cost {
+        let total_mana = shards.len() as f64 + *generic as f64;
+        value += total_mana * 0.5;
+    }
+
+    value
 }
 
 fn softmax_select(
