@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
@@ -15,17 +16,18 @@ const ZONE_TITLES: Record<string, string> = {
 };
 
 export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
-  const cards = useGameStore((s) => {
-    const state = s.gameState;
-    if (!state) return [];
+  const gameState = useGameStore((s) => s.gameState);
+
+  const cards = useMemo(() => {
+    if (!gameState) return [];
 
     const ids =
       zone === "graveyard"
-        ? (state.players[playerId]?.graveyard ?? [])
-        : state.exile.filter((id) => state.objects[id]?.owner === playerId);
+        ? (gameState.players[playerId]?.graveyard ?? [])
+        : gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
 
-    return ids.map((id) => state.objects[id]).filter(Boolean);
-  });
+    return ids.map((id) => gameState.objects[id]).filter(Boolean);
+  }, [gameState, zone, playerId]);
 
   return (
     <AnimatePresence>

@@ -1,5 +1,7 @@
-import type { ManaType } from "../../adapter/types.ts";
+import type { ManaType, ManaUnit } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+
+const EMPTY_MANA: ManaUnit[] = [];
 
 const MANA_COLORS: Record<ManaType, string> = {
   White: "bg-amber-300 text-amber-900",
@@ -18,7 +20,7 @@ interface ManaPoolSummaryProps {
 
 export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
   const manaUnits = useGameStore(
-    (s) => s.gameState?.players[playerId]?.mana_pool.mana ?? [],
+    (s) => s.gameState?.players[playerId]?.mana_pool.mana ?? EMPTY_MANA,
   );
 
   const counts = new Map<ManaType, number>();
