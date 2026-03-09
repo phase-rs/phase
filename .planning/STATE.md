@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 18-03-PLAN.md
-last_updated: "2026-03-09T15:11:41Z"
-last_activity: 2026-03-09 — Completed 18-03 static abilities & prowess trigger
+stopped_at: Completed 18-05-PLAN.md
+last_updated: "2026-03-09T15:25:57.055Z"
+last_activity: 2026-03-09 — Completed 18-05 coverage report & UI warning badge
 progress:
   total_phases: 6
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 17
-  completed_plans: 16
-  percent: 82
+  completed_plans: 17
+  percent: 88
 ---
 
 # Project State
