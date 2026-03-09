@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
+import { initAudioOnInteraction } from "../audio/AudioManager";
 import { CardCoverageDashboard } from "../components/controls/CardCoverageDashboard";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
@@ -103,6 +104,11 @@ export function MenuPage() {
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [savedDeckNames, setSavedDeckNames] = useState<string[]>([]);
   const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
+
+  // Warm up AudioContext on first user interaction (click/tap/key)
+  useEffect(() => {
+    initAudioOnInteraction();
+  }, []);
 
   // On mount: seed starter decks if needed, scan for saved decks, read active deck
   useEffect(() => {

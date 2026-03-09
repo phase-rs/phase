@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useRef, type ReactNode } from "re
 import type { GameAction } from "../adapter/types";
 import { WasmAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
+import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
@@ -173,12 +174,14 @@ export function GameProvider({
         initGame(gameId, wsAdapter).then(() => {
           if (cancelled) return;
           onReadyRef.current?.();
+          audioManager.startMusic();
         });
       }
 
       return () => {
         cancelled = true;
         if (wsUnsubscribe) wsUnsubscribe();
+        audioManager.stopMusic(0);
         reset();
       };
     }
@@ -192,10 +195,12 @@ export function GameProvider({
         if (cancelled) return;
         controller = createGameLoopController({ mode, difficulty });
         controller.start();
+        audioManager.startMusic();
       });
       return () => {
         cancelled = true;
         if (controller) controller.dispose();
+        audioManager.stopMusic(0);
         reset();
       };
     }
@@ -219,6 +224,7 @@ export function GameProvider({
 
         controller = createGameLoopController({ mode, difficulty });
         controller.start();
+        audioManager.startMusic();
       });
     });
 
@@ -227,6 +233,7 @@ export function GameProvider({
       if (controller) {
         controller.dispose();
       }
+      audioManager.stopMusic(0);
       reset();
     };
   }, [gameId, mode, difficulty, joinCode]);
