@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Phase 17 context gathered
-last_updated: "2026-03-09T17:25:42.388Z"
-last_activity: 2026-03-09 — Completed 18-05 coverage report & UI warning badge
+stopped_at: Completed 17-02-PLAN.md
+last_updated: "2026-03-09T17:49:40.619Z"
+last_activity: 2026-03-09 — Completed 17-02 Arena-style stack display
 progress:
   total_phases: 6
   completed_phases: 4
-  total_plans: 17
-  completed_plans: 17
-  percent: 88
+  total_plans: 22
+  completed_plans: 18
+  percent: 82
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 18 - Stubbed Mechanics Implementation
+**Current focus:** Phase 17 - MTG-Specific UI
 
 ## Current Position
 
-Phase: 18 of 18 (Stubbed Mechanics)
-Plan: 5 of 5 in current phase
+Phase: 17 of 18 (MTG-Specific UI)
+Plan: 2 of 5 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 18-05 coverage report & UI warning badge
+Last activity: 2026-03-09 — Completed 17-02 Arena-style stack display
 
-Progress: [█████████░] 88%
+Progress: [████████░░] 82%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [█████████░] 88%
 | Phase 18 P03 | 7min | 2 tasks | 4 files |
 | Phase 18 P04 | 4min | 2 tasks | 6 files |
 | Phase 18 P05 | 5min | 2 tasks | 7 files |
+| Phase 17 P02 | 2min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -115,6 +116,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 18-04]: Infect damage to players skips LifeChanged event (no life changes)
 - [Phase 18-05]: has_unimplemented_mechanics checks all 4 registry types (keywords, effects, triggers, statics)
 - [Phase 18-05]: Derived display fields use skip_deserializing + WASM-side computation pattern
+- [Phase 17]: StackDisplay moved from inline center-divider to fixed right-column overlay for Arena-style presentation
 
 ### Roadmap Evolution
 
@@ -133,5 +135,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 18-05 coverage report & UI warning badge
-Stopped at: Phase 17 context gathered
-Resume file: .planning/phases/17-mtg-specific-ui/17-CONTEXT.md
+Stopped at: Completed 17-02-PLAN.md
+Resume file: None

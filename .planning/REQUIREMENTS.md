@@ -69,7 +69,7 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Stack & Priority
 
-- [ ] **STACK-01**: Arena-style stack visualization displays spells/abilities waiting to resolve with card art and description
+- [x] **STACK-01**: Arena-style stack visualization displays spells/abilities waiting to resolve with card art and description
 - [ ] **STACK-02**: Priority pass/respond buttons appear when player has priority
 - [ ] **STACK-03**: Auto-pass toggle allows skipping priority when no legal instant-speed actions available
 - [ ] **STACK-04**: Full-control mode disables all auto-passing for manual control of every priority window
@@ -205,7 +205,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUDIO-03 | Phase 16 | Pending |
 | AUDIO-04 | Phase 16 | Pending |
 | AUDIO-05 | Phase 16 | Pending |
-| STACK-01 | Phase 17 | Pending |
+| STACK-01 | Phase 17 | Complete |
 | STACK-02 | Phase 17 | Pending |
 | STACK-03 | Phase 17 | Pending |
 | STACK-04 | Phase 17 | Pending |
