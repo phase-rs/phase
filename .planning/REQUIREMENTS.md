@@ -14,7 +14,7 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **BOARD-03**: Same-name tokens stack with count badge, expandable on click
 - [x] **BOARD-04**: Same-name lands group together with count badge
 - [x] **BOARD-05**: Tapped permanents render at 90 degree rotation
-- [ ] **BOARD-06**: Auras and equipment render visually attached to their host permanent
+- [x] **BOARD-06**: Auras and equipment render visually attached to their host permanent
 - [x] **BOARD-07**: Counter overlays display on permanents (e.g. +1/+1, loyalty) with count
 - [x] **BOARD-08**: Persistent damage number displays on damaged creatures
 - [x] **BOARD-09**: Battlefield backgrounds auto-select based on player's dominant mana color (WUBRG) using Forge assets
@@ -149,7 +149,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BOARD-03 | Phase 13 | Complete |
 | BOARD-04 | Phase 13 | Complete |
 | BOARD-05 | Phase 13 | Complete |
-| BOARD-06 | Phase 13 | Pending |
+| BOARD-06 | Phase 13 | Complete |
 | BOARD-07 | Phase 13 | Complete |
 | BOARD-08 | Phase 13 | Complete |
 | BOARD-09 | Phase 13 | Complete |

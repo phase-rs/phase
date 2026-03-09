@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 13-01-PLAN.md
-last_updated: "2026-03-09T00:58:32.111Z"
-last_activity: 2026-03-09 — Completed 13-02 CSS card sizing and event history
+stopped_at: Completed 13-03-PLAN.md
+last_updated: "2026-03-09T01:02:06Z"
+last_activity: 2026-03-09 — Completed 13-03 battlefield grouping and P/T display
 progress:
   total_phases: 5
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 2
-  percent: 20
+  completed_plans: 3
+  percent: 60
 ---
 
 # Project State
@@ -26,25 +26,26 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 13 of 17 (Foundation & Board Layout)
-Plan: 1 of 3 in current phase
+Plan: 3 of 3 in current phase (COMPLETE)
 Status: Executing
-Last activity: 2026-03-09 — Completed 13-02 CSS card sizing and event history
+Last activity: 2026-03-09 — Completed 13-03 battlefield grouping and P/T display
 
-Progress: [██░░░░░░░░] 20%
+Progress: [██████░░░░] 60%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1 (v1.1)
-- Average duration: 2min
-- Total execution time: 2min
+- Total plans completed: 3 (v1.1)
+- Average duration: 3min
+- Total execution time: 9min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 13-foundation-board-layout | 1/3 | 2min | 2min |
+| 13-foundation-board-layout | 3/3 | 9min | 3min |
 | Phase 13 P01 | 5min | 2 tasks | 11 files |
+| Phase 13 P03 | 2min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -58,6 +59,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [13-02] Cap eventHistory at 1000 entries to prevent unbounded memory growth
 - [Phase 13-01]: View model functions are pure mappers from GameObject to flat props, no store coupling
 - [Phase 13-01]: Permanent grouping requires same name + same tapped state + no attachments + no counters
+- [Phase 13-03]: P/T box replaces damage overlay for creatures; non-creatures keep damage overlay
+- [Phase 13-03]: Counter badges at top-right to avoid P/T box overlap at bottom-right
+- [Phase 13-03]: Attachment tuck uses 15px offset per attachment with marginTop reservation
 
 ### Blockers/Concerns
 
@@ -71,6 +75,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 13-02 CSS card sizing and event history
-Stopped at: Completed 13-01-PLAN.md
+Last activity: 2026-03-09 - Completed 13-03 battlefield grouping and P/T display
+Stopped at: Completed 13-03-PLAN.md
 Resume file: None
