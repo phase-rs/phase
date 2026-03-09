@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
@@ -7,6 +7,7 @@ import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { PassButton } from "../components/controls/PassButton.tsx";
+import { PhaseStopBar } from "../components/controls/PhaseStopBar.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
@@ -22,112 +23,25 @@ import { OpponentHud } from "../components/hud/OpponentHud.tsx";
 import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
-import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage.ts";
-import { WasmAdapter } from "../adapter/wasm-adapter.ts";
-import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
-import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter.ts";
-import type { ParsedDeck } from "../services/deckParser.ts";
+import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
-import { createAIController } from "../game/controllers/aiController.ts";
-import type { AIController } from "../game/controllers/aiController.ts";
-
-const DEFAULT_WS_URL = "ws://localhost:8080/ws";
-
-function getWsUrl(): string {
-  return import.meta.env.VITE_WS_URL ?? DEFAULT_WS_URL;
-}
-
-/** Load active deck from localStorage using shared storage constants. */
-function loadActiveDeck(): ParsedDeck | null {
-  const activeName = localStorage.getItem(ACTIVE_DECK_KEY);
-  if (!activeName) return null;
-  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + activeName);
-  if (!raw) return null;
-  return JSON.parse(raw) as ParsedDeck;
-}
-
-/** Convert ParsedDeck to DeckData format for WebSocket adapter. */
-function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
-  const names: string[] = [];
-  for (const entry of deck.main) {
-    for (let i = 0; i < entry.count; i++) {
-      names.push(entry.name);
-    }
-  }
-  const sbNames: string[] = [];
-  for (const entry of deck.sideboard) {
-    for (let i = 0; i < entry.count; i++) {
-      sbNames.push(entry.name);
-    }
-  }
-  return { main_deck: names, sideboard: sbNames };
-}
-
-interface CardFace {
-  name: string;
-  [key: string]: unknown;
-}
-
-interface DeckPayload {
-  player_deck: Array<{ card: CardFace; count: number }>;
-  opponent_deck: Array<{ card: CardFace; count: number }>;
-}
-
-/** Fetch card-data.json and build DeckPayload for WASM. */
-async function buildDeckPayload(deck: ParsedDeck): Promise<DeckPayload | null> {
-  try {
-    const resp = await fetch("/card-data.json");
-    if (!resp.ok) {
-      console.warn("card-data.json not available (HTTP", resp.status, "). Starting with empty game.");
-      return null;
-    }
-    const cardDb = (await resp.json()) as Record<string, CardFace>;
-
-    const entries: Array<{ card: CardFace; count: number }> = [];
-    for (const entry of deck.main) {
-      const card = cardDb[entry.name];
-      if (card) {
-        entries.push({ card, count: entry.count });
-      } else {
-        console.warn(`Card not found in card-data.json: ${entry.name}`);
-      }
-    }
-
-    // Mirror match: opponent uses the same deck
-    return { player_deck: entries, opponent_deck: entries };
-  } catch (err) {
-    console.warn("Failed to load card-data.json:", err);
-    return null;
-  }
-}
+import { GameProvider } from "../providers/GameProvider.tsx";
 
 export function GamePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const mode = searchParams.get("mode");
+  const rawMode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
   const joinCode = searchParams.get("code") ?? "";
-  const containerRef = useRef<HTMLDivElement>(null);
 
-  const initGame = useGameStore((s) => s.initGame);
-  const gameState = useGameStore((s) => s.gameState);
-  const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameDispatch();
-  const reset = useGameStore((s) => s.reset);
-  const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
-  const objects = gameState?.objects;
-  const aiControllerRef = useRef<AIController | null>(null);
-  const wsAdapterRef = useRef<WebSocketAdapter | null>(null);
-  const [showAiHand, setShowAiHand] = useState(false);
+  // Map URL modes to GameProvider modes
+  const mode: "ai" | "online" | "local" =
+    rawMode === "host" || rawMode === "join" ? "online" : rawMode === "ai" ? "ai" : "local";
+
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
-  const [viewingZone, setViewingZone] = useState<{
-    zone: "graveyard" | "exile";
-    playerId: number;
-  } | null>(null);
-  const [showPreferences, setShowPreferences] = useState(false);
 
   // Online multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
@@ -140,117 +54,118 @@ export function GamePage() {
     | { status: "failed" }
   >({ status: "idle" });
 
+  const handleWsEvent = useCallback((event: WsAdapterEvent) => {
+    switch (event.type) {
+      case "gameCreated":
+        setHostGameCode(event.gameCode);
+        break;
+      case "waitingForOpponent":
+        setWaitingForOpponent(true);
+        break;
+      case "opponentDisconnected":
+        setOpponentDisconnected(true);
+        setDisconnectGrace(event.graceSeconds);
+        break;
+      case "opponentReconnected":
+        setOpponentDisconnected(false);
+        break;
+      case "reconnecting":
+        setReconnectState({
+          status: "reconnecting",
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+        });
+        break;
+      case "reconnected":
+        setReconnectState({ status: "idle" });
+        break;
+      case "reconnectFailed":
+        setReconnectState({ status: "failed" });
+        break;
+    }
+  }, []);
+
+  const handleReady = useCallback(() => {
+    setWaitingForOpponent(false);
+  }, []);
+
+  const handleNoDeck = useCallback(() => {
+    navigate("/");
+  }, [navigate]);
+
+  const handleCardDataMissing = useCallback(() => {
+    setShowCardDataMissing(true);
+  }, []);
+
+  return (
+    <GameProvider
+      mode={mode}
+      difficulty={difficulty}
+      joinCode={joinCode || undefined}
+      onWsEvent={mode === "online" ? handleWsEvent : undefined}
+      onReady={mode === "online" ? handleReady : undefined}
+      onCardDataMissing={handleCardDataMissing}
+      onNoDeck={handleNoDeck}
+    >
+      <GamePageContent
+        mode={rawMode}
+        hostGameCode={hostGameCode}
+        waitingForOpponent={waitingForOpponent}
+        opponentDisconnected={opponentDisconnected}
+        disconnectGrace={disconnectGrace}
+        reconnectState={reconnectState}
+        showCardDataMissing={showCardDataMissing}
+        onDismissCardDataMissing={() => setShowCardDataMissing(false)}
+      />
+    </GameProvider>
+  );
+}
+
+interface GamePageContentProps {
+  mode: string | null;
+  hostGameCode: string | null;
+  waitingForOpponent: boolean;
+  opponentDisconnected: boolean;
+  disconnectGrace: number;
+  reconnectState:
+    | { status: "idle" }
+    | { status: "reconnecting"; attempt: number; maxAttempts: number }
+    | { status: "failed" };
+  showCardDataMissing: boolean;
+  onDismissCardDataMissing: () => void;
+}
+
+function GamePageContent({
+  mode,
+  hostGameCode,
+  waitingForOpponent,
+  opponentDisconnected,
+  disconnectGrace,
+  reconnectState,
+  showCardDataMissing,
+  onDismissCardDataMissing,
+}: GamePageContentProps) {
+  const navigate = useNavigate();
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const gameState = useGameStore((s) => s.gameState);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const dispatch = useGameDispatch();
+  const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
+  const objects = gameState?.objects;
+  const [showAiHand, setShowAiHand] = useState(false);
+  const [viewingZone, setViewingZone] = useState<{
+    zone: "graveyard" | "exile";
+    playerId: number;
+  } | null>(null);
+  const [showPreferences, setShowPreferences] = useState(false);
+
   const inspectedCardName =
     inspectedObjectId != null && objects
       ? (objects[inspectedObjectId]?.name ?? null)
       : null;
 
   useKeyboardShortcuts();
-
-  useEffect(() => {
-    const isOnline = mode === "host" || mode === "join";
-
-    // Page-reload reconnection: no mode param but session exists in storage
-    const hasSession = sessionStorage.getItem("forge-ws-session") !== null;
-    const isReconnect = !mode && hasSession;
-
-    if (isOnline || isReconnect) {
-      const parsedDeck = loadActiveDeck();
-      const deck = parsedDeck
-        ? parsedDeckToDeckData(parsedDeck)
-        : { main_deck: [], sideboard: [] };
-      const wsAdapter = new WebSocketAdapter(
-        getWsUrl(),
-        (mode as "host" | "join") ?? "host",
-        deck,
-        mode === "join" ? joinCode : undefined,
-      );
-      wsAdapterRef.current = wsAdapter;
-
-      const unsubscribe = wsAdapter.onEvent((event: WsAdapterEvent) => {
-        switch (event.type) {
-          case "gameCreated":
-            setHostGameCode(event.gameCode);
-            break;
-          case "waitingForOpponent":
-            setWaitingForOpponent(true);
-            break;
-          case "opponentDisconnected":
-            setOpponentDisconnected(true);
-            setDisconnectGrace(event.graceSeconds);
-            break;
-          case "opponentReconnected":
-            setOpponentDisconnected(false);
-            break;
-          case "reconnecting":
-            setReconnectState({
-              status: "reconnecting",
-              attempt: event.attempt,
-              maxAttempts: event.maxAttempts,
-            });
-            break;
-          case "reconnected":
-            setReconnectState({ status: "idle" });
-            break;
-          case "reconnectFailed":
-            setReconnectState({ status: "failed" });
-            break;
-        }
-      });
-
-      if (isReconnect) {
-        // Attempt to restore session from storage
-        wsAdapter.tryReconnect();
-      } else {
-        initGame(wsAdapter).then(() => {
-          setWaitingForOpponent(false);
-        });
-      }
-
-      return () => {
-        unsubscribe();
-        wsAdapterRef.current = null;
-        reset();
-      };
-    }
-
-    // AI or default mode: require active deck
-    const parsedDeck = loadActiveDeck();
-    if (!parsedDeck) {
-      navigate("/");
-      return;
-    }
-
-    let cancelled = false;
-    const adapter = new WasmAdapter();
-
-    buildDeckPayload(parsedDeck).then((deckPayload) => {
-      if (cancelled) return;
-
-      if (deckPayload === null) {
-        setShowCardDataMissing(true);
-      }
-
-      initGame(adapter, deckPayload).then(() => {
-        if (cancelled) return;
-
-        if (mode === "ai") {
-          const controller = createAIController({ difficulty });
-          aiControllerRef.current = controller;
-          controller.start();
-        }
-      });
-    });
-
-    return () => {
-      cancelled = true;
-      if (aiControllerRef.current) {
-        aiControllerRef.current.dispose();
-        aiControllerRef.current = null;
-      }
-      reset();
-    };
-  }, [initGame, reset, mode, difficulty, joinCode, navigate]);
 
   const handleMulliganChoice = useCallback(
     (id: string) => {
@@ -272,14 +187,6 @@ export function GamePage() {
 
   const isReconnecting = reconnectState.status !== "idle";
 
-  const handleRetry = useCallback(() => {
-    if (wsAdapterRef.current) {
-      setReconnectState({ status: "idle" });
-      // Reset internal attempt counter by accessing attemptReconnect indirectly through tryReconnect
-      wsAdapterRef.current.tryReconnect();
-    }
-  }, []);
-
   return (
     <div ref={containerRef} className="relative h-screen w-screen overflow-hidden bg-gray-950">
       {/* Reconnecting banner */}
@@ -293,12 +200,6 @@ export function GamePage() {
       {reconnectState.status === "failed" && (
         <div className="fixed left-0 right-0 top-0 z-40 flex items-center justify-center gap-4 bg-red-700 px-4 py-2 text-sm font-semibold text-white">
           <span>Connection lost</span>
-          <button
-            onClick={handleRetry}
-            className="rounded bg-white/20 px-3 py-1 text-xs font-semibold hover:bg-white/30"
-          >
-            Retry
-          </button>
           <button
             onClick={() => navigate("/")}
             className="rounded bg-white/20 px-3 py-1 text-xs font-semibold hover:bg-white/30"
@@ -326,8 +227,9 @@ export function GamePage() {
           />
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-500">
-              Turn {gameState?.turn_number ?? 0} | {gameState?.phase ?? "---"}
+              T{gameState?.turn_number ?? 0}
             </span>
+            <PhaseStopBar />
             {gameState && gameState.stack.length > 0 && (
               <div className="max-w-xs">
                 <StackDisplay />
@@ -390,7 +292,7 @@ export function GamePage() {
           <div className="relative z-10 rounded-xl bg-gray-900 p-6 text-center shadow-2xl ring-1 ring-gray-700">
             <h2 className="text-lg font-bold text-white">Joining Game...</h2>
             <p className="mt-2 text-sm text-gray-400">
-              Connecting to game {joinCode}
+              Connecting to game
             </p>
           </div>
         </div>
@@ -416,7 +318,7 @@ export function GamePage() {
 
       {/* Card data missing modal */}
       {showCardDataMissing && (
-        <CardDataMissingModal onContinue={() => setShowCardDataMissing(false)} />
+        <CardDataMissingModal onContinue={onDismissCardDataMissing} />
       )}
 
       {/* Overlay layers */}
