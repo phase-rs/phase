@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 18-02-PLAN.md
-last_updated: "2026-03-09T15:13:42.417Z"
-last_activity: 2026-03-09 — Completed 18-01 combat evasion keywords
+stopped_at: Completed 18-03-PLAN.md
+last_updated: "2026-03-09T15:11:41Z"
+last_activity: 2026-03-09 — Completed 18-03 static abilities & prowess trigger
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 17
-  completed_plans: 15
-  percent: 76
+  completed_plans: 16
+  percent: 82
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 18 of 18 (Stubbed Mechanics)
-Plan: 2 of 5 in current phase
+Plan: 4 of 5 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 18-01 combat evasion keywords
+Last activity: 2026-03-09 — Completed 18-03 static abilities & prowess trigger
 
-Progress: [████████░░] 76%
+Progress: [████████░░] 82%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [████████░░] 76%
 | Phase 15 P03 | 5min | 2 tasks | 4 files |
 | Phase 18 P01 | 5min | 1 tasks | 4 files |
 | Phase 18 P02 | 8min | 2 tasks | 7 files |
+| Phase 18 P03 | 7min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,10 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 18]: derive_colors_from_mana_cost made pub(crate) in deck_loading for reuse in test_helpers
 - [Phase 18]: Scry simplified: all scryed cards go to bottom (TODO: WaitingFor::ScryChoice)
 - [Phase 18]: Shared matches_filter() in effects/mod.rs handles Forge Valid patterns (type.controller)
+- [Phase 18-03]: CantBeBlocked checked via static_definitions, matching Forge card data format
+- [Phase 18-03]: Protection only handles Color variant; CardType/Quality deferred
+- [Phase 18-03]: Ward cost enforcement deferred to mana payment UI
+- [Phase 18-03]: Prowess uses synthetic trigger injection for keyword-based triggers
 
 ### Roadmap Evolution
 
@@ -120,6 +125,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 15-02 game loop controller & GameProvider
-Stopped at: Completed 18-02-PLAN.md
+Last activity: 2026-03-09 - Completed 18-03 static abilities & prowess trigger
+Stopped at: Completed 18-03-PLAN.md
 Resume file: None
