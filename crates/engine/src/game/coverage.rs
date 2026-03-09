@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::effects::build_registry as build_effect_registry;
+use crate::game::game_object::GameObject;
 use crate::game::static_abilities::build_static_registry;
 use crate::game::triggers::build_trigger_registry;
 use crate::parser::ability::{parse_ability, parse_static, parse_trigger};
@@ -12,9 +13,7 @@ use crate::types::keywords::Keyword;
 use crate::types::triggers::TriggerMode;
 
 /// Current Standard-legal set codes (2024-2025 Standard rotation).
-const STANDARD_SETS: &[&str] = &[
-    "MKM", "OTJ", "BLB", "DSK", "FDN",
-];
+const STANDARD_SETS: &[&str] = &["MKM", "OTJ", "BLB", "DSK", "FDN"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {
@@ -31,6 +30,47 @@ pub struct CoverageSummary {
     pub coverage_pct: f64,
     pub cards: Vec<CardCoverageResult>,
     pub missing_handler_frequency: Vec<(String, usize)>,
+}
+
+/// Check whether a game object has any mechanics the engine cannot handle.
+///
+/// Checks keywords (Unknown variant = unrecognized), abilities (api_type
+/// not in effect registry), triggers (mode not in trigger registry), and
+/// static abilities (mode not in static registry).
+pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
+    // 1. Any Unknown keyword means the parser didn't recognize it
+    if obj.keywords.iter().any(|k| matches!(k, Keyword::Unknown(_))) {
+        return true;
+    }
+
+    // 2. Check abilities against effect registry
+    let effect_registry = build_effect_registry();
+    for raw in &obj.abilities {
+        if let Ok(def) = parse_ability(raw) {
+            if !def.api_type.is_empty() && !effect_registry.contains_key(&def.api_type) {
+                return true;
+            }
+        }
+    }
+
+    // 3. Check trigger modes against trigger registry
+    let trigger_registry = build_trigger_registry();
+    for trig in &obj.trigger_definitions {
+        let mode = TriggerMode::from_str(&trig.mode).unwrap_or(TriggerMode::Unknown(trig.mode.clone()));
+        if matches!(&mode, TriggerMode::Unknown(_)) || !trigger_registry.contains_key(&mode) {
+            return true;
+        }
+    }
+
+    // 4. Check static ability modes against static registry
+    let static_registry = build_static_registry();
+    for stat in &obj.static_definitions {
+        if !static_registry.contains_key(&stat.mode) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Analyze Standard-legal card coverage by checking which cards have
@@ -68,7 +108,8 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
             for (_name, svar_val) in &face.svars {
                 if svar_val.contains("$ ") {
                     if let Ok(def) = parse_ability(svar_val) {
-                        if !def.api_type.is_empty() && !effect_registry.contains_key(&def.api_type) {
+                        if !def.api_type.is_empty() && !effect_registry.contains_key(&def.api_type)
+                        {
                             let label = format!("Effect:{}", def.api_type);
                             if !missing.contains(&label) {
                                 missing.push(label);
@@ -199,6 +240,9 @@ fn layout_faces(layout: &crate::types::card::CardLayout) -> Vec<&crate::types::c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
     use std::path::Path;
 
     fn create_card_file(dir: &Path, name: &str, content: &str) {
@@ -239,7 +283,9 @@ mod tests {
         assert_eq!(summary.total_cards, 1);
         assert_eq!(summary.supported_cards, 0);
         assert!(!summary.cards[0].supported);
-        assert!(summary.cards[0].missing_handlers.contains(&"Effect:Fateseal".to_string()));
+        assert!(summary.cards[0]
+            .missing_handlers
+            .contains(&"Effect:Fateseal".to_string()));
     }
 
     #[test]
@@ -270,7 +316,10 @@ mod tests {
         let summary = analyze_standard_coverage(&db);
 
         assert_eq!(summary.supported_cards, 0);
-        assert!(summary.cards[0].missing_handlers.iter().any(|m| m.starts_with("Keyword:")));
+        assert!(summary.cards[0]
+            .missing_handlers
+            .iter()
+            .any(|m| m.starts_with("Keyword:")));
     }
 
     #[test]
@@ -328,5 +377,58 @@ mod tests {
         assert_eq!(summary.supported_cards, 2);
         // 2/3 * 100 = 66.67%
         assert!((summary.coverage_pct - 66.66).abs() < 1.0);
+    }
+
+    fn make_obj() -> GameObject {
+        GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    #[test]
+    fn vanilla_object_has_no_unimplemented_mechanics() {
+        let obj = make_obj();
+        assert!(!has_unimplemented_mechanics(&obj));
+    }
+
+    #[test]
+    fn object_with_known_keyword_has_no_unimplemented() {
+        let mut obj = make_obj();
+        obj.keywords.push(Keyword::Flying);
+        obj.keywords.push(Keyword::Haste);
+        assert!(!has_unimplemented_mechanics(&obj));
+    }
+
+    #[test]
+    fn object_with_unknown_keyword_has_unimplemented() {
+        let mut obj = make_obj();
+        obj.keywords.push(Keyword::Unknown("FutureKeyword".to_string()));
+        assert!(has_unimplemented_mechanics(&obj));
+    }
+
+    #[test]
+    fn object_with_registered_ability_has_no_unimplemented() {
+        let mut obj = make_obj();
+        obj.abilities.push("SP$ DealDamage | Cost$ R | NumDmg$ 3".to_string());
+        assert!(!has_unimplemented_mechanics(&obj));
+    }
+
+    #[test]
+    fn object_with_unregistered_ability_has_unimplemented() {
+        let mut obj = make_obj();
+        obj.abilities.push("SP$ Fateseal | Cost$ U | Amount$ 2".to_string());
+        assert!(has_unimplemented_mechanics(&obj));
+    }
+
+    #[test]
+    fn has_unimplemented_via_game_object_method() {
+        let mut obj = make_obj();
+        assert!(!obj.has_unimplemented_mechanics());
+        obj.keywords.push(Keyword::Unknown("Bogus".to_string()));
+        assert!(obj.has_unimplemented_mechanics());
     }
 }

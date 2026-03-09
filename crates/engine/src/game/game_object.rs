@@ -6,7 +6,7 @@ use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefi
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaCost, ManaColor};
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -72,13 +72,7 @@ pub struct GameObject {
 }
 
 impl GameObject {
-    pub fn new(
-        id: ObjectId,
-        card_id: CardId,
-        owner: PlayerId,
-        name: String,
-        zone: Zone,
-    ) -> Self {
+    pub fn new(id: ObjectId, card_id: CardId, owner: PlayerId, name: String, zone: Zone) -> Self {
         GameObject {
             id,
             card_id,
@@ -119,6 +113,11 @@ impl GameObject {
     /// Check if this object has a specific keyword, using discriminant-based matching.
     pub fn has_keyword(&self, keyword: &Keyword) -> bool {
         super::keywords::has_keyword(self, keyword)
+    }
+
+    /// Check if this object uses any mechanics the engine cannot handle.
+    pub fn has_unimplemented_mechanics(&self) -> bool {
+        super::coverage::has_unimplemented_mechanics(self)
     }
 }
 
