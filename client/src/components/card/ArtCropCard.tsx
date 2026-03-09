@@ -45,7 +45,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
     return (
       <div className="flex flex-col">
         <div
-          className="truncate rounded-t-sm bg-black/70 px-1 text-left text-[9px] font-bold text-gray-300"
+          className="truncate rounded-t-sm bg-black/70 px-1.5 py-0.5 text-left text-[9px] font-bold text-gray-300"
           style={{ width: "var(--art-crop-w)" }}
         >
           {cardName}
@@ -67,7 +67,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
     <div className="flex flex-col">
       {/* Card name — left-aligned title above art with background */}
       <div
-        className="truncate rounded-t-sm bg-black/70 px-1 text-left text-[9px] font-bold text-gray-300"
+        className="truncate rounded-t-sm bg-black/70 px-1.5 py-0.5 text-left text-[9px] font-bold text-gray-300"
         style={{ width: "var(--art-crop-w)" }}
       >
         {cardName}

@@ -23,8 +23,10 @@ export function BattlefieldRow({ groups, rowType }: BattlefieldRowProps) {
     ? "min-h-[calc(var(--art-crop-h)+24px)]"
     : "min-h-[calc(var(--card-h)+8px)]";
 
+  const landScale = rowType === "lands" ? "scale-75 origin-top-left" : "";
+
   return (
-    <div className={`flex ${minH} flex-wrap items-center gap-2 px-2 ${ROW_JUSTIFY[rowType]}`}>
+    <div className={`flex ${minH} flex-wrap items-center gap-2 px-2 ${ROW_JUSTIFY[rowType]} ${landScale}`}>
       {groups.map((group) => (
         <GroupedPermanentDisplay key={group.ids[0]} group={group} />
       ))}

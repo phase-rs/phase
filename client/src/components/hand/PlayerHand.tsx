@@ -256,7 +256,7 @@ function HandCard({
       }}
       {...longPressHandlers}
     >
-      <CardImage cardName={cardName} size="small" hasUnimplementedMechanics={hasUnimplementedMechanics} />
+      <CardImage cardName={cardName} size="normal" hasUnimplementedMechanics={hasUnimplementedMechanics} className="!w-[calc(var(--card-w)*1.3)] !h-[calc(var(--card-h)*1.3)]" />
     </motion.div>
   );
 }
