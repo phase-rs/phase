@@ -19,7 +19,11 @@ function listSavedDecks(): string[] {
   return keys.sort();
 }
 
-export function DeckBuilder() {
+interface DeckBuilderProps {
+  onCardHover?: (cardName: string | null) => void;
+}
+
+export function DeckBuilder({ onCardHover }: DeckBuilderProps) {
   const navigate = useNavigate();
   const [deck, setDeck] = useState<ParsedDeck>({ main: [], sideboard: [] });
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
@@ -190,7 +194,11 @@ export function DeckBuilder() {
 
         {/* Center: Card Grid */}
         <div className="min-w-0 flex-1 overflow-y-auto">
-          <CardGrid cards={searchResults} onAddCard={handleAddCard} />
+          <CardGrid
+            cards={searchResults}
+            onAddCard={handleAddCard}
+            onCardHover={onCardHover}
+          />
         </div>
 
         {/* Right: Deck List + Stats */}
@@ -200,6 +208,7 @@ export function DeckBuilder() {
             onRemoveCard={handleRemoveCard}
             onImport={handleImport}
             onExport={handleExport}
+            onCardHover={onCardHover}
           />
           <div className="mt-3 border-t border-gray-700 pt-3">
             <ManaCurve cmcValues={cmcValues} colorValues={colorValues} />

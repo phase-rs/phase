@@ -7,6 +7,7 @@ interface DeckListProps {
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
   onExport: () => void;
+  onCardHover?: (cardName: string | null) => void;
 }
 
 /** Categorize a type_line string into a group for display. */
@@ -42,13 +43,19 @@ function CardEntryRow({
   entry,
   section,
   onRemove,
+  onCardHover,
 }: {
   entry: DeckEntry;
   section: "main" | "sideboard";
   onRemove: (name: string, section: "main" | "sideboard") => void;
+  onCardHover?: (cardName: string | null) => void;
 }) {
   return (
-    <div className="group flex items-center justify-between py-0.5 text-sm">
+    <div
+      className="group flex items-center justify-between py-0.5 text-sm"
+      onMouseEnter={() => onCardHover?.(entry.name)}
+      onMouseLeave={() => onCardHover?.(null)}
+    >
       <span className="text-gray-300">
         <span className="mr-1 text-gray-500">{entry.count}x</span>
         {entry.name}
@@ -69,11 +76,13 @@ function SectionList({
   entries,
   section,
   onRemove,
+  onCardHover,
 }: {
   title: string;
   entries: DeckEntry[];
   section: "main" | "sideboard";
   onRemove: (name: string, section: "main" | "sideboard") => void;
+  onCardHover?: (cardName: string | null) => void;
 }) {
   if (entries.length === 0) return null;
   const count = totalCards(entries);
@@ -90,13 +99,14 @@ function SectionList({
           entry={entry}
           section={section}
           onRemove={onRemove}
+          onCardHover={onCardHover}
         />
       ))}
     </div>
   );
 }
 
-export function DeckList({ deck, onRemoveCard, onImport, onExport }: DeckListProps) {
+export function DeckList({ deck, onRemoveCard, onImport, onExport, onCardHover }: DeckListProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -202,6 +212,7 @@ export function DeckList({ deck, onRemoveCard, onImport, onExport }: DeckListPro
             entries={mainGroups[group]}
             section="main"
             onRemove={onRemoveCard}
+            onCardHover={onCardHover}
           />
         ))}
 
@@ -213,6 +224,7 @@ export function DeckList({ deck, onRemoveCard, onImport, onExport }: DeckListPro
               entries={deck.sideboard}
               section="sideboard"
               onRemove={onRemoveCard}
+              onCardHover={onCardHover}
             />
           </div>
         )}
