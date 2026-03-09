@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
+import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
@@ -11,6 +12,7 @@ import { PhaseStopBar } from "../components/controls/PhaseStopBar.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
+import { DamageAssignmentModal } from "../components/combat/DamageAssignmentModal.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
@@ -346,6 +348,12 @@ function GamePageContent({
 
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
+
+      {/* Block assignment lines (animated SVG overlay for combat) */}
+      <BlockAssignmentLines />
+
+      {/* Damage assignment review (read-only for v1.1) */}
+      <DamageAssignmentModal />
 
       {/* Unified action button (combat + priority controls) */}
       <ActionButton />
