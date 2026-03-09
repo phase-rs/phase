@@ -3,7 +3,7 @@ import { getCachedImage, revokeImageUrl } from "../services/imageCache.ts";
 import { fetchCardImageUrl } from "../services/scryfall.ts";
 
 interface UseCardImageOptions {
-  size?: "small" | "normal" | "large";
+  size?: "small" | "normal" | "large" | "art_crop";
   faceIndex?: number;
 }
 

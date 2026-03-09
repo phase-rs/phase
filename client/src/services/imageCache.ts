@@ -6,7 +6,7 @@ function cacheKey(cardName: string, size: string): string {
 
 export async function getCachedImage(
   cardName: string,
-  size: "small" | "normal" | "large",
+  size: "small" | "normal" | "large" | "art_crop",
 ): Promise<string | null> {
   const blob = await get<Blob>(cacheKey(cardName, size));
   if (!blob) return null;

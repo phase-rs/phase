@@ -7,6 +7,8 @@ import type { AnimationSpeed, VfxQuality } from "../animation/types";
 export type CardSizePreference = "small" | "medium" | "large";
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
+export type BattlefieldCardDisplay = "art_crop" | "full_card";
+export type TapRotation = "mtga" | "classic";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "none" disables the background image. Any other string is a battlefield ID. */
 export type BoardBackground = "auto-wubrg" | "none" | (string & {});
@@ -24,6 +26,8 @@ interface PreferencesState {
   sfxMuted: boolean;
   musicMuted: boolean;
   masterMuted: boolean;
+  battlefieldCardDisplay: BattlefieldCardDisplay;
+  tapRotation: TapRotation;
 }
 
 interface PreferencesActions {
@@ -39,6 +43,8 @@ interface PreferencesActions {
   setSfxMuted: (muted: boolean) => void;
   setMusicMuted: (muted: boolean) => void;
   setMasterMuted: (muted: boolean) => void;
+  setBattlefieldCardDisplay: (display: BattlefieldCardDisplay) => void;
+  setTapRotation: (rotation: TapRotation) => void;
 }
 
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
@@ -56,6 +62,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       sfxMuted: false,
       musicMuted: false,
       masterMuted: false,
+      battlefieldCardDisplay: "art_crop",
+      tapRotation: "mtga",
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
@@ -69,6 +77,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setSfxMuted: (muted) => set({ sfxMuted: muted }),
       setMusicMuted: (muted) => set({ musicMuted: muted }),
       setMasterMuted: (muted) => set({ masterMuted: muted }),
+      setBattlefieldCardDisplay: (display) => set({ battlefieldCardDisplay: display }),
+      setTapRotation: (rotation) => set({ tapRotation: rotation }),
     }),
     { name: "forge-preferences" },
   ),

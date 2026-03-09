@@ -3,7 +3,7 @@ import { cacheImage } from "./imageCache.ts";
 
 const SCRYFALL_DELAY_MS = 75;
 
-type ImageSize = "small" | "normal" | "large";
+export type ImageSize = "small" | "normal" | "large" | "art_crop";
 
 export interface ScryfallCard {
   id: string;
