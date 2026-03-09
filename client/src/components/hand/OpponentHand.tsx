@@ -19,9 +19,13 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
 
   const center = (cardCount - 1) / 2;
 
+  // Base offset pushes cards partially offscreen; rotation compensation keeps fan arc smooth
+  const BASE_Y = -40;
+  const ROTATION_COMPENSATION = 0.8;
+
   return (
     <div
-      className="flex items-start justify-center px-4 py-1"
+      className="flex items-start justify-center overflow-hidden px-4 py-1"
       style={{ perspective: "800px" }}
     >
       <AnimatePresence>
@@ -33,13 +37,13 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
           return (
             <motion.div
               key={id}
-              initial={{ opacity: 0, y: -30 }}
+              initial={{ opacity: 0, y: -60 }}
               animate={{
                 opacity: 1,
-                y: -Math.abs(rotation) * 0.8,
+                y: BASE_Y - Math.abs(rotation) * ROTATION_COMPENSATION,
                 rotate: rotation,
               }}
-              exit={{ opacity: 0, y: -30 }}
+              exit={{ opacity: 0, y: -60 }}
               transition={{ delay: i * 0.03, duration: 0.25 }}
               style={{ marginLeft: i > 0 ? "-16px" : undefined, zIndex: i }}
             >

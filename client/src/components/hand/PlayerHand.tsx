@@ -183,13 +183,16 @@ function HandCard({
       : "opacity-60"
     : "";
 
+  // Rotation compensation: outer cards pushed down to form a natural arc (smile curve)
+  const arcOffset = Math.abs(rotation) * 1.2;
+
   return (
     <motion.div
       layout
       initial={{ opacity: 0, y: 40 }}
       animate={{
         opacity: 1,
-        y: (expanded ? -20 : 30) + Math.abs(rotation) * 0.8,
+        y: (expanded ? -20 : 30) + arcOffset,
         rotate: rotation,
       }}
       exit={{ opacity: 0, y: 40 }}
