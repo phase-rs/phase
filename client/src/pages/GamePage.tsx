@@ -191,6 +191,8 @@ function GamePageContent({
 
   return (
     <div ref={containerRef} className="relative h-screen w-screen overflow-hidden bg-gray-950">
+      <StackDisplay />
+
       {/* Reconnecting banner */}
       {reconnectState.status === "reconnecting" && (
         <div className="fixed left-0 right-0 top-0 z-40 bg-amber-600 px-4 py-2 text-center text-sm font-semibold text-white">
@@ -243,11 +245,6 @@ function GamePageContent({
               </span>
             )}
             <PhaseStopBar />
-            {gameState && gameState.stack.length > 0 && (
-              <div className="max-w-xs">
-                <StackDisplay />
-              </div>
-            )}
           </div>
           <ZoneIndicator
             zone="exile"
