@@ -1,22 +1,38 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { type ScryfallCard, getCardImageSmall } from "../../services/scryfall";
+import type { ScryfallCard } from "../../services/scryfall";
 
 interface CardGridProps {
   cards: ScryfallCard[];
   onAddCard: (card: ScryfallCard) => void;
+  onCardHover?: (cardName: string | null) => void;
+  cardCounts?: Map<string, number>;
+}
+
+function getArtCropUrl(card: ScryfallCard): string {
+  return (
+    card.image_uris?.art_crop ??
+    card.card_faces?.[0]?.image_uris?.art_crop ??
+    ""
+  );
 }
 
 function isStandardLegal(card: ScryfallCard): boolean {
   return card.legalities?.standard === "legal";
 }
 
-export function CardGrid({ cards, onAddCard }: CardGridProps) {
+export function CardGrid({
+  cards,
+  onAddCard,
+  onCardHover,
+  cardCounts,
+}: CardGridProps) {
   return (
     <div className="grid auto-rows-min grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-2 overflow-y-auto p-2">
       <AnimatePresence mode="popLayout">
         {cards.map((card) => {
-          const imageUrl = getCardImageSmall(card);
+          const imageUrl = getArtCropUrl(card);
           const legal = isStandardLegal(card);
+          const count = cardCounts?.get(card.name);
 
           return (
             <motion.button
@@ -27,6 +43,8 @@ export function CardGrid({ cards, onAddCard }: CardGridProps) {
               exit={{ opacity: 0, scale: 0.9 }}
               transition={{ duration: 0.15 }}
               onClick={() => legal && onAddCard(card)}
+              onMouseEnter={() => onCardHover?.(card.name)}
+              onMouseLeave={() => onCardHover?.(null)}
               disabled={!legal}
               title={legal ? `Add ${card.name}` : `${card.name} - Not Standard legal`}
               className={`group relative cursor-pointer overflow-hidden rounded-lg transition-transform hover:scale-105 ${
@@ -39,11 +57,11 @@ export function CardGrid({ cards, onAddCard }: CardGridProps) {
                 <img
                   src={imageUrl}
                   alt={card.name}
-                  className="aspect-[488/680] w-full rounded-lg object-cover"
+                  className="aspect-[4/3] w-full rounded-lg object-cover"
                   loading="lazy"
                 />
               ) : (
-                <div className="flex aspect-[488/680] w-full items-center justify-center rounded-lg bg-gray-800 text-xs text-gray-400">
+                <div className="flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-gray-800 text-xs text-gray-400">
                   {card.name}
                 </div>
               )}
@@ -56,8 +74,15 @@ export function CardGrid({ cards, onAddCard }: CardGridProps) {
                 </div>
               )}
 
-              {/* Hover tooltip */}
-              <div className="pointer-events-none absolute bottom-0 left-0 right-0 translate-y-full bg-black/80 px-1.5 py-1 text-[10px] text-white transition-transform group-hover:translate-y-0">
+              {/* Card count badge */}
+              {count !== undefined && count > 0 && (
+                <div className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white shadow">
+                  {count}
+                </div>
+              )}
+
+              {/* Card name - always visible */}
+              <div className="pointer-events-none absolute bottom-0 left-0 right-0 bg-black/70 px-1.5 py-0.5 text-[10px] text-white truncate">
                 {card.name}
               </div>
             </motion.button>
