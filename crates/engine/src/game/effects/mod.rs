@@ -46,6 +46,8 @@ pub fn build_registry() -> HashMap<String, EffectHandler> {
     registry.insert("RemoveCounter".to_string(), counters::resolve_remove);
     registry.insert("Sacrifice".to_string(), sacrifice::resolve);
     registry.insert("DiscardCard".to_string(), discard::resolve);
+    registry.insert("Mill".to_string(), mill::resolve);
+    registry.insert("Scry".to_string(), scry::resolve);
     registry
 }
 
@@ -237,9 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_15_entries() {
+    fn registry_has_17_entries() {
         let registry = build_registry();
-        assert_eq!(registry.len(), 15);
+        assert_eq!(registry.len(), 17);
     }
 
     #[test]
@@ -261,6 +263,8 @@ mod tests {
             "RemoveCounter",
             "Sacrifice",
             "DiscardCard",
+            "Mill",
+            "Scry",
         ];
         for name in &expected {
             assert!(registry.contains_key(*name), "missing: {}", name);

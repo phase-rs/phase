@@ -1,3 +1,4 @@
+use crate::game::zones;
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -10,11 +11,45 @@ use crate::types::game_state::GameState;
 ///
 /// Reads `ScryNum` param (default 1).
 pub fn resolve(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    todo!("Scry effect not yet implemented")
+    let scry_num: usize = ability
+        .params
+        .get("ScryNum")
+        .map(|v| v.parse().unwrap_or(1))
+        .unwrap_or(1);
+
+    let player = state
+        .players
+        .iter()
+        .find(|p| p.id == ability.controller)
+        .ok_or(EffectError::PlayerNotFound)?;
+
+    let count = scry_num.min(player.library.len());
+    if count == 0 {
+        events.push(GameEvent::EffectResolved {
+            api_type: ability.api_type.clone(),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    // Collect the top N card IDs to move to bottom
+    let cards_to_scry: Vec<_> = player.library[..count].to_vec();
+
+    // Move each card to bottom of library using move_to_library_position
+    for obj_id in cards_to_scry {
+        zones::move_to_library_position(state, obj_id, false, events);
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]

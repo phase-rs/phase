@@ -1,16 +1,61 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::game::zones;
+use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Mill target player: move top N cards from their library to their graveyard.
 /// Reads `NumCards` param (default 1).
 /// Target is resolved from ability.targets (first TargetRef::Player), or defaults to opponent of controller.
 pub fn resolve(
-    _state: &mut GameState,
-    _ability: &ResolvedAbility,
-    _events: &mut Vec<GameEvent>,
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    todo!("Mill effect not yet implemented")
+    let num_cards: usize = ability
+        .params
+        .get("NumCards")
+        .map(|v| v.parse().unwrap_or(1))
+        .unwrap_or(1);
+
+    // Find target player: first TargetRef::Player, or opponent of controller
+    let target_player = ability
+        .targets
+        .iter()
+        .find_map(|t| {
+            if let TargetRef::Player(pid) = t {
+                Some(*pid)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            // Default to opponent: if controller is 0, target is 1, and vice versa
+            PlayerId(if ability.controller.0 == 0 { 1 } else { 0 })
+        });
+
+    let player = state
+        .players
+        .iter()
+        .find(|p| p.id == target_player)
+        .ok_or(EffectError::PlayerNotFound)?;
+
+    // Collect the top N card IDs (or fewer if library is smaller)
+    let count = num_cards.min(player.library.len());
+    let cards_to_mill: Vec<_> = player.library[..count].to_vec();
+
+    // Move each card from library to graveyard
+    for obj_id in cards_to_mill {
+        zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]
