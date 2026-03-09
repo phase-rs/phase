@@ -34,10 +34,10 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Animation Pipeline
 
-- [ ] **ANIM-01**: Step-based animation queue processes engine events sequentially with configurable timing
+- [x] **ANIM-01**: Step-based animation queue processes engine events sequentially with configurable timing
 - [x] **ANIM-02**: Event normalizer translates Forge.rs GameEvent types to animation-compatible format
-- [ ] **ANIM-03**: Board snapshot system preserves dying creatures visually during death animation sequence
-- [ ] **ANIM-04**: Async dispatch wrapper captures positions before WASM call and serializes dispatch-animate flow
+- [x] **ANIM-03**: Board snapshot system preserves dying creatures visually during death animation sequence
+- [x] **ANIM-04**: Async dispatch wrapper captures positions before WASM call and serializes dispatch-animate flow
 - [x] **ANIM-05**: VFX quality levels (full/reduced/minimal) configurable in preferences
 - [x] **ANIM-06**: Animation speed slider configurable in preferences
 
@@ -169,10 +169,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INTEG-01 | Phase 13 | Complete |
 | INTEG-02 | Phase 13 | Complete |
 | INTEG-03 | Phase 13 | Complete |
-| ANIM-01 | Phase 14 | Pending |
+| ANIM-01 | Phase 14 | Complete |
 | ANIM-02 | Phase 14 | Complete |
-| ANIM-03 | Phase 14 | Pending |
-| ANIM-04 | Phase 14 | Pending |
+| ANIM-03 | Phase 14 | Complete |
+| ANIM-04 | Phase 14 | Complete |
 | ANIM-05 | Phase 14 | Complete |
 | ANIM-06 | Phase 14 | Complete |
 | VFX-01 | Phase 14 | Complete |

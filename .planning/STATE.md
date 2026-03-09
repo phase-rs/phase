@@ -10,8 +10,8 @@ progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 9
-  completed_plans: 6
-  percent: 80
+  completed_plans: 7
+  percent: 78
 ---
 
 # Project State
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 14 of 17 (Animation Pipeline)
-Plan: 1 of 4 in current phase
+Plan: 2 of 4 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 14-01 animation pipeline foundation
+Last activity: 2026-03-09 — Completed 14-02 step queue and dispatch pipeline
 
 Progress: [███████░░░] 67%
 
@@ -48,8 +48,9 @@ Progress: [███████░░░] 67%
 | Phase 13 P03 | 2min | 2 tasks | 5 files |
 | Phase 13 P04 | 3min | 2 tasks | 6 files |
 | Phase 13 P05 | 49min | 3 tasks | 9 files |
-| 14-animation-pipeline | 1/4 | 2min | 2min |
+| 14-animation-pipeline | 2/4 | 5min | 2.5min |
 | Phase 14 P01 | 2min | 2 tasks | 7 files |
+| Phase 14 P02 | 3min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 14-01]: Non-visual events defined as set of 12 event types skipped by normalizer
 - [Phase 14-01]: Groupable events (DamageDealt, CreatureDestroyed, PermanentSacrificed) merge consecutive same-type into one step
 - [Phase 14-01]: Merge types (ZoneChanged, LifeChanged) attach to preceding step
+- [Phase 14-02]: captureSnapshot returns local Map, not Zustand state, to avoid re-renders
+- [Phase 14-02]: Dispatch mutex uses useRef to prevent re-render cascades
+- [Phase 14-02]: currentSnapshot exported as module-level variable for AnimationOverlay
 
 ### Blockers/Concerns
 
@@ -87,6 +91,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 14-01 animation pipeline foundation
-Stopped at: Completed 14-01-PLAN.md
-Resume file: .planning/phases/14-animation-pipeline/14-01-SUMMARY.md
+Last activity: 2026-03-09 - Completed 14-02 step queue and dispatch pipeline
+Stopped at: Completed 14-02-PLAN.md
+Resume file: .planning/phases/14-animation-pipeline/14-02-SUMMARY.md
