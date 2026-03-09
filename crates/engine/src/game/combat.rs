@@ -7,6 +7,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
 /// Tracks the state of the current combat phase.
@@ -581,5 +582,131 @@ mod tests {
 
         // Shadow creature can't block non-shadow attacker
         assert!(validate_blockers(&state, &[(shadow_blocker, attacker)]).is_err());
+    }
+
+    // --- Fear tests ---
+
+    #[test]
+    fn fear_cannot_be_blocked_by_non_artifact_non_black() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fear Guy", 2, 2);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Fear);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Green Bear", 2, 2);
+        state.objects.get_mut(&blocker).unwrap().color = vec![ManaColor::Green];
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn fear_can_be_blocked_by_black_creature() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fear Guy", 2, 2);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Fear);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Black Knight", 2, 2);
+        state.objects.get_mut(&blocker).unwrap().color = vec![ManaColor::Black];
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn fear_can_be_blocked_by_artifact_creature() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fear Guy", 2, 2);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Fear);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Golem", 3, 3);
+        state.objects.get_mut(&blocker).unwrap().card_types.core_types.push(CoreType::Artifact);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    // --- Intimidate tests ---
+
+    #[test]
+    fn intimidate_cannot_be_blocked_by_non_artifact_no_shared_color() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Intimidate Guy", 3, 3);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Intimidate);
+        state.objects.get_mut(&attacker).unwrap().color = vec![ManaColor::Red];
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Green Bear", 2, 2);
+        state.objects.get_mut(&blocker).unwrap().color = vec![ManaColor::Green];
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn intimidate_can_be_blocked_by_creature_sharing_color() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Intimidate Guy", 3, 3);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Intimidate);
+        state.objects.get_mut(&attacker).unwrap().color = vec![ManaColor::Red, ManaColor::Green];
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Green Bear", 2, 2);
+        state.objects.get_mut(&blocker).unwrap().color = vec![ManaColor::Green];
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    // --- Skulk tests ---
+
+    #[test]
+    fn skulk_cannot_be_blocked_by_greater_power() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Skulk Guy", 2, 2);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Skulk);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Big Bear", 3, 3);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn skulk_can_be_blocked_by_equal_power() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Skulk Guy", 2, 2);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Skulk);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn skulk_can_be_blocked_by_lesser_power() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Skulk Guy", 2, 2);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Skulk);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Small", 1, 1);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    // --- Horsemanship tests ---
+
+    #[test]
+    fn horsemanship_cannot_be_blocked_by_non_horsemanship() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lu Bu", 4, 3);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Horsemanship);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn horsemanship_can_be_blocked_by_horsemanship() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lu Bu", 4, 3);
+        state.objects.get_mut(&attacker).unwrap().keywords.push(Keyword::Horsemanship);
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Cao Cao", 3, 3);
+        state.objects.get_mut(&blocker).unwrap().keywords.push(Keyword::Horsemanship);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
     }
 }
