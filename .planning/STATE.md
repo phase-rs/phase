@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 18 of 18 (Stubbed Mechanics)
-Plan: 4 of 5 in current phase
+Plan: 5 of 5 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 18-03 static abilities & prowess trigger
+Last activity: 2026-03-09 — Completed 18-05 coverage report & UI warning badge
 
-Progress: [████████░░] 82%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [████████░░] 82%
 | Phase 18 P01 | 5min | 1 tasks | 4 files |
 | Phase 18 P02 | 8min | 2 tasks | 7 files |
 | Phase 18 P03 | 7min | 2 tasks | 4 files |
+| Phase 18 P05 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,11 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 18-03]: Protection only handles Color variant; CardType/Quality deferred
 - [Phase 18-03]: Ward cost enforcement deferred to mana payment UI
 - [Phase 18-03]: Prowess uses synthetic trigger injection for keyword-based triggers
+- [Phase 18-04]: Dig simplified: first ChangeNum cards to hand (TODO: WaitingFor::DigChoice)
+- [Phase 18-04]: Wither/Infect counters applied directly without replacement effects
+- [Phase 18-04]: Infect damage to players skips LifeChanged event (no life changes)
+- [Phase 18-05]: has_unimplemented_mechanics checks all 4 registry types (keywords, effects, triggers, statics)
+- [Phase 18-05]: Derived display fields use skip_deserializing + WASM-side computation pattern
 
 ### Roadmap Evolution
 
@@ -125,6 +131,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 18-03 static abilities & prowess trigger
-Stopped at: Completed 18-03-PLAN.md
+Last activity: 2026-03-09 - Completed 18-05 coverage report & UI warning badge
+Stopped at: Completed 18-05-PLAN.md
 Resume file: None
