@@ -50,7 +50,7 @@ export function GameBoard() {
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col overflow-auto">
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-visible">
       {/* Opponent's battlefield: other (far) → lands → creatures (near center) */}
       <div className="relative flex flex-1 flex-col justify-end gap-1 px-3 py-2">
         {opponent && (
