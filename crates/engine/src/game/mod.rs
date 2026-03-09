@@ -18,6 +18,7 @@ pub mod stack;
 pub mod targeting;
 pub mod triggers;
 pub mod turns;
+pub mod test_helpers;
 pub mod zones;
 
 pub use deck_loading::{load_deck_into_state, DeckEntry, DeckPayload};

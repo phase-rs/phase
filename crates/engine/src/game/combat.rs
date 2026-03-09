@@ -6,7 +6,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
@@ -143,6 +143,37 @@ pub fn validate_blockers(
             .get(&attacker_id)
             .ok_or_else(|| format!("Attacker {:?} not found", attacker_id))?;
 
+        // CantBeBlocked static ability: creature is completely unblockable
+        if attacker
+            .static_definitions
+            .iter()
+            .any(|sd| sd.mode == "CantBeBlocked")
+        {
+            return Err(format!(
+                "{:?} cannot block {:?} (can't be blocked)",
+                blocker_id, attacker_id
+            ));
+        }
+
+        // Protection: creature with protection from a color can't be blocked by
+        // creatures of that color
+        for kw in &attacker.keywords {
+            if let Keyword::Protection(ref target) = kw {
+                match target {
+                    ProtectionTarget::Color(color) => {
+                        if blocker.color.contains(color) {
+                            return Err(format!(
+                                "{:?} cannot block {:?} (protection from {:?})",
+                                blocker_id, attacker_id, color
+                            ));
+                        }
+                    }
+                    // TODO: CardType and Quality protection blocking restrictions
+                    _ => {}
+                }
+            }
+        }
+
         // Flying: can only be blocked by creatures with Flying or Reach
         if attacker.has_keyword(&Keyword::Flying)
             && !blocker.has_keyword(&Keyword::Flying)
@@ -167,6 +198,52 @@ pub fn validate_blockers(
         if !attacker_has_shadow && blocker_has_shadow {
             return Err(format!(
                 "{:?} cannot block {:?} (shadow cannot block non-shadow)",
+                blocker_id, attacker_id
+            ));
+        }
+
+        // Fear (MTG 702.36): can only be blocked by artifact creatures or black creatures
+        if attacker.has_keyword(&Keyword::Fear)
+            && !blocker.card_types.core_types.contains(&CoreType::Artifact)
+            && !blocker.color.contains(&ManaColor::Black)
+        {
+            return Err(format!(
+                "{:?} cannot block {:?} (fear: must be artifact or black)",
+                blocker_id, attacker_id
+            ));
+        }
+
+        // Intimidate (MTG 702.13): can only be blocked by artifact creatures or
+        // creatures sharing a color with the attacker
+        if attacker.has_keyword(&Keyword::Intimidate)
+            && !blocker.card_types.core_types.contains(&CoreType::Artifact)
+            && !attacker.color.iter().any(|c| blocker.color.contains(c))
+        {
+            return Err(format!(
+                "{:?} cannot block {:?} (intimidate: must be artifact or share a color)",
+                blocker_id, attacker_id
+            ));
+        }
+
+        // Skulk (MTG 702.120): cannot be blocked by creatures with strictly greater power
+        if attacker.has_keyword(&Keyword::Skulk)
+            && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
+        {
+            return Err(format!(
+                "{:?} cannot block {:?} (skulk: blocker power {} > attacker power {})",
+                blocker_id,
+                attacker_id,
+                blocker.power.unwrap_or(0),
+                attacker.power.unwrap_or(0)
+            ));
+        }
+
+        // Horsemanship (MTG 702.30): can only be blocked by creatures with horsemanship
+        if attacker.has_keyword(&Keyword::Horsemanship)
+            && !blocker.has_keyword(&Keyword::Horsemanship)
+        {
+            return Err(format!(
+                "{:?} cannot block {:?} (horsemanship: blocker lacks horsemanship)",
                 blocker_id, attacker_id
             ));
         }
@@ -582,6 +659,84 @@ mod tests {
 
         // Shadow creature can't block non-shadow attacker
         assert!(validate_blockers(&state, &[(shadow_blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn cant_be_blocked_creature_is_unblockable() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Invisible Stalker", 1, 1);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition {
+                mode: "CantBeBlocked".to_string(),
+                params: std::collections::HashMap::new(),
+            });
+
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn creature_without_cant_be_blocked_can_be_blocked() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn protection_from_red_prevents_red_creature_blocking() {
+        use crate::types::keywords::ProtectionTarget;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "White Knight", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+
+        let red_blocker = create_creature(&mut state, PlayerId(1), "Goblin", 1, 1);
+        state
+            .objects
+            .get_mut(&red_blocker)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+
+        assert!(validate_blockers(&state, &[(red_blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn protection_from_red_allows_green_creature_blocking() {
+        use crate::types::keywords::ProtectionTarget;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "White Knight", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+
+        let green_blocker = create_creature(&mut state, PlayerId(1), "Elf", 1, 1);
+        state
+            .objects
+            .get_mut(&green_blocker)
+            .unwrap()
+            .color
+            .push(ManaColor::Green);
+
+        assert!(validate_blockers(&state, &[(green_blocker, attacker)]).is_ok());
     }
 
     // --- Fear tests ---

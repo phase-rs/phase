@@ -84,7 +84,7 @@ fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
 }
 
 /// Derive color identity from a ManaCost by collecting unique ManaColor values from shards.
-fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
+pub(crate) fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
     match mana_cost {
         ManaCost::NoCost => vec![],
         ManaCost::Cost { shards, .. } => {
