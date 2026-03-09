@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 15-02-PLAN.md
-last_updated: "2026-03-09T04:45:00.000Z"
+stopped_at: Completed 15-03-PLAN.md
+last_updated: "2026-03-09T06:53:52.913Z"
 last_activity: 2026-03-09 — Completed 15-02 game loop controller & GameProvider
 progress:
   total_phases: 5
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 12
-  completed_plans: 11
+  completed_plans: 12
   percent: 92
 ---
 
@@ -56,6 +56,7 @@ Progress: [█████████░] 92%
 | 15-game-loop-controllers | 2/3 | 4min | 2min |
 | Phase 15 P01 | 2min | 2 tasks | 7 files |
 | Phase 15 P02 | 2min | 2 tasks | 3 files |
+| Phase 15 P03 | 5min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -94,6 +95,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 15-01]: Auto-pass conservative heuristic: stops when player has mana + instants/flash/abilities
 - [Phase 15-02]: GameProvider accepts mode/difficulty as props, does not own game initialization
 - [Phase 15-02]: Auto-pass uses setTimeout with 200ms beat, re-triggered by store subscription
+- [Phase 15-03]: PassButton uses MTGA terminology: Done (empty stack) / Resolve (stack has items)
+- [Phase 15-03]: Turn indicator badge with cyan/red color coding for your/opponent turn
 
 ### Blockers/Concerns
 
@@ -108,5 +111,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 15-02 game loop controller & GameProvider
-Stopped at: Completed 15-02-PLAN.md
+Stopped at: Completed 15-03-PLAN.md
 Resume file: None
