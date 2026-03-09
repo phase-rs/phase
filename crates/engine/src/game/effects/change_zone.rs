@@ -85,10 +85,21 @@ pub fn resolve(
     Ok(())
 }
 
+/// Move all objects matching the `Valid` filter from `Origin` zone to `Destination` zone.
+/// Reads `Origin`, `Destination`, and `Valid` params.
+pub fn resolve_all(
+    _state: &mut GameState,
+    _ability: &ResolvedAbility,
+    _events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    todo!("ChangeZoneAll not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use std::collections::HashMap;
@@ -138,5 +149,44 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.exile.contains(&obj_id));
+    }
+
+    #[test]
+    fn change_zone_all_bounce_opponent_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let opp1 = create_object(&mut state, CardId(1), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&opp1).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let opp2 = create_object(&mut state, CardId(2), PlayerId(1), "Opp Wolf".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&opp2).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        // Controller's creature should stay
+        let mine = create_object(&mut state, CardId(3), PlayerId(0), "My Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&mine).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let ability = ResolvedAbility {
+            api_type: "ChangeZoneAll".to_string(),
+            params: HashMap::from([
+                ("Origin".to_string(), "Battlefield".to_string()),
+                ("Destination".to_string(), "Hand".to_string()),
+                ("Valid".to_string(), "Creature.OppCtrl".to_string()),
+            ]),
+            targets: vec![],
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            sub_ability: None,
+            svars: HashMap::new(),
+        };
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        // Opponent creatures bounced to hand
+        assert!(state.players[1].hand.contains(&opp1));
+        assert!(state.players[1].hand.contains(&opp2));
+        assert!(!state.battlefield.contains(&opp1));
+        assert!(!state.battlefield.contains(&opp2));
+        // Controller's creature stays
+        assert!(state.battlefield.contains(&mine));
     }
 }

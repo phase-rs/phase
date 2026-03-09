@@ -108,10 +108,21 @@ pub fn resolve(
     Ok(())
 }
 
+/// Destroy all permanents matching the `Valid` filter.
+/// Reads `Valid` param and optionally `NoRegen`.
+pub fn resolve_all(
+    _state: &mut GameState,
+    _ability: &ResolvedAbility,
+    _events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    todo!("DestroyAll not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use std::collections::HashMap;
@@ -177,5 +188,38 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(events.iter().any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == obj_id)));
+    }
+
+    #[test]
+    fn destroy_all_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let bear1 = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&bear1).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let bear2 = create_object(&mut state, CardId(2), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&bear2).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        // Non-creature should survive
+        let _land = create_object(&mut state, CardId(3), PlayerId(0), "Forest".to_string(), Zone::Battlefield);
+
+        let ability = ResolvedAbility {
+            api_type: "DestroyAll".to_string(),
+            params: HashMap::from([
+                ("Valid".to_string(), "Creature".to_string()),
+            ]),
+            targets: vec![],
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            sub_ability: None,
+            svars: HashMap::new(),
+        };
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.battlefield.contains(&bear1));
+        assert!(!state.battlefield.contains(&bear2));
+        // Land survives
+        assert_eq!(state.battlefield.len(), 1);
     }
 }

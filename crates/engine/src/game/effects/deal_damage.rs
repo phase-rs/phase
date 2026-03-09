@@ -82,10 +82,21 @@ pub fn resolve(
     Ok(())
 }
 
+/// Deal damage to all permanents (and optionally players) matching the `Valid` filter.
+/// Reads `NumDmg` and `Valid` params.
+pub fn resolve_all(
+    _state: &mut GameState,
+    _ability: &ResolvedAbility,
+    _events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    todo!("DamageAll not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -153,5 +164,34 @@ mod tests {
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
         assert!(matches!(result, Err(EffectError::MissingParam(_))));
+    }
+
+    #[test]
+    fn damage_all_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let bear1 = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&bear1).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let bear2 = create_object(&mut state, CardId(2), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&bear2).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let ability = ResolvedAbility {
+            api_type: "DamageAll".to_string(),
+            params: HashMap::from([
+                ("NumDmg".to_string(), "2".to_string()),
+                ("Valid".to_string(), "Creature".to_string()),
+            ]),
+            targets: vec![],
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            sub_ability: None,
+            svars: HashMap::new(),
+        };
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&bear1].damage_marked, 2);
+        assert_eq!(state.objects[&bear2].damage_marked, 2);
     }
 }

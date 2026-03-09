@@ -43,10 +43,21 @@ pub fn resolve(
     Ok(())
 }
 
+/// Pump all creatures matching the `Valid` filter on the battlefield.
+/// Reads `NumAtt`, `NumDef`, and `Valid` params.
+pub fn resolve_all(
+    _state: &mut GameState,
+    _ability: &ResolvedAbility,
+    _events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    todo!("PumpAll not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -104,5 +115,51 @@ mod tests {
 
         assert_eq!(state.objects[&obj_id].power, Some(1));
         assert_eq!(state.objects[&obj_id].toughness, Some(1));
+    }
+
+    #[test]
+    fn pump_all_your_creatures() {
+        let mut state = GameState::new_two_player(42);
+        // Controller's creatures
+        let bear1 = create_object(&mut state, CardId(1), PlayerId(0), "Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&bear1).unwrap().power = Some(2);
+        state.objects.get_mut(&bear1).unwrap().toughness = Some(2);
+        state.objects.get_mut(&bear1).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let bear2 = create_object(&mut state, CardId(2), PlayerId(0), "Bear 2".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&bear2).unwrap().power = Some(1);
+        state.objects.get_mut(&bear2).unwrap().toughness = Some(1);
+        state.objects.get_mut(&bear2).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        // Opponent's creature (should NOT be pumped)
+        let opp = create_object(&mut state, CardId(3), PlayerId(1), "Opp Bear".to_string(), Zone::Battlefield);
+        state.objects.get_mut(&opp).unwrap().power = Some(3);
+        state.objects.get_mut(&opp).unwrap().toughness = Some(3);
+        state.objects.get_mut(&opp).unwrap().card_types.core_types.push(CoreType::Creature);
+
+        let ability = ResolvedAbility {
+            api_type: "PumpAll".to_string(),
+            params: HashMap::from([
+                ("NumAtt".to_string(), "1".to_string()),
+                ("NumDef".to_string(), "1".to_string()),
+                ("Valid".to_string(), "Creature.YouCtrl".to_string()),
+            ]),
+            targets: vec![],
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            sub_ability: None,
+            svars: HashMap::new(),
+        };
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&bear1].power, Some(3));
+        assert_eq!(state.objects[&bear1].toughness, Some(3));
+        assert_eq!(state.objects[&bear2].power, Some(2));
+        assert_eq!(state.objects[&bear2].toughness, Some(2));
+        // Opponent unchanged
+        assert_eq!(state.objects[&opp].power, Some(3));
+        assert_eq!(state.objects[&opp].toughness, Some(3));
     }
 }
