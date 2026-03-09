@@ -12,9 +12,7 @@ pub enum StaticEffect {
         layer_params: HashMap<String, String>,
     },
     /// Rule modification -- checked at specific game points.
-    RuleModification {
-        mode: String,
-    },
+    RuleModification { mode: String },
 }
 
 /// Context for checking if a static ability applies to a given scenario.
@@ -65,18 +63,51 @@ pub fn build_static_registry() -> HashMap<String, StaticAbilityHandler> {
 
     // Stub modes -- recognized but no-op until needed
     let stubs = [
-        "CantBeCountered", "CantBeDestroyed", "CantBeSacrificed", "CantBeEnchanted",
-        "CantTransform", "CantBeEquipped", "CantRegenerate",
-        "CantPlaneswalkerRedirect", "Devoid", "FlashBack", "Forecast",
-        "ReduceCostEach", "SetCost", "AlternateCost", "CantPlayLand",
-        "CantShuffle", "CantTap", "CantUntap", "ETBReplacement",
-        "Indestructible", "Shroud",
-        "CantDealDamage", "CantBeDealtDamage", "DamageReduction", "PreventDamage",
-        "DealtDamageInsteadExile", "AssignNoCombatDamage", "CantAttackAlone",
-        "CantBlockAlone", "MustBeBlocked", "AttackRestriction", "BlockRestriction",
-        "MinBlockers", "MaxBlockers", "CantBeAttached", "CantExistWithout",
-        "LeavesPlay", "ChangesZoneAll", "Vigilance", "Menace", "Reach",
-        "Flying", "Trample", "Deathtouch", "Lifelink",
+        "CantBeCountered",
+        "CantBeDestroyed",
+        "CantBeSacrificed",
+        "CantBeEnchanted",
+        "CantTransform",
+        "CantBeEquipped",
+        "CantRegenerate",
+        "CantPlaneswalkerRedirect",
+        "Devoid",
+        "FlashBack",
+        "Forecast",
+        "ReduceCostEach",
+        "SetCost",
+        "AlternateCost",
+        "CantPlayLand",
+        "CantShuffle",
+        "CantTap",
+        "CantUntap",
+        "ETBReplacement",
+        "Indestructible",
+        "Shroud",
+        "CantDealDamage",
+        "CantBeDealtDamage",
+        "DamageReduction",
+        "PreventDamage",
+        "DealtDamageInsteadExile",
+        "AssignNoCombatDamage",
+        "CantAttackAlone",
+        "CantBlockAlone",
+        "MustBeBlocked",
+        "AttackRestriction",
+        "BlockRestriction",
+        "MinBlockers",
+        "MaxBlockers",
+        "CantBeAttached",
+        "CantExistWithout",
+        "LeavesPlay",
+        "ChangesZoneAll",
+        "Vigilance",
+        "Menace",
+        "Reach",
+        "Flying",
+        "Trample",
+        "Deathtouch",
+        "Lifelink",
     ];
     for mode in &stubs {
         registry.insert(mode.to_string(), handle_stub);
@@ -158,11 +189,7 @@ fn handle_stub(
 ///
 /// Scans battlefield objects for static_definitions matching the mode,
 /// then checks if the static's condition applies.
-pub fn check_static_ability(
-    state: &GameState,
-    mode: &str,
-    context: &StaticCheckContext,
-) -> bool {
+pub fn check_static_ability(state: &GameState, mode: &str, context: &StaticCheckContext) -> bool {
     for &id in &state.battlefield {
         let obj = match state.objects.get(&id) {
             Some(o) => o,

@@ -6,6 +6,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -39,7 +40,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         // Scan all permanents on the battlefield for matching triggers
         let battlefield_ids: Vec<ObjectId> = state.battlefield.clone();
         for obj_id in battlefield_ids {
-            let (controller, trigger_defs, timestamp, svars) = {
+            let (controller, trigger_defs, timestamp, svars, has_prowess) = {
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
@@ -49,11 +50,13 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     obj.trigger_definitions.clone(),
                     obj.entered_battlefield_turn.unwrap_or(0),
                     obj.svars.clone(),
+                    obj.has_keyword(&Keyword::Prowess),
                 )
             };
 
             for trig_def in &trigger_defs {
-                let mode = TriggerMode::from_str(&trig_def.mode).unwrap_or(TriggerMode::Unknown(trig_def.mode.clone()));
+                let mode = TriggerMode::from_str(&trig_def.mode)
+                    .unwrap_or(TriggerMode::Unknown(trig_def.mode.clone()));
 
                 if let Some(matcher) = registry.get(&mode) {
                     if matcher(event, &trig_def.params, obj_id, state) {
@@ -69,6 +72,55 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     }
                 }
             }
+
+            // Keyword-based triggers: Prowess
+            // Prowess triggers when the controller casts a noncreature spell.
+            // Cards define Prowess as K:Prowess with no explicit trigger_definition,
+            // so we synthetically generate the trigger here.
+            if let GameEvent::SpellCast {
+                card_id,
+                controller: caster,
+            } = event
+            {
+                if has_prowess && *caster == controller {
+                    // Check if the cast spell is noncreature
+                    let is_noncreature = state
+                        .objects
+                        .iter()
+                        .find(|(_, obj)| obj.card_id == *card_id)
+                        .map(|(_, obj)| !obj.card_types.core_types.contains(&CoreType::Creature))
+                        .unwrap_or(false);
+
+                    if is_noncreature {
+                        let prowess_ability = ResolvedAbility {
+                            api_type: "Pump".to_string(),
+                            params: HashMap::from([
+                                ("NumAtt".to_string(), "+1".to_string()),
+                                ("NumDef".to_string(), "+1".to_string()),
+                            ]),
+                            targets: Vec::new(),
+                            source_id: obj_id,
+                            controller,
+                            sub_ability: None,
+                            svars: HashMap::new(),
+                        };
+                        let prowess_trig_def = TriggerDefinition {
+                            mode: "SpellCast".to_string(),
+                            params: HashMap::from([
+                                ("ValidActivatingPlayer".to_string(), "You".to_string()),
+                                ("ValidCard".to_string(), "Card".to_string()),
+                            ]),
+                        };
+                        pending.push(PendingTrigger {
+                            source_id: obj_id,
+                            controller,
+                            trigger_def: prowess_trig_def,
+                            ability: prowess_ability,
+                            timestamp,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -79,7 +131,11 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     // APNAP ordering: active player's triggers first on stack (resolve last),
     // then non-active player's. Within same controller, order by timestamp.
     pending.sort_by_key(|t| {
-        let is_nap = if t.controller == state.active_player { 0 } else { 1 };
+        let is_nap = if t.controller == state.active_player {
+            0
+        } else {
+            1
+        };
         (is_nap, t.timestamp)
     });
 
@@ -161,7 +217,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::SpellCastOrCopy, match_spell_cast);
     r.insert(TriggerMode::Attacks, match_attacks);
     r.insert(TriggerMode::AttackersDeclared, match_attackers_declared);
-    r.insert(TriggerMode::AttackersDeclaredOneTarget, match_attackers_declared);
+    r.insert(
+        TriggerMode::AttackersDeclaredOneTarget,
+        match_attackers_declared,
+    );
     r.insert(TriggerMode::Blocks, match_blocks);
     r.insert(TriggerMode::BlockersDeclared, match_blockers_declared);
     r.insert(TriggerMode::Countered, match_countered);
@@ -322,7 +381,12 @@ fn match_changes_zone(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ZoneChanged { object_id, from, to } = event {
+    if let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+    } = event
+    {
         if let Some(origin) = params.get("Origin") {
             if origin != "Any" && !zone_matches(origin, from) {
                 return false;
@@ -360,7 +424,12 @@ fn match_damage_done(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::DamageDealt { source_id: dmg_source, target: _, amount } = event {
+    if let GameEvent::DamageDealt {
+        source_id: dmg_source,
+        target: _,
+        amount,
+    } = event
+    {
         // Check if trigger requires damage from a specific source
         if let Some(filter) = params.get("ValidSource") {
             if !card_matches_filter(state, *dmg_source, filter, source_id) {
@@ -387,11 +456,17 @@ fn match_spell_cast(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::SpellCast { card_id, controller } = event {
+    if let GameEvent::SpellCast {
+        card_id,
+        controller,
+    } = event
+    {
         // Check ValidCard filter
         if let Some(filter) = params.get("ValidCard") {
             // Find object by card_id
-            let obj_id = state.objects.iter()
+            let obj_id = state
+                .objects
+                .iter()
                 .find(|(_, obj)| obj.card_id == *card_id)
                 .map(|(id, _)| *id);
             if let Some(oid) = obj_id {
@@ -432,7 +507,9 @@ fn match_attacks(
     if let GameEvent::AttackersDeclared { attacker_ids, .. } = event {
         // "Attacks" triggers for the specific source creature attacking
         if let Some(filter) = params.get("ValidCard") {
-            attacker_ids.iter().any(|id| card_matches_filter(state, *id, filter, source_id))
+            attacker_ids
+                .iter()
+                .any(|id| card_matches_filter(state, *id, filter, source_id))
         } else {
             // No filter: trigger if source itself is among attackers
             attacker_ids.contains(&source_id)
@@ -497,7 +574,12 @@ fn match_counter_added(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::CounterAdded { object_id, counter_type, .. } = event {
+    if let GameEvent::CounterAdded {
+        object_id,
+        counter_type,
+        ..
+    } = event
+    {
         if let Some(ct) = params.get("CounterType") {
             if ct != counter_type {
                 return false;
@@ -520,7 +602,12 @@ fn match_counter_removed(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::CounterRemoved { object_id, counter_type, .. } = event {
+    if let GameEvent::CounterRemoved {
+        object_id,
+        counter_type,
+        ..
+    } = event
+    {
         if let Some(ct) = params.get("CounterType") {
             if ct != counter_type {
                 return false;
@@ -649,7 +736,11 @@ fn match_discarded(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::Discarded { player_id, object_id } = event {
+    if let GameEvent::Discarded {
+        player_id,
+        object_id,
+    } = event
+    {
         if let Some(filter) = params.get("ValidCard") {
             if !card_matches_filter(state, *object_id, filter, source_id) {
                 return false;
@@ -1052,7 +1143,10 @@ pub mod tests {
                     ("Execute".to_string(), "TrigAbility".to_string()),
                 ]),
             });
-            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.svars.insert(
+                "TrigAbility".to_string(),
+                "DB$ Draw | NumCards$ 1".to_string(),
+            );
         }
 
         let p1_creature = create_object(
@@ -1075,7 +1169,10 @@ pub mod tests {
                     ("Execute".to_string(), "TrigAbility".to_string()),
                 ]),
             });
-            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.svars.insert(
+                "TrigAbility".to_string(),
+                "DB$ Draw | NumCards$ 1".to_string(),
+            );
         }
 
         // Trigger event
@@ -1095,7 +1192,11 @@ pub mod tests {
         let top = &state.stack[state.stack.len() - 1];
         let bottom = &state.stack[0];
         assert_eq!(top.controller, PlayerId(0), "AP trigger should be on top");
-        assert_eq!(bottom.controller, PlayerId(1), "NAP trigger should be on bottom");
+        assert_eq!(
+            bottom.controller,
+            PlayerId(1),
+            "NAP trigger should be on bottom"
+        );
     }
 
     #[test]
@@ -1117,7 +1218,13 @@ pub mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&id).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         assert!(card_matches_filter(&state, id, "Creature", ObjectId(99)));
         assert!(!card_matches_filter(&state, id, "Land", ObjectId(99)));
@@ -1142,7 +1249,13 @@ pub mod tests {
             "Target".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&target).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let opp_target = create_object(
             &mut state,
             CardId(3),
@@ -1150,10 +1263,26 @@ pub mod tests {
             "Opp Target".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&opp_target).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&opp_target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
-        assert!(card_matches_filter(&state, target, "Creature.YouCtrl", source));
-        assert!(!card_matches_filter(&state, opp_target, "Creature.YouCtrl", source));
+        assert!(card_matches_filter(
+            &state,
+            target,
+            "Creature.YouCtrl",
+            source
+        ));
+        assert!(!card_matches_filter(
+            &state,
+            opp_target,
+            "Creature.YouCtrl",
+            source
+        ));
     }
 
     #[test]
@@ -1181,21 +1310,38 @@ pub mod tests {
     fn life_gained_matches_positive() {
         let state = setup();
         let params = HashMap::new();
-        let event = GameEvent::LifeChanged { player_id: PlayerId(0), amount: 3 };
+        let event = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        };
         assert!(match_life_gained(&event, &params, ObjectId(1), &state));
 
-        let loss_event = GameEvent::LifeChanged { player_id: PlayerId(0), amount: -3 };
-        assert!(!match_life_gained(&loss_event, &params, ObjectId(1), &state));
+        let loss_event = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -3,
+        };
+        assert!(!match_life_gained(
+            &loss_event,
+            &params,
+            ObjectId(1),
+            &state
+        ));
     }
 
     #[test]
     fn life_lost_matches_negative() {
         let state = setup();
         let params = HashMap::new();
-        let event = GameEvent::LifeChanged { player_id: PlayerId(0), amount: -3 };
+        let event = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -3,
+        };
         assert!(match_life_lost(&event, &params, ObjectId(1), &state));
 
-        let gain_event = GameEvent::LifeChanged { player_id: PlayerId(0), amount: 3 };
+        let gain_event = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        };
         assert!(!match_life_lost(&gain_event, &params, ObjectId(1), &state));
     }
 
@@ -1226,7 +1372,10 @@ pub mod tests {
                     ("Execute".to_string(), "TrigAbility".to_string()),
                 ]),
             });
-            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.svars.insert(
+                "TrigAbility".to_string(),
+                "DB$ Draw | NumCards$ 1".to_string(),
+            );
         }
 
         // Simulate a ZoneChanged event (another creature enters)
@@ -1278,7 +1427,10 @@ pub mod tests {
                     ("Execute".to_string(), "TrigAbility".to_string()),
                 ]),
             });
-            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.svars.insert(
+                "TrigAbility".to_string(),
+                "DB$ Draw | NumCards$ 1".to_string(),
+            );
         }
 
         let c2 = create_object(
@@ -1301,7 +1453,10 @@ pub mod tests {
                     ("Execute".to_string(), "TrigAbility".to_string()),
                 ]),
             });
-            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.svars.insert(
+                "TrigAbility".to_string(),
+                "DB$ Draw | NumCards$ 1".to_string(),
+            );
         }
 
         let events = vec![GameEvent::ZoneChanged {
@@ -1344,7 +1499,10 @@ pub mod tests {
                     ("Execute".to_string(), "TrigAbility".to_string()),
                 ]),
             });
-            obj.svars.insert("TrigAbility".to_string(), "DB$ Draw | NumCards$ 1".to_string());
+            obj.svars.insert(
+                "TrigAbility".to_string(),
+                "DB$ Draw | NumCards$ 1".to_string(),
+            );
         }
 
         // Create a non-creature that enters
@@ -1355,7 +1513,13 @@ pub mod tests {
             "Forest".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&land).unwrap().card_types.core_types.push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
 
         // Land enters -- should NOT trigger (ValidCard = Creature)
         let events = vec![GameEvent::ZoneChanged {
@@ -1364,7 +1528,11 @@ pub mod tests {
             to: Zone::Battlefield,
         }];
         process_triggers(&mut state, &events);
-        assert_eq!(state.stack.len(), 0, "Land entering should not trigger creature-only ETB");
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Land entering should not trigger creature-only ETB"
+        );
 
         // Now a creature enters -- should trigger
         let creature = create_object(
@@ -1374,7 +1542,13 @@ pub mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&creature).unwrap().card_types.core_types.push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         let events = vec![GameEvent::ZoneChanged {
             object_id: creature,
@@ -1382,6 +1556,168 @@ pub mod tests {
             to: Zone::Battlefield,
         }];
         process_triggers(&mut state, &events);
-        assert_eq!(state.stack.len(), 1, "Creature entering should trigger creature ETB");
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Creature entering should trigger creature ETB"
+        );
+    }
+
+    #[test]
+    fn prowess_triggers_on_noncreature_spell_cast() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create a creature with Prowess keyword on the battlefield
+        let prowess_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monastery Swiftspear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&prowess_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.keywords.push(Keyword::Prowess);
+        }
+
+        // Create a noncreature spell object (Instant) on stack for the SpellCast event
+        let spell = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        // Simulate SpellCast event by controller
+        let events = vec![GameEvent::SpellCast {
+            card_id: CardId(10),
+            controller: PlayerId(0),
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Prowess should have placed a triggered ability on the stack
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Prowess should trigger on noncreature spell"
+        );
+    }
+
+    #[test]
+    fn prowess_does_not_trigger_on_creature_spell() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let prowess_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monastery Swiftspear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&prowess_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.keywords.push(Keyword::Prowess);
+        }
+
+        // Create a creature spell
+        let creature_spell = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bear Cub".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&creature_spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let events = vec![GameEvent::SpellCast {
+            card_id: CardId(10),
+            controller: PlayerId(0),
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Prowess should NOT trigger on creature spells
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Prowess should not trigger on creature spell"
+        );
+    }
+
+    #[test]
+    fn prowess_does_not_trigger_on_opponent_spell() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let prowess_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monastery Swiftspear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&prowess_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.keywords.push(Keyword::Prowess);
+        }
+
+        // Opponent casts a noncreature spell
+        let spell = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let events = vec![GameEvent::SpellCast {
+            card_id: CardId(10),
+            controller: PlayerId(1),
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Prowess should NOT trigger on opponent's spells
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Prowess should not trigger on opponent's spell"
+        );
     }
 }

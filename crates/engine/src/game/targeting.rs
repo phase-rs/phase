@@ -52,13 +52,7 @@ pub fn find_legal_targets(
         _ if filter.starts_with("Creature.non") => {
             let color_str = &filter["Creature.non".len()..];
             let excluded = parse_color(color_str);
-            add_creatures_color_filter(
-                state,
-                &mut targets,
-                excluded,
-                source_controller,
-                source_id,
-            );
+            add_creatures_color_filter(state, &mut targets, excluded, source_controller, source_id);
         }
         _ => {
             // Unknown filter -- return empty (no legal targets)
@@ -164,7 +158,10 @@ fn add_creatures_color_filter(
 
 fn add_stack_spells(state: &GameState, targets: &mut Vec<TargetRef>) {
     for entry in &state.stack {
-        if matches!(entry.kind, crate::types::game_state::StackEntryKind::Spell { .. }) {
+        if matches!(
+            entry.kind,
+            crate::types::game_state::StackEntryKind::Spell { .. }
+        ) {
             targets.push(TargetRef::Object(entry.id));
         }
     }
@@ -336,14 +333,20 @@ mod tests {
 
     #[test]
     fn check_fizzle_all_targets_illegal() {
-        let original = vec![TargetRef::Object(ObjectId(1)), TargetRef::Object(ObjectId(2))];
+        let original = vec![
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+        ];
         let legal: Vec<TargetRef> = vec![];
         assert!(check_fizzle(&original, &legal));
     }
 
     #[test]
     fn check_fizzle_some_targets_legal() {
-        let original = vec![TargetRef::Object(ObjectId(1)), TargetRef::Object(ObjectId(2))];
+        let original = vec![
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+        ];
         let legal = vec![TargetRef::Object(ObjectId(1))];
         assert!(!check_fizzle(&original, &legal));
     }
