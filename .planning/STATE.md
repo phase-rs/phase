@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 17-03-PLAN.md
+stopped_at: Completed 17-05-PLAN.md
 last_updated: "2026-03-09T17:54:41.141Z"
-last_activity: 2026-03-09 — Completed 17-03 ActionButton orchestrator
+last_activity: 2026-03-09 — Completed 17-05 Combat Visualization
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 22
-  completed_plans: 21
-  percent: 95
+  completed_plans: 22
+  percent: 100
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 17 of 18 (MTG-Specific UI)
-Plan: 4 of 5 in current phase
-Status: Executing
-Last activity: 2026-03-09 — Completed 17-03 ActionButton orchestrator
+Plan: 5 of 5 in current phase
+Status: Phase Complete
+Last activity: 2026-03-09 — Completed 17-05 Combat Visualization
 
-Progress: [█████████░] 95%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Progress: [█████████░] 95%
 | Phase 17 P02 | 2min | 1 tasks | 3 files |
 | Phase 17 P03 | 2min | 2 tasks | 2 files |
 | Phase 17 P04 | 2min | 2 tasks | 3 files |
+| Phase 17 P05 | 2min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -129,6 +130,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 17-04]: Auto-pay via PassPriority useEffect for non-ambiguous costs
 - [Phase 17-04]: Cost inference from top stack entry source_id mana_cost
 - [Phase 17-04]: Phyrexian toggle between mana icon and heart with 2-life label
+- [Phase 17-05]: RAF polling stabilizes after 10 identical frames to avoid infinite animation loops
+- [Phase 17-05]: DamageAssignmentModal is read-only review with user-triggered open (not auto-shown)
+- [Phase 17-05]: BlockAssignmentLines merges UI blockerAssignments with engine blocker_to_attacker for both phases
 
 ### Roadmap Evolution
 
@@ -146,6 +150,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 17-03 ActionButton orchestrator
-Stopped at: Completed 17-03-PLAN.md
+Last activity: 2026-03-09 - Completed 17-05 Combat Visualization
+Stopped at: Completed 17-05-PLAN.md
 Resume file: None

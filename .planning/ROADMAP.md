@@ -33,7 +33,7 @@
 - [x] **Phase 14: Animation Pipeline** - Event normalizer, step-based animation queue, VFX, and visual feedback systems (completed 2026-03-09)
 - [x] **Phase 15: Game Loop & Controllers** - Opponent controller abstraction, auto-advance game loop, and dispatch context (completed 2026-03-09)
 - [ ] **Phase 16: Audio System** - SFX, background music, volume controls via Web Audio API
-- [ ] **Phase 17: MTG-Specific UI** - Stack visualization, mana payment, combat UI, priority controls, and MTGA visual polish
+- [x] **Phase 17: MTG-Specific UI** - Stack visualization, mana payment, combat UI, priority controls, and MTGA visual polish (completed 2026-03-09)
 
 ## Phase Details
 
@@ -133,14 +133,14 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 | 14. Animation Pipeline | 4/4 | Complete    | 2026-03-09 | - |
 | 15. Game Loop & Controllers | 3/3 | Complete    | 2026-03-09 | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
-| 17. MTG-Specific UI | 4/5 | In Progress|  | - |
+| 17. MTG-Specific UI | 5/5 | Complete   | 2026-03-09 | - |
 
 ### Phase 18: Select candidates to support and implement stubbed mechanics
 
 **Goal:** Implement stubbed game mechanics in tiered batches -- combat keywords, effect handlers, static abilities, and damage mechanics -- with test infrastructure, coverage reporting, and UI warnings for remaining gaps
 **Requirements**: MECH-01, MECH-02, MECH-03, MECH-04, MECH-05, MECH-06, MECH-07, MECH-08, MECH-09, MECH-10
 **Depends on:** Phase 15
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 - [ ] 18-01-PLAN.md — Test helper infrastructure and combat evasion keywords (Fear, Intimidate, Skulk, Horsemanship)
