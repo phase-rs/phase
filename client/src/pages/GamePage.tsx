@@ -419,7 +419,7 @@ function GamePageContent({
       )}
 
       {waitingFor?.type === "GameOver" && (
-        <GameOverScreen winner={waitingFor.data.winner} />
+        <GameOverScreen winner={waitingFor.data.winner} mode={mode} />
       )}
     </div>
   );
@@ -646,27 +646,150 @@ function MulliganBottomCardsPrompt({
 
 // ── Game Over Screen ──────────────────────────────────────────────────────
 
-function GameOverScreen({ winner }: { winner: number | null }) {
-  const navigate = useNavigate();
+// Golden floating particles for victory screen
+function VictoryParticles() {
+  const particles = Array.from({ length: 24 }, (_, i) => ({
+    id: i,
+    left: `${5 + Math.random() * 90}%`,
+    size: 2 + Math.random() * 4,
+    delay: Math.random() * 3,
+    duration: 3 + Math.random() * 4,
+    opacity: 0.3 + Math.random() * 0.5,
+  }));
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70" />
-      <div className="relative z-10 rounded-xl bg-gray-900 p-8 text-center shadow-2xl ring-1 ring-gray-700">
-        <h2 className="mb-2 text-2xl font-bold text-white">Game Over</h2>
-        <p className="mb-4 text-lg text-gray-300">
-          {winner != null
-            ? winner === 0
-              ? "You Win!"
-              : "Opponent Wins"
-            : "Draw"}
-        </p>
-        <button
-          onClick={() => navigate("/")}
-          className="rounded-lg bg-indigo-600 px-6 py-2 font-semibold text-white transition hover:bg-indigo-500"
-        >
-          Return to Menu
-        </button>
-      </div>
+    <div className="pointer-events-none absolute inset-0 overflow-hidden">
+      {particles.map((p) => (
+        <motion.div
+          key={p.id}
+          className="absolute rounded-full"
+          style={{
+            left: p.left,
+            bottom: "-10px",
+            width: p.size,
+            height: p.size,
+            backgroundColor: "#C9B037",
+          }}
+          animate={{
+            y: [0, -window.innerHeight - 20],
+            opacity: [0, p.opacity, p.opacity, 0],
+          }}
+          transition={{
+            duration: p.duration,
+            delay: p.delay,
+            repeat: Infinity,
+            ease: "linear",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function GameOverScreen({ winner, mode }: { winner: number | null; mode: string | null }) {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const difficulty = searchParams.get("difficulty") ?? "Medium";
+  const players = useGameStore((s) => s.gameState?.players);
+  const [buttonsVisible, setButtonsVisible] = useState(false);
+
+  const playerLife = players?.[0]?.life ?? 0;
+  const opponentLife = players?.[1]?.life ?? 0;
+
+  const isVictory = winner === 0;
+  const isDraw = winner == null;
+
+  const titleText = isDraw ? "DRAW" : isVictory ? "VICTORY" : "DEFEAT";
+  const titleColor = isDraw ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
+
+  const glowColor = isDraw
+    ? "rgba(176,176,176,0.5)"
+    : isVictory
+      ? "rgba(201,176,55,0.8)"
+      : "rgba(153,27,27,0.8)";
+
+  const textShadow = `0 0 20px ${glowColor}, 0 0 40px ${glowColor.replace(/[\d.]+\)$/, "0.5)")}, 0 0 80px ${glowColor.replace(/[\d.]+\)$/, "0.3)")}`;
+
+  const bgGradient = isDraw
+    ? "radial-gradient(ellipse at center, rgba(50,50,50,0.6) 0%, rgba(0,0,0,0.95) 70%)"
+    : isVictory
+      ? "radial-gradient(ellipse at center, rgba(60,50,10,0.6) 0%, rgba(0,0,0,0.95) 70%)"
+      : "radial-gradient(ellipse at center, rgba(60,10,10,0.5) 0%, rgba(0,0,0,0.95) 70%)";
+
+  const menuBtnClass = isVictory
+    ? "bg-amber-600 text-white hover:bg-amber-500"
+    : "bg-gray-700 text-white hover:bg-gray-600";
+
+  const handleRematch = () => {
+    const newId = crypto.randomUUID();
+    const params = new URLSearchParams();
+    if (mode) params.set("mode", mode);
+    params.set("difficulty", difficulty);
+    navigate(`/game/${newId}?${params.toString()}`);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center"
+      style={{ background: bgGradient }}
+    >
+      {/* Victory particles */}
+      {isVictory && <VictoryParticles />}
+
+      {/* Title text */}
+      <motion.h2
+        className="relative z-10 text-6xl font-black tracking-widest"
+        style={{ color: titleColor, textShadow }}
+        initial={{ scale: 0.5, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ type: "spring", stiffness: 200, damping: 12, duration: 0.6 }}
+        onAnimationComplete={() => setButtonsVisible(true)}
+      >
+        {titleText}
+      </motion.h2>
+
+      {/* Life totals */}
+      <AnimatePresence>
+        {buttonsVisible && (
+          <motion.div
+            className="relative z-10 mt-6 text-center"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+          >
+            <p className="text-lg text-gray-200">
+              You: <span className="font-bold text-white">{playerLife}</span>
+              <span className="mx-3 text-gray-500">/</span>
+              Opponent: <span className="font-bold text-white">{opponentLife}</span>
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Buttons */}
+      <AnimatePresence>
+        {buttonsVisible && (
+          <motion.div
+            className="relative z-10 mt-8 flex gap-4"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15, duration: 0.3 }}
+          >
+            <button
+              onClick={() => navigate("/")}
+              className={`rounded-lg px-10 py-4 text-lg font-bold shadow-lg transition ${menuBtnClass}`}
+            >
+              Return to Menu
+            </button>
+            <button
+              onClick={handleRematch}
+              className="rounded-lg border border-gray-500 bg-transparent px-10 py-4 text-lg font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white"
+            >
+              Rematch
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
