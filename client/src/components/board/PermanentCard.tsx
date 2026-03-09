@@ -137,7 +137,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
       {/* Main card */}
       <div className="relative z-10">
-        <CardImage cardName={obj.name} tapped={obj.tapped} size="small" />
+        <CardImage cardName={obj.name} tapped={obj.tapped} size="small" hasUnimplementedMechanics={obj.has_unimplemented_mechanics} />
       </div>
 
       {/* P/T box for creatures */}

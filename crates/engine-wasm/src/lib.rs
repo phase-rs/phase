@@ -77,12 +77,20 @@ pub fn submit_action(action: JsValue) -> JsValue {
 }
 
 /// Get the current game state as JSON.
+/// Computes the `has_unimplemented_mechanics` flag on each object before
+/// serializing so the frontend can display coverage warnings.
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
-        let state_ref = gs.borrow();
-        match state_ref.as_ref() {
-            Some(state) => serde_wasm_bindgen::to_value(state).unwrap(),
+        let mut state_ref = gs.borrow_mut();
+        match state_ref.as_mut() {
+            Some(state) => {
+                for obj in state.objects.values_mut() {
+                    obj.has_unimplemented_mechanics =
+                        engine::game::coverage::has_unimplemented_mechanics(obj);
+                }
+                serde_wasm_bindgen::to_value(state).unwrap()
+            }
             None => JsValue::NULL,
         }
     })

@@ -69,6 +69,10 @@ pub struct GameObject {
 
     // Summoning sickness
     pub entered_battlefield_turn: Option<u32>,
+
+    // Coverage flag (computed for serialization, not persisted)
+    #[serde(skip_deserializing, default)]
+    pub has_unimplemented_mechanics: bool,
 }
 
 impl GameObject {
@@ -107,6 +111,7 @@ impl GameObject {
             base_color: Vec::new(),
             timestamp: 0,
             entered_battlefield_turn: None,
+            has_unimplemented_mechanics: false,
         }
     }
 

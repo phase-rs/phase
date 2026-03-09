@@ -106,6 +106,7 @@ export interface GameObject {
   base_color: ManaColor[];
   timestamp: number;
   entered_battlefield_turn: number | null;
+  has_unimplemented_mechanics?: boolean;
 }
 
 // ── Player ───────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ interface CardImageProps {
   faceIndex?: number;
   className?: string;
   tapped?: boolean;
+  hasUnimplementedMechanics?: boolean;
 }
 
 export function CardImage({
@@ -14,6 +15,7 @@ export function CardImage({
   faceIndex,
   className = "",
   tapped = false,
+  hasUnimplementedMechanics = false,
 }: CardImageProps) {
   const { src, isLoading } = useCardImage(cardName, { size, faceIndex });
 
@@ -30,11 +32,21 @@ export function CardImage({
   }
 
   return (
-    <img
-      src={src}
-      alt={cardName}
-      className={`${baseClasses} border border-gray-600 shadow-md object-cover`}
-      draggable={false}
-    />
+    <div className="relative inline-block">
+      <img
+        src={src}
+        alt={cardName}
+        className={`${baseClasses} border border-gray-600 shadow-md object-cover`}
+        draggable={false}
+      />
+      {hasUnimplementedMechanics && (
+        <span
+          className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"
+          title="This card has mechanics not yet fully implemented"
+        >
+          !
+        </span>
+      )}
+    </div>
   );
 }
