@@ -33,7 +33,7 @@
 - [x] **Phase 14: Animation Pipeline** - Event normalizer, step-based animation queue, VFX, and visual feedback systems (completed 2026-03-09)
 - [x] **Phase 15: Game Loop & Controllers** - Opponent controller abstraction, auto-advance game loop, and dispatch context (completed 2026-03-09)
 - [ ] **Phase 16: Audio System** - SFX, background music, volume controls via Web Audio API
-- [ ] **Phase 17: MTG-Specific UI** - Stack visualization, mana payment, combat UI, and priority controls
+- [ ] **Phase 17: MTG-Specific UI** - Stack visualization, mana payment, combat UI, priority controls, and MTGA visual polish
 
 ## Phase Details
 
@@ -103,19 +103,23 @@ Plans:
 - [ ] 16-01: TBD
 
 ### Phase 17: MTG-Specific UI
-**Goal**: Players interact with MTG-specific mechanics through polished UI -- stack visualization, mana payment, combat assignment, and priority controls
+**Goal**: Players interact with MTG-specific mechanics through polished UI -- stack visualization, mana payment, combat assignment, priority controls, and MTGA-quality visual polish (board sizing, hand fan, HUD)
 **Depends on**: Phase 14, Phase 15
 **Requirements**: STACK-01, STACK-02, STACK-03, STACK-04, MANA-01, MANA-02, MANA-03, COMBAT-01, COMBAT-02, COMBAT-03, COMBAT-04
 **Success Criteria** (what must be TRUE):
   1. Spells and abilities on the stack display with card art and description in an Arena-style visualization, resolving visually in LIFO order
   2. Player sees priority pass/respond buttons when they have priority, can toggle auto-pass when no instant-speed actions are available, and can enable full-control mode for manual priority at every window
   3. Mana payment UI shows required cost with WUBRG symbols, handles hybrid/phyrexian/X costs with appropriate affordances, and the mana pool display updates in real-time
-  4. Player can declare attackers and blockers by clicking highlighted legal options, sees combat math bubbles previewing P/T trade outcomes, and can distribute damage across multiple blockers via a modal
-**Plans**: TBD
+  4. Player can declare attackers and blockers by clicking highlighted legal options, and can review damage distribution across multiple blockers via a modal
+  5. Hand fan uses dramatic rotation with perspective, board has zone visual hierarchy, HUD displays are prominent and Arena-quality
+**Plans**: 5 plans
 
 Plans:
-- [ ] 17-01: TBD
-- [ ] 17-02: TBD
+- [ ] 17-01-PLAN.md — Foundation utilities (buttonStyles, usePhaseInfo, boardSizing) and visual polish (hand fan, board, HUD)
+- [ ] 17-02-PLAN.md — Stack visualization upgrade (full card images, staggered pile, container-aware sizing)
+- [ ] 17-03-PLAN.md — ActionButton unified orchestrator (combat controls, priority, resolve all)
+- [ ] 17-04-PLAN.md — Mana payment upgrade (smart auto-pay, hybrid/phyrexian/X cost UI, ManaSymbol)
+- [ ] 17-05-PLAN.md — BlockAssignmentLines (animated SVG), DamageAssignmentModal, GamePage wiring
 
 ## Progress
 
@@ -129,7 +133,7 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 | 14. Animation Pipeline | 4/4 | Complete    | 2026-03-09 | - |
 | 15. Game Loop & Controllers | 3/3 | Complete    | 2026-03-09 | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
-| 17. MTG-Specific UI | v1.1 | 0/2 | Not started | - |
+| 17. MTG-Specific UI | v1.1 | 0/5 | Not started | - |
 
 ### Phase 18: Select candidates to support and implement stubbed mechanics
 
