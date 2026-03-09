@@ -9,11 +9,11 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Board Layout
 
-- [ ] **BOARD-01**: Game board uses CSS custom properties for responsive card sizing across mobile, tablet, and desktop breakpoints
+- [x] **BOARD-01**: Game board uses CSS custom properties for responsive card sizing across mobile, tablet, and desktop breakpoints
 - [ ] **BOARD-02**: Battlefield renders permanents in dynamic multi-row layout grouped by type (creatures, non-creatures, lands)
 - [ ] **BOARD-03**: Same-name tokens stack with count badge, expandable on click
 - [ ] **BOARD-04**: Same-name lands group together with count badge
-- [ ] **BOARD-05**: Tapped permanents render at 90 degree rotation
+- [x] **BOARD-05**: Tapped permanents render at 90 degree rotation
 - [ ] **BOARD-06**: Auras and equipment render visually attached to their host permanent
 - [ ] **BOARD-07**: Counter overlays display on permanents (e.g. +1/+1, loyalty) with count
 - [ ] **BOARD-08**: Persistent damage number displays on damaged creatures
@@ -101,7 +101,7 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Integration
 
-- [ ] **INTEG-01**: All UI components wire through EngineAdapter interface preserving WASM, Tauri, and WebSocket support
+- [x] **INTEG-01**: All UI components wire through EngineAdapter interface preserving WASM, Tauri, and WebSocket support
 - [ ] **INTEG-02**: GameObject view model maps deep Forge.rs engine objects to flat props for UI components
 - [ ] **INTEG-03**: Preferences store persists display, audio, and gameplay settings to localStorage
 
@@ -144,11 +144,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BOARD-01 | Phase 13 | Pending |
+| BOARD-01 | Phase 13 | Complete |
 | BOARD-02 | Phase 13 | Pending |
 | BOARD-03 | Phase 13 | Pending |
 | BOARD-04 | Phase 13 | Pending |
-| BOARD-05 | Phase 13 | Pending |
+| BOARD-05 | Phase 13 | Complete |
 | BOARD-06 | Phase 13 | Pending |
 | BOARD-07 | Phase 13 | Pending |
 | BOARD-08 | Phase 13 | Pending |
@@ -166,7 +166,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LOG-01 | Phase 13 | Pending |
 | LOG-02 | Phase 13 | Pending |
 | LOG-03 | Phase 13 | Pending |
-| INTEG-01 | Phase 13 | Pending |
+| INTEG-01 | Phase 13 | Complete |
 | INTEG-02 | Phase 13 | Pending |
 | INTEG-03 | Phase 13 | Pending |
 | ANIM-01 | Phase 14 | Pending |
