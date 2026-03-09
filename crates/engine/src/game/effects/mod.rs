@@ -14,8 +14,10 @@ pub mod destroy;
 pub mod discard;
 pub mod draw;
 pub mod life;
+pub mod mill;
 pub mod pump;
 pub mod sacrifice;
+pub mod scry;
 pub mod tap_untap;
 pub mod token;
 
