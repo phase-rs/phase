@@ -28,10 +28,7 @@ export function TurnBanner({
         initial={isMinimal ? { opacity: 0 } : { x: "-100%", opacity: 0 }}
         animate={isMinimal ? { opacity: 1 } : { x: "0%", opacity: 1 }}
         exit={isMinimal ? { opacity: 0 } : { x: "100%", opacity: 0 }}
-        transition={{
-          duration: 0.3 * speedMultiplier,
-          exit: { duration: 0.3 * speedMultiplier, delay: 0.6 * speedMultiplier },
-        }}
+        transition={{ duration: 0.3 * speedMultiplier }}
         style={{
           position: "fixed",
           top: "50%",

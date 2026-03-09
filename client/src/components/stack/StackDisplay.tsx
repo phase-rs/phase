@@ -2,9 +2,12 @@ import { AnimatePresence } from "framer-motion";
 
 import { StackEntry } from "./StackEntry.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
+import type { StackEntry as StackEntryType } from "../../adapter/types.ts";
+
+const EMPTY_STACK: StackEntryType[] = [];
 
 export function StackDisplay() {
-  const stack = useGameStore((s) => s.gameState?.stack ?? []);
+  const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
 
   return (
     <div className="flex flex-col gap-1">

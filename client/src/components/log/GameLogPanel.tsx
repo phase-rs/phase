@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import type { GameEvent } from "../../adapter/types.ts";
@@ -19,6 +19,7 @@ export function GameLogPanel() {
   const [isOpen, setIsOpen] = useState(logDefaultState === "open");
   const [verbosity, setVerbosity] = useState<LogVerbosity>("compact");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const filteredEvents = filterByVerbosity(eventHistory, verbosity);
 
@@ -28,6 +29,23 @@ export function GameLogPanel() {
       el.scrollTop = el.scrollHeight;
     }
   }, [filteredEvents.length]);
+
+  // Close panel when clicking outside
+  const handleOutsideClick = useCallback(
+    (e: MouseEvent) => {
+      if (isOpen && panelRef.current && !panelRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    },
+    [isOpen],
+  );
+
+  useEffect(() => {
+    if (isOpen) {
+      document.addEventListener("mousedown", handleOutsideClick);
+      return () => document.removeEventListener("mousedown", handleOutsideClick);
+    }
+  }, [isOpen, handleOutsideClick]);
 
   return (
     <>
@@ -52,6 +70,7 @@ export function GameLogPanel() {
       <AnimatePresence>
         {isOpen && (
           <motion.div
+            ref={panelRef}
             className="fixed bottom-0 right-0 top-0 z-30 flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl"
             initial={{ x: "100%" }}
             animate={{ x: 0 }}

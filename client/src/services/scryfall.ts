@@ -43,12 +43,22 @@ async function rateLimitedFetch(url: string): Promise<Response> {
 }
 
 async function fetchCardData(cardName: string): Promise<ScryfallCard> {
-  const url = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(cardName)}`;
-  const response = await rateLimitedFetch(url);
-  if (!response.ok) {
-    throw new Error(`Scryfall API error: ${response.status} for "${cardName}"`);
+  const exactUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(cardName)}`;
+  const exactResponse = await rateLimitedFetch(exactUrl);
+  if (exactResponse.ok) {
+    return exactResponse.json() as Promise<ScryfallCard>;
   }
-  return response.json() as Promise<ScryfallCard>;
+
+  if (exactResponse.status !== 404) {
+    throw new Error(`Scryfall API error: ${exactResponse.status} for "${cardName}"`);
+  }
+
+  const fuzzyUrl = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(cardName)}`;
+  const fuzzyResponse = await rateLimitedFetch(fuzzyUrl);
+  if (!fuzzyResponse.ok) {
+    throw new Error(`Scryfall API error: ${fuzzyResponse.status} for "${cardName}"`);
+  }
+  return fuzzyResponse.json() as Promise<ScryfallCard>;
 }
 
 function getImageUrl(
@@ -75,6 +85,11 @@ export async function fetchCardImage(
   const card = await fetchCardData(cardName);
   const imageUrl = getImageUrl(card, size, 0);
   const imageResponse = await rateLimitedFetch(imageUrl);
+  if (!imageResponse.ok) {
+    throw new Error(
+      `Scryfall image fetch error: ${imageResponse.status} for "${cardName}"`,
+    );
+  }
   const blob = await imageResponse.blob();
   await cacheImage(cardName, size, blob);
   return blob;
@@ -86,7 +101,13 @@ export async function prefetchDeckImages(
   const unique = [...new Set(cardNames)];
   for (const name of unique) {
     try {
-      await fetchCardImage(name, "normal");
+      const imageUrl = await fetchCardImageUrl(name, 0, "normal");
+      await new Promise<void>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error(`Failed to preload image for "${name}"`));
+        img.src = imageUrl;
+      });
     } catch {
       // Skip failed fetches during prefetch
     }
@@ -161,4 +182,3 @@ export function getCardImageSmall(card: ScryfallCard): string {
     ?? card.card_faces?.[0]?.image_uris?.small
     ?? "";
 }
-

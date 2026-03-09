@@ -37,6 +37,9 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const combatClickHandler = useUiStore((s) => s.combatClickHandler);
   const validTargetIds = useUiStore((s) => s.validTargetIds);
+  const combatAttackers = useGameStore(
+    (s) => s.gameState?.combat?.attackers,
+  );
 
   const longPressHandlers = useLongPress(
     useCallback(() => {
@@ -57,9 +60,12 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const isTarget = selectedTargets.includes(objectId);
   const isValidTarget = targetingMode && validTargetIds.includes(objectId);
 
-  // Combat state
-  const isAttacking =
+  // Combat state — check both UI selection and committed combat state
+  const isSelectingAttacker =
     combatMode === "attackers" && selectedAttackers.includes(objectId);
+  const isCommittedAttacker =
+    combatAttackers?.some((a) => a.object_id === objectId) ?? false;
+  const isAttacking = isSelectingAttacker || isCommittedAttacker;
   const isBlocking =
     combatMode === "blockers" && blockerAssignments.has(objectId);
 

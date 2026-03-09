@@ -9,11 +9,11 @@ import { getDominantManaColor } from "../../viewmodel/dominantColor.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
 
 const COLOR_GRADIENTS: Record<ManaColor, string> = {
-  White: "from-amber-950/20 via-gray-950 to-amber-950/20",
-  Blue: "from-blue-950/30 via-gray-950 to-blue-950/30",
-  Black: "from-gray-950 via-gray-900/50 to-gray-950",
-  Red: "from-red-950/20 via-gray-950 to-red-950/20",
-  Green: "from-emerald-950/20 via-gray-950 to-emerald-950/20",
+  White: "from-amber-900/50 via-gray-950 to-amber-900/50",
+  Blue: "from-blue-900/60 via-gray-950 to-blue-900/60",
+  Black: "from-purple-950/40 via-gray-900/60 to-purple-950/40",
+  Red: "from-red-900/50 via-gray-950 to-red-900/50",
+  Green: "from-emerald-900/50 via-gray-950 to-emerald-900/50",
 };
 
 const BG_TO_MANA_COLOR: Record<string, ManaColor> = {

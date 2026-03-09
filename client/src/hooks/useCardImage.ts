@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCachedImage, revokeImageUrl } from "../services/imageCache.ts";
-import { fetchCardImage } from "../services/scryfall.ts";
+import { fetchCardImageUrl } from "../services/scryfall.ts";
 
 interface UseCardImageOptions {
   size?: "small" | "normal" | "large";
@@ -17,6 +17,7 @@ export function useCardImage(
   options?: UseCardImageOptions,
 ): UseCardImageResult {
   const size = options?.size ?? "normal";
+  const faceIndex = options?.faceIndex ?? 0;
   const [src, setSrc] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -43,11 +44,9 @@ export function useCardImage(
         }
 
         // Cache miss - fetch from Scryfall
-        const blob = await fetchCardImage(cardName, size);
+        const directUrl = await fetchCardImageUrl(cardName, faceIndex, size);
         if (!cancelled) {
-          const url = URL.createObjectURL(blob);
-          objectUrl = url;
-          setSrc(url);
+          setSrc(directUrl);
           setIsLoading(false);
         }
       } catch {
@@ -65,7 +64,7 @@ export function useCardImage(
         revokeImageUrl(objectUrl);
       }
     };
-  }, [cardName, size]);
+  }, [cardName, size, faceIndex]);
 
   return { src, isLoading };
 }

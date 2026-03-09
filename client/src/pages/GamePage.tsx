@@ -29,6 +29,7 @@ import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
+import { PLAYER_ID } from "../constants/game.ts";
 
 export function GamePage() {
   const navigate = useNavigate();
@@ -160,8 +161,9 @@ function GamePageContent({
   } | null>(null);
   const [showPreferences, setShowPreferences] = useState(false);
 
+  const isDragging = useUiStore((s) => s.isDragging);
   const inspectedCardName =
-    inspectedObjectId != null && objects
+    !isDragging && inspectedObjectId != null && objects
       ? (objects[inspectedObjectId]?.name ?? null)
       : null;
 
@@ -213,7 +215,7 @@ function GamePageContent({
       <div className={`flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}>
         {/* Opponent area */}
         <OpponentHud />
-        <OpponentHand />
+        <OpponentHand showCards={showAiHand} />
 
         {/* Opponent battlefield */}
         <GameBoard />
@@ -360,7 +362,7 @@ function GamePageContent({
       {waitingFor?.type === "ManaPayment" && <ManaPaymentUI />}
       {waitingFor?.type === "ReplacementChoice" && <ReplacementModal />}
 
-      {waitingFor?.type === "MulliganDecision" && (
+      {waitingFor?.type === "MulliganDecision" && waitingFor.data.player === PLAYER_ID && (
         <MulliganDecisionPrompt
           playerId={waitingFor.data.player}
           mulliganCount={waitingFor.data.mulligan_count}
@@ -368,7 +370,7 @@ function GamePageContent({
         />
       )}
 
-      {waitingFor?.type === "MulliganBottomCards" && (
+      {waitingFor?.type === "MulliganBottomCards" && waitingFor.data.player === PLAYER_ID && (
         <MulliganBottomCardsPrompt
           playerId={waitingFor.data.player}
           count={waitingFor.data.count}

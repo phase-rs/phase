@@ -15,6 +15,7 @@ interface UiStoreState {
   selectedAttackers: ObjectId[];
   blockerAssignments: Map<ObjectId, ObjectId>;
   combatClickHandler: ((id: ObjectId) => void) | null;
+  isDragging: boolean;
 }
 
 interface UiStoreActions {
@@ -33,6 +34,7 @@ interface UiStoreActions {
   removeBlockerAssignment: (blockerId: ObjectId) => void;
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
+  setDragging: (dragging: boolean) => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -51,6 +53,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   selectedAttackers: [],
   blockerAssignments: new Map(),
   combatClickHandler: null,
+  isDragging: false,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -107,4 +110,5 @@ export const useUiStore = create<UiStore>()((set) => ({
     }),
 
   setCombatClickHandler: (handler) => set({ combatClickHandler: handler }),
+  setDragging: (dragging) => set({ isDragging: dragging }),
 }));
