@@ -410,6 +410,7 @@ function MulliganDecisionPrompt({
 }: MulliganDecisionPromptProps) {
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const inspectObject = useUiStore((s) => s.inspectObject);
 
   if (!player || !objects) {
     return (
@@ -442,10 +443,15 @@ function MulliganDecisionPrompt({
           Review your opening hand and choose to keep or mulligan.
         </p>
 
-        <div className="mb-6 flex flex-wrap justify-center gap-2">
+        <div className="mb-6 flex flex-wrap justify-center gap-3">
           {handObjects.map((obj) => (
-            <div key={obj.id} className="rounded-lg border border-gray-700 bg-gray-800/60 p-1">
-              <CardImage cardName={obj.name} size="small" />
+            <div
+              key={obj.id}
+              className="rounded-lg border border-gray-700 bg-gray-800/60 p-1"
+              onMouseEnter={() => inspectObject(obj.id)}
+              onMouseLeave={() => inspectObject(null)}
+            >
+              <CardImage cardName={obj.name} size="normal" className="!w-[130px] !h-[182px]" />
             </div>
           ))}
         </div>
@@ -478,6 +484,7 @@ function MulliganBottomCardsPrompt({
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedTargets = useUiStore((s) => s.selectedTargets);
   const addTarget = useUiStore((s) => s.addTarget);
+  const inspectObject = useUiStore((s) => s.inspectObject);
 
   if (!player || !objects) return null;
 
@@ -491,7 +498,7 @@ function MulliganBottomCardsPrompt({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60" />
-      <div className="relative z-10 w-full max-w-lg rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+      <div className="relative z-10 w-full max-w-5xl rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
         <h2 className="mb-2 text-center text-lg font-bold text-white">
           Put {count} card{count > 1 ? "s" : ""} on bottom
         </h2>
@@ -511,13 +518,15 @@ function MulliganBottomCardsPrompt({
                     addTarget(obj.id);
                   }
                 }}
+                onMouseEnter={() => inspectObject(obj.id)}
+                onMouseLeave={() => inspectObject(null)}
                 className={`rounded-lg p-1 text-sm transition ${
                   isSelected
                     ? "bg-cyan-600 text-white ring-2 ring-cyan-400"
                     : "bg-gray-800 text-gray-300 hover:bg-gray-700"
                 }`}
               >
-                <CardImage cardName={obj.name} size="small" />
+                <CardImage cardName={obj.name} size="normal" className="!w-[130px] !h-[182px]" />
               </button>
             );
           })}

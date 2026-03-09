@@ -51,7 +51,7 @@ function CardPreviewInner({
 
   return (
     <motion.div
-      className="fixed z-50 pointer-events-none"
+      className="fixed z-[60] pointer-events-none"
       style={style}
       initial={{ opacity: 0, scale: 0.9 }}
       animate={{ opacity: 1, scale: 1 }}
