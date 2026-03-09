@@ -34,24 +34,34 @@ export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
     );
   }
 
-  // When any card in the group is tapped, the container rotates 90° — hide shadow layers to avoid silhouette
-  const isTapped = representativeObj?.tapped ?? false;
+  // Staggered render: show each card slightly offset to the right
+  const STAGGER_PX = 20;
 
   return (
     <div
       className="relative cursor-pointer"
       onClick={() => setExpanded(true)}
+      style={{
+        // Reserve width for staggered cards beyond the first
+        paddingRight: `${(group.count - 1) * STAGGER_PX}px`,
+      }}
     >
-      {/* Stacked shadow layers behind (hidden when tapped to avoid silhouette) */}
-      {!isTapped && group.count >= 3 && (
-        <div className="absolute left-[4px] top-[4px] z-0 h-full w-full rounded-lg bg-gray-700/40" />
-      )}
-      {!isTapped && group.count >= 2 && (
-        <div className="absolute left-[2px] top-[2px] z-[1] h-full w-full rounded-lg bg-gray-600/50" />
-      )}
+      {/* Each card staggered to the right, last card on top */}
+      {group.ids.map((id, i) => (
+        <div
+          key={id}
+          className="absolute top-0"
+          style={{
+            left: `${i * STAGGER_PX}px`,
+            zIndex: i,
+          }}
+        >
+          <PermanentCard objectId={id} />
+        </div>
+      ))}
 
-      {/* Representative card */}
-      <div className="relative z-[2]">
+      {/* Invisible spacer sized to first card for layout */}
+      <div className="invisible">
         <PermanentCard objectId={group.ids[0]} />
       </div>
 

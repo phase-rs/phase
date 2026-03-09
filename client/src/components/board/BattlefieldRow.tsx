@@ -18,8 +18,9 @@ export function BattlefieldRow({ groups, rowType }: BattlefieldRowProps) {
 
   if (groups.length === 0) return null;
 
+  // Art-crop adds ~16px for name label above card
   const minH = battlefieldCardDisplay === "art_crop"
-    ? "min-h-[calc(var(--art-crop-h)+8px)]"
+    ? "min-h-[calc(var(--art-crop-h)+24px)]"
     : "min-h-[calc(var(--card-h)+8px)]";
 
   return (

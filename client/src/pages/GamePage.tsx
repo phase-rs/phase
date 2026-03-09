@@ -281,8 +281,8 @@ function GamePageContent({
         />
       </div>
 
-      {/* Combat phase indicator near action button */}
-      <div className="fixed bottom-36 right-4 z-30">
+      {/* Combat phase indicator — above action buttons to avoid overlap */}
+      <div className="fixed bottom-44 right-4 z-30">
         <CombatPhaseIndicator />
       </div>
 
