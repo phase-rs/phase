@@ -42,7 +42,7 @@ export function BattlefieldBackground() {
 
   return (
     <div
-      className="fixed inset-0 bg-cover bg-center"
+      className="pointer-events-none fixed inset-0 bg-cover bg-center"
       style={{ backgroundImage: `url(${bgImage})` }}
     />
   );

@@ -12,7 +12,7 @@ export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
   const setMasterMuted = usePreferencesStore((s) => s.setMasterMuted);
 
   return (
-    <div className="flex items-center justify-center gap-3 py-1">
+    <div className="relative z-20 flex shrink-0 items-center justify-center gap-3 py-1">
       <PhaseIndicatorLeft />
       <div className="flex items-center gap-2 rounded-full bg-black/50 px-3 py-1">
         <LifeTotal playerId={0} size="lg" />
