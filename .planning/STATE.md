@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 16-03-PLAN.md
-last_updated: "2026-03-09T22:25:44.412Z"
-last_activity: 2026-03-09 — Completed 16-01 Core Audio System
+stopped_at: Completed 16-02-PLAN.md
+last_updated: "2026-03-09T22:26:24.607Z"
+last_activity: 2026-03-09 — Completed 16-02 Dispatch Integration
 progress:
   total_phases: 7
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 25
-  completed_plans: 24
+  completed_plans: 25
   percent: 100
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 16 of 18 (Audio System)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 16-01 Core Audio System
+Last activity: 2026-03-09 — Completed 16-02 Dispatch Integration
 
 Progress: [██████████] 100%
 
@@ -69,6 +69,7 @@ Progress: [██████████] 100%
 | Phase 17 P05 | 2min | 2 tasks | 3 files |
 | Phase 16 P01 | 4min | 2 tasks | 5 files |
 | Phase 16 P03 | 2min | 2 tasks | 2 files |
+| Phase 16 P02 | 2min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 16-03]: Speaker icon placed left of settings gear for quick access without opening modal
 - [Phase 16-03]: Red icon color (text-red-400) for muted state provides clear visual feedback
 - [Phase 16-03]: Slider opacity dims when individually muted but remains interactive
+- [Phase 16-02]: SFX scheduling uses setTimeout with cumulative offsets to sync with visual animation step timing
+- [Phase 16-02]: GameOver triggers music fade-out via audioManager.stopMusic(2.0) after state update
+- [Phase 16-02]: Music starts after onReady callback for online games to avoid playing during opponent wait
 
 ### Roadmap Evolution
 
@@ -160,5 +164,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 16-01 Core Audio System
-Stopped at: Completed 16-03-PLAN.md
+Stopped at: Completed 16-02-PLAN.md
 Resume file: None
