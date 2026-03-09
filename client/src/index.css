@@ -6,7 +6,7 @@
   --card-w: calc(var(--card-base) * var(--card-size-scale));
   --card-h: calc(var(--card-w) * 1.4);
   --card-radius: 6px;
-  --art-crop-base: 14vw;
+  --art-crop-base: 20vw;
   --art-crop-w: calc(var(--art-crop-base) * var(--card-size-scale));
   --art-crop-h: calc(var(--art-crop-w) * 0.75);
 }
@@ -14,7 +14,7 @@
 @media (min-width: 768px) {
   :root {
     --card-base: 12vw;
-    --art-crop-base: 9vw;
+    --art-crop-base: 12vw;
   }
 }
 
@@ -22,6 +22,6 @@
   :root {
     --card-base: 7vw;
     --card-radius: 8px;
-    --art-crop-base: 5.5vw;
+    --art-crop-base: 7.5vw;
   }
 }

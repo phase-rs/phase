@@ -66,7 +66,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
 /** Upkeep, Draw, Main1 — placed to the left of the player avatar */
 export function PhaseIndicatorLeft() {
   return (
-    <div className="flex items-center gap-0.5">
+    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-2 py-0.5">
       {LEFT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -77,7 +77,7 @@ export function PhaseIndicatorLeft() {
 /** Main2, End — placed to the right of the player avatar */
 export function PhaseIndicatorRight() {
   return (
-    <div className="flex items-center gap-0.5">
+    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-2 py-0.5">
       {RIGHT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
