@@ -1,21 +1,16 @@
 import { create } from "zustand";
-import type { GameEvent } from "../adapter/types";
-
-export interface AnimationEffect {
-  type: string;
-  data: unknown;
-  duration: number;
-}
+import type { AnimationStep, PositionSnapshot } from "../animation/types";
 
 interface AnimationStoreState {
-  queue: AnimationEffect[];
+  steps: AnimationStep[];
   isPlaying: boolean;
   positionRegistry: Map<number, DOMRect>;
 }
 
 interface AnimationStoreActions {
-  enqueueEffects: (events: GameEvent[]) => void;
-  playNext: () => AnimationEffect | undefined;
+  enqueueSteps: (steps: AnimationStep[]) => void;
+  playNextStep: () => AnimationStep | undefined;
+  captureSnapshot: () => PositionSnapshot;
   registerPosition: (objectId: number, rect: DOMRect) => void;
   getPosition: (objectId: number) => DOMRect | undefined;
   clearQueue: () => void;
@@ -23,51 +18,40 @@ interface AnimationStoreActions {
 
 export type AnimationStore = AnimationStoreState & AnimationStoreActions;
 
-const EVENT_DURATIONS: Record<string, number> = {
-  ZoneChanged: 400,
-  DamageDealt: 300,
-  LifeChanged: 300,
-  SpellCast: 500,
-  CreatureDestroyed: 400,
-  TokenCreated: 400,
-  CounterAdded: 200,
-  CounterRemoved: 200,
-  PermanentTapped: 200,
-  PermanentUntapped: 200,
-  AttackersDeclared: 300,
-  BlockersDeclared: 300,
-};
-
-const DEFAULT_DURATION = 200;
-
 export const useAnimationStore = create<AnimationStore>()((set, get) => ({
-  queue: [],
+  steps: [],
   isPlaying: false,
   positionRegistry: new Map(),
 
-  enqueueEffects: (events) => {
-    const effects: AnimationEffect[] = events.map((event) => ({
-      type: event.type,
-      data: "data" in event ? event.data : undefined,
-      duration: EVENT_DURATIONS[event.type] ?? DEFAULT_DURATION,
-    }));
-
+  enqueueSteps: (steps) => {
     set((state) => ({
-      queue: [...state.queue, ...effects],
+      steps: [...state.steps, ...steps],
       isPlaying: true,
     }));
   },
 
-  playNext: () => {
-    const { queue } = get();
-    if (queue.length === 0) {
+  playNextStep: () => {
+    const { steps } = get();
+    if (steps.length === 0) {
       set({ isPlaying: false });
       return undefined;
     }
 
-    const [next, ...rest] = queue;
-    set({ queue: rest, isPlaying: rest.length > 0 });
+    const [next, ...rest] = steps;
+    set({ steps: rest, isPlaying: rest.length > 0 });
     return next;
+  },
+
+  captureSnapshot: () => {
+    const snapshot: PositionSnapshot = new Map();
+    const elements = document.querySelectorAll("[data-object-id]");
+    for (const el of elements) {
+      const id = Number(el.getAttribute("data-object-id"));
+      if (!Number.isNaN(id)) {
+        snapshot.set(id, el.getBoundingClientRect());
+      }
+    }
+    return snapshot;
   },
 
   registerPosition: (objectId, rect) => {
@@ -80,5 +64,5 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
 
   getPosition: (objectId) => get().positionRegistry.get(objectId),
 
-  clearQueue: () => set({ queue: [], isPlaying: false }),
+  clearQueue: () => set({ steps: [], isPlaying: false }),
 }));

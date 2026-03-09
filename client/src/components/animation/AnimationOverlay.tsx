@@ -1,11 +1,11 @@
 import { AnimatePresence } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { StepEffect } from "../../animation/types.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { FloatingNumber } from "./FloatingNumber.tsx";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
-import type { AnimationEffect } from "../../stores/animationStore.ts";
 
 interface ActiveFloat {
   id: number;
@@ -17,16 +17,16 @@ interface ActiveFloat {
 let floatIdCounter = 0;
 
 export function AnimationOverlay() {
-  const queue = useAnimationStore((s) => s.queue);
+  const steps = useAnimationStore((s) => s.steps);
   const isPlaying = useAnimationStore((s) => s.isPlaying);
-  const playNext = useAnimationStore((s) => s.playNext);
+  const playNextStep = useAnimationStore((s) => s.playNextStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
   const [activeFloats, setActiveFloats] = useState<ActiveFloat[]>([]);
   const processingRef = useRef(false);
 
   const processEffect = useCallback(
-    (effect: AnimationEffect) => {
+    (effect: StepEffect) => {
       const data = effect.data as Record<string, unknown>;
 
       switch (effect.type) {
@@ -128,23 +128,25 @@ export function AnimationOverlay() {
   );
 
   useEffect(() => {
-    if (!isPlaying || queue.length === 0 || processingRef.current) return;
+    if (!isPlaying || steps.length === 0 || processingRef.current) return;
 
     processingRef.current = true;
-    const effect = playNext();
-    if (!effect) {
+    const step = playNextStep();
+    if (!step) {
       processingRef.current = false;
       return;
     }
 
-    processEffect(effect);
+    for (const effect of step.effects) {
+      processEffect(effect);
+    }
 
     const timer = setTimeout(() => {
       processingRef.current = false;
-    }, effect.duration);
+    }, step.duration);
 
     return () => clearTimeout(timer);
-  }, [isPlaying, queue, playNext, processEffect]);
+  }, [isPlaying, steps, playNextStep, processEffect]);
 
   const handleFloatComplete = useCallback((id: number) => {
     setActiveFloats((prev) => prev.filter((f) => f.id !== id));
