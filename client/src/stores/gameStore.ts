@@ -6,6 +6,7 @@ import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 interface GameStoreState {
   gameState: GameState | null;
   events: GameEvent[];
+  eventHistory: GameEvent[];
   adapter: EngineAdapter | null;
   waitingFor: WaitingFor | null;
   stateHistory: GameState[];
@@ -23,6 +24,7 @@ export type GameStore = GameStoreState & GameStoreActions;
 const initialState: GameStoreState = {
   gameState: null,
   events: [],
+  eventHistory: [],
   adapter: null,
   waitingFor: null,
   stateHistory: [],
@@ -41,6 +43,7 @@ export const useGameStore = create<GameStore>()(
         gameState: state,
         waitingFor: state.waiting_for,
         events: [],
+        eventHistory: [],
         stateHistory: [],
       });
     },
@@ -65,6 +68,7 @@ export const useGameStore = create<GameStore>()(
         return {
           gameState: newState,
           events,
+          eventHistory: [...prev.eventHistory, ...events].slice(-1000),
           waitingFor: newState.waiting_for,
           stateHistory: newHistory,
         };
