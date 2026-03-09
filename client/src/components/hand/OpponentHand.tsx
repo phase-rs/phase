@@ -51,7 +51,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
             >
               {obj ? (
                 <div
-                  style={{ transform: "scale(0.6)", transformOrigin: "top left", width: "calc(var(--card-w) * 0.6)", height: "calc(var(--card-h) * 0.6)" }}
+                  style={{ transform: "scale(0.6) rotate(180deg)", transformOrigin: "center center", width: "calc(var(--card-w) * 0.6)", height: "calc(var(--card-h) * 0.6)" }}
                   onMouseEnter={() => inspectObject(id)}
                   onMouseLeave={() => inspectObject(null)}
                 >
