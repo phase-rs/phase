@@ -19,6 +19,11 @@ interface PreferencesState {
   vfxQuality: VfxQuality;
   animationSpeed: AnimationSpeed;
   phaseStops: Phase[];
+  sfxVolume: number;
+  musicVolume: number;
+  sfxMuted: boolean;
+  musicMuted: boolean;
+  masterMuted: boolean;
 }
 
 interface PreferencesActions {
@@ -29,6 +34,11 @@ interface PreferencesActions {
   setVfxQuality: (quality: VfxQuality) => void;
   setAnimationSpeed: (speed: AnimationSpeed) => void;
   setPhaseStops: (stops: Phase[]) => void;
+  setSfxVolume: (vol: number) => void;
+  setMusicVolume: (vol: number) => void;
+  setSfxMuted: (muted: boolean) => void;
+  setMusicMuted: (muted: boolean) => void;
+  setMasterMuted: (muted: boolean) => void;
 }
 
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
@@ -41,6 +51,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       vfxQuality: "full",
       animationSpeed: "normal",
       phaseStops: [],
+      sfxVolume: 70,
+      musicVolume: 40,
+      sfxMuted: false,
+      musicMuted: false,
+      masterMuted: false,
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
@@ -49,6 +64,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
       setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
+      setSfxVolume: (vol) => set({ sfxVolume: vol }),
+      setMusicVolume: (vol) => set({ musicVolume: vol }),
+      setSfxMuted: (muted) => set({ sfxMuted: muted }),
+      setMusicMuted: (muted) => set({ musicMuted: muted }),
+      setMasterMuted: (muted) => set({ masterMuted: muted }),
     }),
     { name: "forge-preferences" },
   ),

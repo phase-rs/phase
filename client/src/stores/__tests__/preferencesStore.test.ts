@@ -14,6 +14,11 @@ describe("preferencesStore", () => {
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
         animationSpeed: "normal",
+        sfxVolume: 70,
+        musicVolume: 40,
+        sfxMuted: false,
+        musicMuted: false,
+        masterMuted: false,
       });
     });
     localStorage.clear();
@@ -108,6 +113,84 @@ describe("preferencesStore", () => {
 
     const parsed = JSON.parse(stored!);
     expect(parsed.state.cardSize).toBe("small");
+  });
+
+  // --- Audio preferences ---
+
+  it("has correct audio defaults", () => {
+    const state = usePreferencesStore.getState();
+
+    expect(state.sfxVolume).toBe(70);
+    expect(state.musicVolume).toBe(40);
+    expect(state.sfxMuted).toBe(false);
+    expect(state.musicMuted).toBe(false);
+    expect(state.masterMuted).toBe(false);
+  });
+
+  it("setSfxVolume updates sfx volume", () => {
+    act(() => {
+      usePreferencesStore.getState().setSfxVolume(50);
+    });
+
+    expect(usePreferencesStore.getState().sfxVolume).toBe(50);
+  });
+
+  it("setMusicVolume updates music volume", () => {
+    act(() => {
+      usePreferencesStore.getState().setMusicVolume(80);
+    });
+
+    expect(usePreferencesStore.getState().musicVolume).toBe(80);
+  });
+
+  it("setSfxMuted toggles sfx mute", () => {
+    act(() => {
+      usePreferencesStore.getState().setSfxMuted(true);
+    });
+
+    expect(usePreferencesStore.getState().sfxMuted).toBe(true);
+  });
+
+  it("setMusicMuted toggles music mute", () => {
+    act(() => {
+      usePreferencesStore.getState().setMusicMuted(true);
+    });
+
+    expect(usePreferencesStore.getState().musicMuted).toBe(true);
+  });
+
+  it("setMasterMuted toggles master mute", () => {
+    act(() => {
+      usePreferencesStore.getState().setMasterMuted(true);
+    });
+
+    expect(usePreferencesStore.getState().masterMuted).toBe(true);
+  });
+
+  it("audio preferences persist to localStorage", () => {
+    act(() => {
+      usePreferencesStore.getState().setSfxVolume(30);
+    });
+
+    const stored = localStorage.getItem("forge-preferences");
+    expect(stored).toBeTruthy();
+
+    const parsed = JSON.parse(stored!);
+    expect(parsed.state.sfxVolume).toBe(30);
+  });
+
+  it("audio preferences don't affect existing preferences", () => {
+    act(() => {
+      usePreferencesStore.getState().setSfxVolume(30);
+      usePreferencesStore.getState().setMusicVolume(90);
+      usePreferencesStore.getState().setSfxMuted(true);
+      usePreferencesStore.getState().setMusicMuted(true);
+      usePreferencesStore.getState().setMasterMuted(true);
+    });
+
+    const state = usePreferencesStore.getState();
+    expect(state.cardSize).toBe("medium");
+    expect(state.hudLayout).toBe("inline");
   });
 
   it("hydrates from pre-populated localStorage", () => {
