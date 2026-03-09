@@ -1,10 +1,12 @@
 import { motion } from "framer-motion";
 import { useCallback } from "react";
 
+import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { computePTDisplay } from "../../viewmodel/cardProps.ts";
 
@@ -22,6 +24,8 @@ const ATTACHMENT_OFFSET_PX = 15;
 
 export function PermanentCard({ objectId }: PermanentCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
+  const tapRotation = usePreferencesStore((s) => s.tapRotation);
 
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
   const targetingMode = useUiStore((s) => s.targetingMode);
@@ -96,6 +100,10 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       ? (waitingFor.data.valid_attacker_ids ?? [])
       : [];
 
+  // Tap rotation: 17deg in MTGA mode, 90deg in classic mode
+  const tapAngle = tapRotation === "mtga" ? 17 : 90;
+  const tapOpacity = tapRotation === "mtga" && obj.tapped && !isAttacking ? 0.85 : 1;
+
   const handleClick = () => {
     if (combatMode === "attackers") {
       if (validAttackerIds.includes(objectId)) toggleAttacker(objectId);
@@ -107,6 +115,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       selectObject(isSelected ? null : objectId);
     }
   };
+
+  const useArtCrop = battlefieldCardDisplay === "art_crop";
 
   return (
     <motion.div
@@ -122,7 +132,10 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
             ? `${obj.attachments.length * ATTACHMENT_OFFSET_PX}px`
             : undefined,
       }}
-      animate={{ rotate: isAttacking || obj.tapped ? 90 : 0 }}
+      animate={{
+        rotate: isAttacking || obj.tapped ? tapAngle : 0,
+        opacity: tapOpacity,
+      }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
       onMouseEnter={() => { hoverObject(objectId); inspectObject(objectId); }}
@@ -142,40 +155,46 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
         </div>
       ))}
 
-      {/* Main card */}
-      <div className="relative z-10">
-        <CardImage cardName={obj.name} size="small" hasUnimplementedMechanics={obj.has_unimplemented_mechanics} />
-      </div>
+      {/* Main card — art crop or full card based on preference */}
+      {useArtCrop ? (
+        <ArtCropCard objectId={objectId} />
+      ) : (
+        <>
+          <div className="relative z-10">
+            <CardImage cardName={obj.name} size="small" hasUnimplementedMechanics={obj.has_unimplemented_mechanics} />
+          </div>
 
-      {/* P/T box for creatures */}
-      {ptDisplay && <PTBox ptDisplay={ptDisplay} />}
+          {/* P/T box for creatures */}
+          {ptDisplay && <PTBox ptDisplay={ptDisplay} />}
 
-      {/* Damage overlay for non-creatures only (creatures use P/T box) */}
-      {!ptDisplay && obj.damage_marked > 0 && (
-        <div className="absolute inset-x-0 bottom-0 z-20 flex h-6 items-center justify-center rounded-b-lg bg-red-600/60 text-xs font-bold text-white">
-          -{obj.damage_marked}
-        </div>
-      )}
+          {/* Damage overlay for non-creatures only (creatures use P/T box) */}
+          {!ptDisplay && obj.damage_marked > 0 && (
+            <div className="absolute inset-x-0 bottom-0 z-20 flex h-6 items-center justify-center rounded-b-lg bg-red-600/60 text-xs font-bold text-white">
+              -{obj.damage_marked}
+            </div>
+          )}
 
-      {/* Loyalty shield for planeswalkers */}
-      {obj.loyalty != null && (
-        <div className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 rounded-t bg-gray-900/90 px-1.5 py-0.5 text-xs font-bold text-amber-300">
-          {obj.loyalty}
-        </div>
-      )}
+          {/* Loyalty shield for planeswalkers */}
+          {obj.loyalty != null && (
+            <div className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 rounded-t bg-gray-900/90 px-1.5 py-0.5 text-xs font-bold text-amber-300">
+              {obj.loyalty}
+            </div>
+          )}
 
-      {/* Counter badges (top-right to avoid overlap with P/T box) */}
-      {counters.length > 0 && (
-        <div className="absolute right-1 top-1 z-20 flex flex-col gap-0.5">
-          {counters.map(([type, count]) => (
-            <span
-              key={type}
-              className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-            >
-              {formatCounterType(type)} x{count}
-            </span>
-          ))}
-        </div>
+          {/* Counter badges (top-right to avoid overlap with P/T box) */}
+          {counters.length > 0 && (
+            <div className="absolute right-1 top-1 z-20 flex flex-col gap-0.5">
+              {counters.map(([type, count]) => (
+                <span
+                  key={type}
+                  className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                >
+                  {formatCounterType(type)} x{count}
+                </span>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </motion.div>
   );
