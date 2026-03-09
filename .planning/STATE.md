@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 17-02-PLAN.md
-last_updated: "2026-03-09T17:49:40.619Z"
-last_activity: 2026-03-09 — Completed 17-02 Arena-style stack display
+stopped_at: Completed 17-01-PLAN.md
+last_updated: "2026-03-09T17:50:00.000Z"
+last_activity: 2026-03-09 — Completed 17-01 foundation utilities & visual polish
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 22
-  completed_plans: 18
-  percent: 82
+  completed_plans: 19
+  percent: 86
 ---
 
 # Project State
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 Phase: 17 of 18 (MTG-Specific UI)
 Plan: 2 of 5 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 17-02 Arena-style stack display
+Last activity: 2026-03-09 — Completed 17-01 foundation utilities & visual polish
 
-Progress: [████████░░] 82%
+Progress: [████████░░] 86%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [████████░░] 82%
 | Phase 18 P03 | 7min | 2 tasks | 4 files |
 | Phase 18 P04 | 4min | 2 tasks | 6 files |
 | Phase 18 P05 | 5min | 2 tasks | 7 files |
+| Phase 17 P01 | 3min | 2 tasks | 10 files |
 | Phase 17 P02 | 2min | 1 tasks | 3 files |
 
 ## Accumulated Context
@@ -116,6 +117,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 18-04]: Infect damage to players skips LifeChanged event (no life changes)
 - [Phase 18-05]: has_unimplemented_mechanics checks all 4 registry types (keywords, effects, triggers, statics)
 - [Phase 18-05]: Derived display fields use skip_deserializing + WASM-side computation pattern
+- [Phase 17-01]: usePhaseInfo groups MTG 12 phases into 5 display keys: draw, main1, combat, main2, end
+- [Phase 17-01]: LifeTotal accepts size prop for context-aware rendering (lg in HUD, default elsewhere)
+- [Phase 17-01]: OpponentHand upgraded from static divs to motion.div with AnimatePresence for fan animation
 - [Phase 17]: StackDisplay moved from inline center-divider to fixed right-column overlay for Arena-style presentation
 
 ### Roadmap Evolution
@@ -135,5 +139,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 18-05 coverage report & UI warning badge
-Stopped at: Completed 17-02-PLAN.md
+Stopped at: Completed 17-01-PLAN.md
 Resume file: None
