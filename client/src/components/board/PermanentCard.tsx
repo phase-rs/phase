@@ -3,7 +3,6 @@ import { useCallback } from "react";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
-// COMBAT_TILT_DEGREES no longer needed — attacking creatures use standard 90° tap
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";

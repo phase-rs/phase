@@ -20,7 +20,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const center = (cardCount - 1) / 2;
 
   // Base offset pushes cards partially offscreen; rotation compensation keeps fan arc smooth
-  const BASE_Y = -40;
+  const BASE_Y = -25;
   const ROTATION_COMPENSATION = 0.8;
 
   return (
