@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 19-08-PLAN.md
-last_updated: "2026-03-09T23:02:48.718Z"
-last_activity: 2026-03-09 — Completed 19-02 Battlefield Rendering
+stopped_at: Completed 19-03-PLAN.md
+last_updated: "2026-03-09T23:03:47.833Z"
+last_activity: 2026-03-09 — Completed 19-03 Board & HUD Layout
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 33
-  completed_plans: 29
-  percent: 25
+  completed_plans: 31
+  percent: 37
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 19 of 20 (Recreate MTGA UI)
-Plan: 2 of 8 in current phase
+Plan: 5 of 8 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 19-02 Battlefield Rendering
+Last activity: 2026-03-09 — Completed 19-05 Cinematic Animations
 
-Progress: [███-------] 25%
+Progress: [██████----] 62%
 
 ## Performance Metrics
 
@@ -74,6 +74,7 @@ Progress: [███-------] 25%
 | Phase 19 P02 | 2min | 2 tasks | 4 files |
 | Phase 19 P07 | 2min | 2 tasks | 5 files |
 | Phase 19 P08 | 2min | 2 tasks | 4 files |
+| Phase 19 P03 | 3min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -161,6 +162,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19-08]: CardSearch already provides WUBRG filters and type dropdown -- no duplicate filter UI added
 - [Phase 19-08]: Art crop URL extracted from ScryfallCard.image_uris directly, not via useCardImage hook
 - [Phase 19-08]: Hover state lifted from DeckBuilder to DeckBuilderPage via onCardHover callback prop
+- [Phase 19-03]: HUD always centered (removed floating option) -- MTGA does not have a floating HUD
+- [Phase 19-03]: CombatPhaseIndicator placed near ActionButton (fixed right side) per MTGA layout
 
 ### Roadmap Evolution
 
@@ -181,5 +184,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-09 - Completed 19-01 Art-Crop Card & Image Infrastructure
-Stopped at: Completed 19-08-PLAN.md
+Stopped at: Completed 19-03-PLAN.md
 Resume file: None
