@@ -30,7 +30,7 @@
 **Milestone Goal:** Replace the current frontend with a polished Arena-style UI ported from the Alchemy project, wired to the Rust/WASM engine via the existing EngineAdapter interface.
 
 - [x] **Phase 13: Foundation & Board Layout** - Responsive board, hand, HUD, zones, game log, view model, and preferences infrastructure (completed 2026-03-09)
-- [ ] **Phase 14: Animation Pipeline** - Event normalizer, step-based animation queue, VFX, and visual feedback systems
+- [x] **Phase 14: Animation Pipeline** - Event normalizer, step-based animation queue, VFX, and visual feedback systems (completed 2026-03-09)
 - [ ] **Phase 15: Game Loop & Controllers** - Opponent controller abstraction, auto-advance game loop, and dispatch context
 - [ ] **Phase 16: Audio System** - SFX, background music, volume controls via Web Audio API
 - [ ] **Phase 17: MTG-Specific UI** - Stack visualization, mana payment, combat UI, and priority controls
@@ -124,7 +124,7 @@ Phases 15 and 16 are parallelizable (independent subsystems). All others are seq
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13. Foundation & Board Layout | 5/5 | Complete    | 2026-03-09 | - |
-| 14. Animation Pipeline | 3/4 | In Progress|  | - |
+| 14. Animation Pipeline | 4/4 | Complete   | 2026-03-09 | - |
 | 15. Game Loop & Controllers | v1.1 | 0/1 | Not started | - |
 | 16. Audio System | v1.1 | 0/1 | Not started | - |
 | 17. MTG-Specific UI | v1.1 | 0/2 | Not started | - |

@@ -48,8 +48,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **VFX-03**: Screen shake triggers on combat damage at 3 intensity levels
 - [x] **VFX-04**: Card reveal animation plays on creature/spell entry with burst effect
 - [x] **VFX-05**: Damage vignette (red screen flash) on player damage
-- [ ] **VFX-06**: Block assignment lines (SVG) connect attacker/blocker pairs during combat
-- [ ] **VFX-07**: Targeting arcs connect spells/abilities to their targets during resolution
+- [x] **VFX-06**: Block assignment lines (SVG) connect attacker/blocker pairs during combat
+- [x] **VFX-07**: Targeting arcs connect spells/abilities to their targets during resolution
 - [x] **VFX-08**: Turn/phase banner overlay animates on phase transitions
 
 ### Audio
@@ -180,8 +180,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | VFX-03 | Phase 14 | Complete |
 | VFX-04 | Phase 14 | Complete |
 | VFX-05 | Phase 14 | Complete |
-| VFX-06 | Phase 14 | Pending |
-| VFX-07 | Phase 14 | Pending |
+| VFX-06 | Phase 14 | Complete |
+| VFX-07 | Phase 14 | Complete |
 | VFX-08 | Phase 14 | Complete |
 | LOOP-01 | Phase 15 | Pending |
 | LOOP-02 | Phase 15 | Pending |

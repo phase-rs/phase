@@ -10,8 +10,8 @@ progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 9
-  completed_plans: 8
-  percent: 80
+  completed_plans: 9
+  percent: 90
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 14 of 17 (Animation Pipeline)
-Plan: 3 of 4 in current phase
+Plan: 4 of 4 in current phase
 Status: Executing
-Last activity: 2026-03-09 — Completed 14-03 VFX components
+Last activity: 2026-03-09 — Completed 14-04 animation pipeline integration
 
-Progress: [████████░░] 80%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
@@ -48,10 +48,11 @@ Progress: [████████░░] 80%
 | Phase 13 P03 | 2min | 2 tasks | 5 files |
 | Phase 13 P04 | 3min | 2 tasks | 6 files |
 | Phase 13 P05 | 49min | 3 tasks | 9 files |
-| 14-animation-pipeline | 3/4 | 8min | 2.7min |
+| 14-animation-pipeline | 4/4 | 10min | 2.5min |
 | Phase 14 P01 | 2min | 2 tasks | 7 files |
 | Phase 14 P02 | 3min | 2 tasks | 5 files |
 | Phase 14 P03 | 3min | 2 tasks | 8 files |
+| Phase 14 P04 | 2min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 14-03]: VFX quality reads via getState() (non-reactive) in ParticleCanvas for performance
 - [Phase 14-03]: ScreenShake is a plain function, not a React component — applies CSS transform via rAF
 - [Phase 14-03]: ParticleCanvas halves count internally for reduced quality, centralizing logic
+- [Phase 14-04]: Death clones use card name text overlay, not full card images
+- [Phase 14-04]: Screen shake only at full VFX quality to avoid motion sickness
+- [Phase 14-04]: getObjectPosition checks snapshot first, then live registry
 
 ### Blockers/Concerns
 
@@ -95,6 +99,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 14-03 VFX components
-Stopped at: Completed 14-03-PLAN.md
-Resume file: .planning/phases/14-animation-pipeline/14-03-SUMMARY.md
+Last activity: 2026-03-09 - Completed 14-04 animation pipeline integration
+Stopped at: Completed 14-04-PLAN.md
+Resume file: .planning/phases/14-animation-pipeline/14-04-SUMMARY.md
