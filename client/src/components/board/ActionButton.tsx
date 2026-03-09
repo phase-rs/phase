@@ -248,7 +248,7 @@ export function ActionButton() {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 20 }}
           transition={{ duration: 0.15 }}
-          className="fixed bottom-28 inset-x-0 z-30 flex justify-center gap-2"
+          className="fixed bottom-24 right-4 z-30 flex items-center gap-2"
         >
           {mode === "combat-attackers" && (
             <>
@@ -351,7 +351,12 @@ export function ActionButton() {
                 onClick={endTurn}
                 className={gameButtonClass({ tone: "slate", size: "md" })}
               >
-                {">> End Turn"}
+                <span className="flex items-center gap-1">
+                  End Turn
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                    <path fillRule="evenodd" d="M2 10a.75.75 0 0 1 .75-.75h12.59l-2.1-1.95a.75.75 0 1 1 1.02-1.1l3.5 3.25a.75.75 0 0 1 0 1.1l-3.5 3.25a.75.75 0 1 1-1.02-1.1l2.1-1.95H2.75A.75.75 0 0 1 2 10Z" clipRule="evenodd" />
+                  </svg>
+                </span>
               </button>
             </>
           )}
