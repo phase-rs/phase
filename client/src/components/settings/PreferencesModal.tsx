@@ -36,6 +36,14 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const setVfxQuality = usePreferencesStore((s) => s.setVfxQuality);
+  const sfxVolume = usePreferencesStore((s) => s.sfxVolume);
+  const musicVolume = usePreferencesStore((s) => s.musicVolume);
+  const sfxMuted = usePreferencesStore((s) => s.sfxMuted);
+  const musicMuted = usePreferencesStore((s) => s.musicMuted);
+  const setSfxVolume = usePreferencesStore((s) => s.setSfxVolume);
+  const setMusicVolume = usePreferencesStore((s) => s.setMusicVolume);
+  const setSfxMuted = usePreferencesStore((s) => s.setSfxMuted);
+  const setMusicMuted = usePreferencesStore((s) => s.setMusicMuted);
   const setAnimationSpeed = usePreferencesStore((s) => s.setAnimationSpeed);
 
   return (
@@ -131,6 +139,57 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                 value={animationSpeed}
                 onChange={setAnimationSpeed}
               />
+            </SettingGroup>
+
+            {/* Audio divider */}
+            <div className="border-t border-gray-700 pt-4">
+              {/* SFX Volume */}
+              <SettingGroup label="SFX Volume">
+                <div className={`flex items-center gap-2 ${sfxMuted ? "opacity-50" : ""}`}>
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={sfxMuted}
+                      onChange={(e) => setSfxMuted(e.target.checked)}
+                      className="accent-cyan-500"
+                    />
+                    <span className="text-xs text-gray-400">Mute</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={sfxVolume}
+                    onChange={(e) => setSfxVolume(Number(e.target.value))}
+                    className="flex-1 accent-cyan-500"
+                  />
+                  <span className="w-10 text-right text-xs text-gray-400">{sfxVolume}%</span>
+                </div>
+              </SettingGroup>
+            </div>
+
+            {/* Music Volume */}
+            <SettingGroup label="Music Volume">
+              <div className={`flex items-center gap-2 ${musicMuted ? "opacity-50" : ""}`}>
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={musicMuted}
+                    onChange={(e) => setMusicMuted(e.target.checked)}
+                    className="accent-cyan-500"
+                  />
+                  <span className="text-xs text-gray-400">Mute</span>
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={musicVolume}
+                  onChange={(e) => setMusicVolume(Number(e.target.value))}
+                  className="flex-1 accent-cyan-500"
+                />
+                <span className="w-10 text-right text-xs text-gray-400">{musicVolume}%</span>
+              </div>
             </SettingGroup>
           </div>
         </motion.div>
