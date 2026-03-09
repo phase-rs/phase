@@ -133,6 +133,28 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **ARENA-11**: Deck builder art-crop image grid with instant card preview panel and visual color/type filtering
 - [x] **ARENA-12**: Forge.rs logo converted to WebP for splash screen and menu branding
 
+### Engine Completeness (Phase 20)
+
+- [ ] **ENG-01**: Mana abilities (Rule 605) resolve instantly without using the stack, activatable during mana payment
+- [ ] **ENG-02**: Nonbasic lands and mana creatures produce mana via proper mana ability resolution (not just TapLandForMana shortcut)
+- [ ] **ENG-03**: Equipment equip action attaches equipment to creatures with sorcery-speed timing and mana cost
+- [ ] **ENG-04**: Aura and equipment attachment state properly managed with SBA cleanup on host death
+- [ ] **ENG-05**: Scry emits WaitingFor::ScryChoice with per-card top/bottom selection (MTGA-style)
+- [ ] **ENG-06**: Dig emits WaitingFor::DigChoice for player to select cards to keep
+- [ ] **ENG-07**: Surveil effect handler with WaitingFor::SurveilChoice for graveyard/top decision
+- [ ] **ENG-08**: Planeswalker loyalty ability activation with counter cost and once-per-turn restriction
+- [ ] **ENG-09**: Planeswalker SBA (0 loyalty dies) and damage-to-planeswalker removes loyalty counters
+- [ ] **ENG-10**: Transform/DFC face switching changes card characteristics (name, P/T, abilities, types)
+- [ ] **ENG-11**: DFCs reset to front face on zone change (Rule 711.8) with hover-to-peek UI for back face
+- [ ] **ENG-12**: Static ability stubs promoted to real handlers (Indestructible, CantBeCountered, FlashBack, keyword-granting statics)
+- [ ] **ENG-13**: Trigger matcher stubs promoted to real matchers (AttackerBlocked, Attached, Milled, Exiled, etc.)
+- [ ] **ENG-14**: Missing effect handlers implemented (Fight, Bounce, Explore, Proliferate, CopySpell, ChooseCard)
+- [ ] **ENG-15**: Replacement effect stubs promoted to real handlers (Attached, ProduceMana, Mill, Transform, etc.)
+- [ ] **ENG-16**: Day/Night global state with Daybound/Nightbound creature transformation
+- [ ] **ENG-17**: Morph/Manifest/Disguise face-down mechanics with turn-face-up action and hidden information
+- [ ] **ENG-18**: Standard-legal card data subset curated and checked into repository
+- [ ] **ENG-19**: Coverage report CI gate validates 100% Standard-legal card coverage with zero regressions
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -252,12 +274,31 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ARENA-10 | Phase 19 | Planned |
 | ARENA-11 | Phase 19 | Planned |
 | ARENA-12 | Phase 19 | Planned |
+| ENG-01 | Phase 20 | Planned |
+| ENG-02 | Phase 20 | Planned |
+| ENG-03 | Phase 20 | Planned |
+| ENG-04 | Phase 20 | Planned |
+| ENG-05 | Phase 20 | Planned |
+| ENG-06 | Phase 20 | Planned |
+| ENG-07 | Phase 20 | Planned |
+| ENG-08 | Phase 20 | Planned |
+| ENG-09 | Phase 20 | Planned |
+| ENG-10 | Phase 20 | Planned |
+| ENG-11 | Phase 20 | Planned |
+| ENG-12 | Phase 20 | Planned |
+| ENG-13 | Phase 20 | Planned |
+| ENG-14 | Phase 20 | Planned |
+| ENG-15 | Phase 20 | Planned |
+| ENG-16 | Phase 20 | Planned |
+| ENG-17 | Phase 20 | Planned |
+| ENG-18 | Phase 20 | Planned |
+| ENG-19 | Phase 20 | Planned |
 
 **Coverage:**
-- v1.1 requirements: 68 total
-- Mapped to phases: 68
+- v1.1 requirements: 87 total
+- Mapped to phases: 87
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-08*
-*Last updated: 2026-03-09 after Phase 19 planning*
+*Last updated: 2026-03-09 after Phase 20 planning*

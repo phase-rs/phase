@@ -179,10 +179,27 @@ Plans:
 
 ### Phase 20: Implement all remaining effects, keywords, statuses, and stubbed mechanics
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** Complete the engine's mechanic coverage to 100% of Standard-legal cards -- implement mana abilities (Rule 605), equipment/aura attachment, interactive WaitingFor choices (Scry/Dig/Surveil), planeswalker loyalty, transform/DFCs, day/night, morph/manifest, and batch-promote all remaining static/trigger/replacement stubs, with CI-gated coverage validation
+**Requirements**: ENG-01, ENG-02, ENG-03, ENG-04, ENG-05, ENG-06, ENG-07, ENG-08, ENG-09, ENG-10, ENG-11, ENG-12, ENG-13, ENG-14, ENG-15, ENG-16, ENG-17, ENG-18, ENG-19
 **Depends on:** Phase 19
-**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+  1. Mana abilities resolve instantly without the stack, activatable during mana payment
+  2. Equipment and auras attach properly with SBA cleanup on host death
+  3. Scry/Dig/Surveil emit interactive WaitingFor choices with MTGA-style UI and AI evaluation
+  4. Planeswalker loyalty abilities activate with counter cost, once-per-turn, and 0-loyalty SBA
+  5. DFCs transform between faces with characteristic swapping and zone-change reset
+  6. Day/night tracks globally with Daybound/Nightbound auto-transformation
+  7. Morph/manifest create face-down 2/2 creatures that can be turned face up
+  8. Coverage report confirms 100% Standard-legal card support with CI gate preventing regressions
+**Plans:** 9 plans
 
 Plans:
-- [ ] TBD (run /gsd:plan-phase 20 to break down)
+- [ ] 20-01-PLAN.md — Mana abilities (Rule 605 instant resolution, ManaPayment activation)
+- [ ] 20-02-PLAN.md — Equipment/Aura attachment (equip action, SBA, WaitingFor::EquipTarget)
+- [ ] 20-03-PLAN.md — WaitingFor interactive choices (ScryChoice, DigChoice, SurveilChoice, CardChoiceModal, AI)
+- [ ] 20-04-PLAN.md — Planeswalker loyalty (activation, once-per-turn, 0-loyalty SBA, damage redirect)
+- [ ] 20-05-PLAN.md — Transform/DFC (face switching, zone reset, hover-to-peek UI)
+- [ ] 20-06-PLAN.md — Static ability + trigger matcher batch promotion (Indestructible, CantBeCountered, FlashBack, AttackerBlocked, etc.)
+- [ ] 20-07-PLAN.md — Effect handlers (Fight, Bounce, Explore, Proliferate, CopySpell) + replacement promotions
+- [ ] 20-08-PLAN.md — Day/Night + Morph/Manifest/Disguise complex subsystems
+- [ ] 20-09-PLAN.md — Standard card data curation + coverage CI gate
