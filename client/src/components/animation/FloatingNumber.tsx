@@ -5,6 +5,7 @@ interface FloatingNumberProps {
   position: { x: number; y: number };
   color: string;
   onComplete: () => void;
+  speedMultiplier?: number;
 }
 
 export function FloatingNumber({
@@ -12,12 +13,13 @@ export function FloatingNumber({
   position,
   color,
   onComplete,
+  speedMultiplier = 1.0,
 }: FloatingNumberProps) {
   return (
     <motion.div
-      initial={{ opacity: 1, y: 0 }}
-      animate={{ opacity: 0, y: -60 }}
-      transition={{ duration: 0.8 }}
+      initial={{ opacity: 1, y: 0, scale: 1.2 }}
+      animate={{ opacity: 0, y: -60, scale: 1.0 }}
+      transition={{ duration: 0.8 * speedMultiplier }}
       onAnimationComplete={onComplete}
       style={{
         position: "fixed",
