@@ -86,6 +86,12 @@ pub enum Keyword {
     Riot,
     Afterlife(u32),
 
+    // Enchantment
+    Enchant(String),
+
+    // ETB counter (e.g., etbCounter:P1P1:1)
+    EtbCounter(String),
+
     // Equipment / attachment
     Reconfigure(String),
     LivingWeapon,
@@ -264,6 +270,8 @@ impl FromStr for Keyword {
                 "graft" => return Ok(Keyword::Graft(p.parse().unwrap_or(1))),
                 "devour" => return Ok(Keyword::Devour(p.parse().unwrap_or(1))),
                 "afflict" => return Ok(Keyword::Afflict),
+                "enchant" => return Ok(Keyword::Enchant(p.clone())),
+                "etbcounter" => return Ok(Keyword::EtbCounter(s[name.len() + 1..].to_string())),
                 _ => return Ok(Keyword::Unknown(s.to_string())),
             }
         }

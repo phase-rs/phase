@@ -98,6 +98,72 @@ pub fn resolve_add(
     Ok(())
 }
 
+/// Multiply counters on target objects (default: double).
+/// Reads `CounterType` and optional `Multiplier` params.
+pub fn resolve_multiply(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let counter_type_str = ability
+        .params
+        .get("CounterType")
+        .cloned()
+        .unwrap_or_else(|| "P1P1".to_string());
+    let multiplier: u32 = ability
+        .params
+        .get("Multiplier")
+        .map(|v| v.parse().unwrap_or(2))
+        .unwrap_or(2);
+
+    let targets = resolve_defined_or_targets(ability, state);
+    for obj_id in targets {
+        let ct = parse_counter_type(&counter_type_str);
+        let obj = state
+            .objects
+            .get_mut(&obj_id)
+            .ok_or(EffectError::ObjectNotFound(obj_id))?;
+        let current = obj.counters.get(&ct).copied().unwrap_or(0);
+        let to_add = current.saturating_mul(multiplier).saturating_sub(current);
+        if to_add > 0 {
+            let entry = obj.counters.entry(ct.clone()).or_insert(0);
+            *entry += to_add;
+
+            if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
+                state.layers_dirty = true;
+            }
+
+            events.push(GameEvent::CounterAdded {
+                object_id: obj_id,
+                counter_type: counter_type_str.clone(),
+                count: to_add,
+            });
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        api_type: ability.api_type.clone(),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
+/// Resolve `Defined$` param to object IDs, falling back to targets.
+fn resolve_defined_or_targets(ability: &ResolvedAbility, _state: &GameState) -> Vec<crate::types::identifiers::ObjectId> {
+    if let Some(defined) = ability.params.get("Defined") {
+        if defined == "Self" {
+            return vec![ability.source_id];
+        }
+        // For other Defined$ values, fall through to targets
+    }
+    ability
+        .targets
+        .iter()
+        .filter_map(|t| if let TargetRef::Object(id) = t { Some(*id) } else { None })
+        .collect()
+}
+
 /// Remove counters from target objects, clamping at 0.
 /// Reads `CounterType` and `CounterNum` params.
 pub fn resolve_remove(

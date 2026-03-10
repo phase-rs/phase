@@ -6,6 +6,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
+pub mod animate;
 pub mod attach;
 pub mod bounce;
 pub mod change_zone;
@@ -18,6 +19,7 @@ pub mod destroy;
 pub mod dig;
 pub mod discard;
 pub mod draw;
+pub mod effect;
 pub mod explore;
 pub mod fight;
 pub mod gain_control;
@@ -72,6 +74,10 @@ pub fn build_registry() -> HashMap<String, EffectHandler> {
     registry.insert("Proliferate".to_string(), proliferate::resolve);
     registry.insert("CopySpell".to_string(), copy_spell::resolve);
     registry.insert("ChooseCard".to_string(), choose_card::resolve);
+    registry.insert("PutCounter".to_string(), counters::resolve_add);
+    registry.insert("MultiplyCounter".to_string(), counters::resolve_multiply);
+    registry.insert("Animate".to_string(), animate::resolve);
+    registry.insert("Effect".to_string(), effect::resolve);
     registry
 }
 
@@ -263,9 +269,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_31_entries() {
+    fn registry_has_35_entries() {
         let registry = build_registry();
-        assert_eq!(registry.len(), 31);
+        assert_eq!(registry.len(), 35);
     }
 
     #[test]
