@@ -78,11 +78,12 @@ Plans:
   2. Scenario-based tests for core mechanics pass: ETB triggers fire, combat damage resolves correctly, stack resolves LIFO, state-based actions check triggers, layer system applies in order, keyword interactions (e.g., deathtouch + trample) produce correct outcomes
   3. `insta` snapshot tests capture GameState after action sequences and `cargo test` fails if snapshots change unexpectedly
   4. `cargo test --all` completes with zero silent skips (no tests that pass by doing nothing when files are missing)
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 22-01: TBD
-- [ ] 22-02: TBD
+- [ ] 22-01-PLAN.md — GameScenario builder, CardBuilder, GameRunner, GameSnapshot, and integration test scaffolding
+- [ ] 22-02-PLAN.md — Rules tests: ETB triggers, stack resolution, state-based actions, targeting
+- [ ] 22-03-PLAN.md — Rules tests: combat damage, keyword interactions, layer system, and snapshot golden masters
 
 ### Phase 23: Unified Card Loader
 **Goal**: The engine can load cards from MTGJSON metadata + ability JSON as its primary path, proven end-to-end with sample cards
@@ -148,7 +149,7 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
 | 21. Schema & MTGJSON Foundation | v1.2 | Complete    | 2026-03-10 | 2026-03-10 |
-| 22. Test Infrastructure | v1.2 | 0/? | Not started | - |
+| 22. Test Infrastructure | v1.2 | 0/3 | Planning complete | - |
 | 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |
 | 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |
