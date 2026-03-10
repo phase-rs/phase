@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
+use crate::types::ability::{
+    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+};
 use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::CardType;
 use crate::types::mana::{ManaColor, ManaCost};
 
+use super::ability::{parse_ability, parse_replacement, parse_static, parse_trigger};
 use super::{card_type, mana_cost, ParseError};
 
 struct CardFaceBuilder {
@@ -19,10 +23,10 @@ struct CardFaceBuilder {
     flavor_name: Option<String>,
     color_override: Option<Vec<ManaColor>>,
     keywords: Vec<String>,
-    abilities: Vec<String>,
-    triggers: Vec<String>,
-    static_abilities: Vec<String>,
-    replacements: Vec<String>,
+    abilities: Vec<AbilityDefinition>,
+    triggers: Vec<TriggerDefinition>,
+    static_abilities: Vec<StaticDefinition>,
+    replacements: Vec<ReplacementDefinition>,
     svars: HashMap<String, String>,
 }
 
@@ -139,7 +143,11 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
 
     match key.as_bytes().first() {
         Some(b'A') => match key {
-            "A" => face.abilities.push(value.to_string()),
+            "A" => {
+                if let Ok(def) = parse_ability(value) {
+                    face.abilities.push(def);
+                }
+            }
             "AlternateMode" => state.alt_mode = Some(value.to_string()),
             _ => {} // skip unknown
         },
@@ -207,11 +215,17 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
         },
         Some(b'R') => {
             if key == "R" {
-                face.replacements.push(value.to_string())
+                if let Ok(def) = parse_replacement(value) {
+                    face.replacements.push(def);
+                }
             }
         }
         Some(b'S') => match key {
-            "S" => face.static_abilities.push(value.to_string()),
+            "S" => {
+                if let Ok(def) = parse_static(value) {
+                    face.static_abilities.push(def);
+                }
+            }
             "SVar" => {
                 if let Some((var_name, var_value)) = value.split_once(':') {
                     face.svars
@@ -221,7 +235,11 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
             _ => {}
         },
         Some(b'T') => match key {
-            "T" => face.triggers.push(value.to_string()),
+            "T" => {
+                if let Ok(def) = parse_trigger(value) {
+                    face.triggers.push(def);
+                }
+            }
             "Types" => face.card_type = Some(card_type::parse(value)),
             "Text" => face.non_ability_text = Some(value.to_string()),
             _ => {}
@@ -270,7 +288,7 @@ SVar:Picture:https://example.com/bolt.jpg";
                 );
                 assert_eq!(face.card_type.core_types, vec![CoreType::Instant]);
                 assert_eq!(face.abilities.len(), 1);
-                assert!(face.abilities[0].starts_with("SP$ DealDamage"));
+                assert_eq!(face.abilities[0].api_type(), "DealDamage");
                 assert_eq!(
                     face.oracle_text.as_deref(),
                     Some("Lightning Bolt deals 3 damage to any target.")
@@ -648,9 +666,15 @@ Oracle:Test card.";
         match &rules.layout {
             CardLayout::Single(face) => {
                 assert_eq!(face.static_abilities.len(), 1);
-                assert!(face.static_abilities[0].starts_with("Mode$ Continuous"));
+                assert_eq!(
+                    face.static_abilities[0].mode,
+                    crate::types::statics::StaticMode::Continuous
+                );
                 assert_eq!(face.replacements.len(), 1);
-                assert!(face.replacements[0].starts_with("Event$ Moved"));
+                assert_eq!(
+                    face.replacements[0].event,
+                    crate::types::replacements::ReplacementEvent::Moved
+                );
             }
             _ => panic!("Expected Single layout"),
         }

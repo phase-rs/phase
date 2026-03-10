@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefinition};
+use crate::types::ability::{
+    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+};
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -19,7 +21,7 @@ pub struct BackFaceData {
     pub toughness: Option<i32>,
     pub card_types: CardType,
     pub keywords: Vec<Keyword>,
-    pub abilities: Vec<String>,
+    pub abilities: Vec<AbilityDefinition>,
     pub color: Vec<ManaColor>,
 }
 
@@ -64,7 +66,7 @@ pub struct GameObject {
     pub card_types: CardType,
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
-    pub abilities: Vec<String>,
+    pub abilities: Vec<AbilityDefinition>,
     pub trigger_definitions: Vec<TriggerDefinition>,
     pub replacement_definitions: Vec<ReplacementDefinition>,
     pub static_definitions: Vec<StaticDefinition>,

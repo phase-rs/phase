@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::ability::{
+    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+};
 use super::card_type::CardType;
 use super::mana::{ManaColor, ManaCost};
 
@@ -18,10 +21,10 @@ pub struct CardFace {
     pub non_ability_text: Option<String>,
     pub flavor_name: Option<String>,
     pub keywords: Vec<String>,
-    pub abilities: Vec<String>,
-    pub triggers: Vec<String>,
-    pub static_abilities: Vec<String>,
-    pub replacements: Vec<String>,
+    pub abilities: Vec<AbilityDefinition>,
+    pub triggers: Vec<TriggerDefinition>,
+    pub static_abilities: Vec<StaticDefinition>,
+    pub replacements: Vec<ReplacementDefinition>,
     pub svars: HashMap<String, String>,
     pub color_override: Option<Vec<ManaColor>>,
 }

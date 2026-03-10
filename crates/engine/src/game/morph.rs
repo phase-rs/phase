@@ -1,3 +1,4 @@
+use crate::types::ability::AbilityDefinition;
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -18,7 +19,7 @@ pub struct FaceDownData {
     pub toughness: Option<i32>,
     pub card_types: CardType,
     pub keywords: Vec<Keyword>,
-    pub abilities: Vec<String>,
+    pub abilities: Vec<AbilityDefinition>,
     pub color: Vec<crate::types::mana::ManaColor>,
 }
 
@@ -277,7 +278,13 @@ mod tests {
             subtypes: vec!["Beast".to_string()],
         };
         obj.keywords = vec![Keyword::Morph("3".to_string()), Keyword::Trample];
-        obj.abilities = vec!["Some ability".to_string()];
+        obj.abilities = vec![AbilityDefinition {
+            kind: crate::types::ability::AbilityKind::Activated,
+            effect: crate::types::ability::Effect::Draw { count: 1 },
+            cost: None,
+            sub_ability: None,
+            remaining_params: std::collections::HashMap::new(),
+        }];
         obj.color = vec![ManaColor::Green];
         id
     }
@@ -322,7 +329,7 @@ mod tests {
         assert!(obj.card_types.subtypes.contains(&"Beast".to_string()));
         assert!(obj.keywords.contains(&Keyword::Trample));
         assert!(obj.keywords.contains(&Keyword::Morph("3".to_string())));
-        assert_eq!(obj.abilities, vec!["Some ability".to_string()]);
+        assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
     }
 
