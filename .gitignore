@@ -16,6 +16,7 @@ client/coverage/
 # Downloaded card data (but keep curated Standard subset for CI)
 data/*
 !data/standard-cards/
+!data/standard-cards.txt
 !data/mtgjson/
 !data/abilities/
 

@@ -1,0 +1,80 @@
+# Standard card manifest for CI coverage gates
+# 78 cards - one per line, exact card name
+Armored Armadillo
+Ash Zealot
+Augur of Bolas
+Baneslayer Angel
+Banishing Light
+Blade Splicer
+Blood Burglar
+Blood Petal Celebrant
+Bomat Courier
+Bonesplitter
+Brainstorm
+Cancel
+Cast Down
+Champion of Arashin
+Charging Paladin
+Cleric of the Forward Order
+Cloudreader Sphinx
+Colossal Might
+Counterspell
+Cut Down
+Darksteel Myr
+Disenchant
+Divine Offering
+Divine Verdict
+Doom Blade
+Drannith Healer
+Eager Cadet
+Elite Vanguard
+Enduring Innocence
+Essence Scatter
+Eye Collector
+Faerie Miscreant
+Falkenrath Gorger
+Fervent Champion
+Forest
+Giant Growth
+Gifted Aetherborn
+Glory Seeker
+Go for the Throat
+Goblin Chainwhirler
+Goblin Guide
+Grizzly Bears
+Gutterbones
+Healer's Hawk
+Immersturm Raider
+Island
+Kalonian Tusker
+Lava Spike
+Leatherback Baloth
+Lightning Bolt
+Lightning Strike
+Linden, the Steadfast Queen
+Lovestruck Beast
+Monastery Swiftspear
+Mountain
+Murder
+Naturalize
+Negate
+Opt
+Path to Exile
+Plains
+Rampant Growth
+Revitalize
+Savannah Lions
+Searing Spear
+Serra Angel
+Shock
+Soldier of the Pantheon
+Spectral Sailor
+Swamp
+Swords to Plowshares
+Tarmogoyf
+Think Twice
+Ultimate Price
+Unsummon
+Vampire Nighthawk
+Viashino Pyromancer
+Walk the Plank
