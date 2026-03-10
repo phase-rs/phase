@@ -63,28 +63,28 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DATA-01 | — | Pending |
-| DATA-02 | — | Pending |
-| DATA-03 | — | Pending |
-| DATA-04 | — | Pending |
-| MIGR-01 | — | Pending |
-| MIGR-02 | — | Pending |
-| MIGR-03 | — | Pending |
-| MIGR-04 | — | Pending |
-| MIGR-05 | — | Pending |
-| TEST-01 | — | Pending |
-| TEST-02 | — | Pending |
-| TEST-03 | — | Pending |
-| TEST-04 | — | Pending |
-| LICN-01 | — | Pending |
-| LICN-02 | — | Pending |
-| LICN-03 | — | Pending |
+| DATA-01 | Phase 21 | Pending |
+| DATA-02 | Phase 21 | Pending |
+| DATA-03 | Phase 23 | Pending |
+| DATA-04 | Phase 21 | Pending |
+| MIGR-01 | Phase 24 | Pending |
+| MIGR-02 | Phase 25 | Pending |
+| MIGR-03 | Phase 24 | Pending |
+| MIGR-04 | Phase 23 | Pending |
+| MIGR-05 | Phase 24 | Pending |
+| TEST-01 | Phase 22 | Pending |
+| TEST-02 | Phase 22 | Pending |
+| TEST-03 | Phase 22 | Pending |
+| TEST-04 | Phase 24 | Pending |
+| LICN-01 | Phase 25 | Pending |
+| LICN-02 | Phase 25 | Pending |
+| LICN-03 | Phase 25 | Pending |
 
 **Coverage:**
 - v1.2 requirements: 16 total
-- Mapped to phases: 0
-- Unmapped: 16 ⚠️
+- Mapped to phases: 16
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-10*
-*Last updated: 2026-03-10 after initial definition*
+*Last updated: 2026-03-10 after roadmap creation*

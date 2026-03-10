@@ -4,6 +4,7 @@
 
 - ✅ **v1.0 MVP** — Phases 1-12 (shipped 2026-03-08) — [archive](milestones/v1.0-ROADMAP.md)
 - ✅ **v1.1 Arena UI** — Phases 13-20 (shipped 2026-03-10) — [archive](milestones/v1.1-ROADMAP.md)
+- 🚧 **v1.2 Migrate Data Source & Add Tests** — Phases 21-25 (in progress)
 
 ## Phases
 
@@ -39,9 +40,106 @@
 
 </details>
 
+### 🚧 v1.2 Migrate Data Source & Add Tests (In Progress)
+
+**Milestone Goal:** Replace Forge's GPL card data with MTGJSON (MIT) + custom ability JSON format, add comprehensive test coverage, and relicense the project as MIT/Apache-2.0.
+
+- [ ] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on
+- [ ] **Phase 22: Test Infrastructure** - Build the GameScenario test harness and rules correctness test suite before any cards are migrated
+- [ ] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards
+- [ ] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation
+- [ ] **Phase 25: Forge Removal & Relicensing** - Remove all GPL data, feature-gate Forge parser, and relicense as MIT/Apache-2.0
+
+## Phase Details
+
+### Phase 21: Schema & MTGJSON Foundation
+**Goal**: The engine has a validated, schema-documented ability format and can load card metadata from MTGJSON
+**Depends on**: Nothing (first phase of v1.2)
+**Requirements**: DATA-01, DATA-02, DATA-04
+**Success Criteria** (what must be TRUE):
+  1. `cargo test` includes a passing test that loads card metadata (name, mana cost, types, P/T, colors, keywords, oracle text, layout) from MTGJSON StandardAtomic.json for a known card
+  2. A hand-authored ability JSON file for a test card deserializes into the engine's AbilityDefinition/TriggerDefinition/StaticDefinition/ReplacementDefinition types without error
+  3. Running `cargo test` produces (or validates against) a JSON Schema file that documents every field in the ability format, usable for editor autocompletion
+  4. Round-trip test: an ability JSON file serialized from Rust types and deserialized back produces identical typed structures
+**Plans**: TBD
+
+Plans:
+- [ ] 21-01: TBD
+- [ ] 21-02: TBD
+
+### Phase 22: Test Infrastructure
+**Goal**: Developers can write self-contained rules correctness tests that run in CI with no filesystem dependencies
+**Depends on**: Nothing (parallel with Phase 21 -- no dependency on new card format)
+**Requirements**: TEST-01, TEST-02, TEST-03
+**Success Criteria** (what must be TRUE):
+  1. A GameScenario test can set up a board state (add specific cards, set phase/turn, set life totals) and execute actions without touching the filesystem or loading card data files
+  2. Scenario-based tests for core mechanics pass: ETB triggers fire, combat damage resolves correctly, stack resolves LIFO, state-based actions check triggers, layer system applies in order, keyword interactions (e.g., deathtouch + trample) produce correct outcomes
+  3. `insta` snapshot tests capture GameState after action sequences and `cargo test` fails if snapshots change unexpectedly
+  4. `cargo test --all` completes with zero silent skips (no tests that pass by doing nothing when files are missing)
+**Plans**: TBD
+
+Plans:
+- [ ] 22-01: TBD
+- [ ] 22-02: TBD
+
+### Phase 23: Unified Card Loader
+**Goal**: The engine can load cards from MTGJSON metadata + ability JSON as its primary path, proven end-to-end with sample cards
+**Depends on**: Phase 21
+**Requirements**: DATA-03, MIGR-04
+**Success Criteria** (what must be TRUE):
+  1. `CardDatabase::load_json()` loads a card by merging MTGJSON metadata with an ability JSON file and produces a valid CardFace that the engine can use to play a game
+  2. Multi-face cards (Adventure, Transform, Modal DFC) load correctly with both faces populated
+  3. Loaded cards include MTGJSON scryfallOracleId and the frontend can use it for image lookups via Scryfall API
+  4. A smoke test game using 5-10 JSON-loaded cards completes without errors (cards can be cast, abilities resolve, combat works)
+**Plans**: TBD
+
+Plans:
+- [ ] 23-01: TBD
+- [ ] 23-02: TBD
+
+### Phase 24: Card Migration
+**Goal**: All engine-supported cards are converted to the new format with automated tooling, and behavioral parity is validated
+**Depends on**: Phase 22, Phase 23
+**Requirements**: MIGR-01, MIGR-03, MIGR-05, TEST-04
+**Success Criteria** (what must be TRUE):
+  1. An automated migration tool converts Forge .txt card definitions to ability JSON files, and it has processed all 32,300+ Forge cards (producing ability files for every card whose mechanics have registered engine handlers)
+  2. All previously supported cards (every card that passed the old CI coverage gate) still pass when loaded via the JSON path
+  3. Per-card behavioral parity tests confirm that sampled migrated cards produce identical game outcomes as the original Forge format (sampling across mechanic categories, not exhaustive per-card)
+  4. CI coverage gate passes against JSON card data with 100% Standard-legal coverage preserved
+**Plans**: TBD
+
+Plans:
+- [ ] 24-01: TBD
+- [ ] 24-02: TBD
+- [ ] 24-03: TBD
+
+### Phase 25: Forge Removal & Relicensing
+**Goal**: The project contains no GPL-licensed data and is relicensed as MIT/Apache-2.0
+**Depends on**: Phase 24
+**Requirements**: MIGR-02, LICN-01, LICN-02, LICN-03
+**Success Criteria** (what must be TRUE):
+  1. `data/cardsfolder/` and `data/standard-cards/` directories are deleted from the repository and the Forge parser is feature-gated behind `forge-compat` (not compiled by default)
+  2. LICENSE file(s) specify MIT/Apache-2.0 dual license and all Cargo.toml files reflect the new license
+  3. PROJECT.md constraints and key decisions are updated to reflect MTGJSON + own ability format (no mention of Forge as a runtime dependency)
+  4. `coverage.rs` reads JSON format and the CI gate (100% Standard coverage) passes on the main branch with no Forge data present
+  5. `cargo build --target wasm32-unknown-unknown` succeeds and `cargo test --all` passes with the `forge-compat` feature disabled
+**Plans**: TBD
+
+Plans:
+- [ ] 25-01: TBD
+- [ ] 25-02: TBD
+
 ## Progress
+
+**Execution Order:**
+Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 requires 22 + 23. Phase 25 requires 24.
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
+| 21. Schema & MTGJSON Foundation | v1.2 | 0/? | Not started | - |
+| 22. Test Infrastructure | v1.2 | 0/? | Not started | - |
+| 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
+| 24. Card Migration | v1.2 | 0/? | Not started | - |
+| 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |
