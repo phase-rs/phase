@@ -169,8 +169,8 @@ fn parse_pw_ability(
     // Try to parse via the standard parser; fall back to a minimal ability
     match crate::parser::ability::parse_ability(ability_text) {
         Ok(def) => ResolvedAbility {
-            api_type: def.api_type,
-            params: def.params,
+            api_type: def.api_type().to_string(),
+            params: def.params(),
             targets: Vec::new(),
             source_id,
             controller,

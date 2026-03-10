@@ -1,11 +1,13 @@
 use std::convert::Infallible;
+use std::fmt;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// All trigger modes from Forge's TriggerType enum.
 /// Matched case-sensitively against Forge trigger mode strings.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum TriggerMode {
     // Zone changes
     ChangesZone,
@@ -379,6 +381,19 @@ impl FromStr for TriggerMode {
             _ => TriggerMode::Unknown(s.to_string()),
         };
         Ok(mode)
+    }
+}
+
+impl fmt::Display for TriggerMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TriggerMode::Unknown(s) => write!(f, "{s}"),
+            other => {
+                // Use Debug formatting but strip the enum prefix for known variants.
+                // Known variants serialize as their name (e.g. ChangesZone -> "ChangesZone").
+                write!(f, "{other:?}")
+            }
+        }
     }
 }
 

@@ -47,7 +47,8 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
     let effect_registry = build_effect_registry();
     for raw in &obj.abilities {
         if let Ok(def) = parse_ability(raw) {
-            if !def.api_type.is_empty() && !effect_registry.contains_key(&def.api_type) {
+            let api = def.api_type();
+            if !api.is_empty() && !effect_registry.contains_key(api) {
                 return true;
             }
         }
@@ -56,9 +57,9 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
     // 3. Check trigger modes against trigger registry
     let trigger_registry = build_trigger_registry();
     for trig in &obj.trigger_definitions {
-        let mode =
-            TriggerMode::from_str(&trig.mode).unwrap_or(TriggerMode::Unknown(trig.mode.clone()));
-        if matches!(&mode, TriggerMode::Unknown(_)) || !trigger_registry.contains_key(&mode) {
+        if matches!(&trig.mode, TriggerMode::Unknown(_))
+            || !trigger_registry.contains_key(&trig.mode)
+        {
             return true;
         }
     }
@@ -66,7 +67,7 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
     // 4. Check static ability modes against static registry
     let static_registry = build_static_registry();
     for stat in &obj.static_definitions {
-        if !static_registry.contains_key(&stat.mode) {
+        if !static_registry.contains_key(&stat.mode_str()) {
             return true;
         }
     }
@@ -109,9 +110,9 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
             for svar_val in face.svars.values() {
                 if svar_val.contains("$ ") {
                     if let Ok(def) = parse_ability(svar_val) {
-                        if !def.api_type.is_empty() && !effect_registry.contains_key(&def.api_type)
-                        {
-                            let label = format!("Effect:{}", def.api_type);
+                        let api = def.api_type();
+                        if !api.is_empty() && !effect_registry.contains_key(api) {
+                            let label = format!("Effect:{api}");
                             if !missing.contains(&label) {
                                 missing.push(label);
                             }
@@ -162,8 +163,9 @@ fn check_abilities(
 ) {
     for raw in abilities {
         if let Ok(def) = parse_ability(raw) {
-            if !def.api_type.is_empty() && !effect_registry.contains_key(&def.api_type) {
-                let label = format!("Effect:{}", def.api_type);
+            let api = def.api_type();
+            if !api.is_empty() && !effect_registry.contains_key(api) {
+                let label = format!("Effect:{api}");
                 if !missing.contains(&label) {
                     missing.push(label);
                 }
@@ -179,8 +181,9 @@ fn check_triggers(
 ) {
     for raw in triggers {
         if let Ok(def) = parse_trigger(raw) {
-            let mode = TriggerMode::from_str(&def.mode).unwrap();
-            if matches!(&mode, TriggerMode::Unknown(_)) || !trigger_registry.contains_key(&mode) {
+            if matches!(&def.mode, TriggerMode::Unknown(_))
+                || !trigger_registry.contains_key(&def.mode)
+            {
                 let label = format!("Trigger:{}", def.mode);
                 if !missing.contains(&label) {
                     missing.push(label);
@@ -209,7 +212,7 @@ fn check_statics(
 ) {
     for raw in statics {
         if let Ok(def) = parse_static(raw) {
-            if !static_registry.contains_key(&def.mode) {
+            if !static_registry.contains_key(&def.mode_str()) {
                 let label = format!("Static:{}", def.mode);
                 if !missing.contains(&label) {
                     missing.push(label);

@@ -11,12 +11,15 @@ pub mod mana;
 pub mod phase;
 pub mod player;
 pub mod proposed_event;
+pub mod replacements;
+pub mod statics;
 pub mod triggers;
 pub mod zones;
 
 pub use ability::{
-    AbilityDefinition, AbilityKind, EffectError, ReplacementDefinition, ResolvedAbility,
-    StaticDefinition, TargetRef, TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, EffectError,
+    ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetRef, TargetSpec,
+    TriggerDefinition,
 };
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};
@@ -32,5 +35,7 @@ pub use mana::{ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, Ma
 pub use phase::Phase;
 pub use player::{Player, PlayerId};
 pub use proposed_event::{ProposedEvent, ReplacementId};
+pub use replacements::ReplacementEvent;
+pub use statics::StaticMode;
 pub use triggers::TriggerMode;
 pub use zones::Zone;

@@ -15,7 +15,7 @@ pub fn is_mana_ability(ability_text: &str) -> bool {
     let Ok(def) = parse_ability(ability_text) else {
         return false;
     };
-    def.api_type == "Mana"
+    def.api_type() == "Mana"
 }
 
 /// Map a Forge "Produced$" color code to ManaType.
@@ -44,11 +44,7 @@ pub fn resolve_mana_ability(
         .map_err(|e| EngineError::InvalidAction(format!("Failed to parse ability: {}", e)))?;
 
     // Pay tap cost if present
-    let has_tap_cost = def
-        .params
-        .get("Cost")
-        .map(|c| c.contains('T'))
-        .unwrap_or(false);
+    let has_tap_cost = matches!(def.cost, Some(crate::types::ability::AbilityCost::Tap));
 
     if has_tap_cost {
         let obj = state
@@ -67,9 +63,9 @@ pub fn resolve_mana_ability(
         });
     }
 
-    // Determine produced mana color
-    let produced = def
-        .params
+    // Determine produced mana color from the typed Effect
+    let compat_params = def.params();
+    let produced = compat_params
         .get("Produced")
         .cloned()
         .unwrap_or_else(|| "C".to_string());
@@ -87,8 +83,7 @@ pub fn resolve_mana_ability(
     let mana_type = produced_to_mana_type(color_str);
 
     // Handle Amount$ parameter (default 1)
-    let amount: u32 = def
-        .params
+    let amount: u32 = compat_params
         .get("Amount")
         .and_then(|a| a.parse().ok())
         .unwrap_or(1);

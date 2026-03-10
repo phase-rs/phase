@@ -128,8 +128,8 @@ pub fn resolve_ability_chain(
         if let Some(raw_ability) = ability.svars.get(svar_name) {
             if let Ok(def) = parse_ability(raw_ability) {
                 let mut sub_resolved = ResolvedAbility {
-                    api_type: def.api_type,
-                    params: def.params,
+                    api_type: def.api_type().to_string(),
+                    params: def.params(),
                     targets: Vec::new(),
                     source_id: ability.source_id,
                     controller: ability.controller,

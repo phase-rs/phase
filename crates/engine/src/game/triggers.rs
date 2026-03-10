@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use crate::game::filter::object_matches_filter;
 use crate::types::ability::{ResolvedAbility, TriggerDefinition};
@@ -56,10 +55,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             };
 
             for trig_def in &trigger_defs {
-                let mode = TriggerMode::from_str(&trig_def.mode)
-                    .unwrap_or(TriggerMode::Unknown(trig_def.mode.clone()));
-
-                if let Some(matcher) = registry.get(&mode) {
+                if let Some(matcher) = registry.get(&trig_def.mode) {
                     if matcher(event, &trig_def.params, obj_id, state) {
                         // Build the ResolvedAbility from the trigger definition
                         let ability = build_triggered_ability(trig_def, obj_id, controller, &svars);
@@ -106,7 +102,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             svars: HashMap::new(),
                         };
                         let prowess_trig_def = TriggerDefinition {
-                            mode: "SpellCast".to_string(),
+                            mode: TriggerMode::SpellCast,
                             params: HashMap::from([
                                 ("ValidActivatingPlayer".to_string(), "You".to_string()),
                                 ("ValidCard".to_string(), "Card".to_string()),
@@ -174,7 +170,7 @@ fn build_triggered_ability(
         if let Some(svar_value) = svars.get(execute_svar) {
             // Parse the SVar as an ability string
             if let Ok(ability_def) = crate::parser::ability::parse_ability(svar_value) {
-                (ability_def.api_type, ability_def.params)
+                (ability_def.api_type().to_string(), ability_def.params())
             } else {
                 (String::new(), HashMap::new())
             }
@@ -1361,7 +1357,7 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
-                mode: "ChangesZone".to_string(),
+                mode: TriggerMode::ChangesZone,
                 params: HashMap::from([
                     ("Origin".to_string(), "Any".to_string()),
                     ("Destination".to_string(), "Battlefield".to_string()),
@@ -1387,7 +1383,7 @@ pub mod tests {
             obj.controller = PlayerId(1);
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
-                mode: "ChangesZone".to_string(),
+                mode: TriggerMode::ChangesZone,
                 params: HashMap::from([
                     ("Origin".to_string(), "Any".to_string()),
                     ("Destination".to_string(), "Battlefield".to_string()),
@@ -1590,7 +1586,7 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
-                mode: "ChangesZone".to_string(),
+                mode: TriggerMode::ChangesZone,
                 params: HashMap::from([
                     ("Origin".to_string(), "Any".to_string()),
                     ("Destination".to_string(), "Battlefield".to_string()),
@@ -1645,7 +1641,7 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
-                mode: "ChangesZone".to_string(),
+                mode: TriggerMode::ChangesZone,
                 params: HashMap::from([
                     ("Origin".to_string(), "Any".to_string()),
                     ("Destination".to_string(), "Battlefield".to_string()),
@@ -1671,7 +1667,7 @@ pub mod tests {
             obj.controller = PlayerId(1);
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
-                mode: "ChangesZone".to_string(),
+                mode: TriggerMode::ChangesZone,
                 params: HashMap::from([
                     ("Origin".to_string(), "Any".to_string()),
                     ("Destination".to_string(), "Battlefield".to_string()),
@@ -1716,7 +1712,7 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
-                mode: "ChangesZone".to_string(),
+                mode: TriggerMode::ChangesZone,
                 params: HashMap::from([
                     ("Origin".to_string(), "Any".to_string()),
                     ("Destination".to_string(), "Battlefield".to_string()),

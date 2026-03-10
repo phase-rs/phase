@@ -10,6 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::mana::ManaColor;
+use crate::types::statics::StaticMode;
 
 /// Evaluate all continuous effects through the seven-layer system.
 ///
@@ -31,9 +32,7 @@ pub fn evaluate_layers(state: &mut GameState) {
             if obj.base_toughness.is_some() {
                 obj.toughness = obj.base_toughness;
             }
-            if !obj.base_keywords.is_empty() {
-                obj.keywords = obj.base_keywords.clone();
-            }
+            obj.keywords = obj.base_keywords.clone();
             if !obj.base_color.is_empty() {
                 obj.color = obj.base_color.clone();
             }
@@ -100,7 +99,7 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
         };
 
         for (def_idx, def) in obj.static_definitions.iter().enumerate() {
-            if def.mode != "Continuous" {
+            if def.mode != StaticMode::Continuous {
                 continue;
             }
 
@@ -117,7 +116,7 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                     timestamp: obj.timestamp,
                     params: def.params.clone(),
                     affected_filter: affected.clone(),
-                    mode: def.mode.clone(),
+                    mode: def.mode_str(),
                 });
             }
         }
@@ -407,7 +406,7 @@ mod tests {
         params.insert("AddPower".to_string(), add_power.to_string());
         params.insert("AddToughness".to_string(), add_toughness.to_string());
         let def = StaticDefinition {
-            mode: "Continuous".to_string(),
+            mode: StaticMode::Continuous,
             params,
         };
         state
@@ -477,7 +476,7 @@ mod tests {
             params.insert("Affected".to_string(), "Artifact.YouCtrl".to_string());
             params.insert("AddType".to_string(), "Creature".to_string());
             let def = StaticDefinition {
-                mode: "Continuous".to_string(),
+                mode: StaticMode::Continuous,
                 params,
             };
             state
@@ -563,7 +562,7 @@ mod tests {
             params.insert("Affected".to_string(), "Artifact.YouCtrl".to_string());
             params.insert("AddType".to_string(), "Creature".to_string());
             let def = StaticDefinition {
-                mode: "Continuous".to_string(),
+                mode: StaticMode::Continuous,
                 params,
             };
             state
@@ -640,7 +639,7 @@ mod tests {
             params.insert("AddPower".to_string(), "2".to_string());
             params.insert("AddKeyword".to_string(), "Trample".to_string());
             obj.static_definitions.push(StaticDefinition {
-                mode: "Continuous".to_string(),
+                mode: StaticMode::Continuous,
                 params,
             });
         }
@@ -690,7 +689,7 @@ mod tests {
                 .unwrap()
                 .static_definitions
                 .push(StaticDefinition {
-                    mode: "Continuous".to_string(),
+                    mode: StaticMode::Continuous,
                     params,
                 });
         }

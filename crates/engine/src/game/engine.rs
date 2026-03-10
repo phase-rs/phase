@@ -1973,6 +1973,9 @@ mod tests {
         use crate::types::game_state::GameState;
         use crate::types::identifiers::{CardId, ObjectId};
         use crate::types::player::PlayerId;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::statics::StaticMode;
+        use crate::types::triggers::TriggerMode;
         use crate::types::zones::Zone;
         use std::collections::HashMap;
 
@@ -2015,7 +2018,7 @@ mod tests {
                 .unwrap()
                 .replacement_definitions
                 .push(ReplacementDefinition {
-                    event: "Moved".to_string(),
+                    event: ReplacementEvent::Moved,
                     params: HashMap::from([
                         ("Origin$".to_string(), "Battlefield".to_string()),
                         ("Destination$".to_string(), "Graveyard".to_string()),
@@ -2077,7 +2080,7 @@ mod tests {
                 .unwrap()
                 .static_definitions
                 .push(StaticDefinition {
-                    mode: "Continuous".to_string(),
+                    mode: StaticMode::Continuous,
                     params: HashMap::from([
                         ("Affected".to_string(), "Creature.YouCtrl.Other".to_string()),
                         ("AddPower".to_string(), "-2".to_string()),
@@ -2127,7 +2130,7 @@ mod tests {
                 .unwrap()
                 .replacement_definitions
                 .push(ReplacementDefinition {
-                    event: "DamageDone".to_string(),
+                    event: ReplacementEvent::DamageDone,
                     params: HashMap::from([
                         ("Prevent".to_string(), "True".to_string()),
                         ("DamageType$".to_string(), "Combat".to_string()),
@@ -2166,7 +2169,7 @@ mod tests {
                 .unwrap()
                 .static_definitions
                 .push(StaticDefinition {
-                    mode: "Continuous".to_string(),
+                    mode: StaticMode::Continuous,
                     params: HashMap::from([
                         ("Affected".to_string(), "Creature.YouCtrl.Other".to_string()),
                         ("AddPower".to_string(), "1".to_string()),
@@ -2213,7 +2216,7 @@ mod tests {
                 .unwrap()
                 .replacement_definitions
                 .push(ReplacementDefinition {
-                    event: "Moved".to_string(),
+                    event: ReplacementEvent::Moved,
                     params: HashMap::from([
                         ("Origin$".to_string(), "Battlefield".to_string()),
                         ("Destination$".to_string(), "Graveyard".to_string()),
@@ -2237,7 +2240,7 @@ mod tests {
                 .unwrap()
                 .trigger_definitions
                 .push(TriggerDefinition {
-                    mode: "ChangesZone".to_string(),
+                    mode: TriggerMode::ChangesZone,
                     params: HashMap::from([
                         ("Origin".to_string(), "Battlefield".to_string()),
                         ("Destination".to_string(), "Exile".to_string()),

@@ -335,7 +335,7 @@ pub fn check_static_ability(state: &GameState, mode: &str, context: &StaticCheck
         };
 
         for def in &obj.static_definitions {
-            if def.mode != mode {
+            if def.mode_str() != mode {
                 continue;
             }
 
@@ -380,6 +380,7 @@ mod tests {
     use crate::types::ability::StaticDefinition;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
+    use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -431,7 +432,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition {
-                mode: "CantAttack".to_string(),
+                mode: StaticMode::CantAttack,
                 params,
             });
 

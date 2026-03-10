@@ -150,7 +150,10 @@ pub fn resolve_multiply(
 }
 
 /// Resolve `Defined$` param to object IDs, falling back to targets.
-fn resolve_defined_or_targets(ability: &ResolvedAbility, _state: &GameState) -> Vec<crate::types::identifiers::ObjectId> {
+fn resolve_defined_or_targets(
+    ability: &ResolvedAbility,
+    _state: &GameState,
+) -> Vec<crate::types::identifiers::ObjectId> {
     if let Some(defined) = ability.params.get("Defined") {
         if defined == "Self" {
             return vec![ability.source_id];
@@ -160,7 +163,13 @@ fn resolve_defined_or_targets(ability: &ResolvedAbility, _state: &GameState) -> 
     ability
         .targets
         .iter()
-        .filter_map(|t| if let TargetRef::Object(id) = t { Some(*id) } else { None })
+        .filter_map(|t| {
+            if let TargetRef::Object(id) = t {
+                Some(*id)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 

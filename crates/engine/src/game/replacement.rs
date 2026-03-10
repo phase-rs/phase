@@ -1234,7 +1234,7 @@ pub fn find_applicable_replacements(
                 continue;
             }
 
-            if let Some(handler) = registry.get(&repl_def.event) {
+            if let Some(handler) = registry.get(&repl_def.event_str()) {
                 if (handler.matcher)(event, &repl_def.params, obj.id, state) {
                     candidates.push(rid);
                 }
@@ -1256,7 +1256,7 @@ fn apply_single_replacement(
 ) -> Result<ProposedEvent, ApplyResult> {
     if let Some(obj) = state.objects.get(&rid.source) {
         if let Some(repl_def) = obj.replacement_definitions.get(rid.index) {
-            let event_type = repl_def.event.clone();
+            let event_type = repl_def.event_str();
             let params = repl_def.params.clone();
             if let Some(handler) = registry.get(&event_type) {
                 match (handler.applier)(proposed, &params, rid.source, state, events) {
@@ -1375,6 +1375,7 @@ mod tests {
     use crate::types::ability::{ReplacementDefinition, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use std::collections::HashSet;
 
     fn test_state_with_object(
@@ -1396,7 +1397,7 @@ mod tests {
     fn test_single_replacement_zone_change() {
         // Creature with Moved replacement: death -> exile
         let repl = ReplacementDefinition {
-            event: "Moved".to_string(),
+            event: ReplacementEvent::Moved,
             params: HashMap::from([
                 ("Origin$".to_string(), "Battlefield".to_string()),
                 ("Destination$".to_string(), "Graveyard".to_string()),
@@ -1436,7 +1437,7 @@ mod tests {
     fn test_once_per_event_enforcement() {
         // Two Moved replacements on the same object
         let repl1 = ReplacementDefinition {
-            event: "Moved".to_string(),
+            event: ReplacementEvent::Moved,
             params: HashMap::from([
                 ("Origin$".to_string(), "Battlefield".to_string()),
                 ("Destination$".to_string(), "Graveyard".to_string()),
@@ -1444,7 +1445,7 @@ mod tests {
             ]),
         };
         let repl2 = ReplacementDefinition {
-            event: "Moved".to_string(),
+            event: ReplacementEvent::Moved,
             params: HashMap::from([
                 ("Origin$".to_string(), "Battlefield".to_string()),
                 ("Destination$".to_string(), "Graveyard".to_string()),
@@ -1474,7 +1475,7 @@ mod tests {
     fn test_multiple_replacements_needs_choice() {
         // Two different objects each with a Moved replacement
         let repl = ReplacementDefinition {
-            event: "Moved".to_string(),
+            event: ReplacementEvent::Moved,
             params: HashMap::from([
                 ("Origin$".to_string(), "Battlefield".to_string()),
                 ("Destination$".to_string(), "Graveyard".to_string()),
@@ -1539,7 +1540,7 @@ mod tests {
     fn test_continue_replacement_after_choice() {
         // Setup: two replacements that trigger NeedsChoice
         let repl1 = ReplacementDefinition {
-            event: "Moved".to_string(),
+            event: ReplacementEvent::Moved,
             params: HashMap::from([
                 ("Origin$".to_string(), "Battlefield".to_string()),
                 ("Destination$".to_string(), "Graveyard".to_string()),
@@ -1547,7 +1548,7 @@ mod tests {
             ]),
         };
         let repl2 = ReplacementDefinition {
-            event: "Moved".to_string(),
+            event: ReplacementEvent::Moved,
             params: HashMap::from([
                 ("Origin$".to_string(), "Battlefield".to_string()),
                 ("Destination$".to_string(), "Graveyard".to_string()),
@@ -1592,7 +1593,7 @@ mod tests {
         // but once-per-event tracking should prevent infinite loop anyway.
         // This just verifies the depth cap mechanism exists.
         let repl = ReplacementDefinition {
-            event: "Moved".to_string(),
+            event: ReplacementEvent::Moved,
             params: HashMap::from([("NewDestination$".to_string(), "Exile".to_string())]),
         };
 
@@ -1619,7 +1620,7 @@ mod tests {
     #[test]
     fn test_damage_prevention() {
         let repl = ReplacementDefinition {
-            event: "DamageDone".to_string(),
+            event: ReplacementEvent::DamageDone,
             params: HashMap::from([("Prevent".to_string(), "True".to_string())]),
         };
 
@@ -1668,7 +1669,7 @@ mod tests {
     fn test_dealt_damage_replacement_prevents_damage_to_source() {
         // DealtDamage replacement on a creature prevents damage dealt to it
         let repl = ReplacementDefinition {
-            event: "DealtDamage".to_string(),
+            event: ReplacementEvent::Other("DealtDamage".to_string()),
             params: HashMap::from([("Prevent".to_string(), "True".to_string())]),
         };
 
@@ -1692,7 +1693,7 @@ mod tests {
     fn test_dealt_damage_does_not_match_damage_to_other() {
         // DealtDamage on ObjectId(10) should NOT match damage targeting ObjectId(20)
         let repl = ReplacementDefinition {
-            event: "DealtDamage".to_string(),
+            event: ReplacementEvent::Other("DealtDamage".to_string()),
             params: HashMap::from([("Prevent".to_string(), "True".to_string())]),
         };
 
@@ -1715,7 +1716,7 @@ mod tests {
     #[test]
     fn test_mill_replacement_redirects_to_exile() {
         let repl = ReplacementDefinition {
-            event: "Mill".to_string(),
+            event: ReplacementEvent::Other("Mill".to_string()),
             params: HashMap::from([("NewDestination$".to_string(), "Exile".to_string())]),
         };
 
@@ -1742,7 +1743,7 @@ mod tests {
     #[test]
     fn test_pay_life_replacement_prevents() {
         let repl = ReplacementDefinition {
-            event: "PayLife".to_string(),
+            event: ReplacementEvent::Other("PayLife".to_string()),
             params: HashMap::from([("Prevent".to_string(), "True".to_string())]),
         };
 
@@ -1762,7 +1763,7 @@ mod tests {
     #[test]
     fn test_pay_life_replacement_modifies_amount() {
         let repl = ReplacementDefinition {
-            event: "PayLife".to_string(),
+            event: ReplacementEvent::Other("PayLife".to_string()),
             params: HashMap::from([("NewAmount$".to_string(), "1".to_string())]),
         };
 

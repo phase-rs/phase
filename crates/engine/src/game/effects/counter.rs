@@ -33,7 +33,7 @@ pub fn resolve(
                 .map(|obj| {
                     obj.static_definitions
                         .iter()
-                        .any(|sd| sd.mode == "CantBeCountered")
+                        .any(|sd| sd.mode_str() == "CantBeCountered")
                 })
                 .unwrap_or(false);
             if has_cant_be_countered {
@@ -122,6 +122,7 @@ mod tests {
     #[test]
     fn cant_be_countered_spell_stays_on_stack() {
         use crate::types::ability::StaticDefinition;
+        use crate::types::statics::StaticMode;
 
         let mut state = GameState::new_two_player(42);
         let obj_id = create_object(
@@ -138,7 +139,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition {
-                mode: "CantBeCountered".to_string(),
+                mode: StaticMode::Other("CantBeCountered".to_string()),
                 params: HashMap::new(),
             });
         state.stack.push(StackEntry {

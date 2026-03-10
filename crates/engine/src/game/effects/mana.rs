@@ -149,12 +149,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
-        resolve(
-            &mut state,
-            &make_mana_ability("G", Some(3)),
-            &mut events,
-        )
-        .unwrap();
+        resolve(&mut state, &make_mana_ability("G", Some(3)), &mut events).unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 3);
     }
@@ -164,12 +159,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
-        resolve(
-            &mut state,
-            &make_mana_ability("C", Some(2)),
-            &mut events,
-        )
-        .unwrap();
+        resolve(&mut state, &make_mana_ability("C", Some(2)), &mut events).unwrap();
 
         assert_eq!(
             state.players[0].mana_pool.count_color(ManaType::Colorless),
@@ -199,12 +189,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
-        resolve(
-            &mut state,
-            &make_mana_ability("Any", None),
-            &mut events,
-        )
-        .unwrap();
+        resolve(&mut state, &make_mana_ability("Any", None), &mut events).unwrap();
 
         assert_eq!(
             state.players[0].mana_pool.count_color(ManaType::Colorless),
@@ -217,12 +202,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
-        resolve(
-            &mut state,
-            &make_mana_ability("W U", None),
-            &mut events,
-        )
-        .unwrap();
+        resolve(&mut state, &make_mana_ability("W U", None), &mut events).unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::White), 1);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
@@ -234,12 +214,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
-        resolve(
-            &mut state,
-            &make_mana_ability("R", Some(2)),
-            &mut events,
-        )
-        .unwrap();
+        resolve(&mut state, &make_mana_ability("R", Some(2)), &mut events).unwrap();
 
         let mana_events: Vec<_> = events
             .iter()

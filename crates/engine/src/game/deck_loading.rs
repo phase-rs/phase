@@ -394,7 +394,10 @@ mod tests {
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.trigger_definitions.len(), 1);
-        assert_eq!(obj.trigger_definitions[0].mode, "ChangesZone");
+        assert_eq!(
+            obj.trigger_definitions[0].mode,
+            crate::types::triggers::TriggerMode::ChangesZone
+        );
     }
 
     #[test]
@@ -407,7 +410,10 @@ mod tests {
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.static_definitions.len(), 1);
-        assert_eq!(obj.static_definitions[0].mode, "Continuous");
+        assert_eq!(
+            obj.static_definitions[0].mode,
+            crate::types::statics::StaticMode::Continuous
+        );
     }
 
     #[test]
@@ -421,7 +427,10 @@ mod tests {
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.replacement_definitions.len(), 1);
-        assert_eq!(obj.replacement_definitions[0].event, "DamageDone");
+        assert_eq!(
+            obj.replacement_definitions[0].event,
+            crate::types::replacements::ReplacementEvent::DamageDone
+        );
     }
 
     #[test]

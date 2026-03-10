@@ -151,7 +151,7 @@ pub fn validate_blockers(
         if attacker
             .static_definitions
             .iter()
-            .any(|sd| sd.mode == "CantBeBlocked")
+            .any(|sd| sd.mode_str() == "CantBeBlocked")
         {
             return Err(format!(
                 "{:?} cannot block {:?} (can't be blocked)",
@@ -381,7 +381,7 @@ fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
     if attacker
         .static_definitions
         .iter()
-        .any(|sd| sd.mode == "CantBeBlocked")
+        .any(|sd| sd.mode_str() == "CantBeBlocked")
     {
         return false;
     }
@@ -423,8 +423,7 @@ fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
     {
         return false;
     }
-    if attacker.has_keyword(&Keyword::Horsemanship)
-        && !blocker.has_keyword(&Keyword::Horsemanship)
+    if attacker.has_keyword(&Keyword::Horsemanship) && !blocker.has_keyword(&Keyword::Horsemanship)
     {
         return false;
     }
@@ -809,6 +808,7 @@ mod tests {
     #[test]
     fn cant_be_blocked_creature_is_unblockable() {
         use crate::types::ability::StaticDefinition;
+        use crate::types::statics::StaticMode;
 
         let mut state = setup();
         let attacker = create_creature(&mut state, PlayerId(0), "Invisible Stalker", 1, 1);
@@ -818,7 +818,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition {
-                mode: "CantBeBlocked".to_string(),
+                mode: StaticMode::Other("CantBeBlocked".to_string()),
                 params: std::collections::HashMap::new(),
             });
 

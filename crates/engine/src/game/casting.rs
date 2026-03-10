@@ -50,11 +50,16 @@ pub fn handle_cast_spell(
     let ability_def = if obj.abilities.is_empty() {
         // Vanilla creatures/enchantments/etc. have no explicit ability text
         // but are still castable — they resolve by entering the battlefield.
-        use crate::types::ability::AbilityDefinition;
+        use crate::types::ability::{AbilityDefinition, Effect};
         AbilityDefinition {
-            api_type: "PermanentNoncreature".to_string(),
             kind: AbilityKind::Spell,
-            params: HashMap::new(),
+            effect: Effect::Other {
+                api_type: "PermanentNoncreature".to_string(),
+                params: HashMap::new(),
+            },
+            cost: None,
+            sub_ability: None,
+            remaining_params: HashMap::new(),
         }
     } else {
         parse_ability(&obj.abilities[0])
@@ -90,9 +95,10 @@ pub fn handle_cast_spell(
     // 4. Build ResolvedAbility
     let mana_cost = obj.mana_cost.clone();
     let svars = obj.svars.clone();
+    let compat_params = ability_def.params();
     let mut resolved = ResolvedAbility {
-        api_type: ability_def.api_type,
-        params: ability_def.params.clone(),
+        api_type: ability_def.api_type().to_string(),
+        params: compat_params.clone(),
         targets: Vec::new(),
         source_id: object_id,
         controller: player,
@@ -104,7 +110,7 @@ pub fn handle_cast_spell(
     if state.layers_dirty {
         super::layers::evaluate_layers(state);
     }
-    if let Some(valid_tgts) = ability_def.params.get("ValidTgts") {
+    if let Some(valid_tgts) = compat_params.get("ValidTgts") {
         let legal = targeting::find_legal_targets(state, valid_tgts, player, object_id);
         if legal.is_empty() {
             return Err(EngineError::ActionNotAllowed(
@@ -209,11 +215,10 @@ pub fn handle_activate_ability(
         .map_err(|e| EngineError::InvalidAction(format!("Failed to parse ability: {}", e)))?;
 
     // Handle tap cost
-    let has_tap_cost = ability_def
-        .params
-        .get("Cost")
-        .map(|c| c.contains('T'))
-        .unwrap_or(false);
+    let has_tap_cost = matches!(
+        ability_def.cost,
+        Some(crate::types::ability::AbilityCost::Tap)
+    );
 
     if has_tap_cost {
         let obj = state.objects.get(&source_id).unwrap();
@@ -229,9 +234,10 @@ pub fn handle_activate_ability(
         });
     }
 
+    let compat_params2 = ability_def.params();
     let mut resolved = ResolvedAbility {
-        api_type: ability_def.api_type,
-        params: ability_def.params.clone(),
+        api_type: ability_def.api_type().to_string(),
+        params: compat_params2.clone(),
         targets: Vec::new(),
         source_id,
         controller: player,
@@ -240,7 +246,7 @@ pub fn handle_activate_ability(
     };
 
     // Handle targeting
-    if let Some(valid_tgts) = ability_def.params.get("ValidTgts") {
+    if let Some(valid_tgts) = compat_params2.get("ValidTgts") {
         let legal = targeting::find_legal_targets(state, valid_tgts, player, source_id);
         if legal.is_empty() {
             return Err(EngineError::ActionNotAllowed(
