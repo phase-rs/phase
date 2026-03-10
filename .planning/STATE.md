@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: active
-stopped_at: Completed 23-01-PLAN.md
-last_updated: "2026-03-10T20:52:04Z"
-last_activity: 2026-03-10 — Completed Plan 23-01 (JSON Card Loader)
+stopped_at: Completed 23-02-PLAN.md
+last_updated: "2026-03-10T21:05:04Z"
+last_activity: 2026-03-10 — Completed Plan 23-02 (Smoke Test Cards & Integration Tests)
 progress:
   total_phases: 5
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 9
-  completed_plans: 8
-  percent: 60
+  completed_plans: 9
+  percent: 80
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 23 — Unified Card Loader
+**Current focus:** Phase 23 complete — ready for Phase 24
 
 ## Current Position
 
-Phase: 23 (third of 5 in v1.2) — Unified Card Loader
-Plan: 1/2 complete
-Status: Plan 23-01 complete, Plan 23-02 pending
-Last activity: 2026-03-10 — Completed Plan 23-01 (JSON Card Loader)
+Phase: 23 (third of 5 in v1.2) — Unified Card Loader (COMPLETE)
+Plan: 2/2 complete
+Status: Phase 23 complete, Phase 24 pending
+Last activity: 2026-03-10 — Completed Plan 23-02 (Smoke Test Cards & Integration Tests)
 
-Progress: [██████░░░░] 60%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9 (v1.2)
-- Average duration: 13min
-- Total execution time: 1.8 hours
+- Total plans completed: 10 (v1.2)
+- Average duration: 12min
+- Total execution time: 2.0 hours
 
 **By Phase:**
 
@@ -45,7 +45,7 @@ Progress: [██████░░░░] 60%
 |-------|-------|-------|----------|
 | 21 | 5/5 | 68min | 14min |
 | 22 | 3/3 | 35min | 12min |
-| 23 | 1/2 | 9min | 9min |
+| 23 | 2/2 | 18min | 9min |
 
 ## Accumulated Context
 
@@ -83,6 +83,9 @@ Recent decisions affecting current work:
 - [23-01]: FaceAbilities struct with flat #[serde(default)] fields mirroring AbilityFile for multi-face cards
 - [23-01]: Equip synthesis uses Effect::Attach with TargetSpec::Filtered for Creature.YouCtrl
 - [23-01]: CardDatabase fields made pub(crate) for cross-module construction by json_loader
+- [23-02]: normalize_for_match() strips punctuation for card name matching (handles comma in "Jace, the Mind Sculptor")
+- [23-02]: Smoke game tests use direct mana pool injection for spell casting, PassPriority loop for combat phases
+- [23-02]: Ability JSON files use Effect::Other for complex card-specific effects not yet covered by typed variants
 
 ### Pending Todos
 
@@ -94,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T20:52:04Z
-Stopped at: Completed 23-01-PLAN.md
-Resume file: .planning/phases/23-unified-card-loader/23-01-SUMMARY.md
+Last session: 2026-03-10T21:05:04Z
+Stopped at: Completed 23-02-PLAN.md
+Resume file: .planning/phases/23-unified-card-loader/23-02-SUMMARY.md

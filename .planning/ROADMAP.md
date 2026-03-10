@@ -46,7 +46,7 @@
 
 - [x] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on
 - [x] **Phase 22: Test Infrastructure** - Build the GameScenario test harness and rules correctness test suite before any cards are migrated (completed 2026-03-10)
-- [ ] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards
+- [x] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards (completed 2026-03-10)
 - [ ] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation
 - [ ] **Phase 25: Forge Removal & Relicensing** - Remove all GPL data, feature-gate Forge parser, and relicense as MIT/Apache-2.0
 
@@ -150,6 +150,6 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
 | 21. Schema & MTGJSON Foundation | v1.2 | Complete    | 2026-03-10 | 2026-03-10 |
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
-| 23. Unified Card Loader | 1/2 | In Progress|  | - |
+| 23. Unified Card Loader | 2/2 | Complete   | 2026-03-10 | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |
 | 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |
