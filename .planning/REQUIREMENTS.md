@@ -135,8 +135,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 
 ### Engine Completeness (Phase 20)
 
-- [ ] **ENG-01**: Mana abilities (Rule 605) resolve instantly without using the stack, activatable during mana payment
-- [ ] **ENG-02**: Nonbasic lands and mana creatures produce mana via proper mana ability resolution (not just TapLandForMana shortcut)
+- [x] **ENG-01**: Mana abilities (Rule 605) resolve instantly without using the stack, activatable during mana payment
+- [x] **ENG-02**: Nonbasic lands and mana creatures produce mana via proper mana ability resolution (not just TapLandForMana shortcut)
 - [ ] **ENG-03**: Equipment equip action attaches equipment to creatures with sorcery-speed timing and mana cost
 - [ ] **ENG-04**: Aura and equipment attachment state properly managed with SBA cleanup on host death
 - [ ] **ENG-05**: Scry emits WaitingFor::ScryChoice with per-card top/bottom selection (MTGA-style)

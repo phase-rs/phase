@@ -191,7 +191,7 @@ Plans:
   6. Day/night tracks globally with Daybound/Nightbound auto-transformation
   7. Morph/manifest create face-down 2/2 creatures that can be turned face up
   8. Coverage report confirms 100% Standard-legal card support with CI gate preventing regressions
-**Plans:** 10 plans
+**Plans:** 1/10 plans executed
 
 Plans:
 - [ ] 20-01-PLAN.md — Mana abilities (Rule 605 instant resolution, ManaPayment activation)
