@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: completed
-stopped_at: Completed 21-02-PLAN.md (Phase 21 complete)
-last_updated: "2026-03-10T17:13:01.821Z"
-last_activity: 2026-03-10 — Completed Plan 21-02 (Typed Ability Vectors)
+stopped_at: Completed 21-04-PLAN.md (Typed Effect Dispatch)
+last_updated: "2026-03-10T17:51:42Z"
+last_activity: 2026-03-10 — Completed Plan 21-04 (Typed Effect Dispatch)
 progress:
   total_phases: 5
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 5
+  completed_plans: 5
   percent: 20
 ---
 
@@ -26,24 +26,24 @@ See: .planning/PROJECT.md (updated 2026-03-10)
 ## Current Position
 
 Phase: 21 (first of 5 in v1.2) — Schema & MTGJSON Foundation -- COMPLETE
-Plan: 3/3 complete (all plans done)
+Plan: 5/5 complete (all plans done, including gap closure plans 03+04)
 Status: Phase 21 complete — ready for Phase 22
-Last activity: 2026-03-10 — Completed Plan 21-02 (Typed Ability Vectors)
+Last activity: 2026-03-10 — Completed Plan 21-04 (Typed Effect Dispatch)
 
 Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3 (v1.2)
+- Total plans completed: 5 (v1.2)
 - Average duration: 14min
-- Total execution time: 0.7 hours
+- Total execution time: 1.1 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 21 | 3/3 | 41min | 14min |
+| 21 | 5/5 | 68min | 14min |
 
 ## Accumulated Context
 
@@ -65,6 +65,8 @@ Recent decisions affecting current work:
 - [21-03]: Relative $schema path in ability JSON files for co-located schema
 - [Phase 21-02]: Kept compat bridge methods (api_type, params) for transitional dispatch rather than full pattern-matching migration
 - [Phase 21-02]: parse_test_ability() helpers in test modules for readable typed test data construction
+- [21-04]: Kept api_type/params on ResolvedAbility for backward compat; typed dispatch via match on effect field
+- [21-04]: from_raw() wraps in Effect::Other for test compat; new() builds from typed Effect for production code
 
 ### Pending Todos
 
@@ -76,6 +78,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T17:13:01.818Z
-Stopped at: Completed 21-02-PLAN.md (Phase 21 complete)
+Last session: 2026-03-10T17:51:42Z
+Stopped at: Completed 21-04-PLAN.md (Typed Effect Dispatch)
 Resume file: None

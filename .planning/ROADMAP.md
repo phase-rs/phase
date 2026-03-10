@@ -44,7 +44,7 @@
 
 **Milestone Goal:** Replace Forge's GPL card data with MTGJSON (MIT) + custom ability JSON format, add comprehensive test coverage, and relicense the project as MIT/Apache-2.0.
 
-- [ ] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on
+- [x] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on
 - [ ] **Phase 22: Test Infrastructure** - Build the GameScenario test harness and rules correctness test suite before any cards are migrated
 - [ ] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards
 - [ ] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation
@@ -61,13 +61,13 @@
   2. A hand-authored ability JSON file for a test card deserializes into the engine's AbilityDefinition/TriggerDefinition/StaticDefinition/ReplacementDefinition types without error
   3. Running `cargo test` produces (or validates against) a JSON Schema file that documents every field in the ability format, usable for editor autocompletion
   4. Round-trip test: an ability JSON file serialized from Rust types and deserialized back produces identical typed structures
-**Plans**: 4 plans
+**Plans**: 5 plans
 
 Plans:
 - [x] 21-01-PLAN.md — Define typed enums (Effect, StaticMode, ReplacementEvent) and add schemars/insta deps — completed 2026-03-10
 - [x] 21-02-PLAN.md — Refactor all ~13 consumer files to use typed ability structs — completed 2026-03-10
 - [x] 21-03-PLAN.md — MTGJSON loader, ability JSON file, schema generation, and snapshot tests — completed 2026-03-10
-- [ ] 21-04-PLAN.md — Gap closure: thread typed Effect through ResolvedAbility and replace string dispatch
+- [x] 21-04-PLAN.md — Gap closure: thread typed Effect through ResolvedAbility and replace string dispatch — completed 2026-03-10
 
 ### Phase 22: Test Infrastructure
 **Goal**: Developers can write self-contained rules correctness tests that run in CI with no filesystem dependencies
@@ -93,6 +93,10 @@ Plans:
   2. Multi-face cards (Adventure, Transform, Modal DFC) load correctly with both faces populated
   3. Loaded cards include MTGJSON scryfallOracleId and the frontend can use it for image lookups via Scryfall API
   4. A smoke test game using 5-10 JSON-loaded cards completes without errors (cards can be cast, abilities resolve, combat works)
+**Known Concerns** (from Phase 21 review):
+  - Implicit abilities must be made explicit during loading: basic lands need synthesized mana abilities (e.g., Forest → `{T}: Add {G}`), equipment needs Equip activated ability from `K:Equip:N` keyword, planeswalkers need loyalty costs wired through `AbilityCost::Loyalty` instead of `remaining_params["PW_Cost"]`
+  - Cross-validation needed: test that ability JSON files match MTGJSON card data for completeness (catch missing/incomplete card definitions at test time, not runtime)
+  - Vanilla creatures with empty ability vectors are already handled (`casting.rs` synthesizes a Spell marker) — no action needed
 **Plans**: TBD
 
 Plans:
@@ -108,6 +112,9 @@ Plans:
   2. All previously supported cards (every card that passed the old CI coverage gate) still pass when loaded via the JSON path
   3. Per-card behavioral parity tests confirm that sampled migrated cards produce identical game outcomes as the original Forge format (sampling across mechanic categories, not exhaustive per-card)
   4. CI coverage gate passes against JSON card data with 100% Standard-legal coverage preserved
+**Known Concerns** (from Phase 21 review):
+  - Migration tool must generate explicit ability JSON for implicit abilities: basic lands (mana production), equipment (Equip activated ability from keyword), planeswalkers (loyalty cost in `AbilityCost::Loyalty` not string params)
+  - Migration tool should validate generated ability JSON against MTGJSON oracle text to catch omissions
 **Plans**: TBD
 
 Plans:
@@ -140,7 +147,7 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
-| 21. Schema & MTGJSON Foundation | v1.2 | 3/4 | Gap closure | - |
+| 21. Schema & MTGJSON Foundation | v1.2 | 5/5 | Complete | 2026-03-10 |
 | 22. Test Infrastructure | v1.2 | 0/? | Not started | - |
 | 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |
