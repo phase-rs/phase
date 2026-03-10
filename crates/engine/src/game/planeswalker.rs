@@ -143,11 +143,15 @@ pub fn handle_activate_loyalty(
 
 /// Extract the loyalty cost from a typed ability definition.
 ///
-/// The PW_Cost parameter is stored in `remaining_params` as it is
-/// not part of the typed Effect.
-///
-/// Falls back to 0 if no PW_Cost found.
+/// Prefers `AbilityCost::Loyalty` (set by the JSON loader) over the legacy
+/// `remaining_params["PW_Cost"]` (set by the Forge parser). Falls back to 0
+/// if neither is present.
 fn parse_loyalty_cost(ability_def: &crate::types::ability::AbilityDefinition) -> i32 {
+    // Prefer typed AbilityCost::Loyalty from JSON ability files
+    if let Some(crate::types::ability::AbilityCost::Loyalty { amount }) = &ability_def.cost {
+        return *amount;
+    }
+    // Fall back to remaining_params for Forge-parsed cards
     ability_def
         .remaining_params
         .get("PW_Cost")
@@ -375,6 +379,35 @@ mod tests {
         let mut events = Vec::new();
         let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_loyalty_cost_prefers_typed_ability_cost() {
+        use crate::types::ability::{AbilityCost, AbilityKind, Effect};
+        // When AbilityCost::Loyalty is set, it should be preferred
+        let ability = crate::types::ability::AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Draw { count: 1 },
+            cost: Some(AbilityCost::Loyalty { amount: -3 }),
+            sub_ability: None,
+            remaining_params: HashMap::from([("PW_Cost".to_string(), "+1".to_string())]),
+        };
+        // Should return -3 from AbilityCost::Loyalty, not +1 from remaining_params
+        assert_eq!(parse_loyalty_cost(&ability), -3);
+    }
+
+    #[test]
+    fn parse_loyalty_cost_falls_back_to_remaining_params() {
+        use crate::types::ability::{AbilityKind, Effect};
+        // When no AbilityCost::Loyalty, fall back to remaining_params
+        let ability = crate::types::ability::AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Draw { count: 1 },
+            cost: None,
+            sub_ability: None,
+            remaining_params: HashMap::from([("PW_Cost".to_string(), "+2".to_string())]),
+        };
+        assert_eq!(parse_loyalty_cost(&ability), 2);
     }
 
     #[test]

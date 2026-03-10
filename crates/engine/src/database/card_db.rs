@@ -7,12 +7,19 @@ use crate::parser::{parse_card_file, ParseError};
 use crate::types::card::{CardFace, CardLayout, CardRules};
 
 pub struct CardDatabase {
-    cards: HashMap<String, CardRules>,
-    face_index: HashMap<String, CardFace>,
-    errors: Vec<(PathBuf, String)>,
+    pub(crate) cards: HashMap<String, CardRules>,
+    pub(crate) face_index: HashMap<String, CardFace>,
+    pub(crate) errors: Vec<(PathBuf, String)>,
 }
 
 impl CardDatabase {
+    pub fn load_json(
+        mtgjson_path: &Path,
+        abilities_dir: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        super::json_loader::load_json(mtgjson_path, abilities_dir)
+    }
+
     pub fn load(root: &Path) -> Result<Self, ParseError> {
         let mut cards = HashMap::new();
         let mut face_index = HashMap::new();
