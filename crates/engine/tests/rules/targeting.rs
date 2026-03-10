@@ -85,7 +85,8 @@ fn spell_fizzles_when_target_removed() {
     // Bolt 1 should have fizzled (no damage dealt, moved to graveyard)
     // P1's life should still be 20 (bolt 1 didn't deal damage to a player)
     assert_eq!(
-        runner.state().players[1].life, 20,
+        runner.state().players[1].life,
+        20,
         "P1's life should be unchanged (bolt 1 fizzled)"
     );
 
@@ -185,10 +186,7 @@ fn hexproof_prevents_opponent_targeting() {
         .expect("cast should succeed (there are still legal targets: players)");
 
     // If target selection is needed, verify the troll is NOT in legal targets
-    if let WaitingFor::TargetSelection {
-        legal_targets, ..
-    } = &result.waiting_for
-    {
+    if let WaitingFor::TargetSelection { legal_targets, .. } = &result.waiting_for {
         assert!(
             !legal_targets.contains(&TargetRef::Object(troll_id)),
             "Hexproof creature should not be in legal targets for opponent"
@@ -241,10 +239,7 @@ fn shroud_prevents_all_targeting() {
         .expect("cast should succeed (players are still valid targets)");
 
     // If target selection is needed, verify the stalker is NOT in legal targets
-    if let WaitingFor::TargetSelection {
-        legal_targets, ..
-    } = &result.waiting_for
-    {
+    if let WaitingFor::TargetSelection { legal_targets, .. } = &result.waiting_for {
         assert!(
             !legal_targets.contains(&TargetRef::Object(stalker_id)),
             "Shroud creature should not be in legal targets for any player"

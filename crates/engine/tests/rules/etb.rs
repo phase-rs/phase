@@ -46,9 +46,11 @@ fn etb_changes_zone_trigger_fires_on_zone_change() {
     );
 
     // Verify there's a TriggeredAbility on the stack
-    let has_trigger = runner.state().stack.iter().any(|entry| {
-        matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
-    });
+    let has_trigger = runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }));
     assert!(
         has_trigger,
         "Stack should contain a TriggeredAbility from the ChangesZone trigger"
@@ -164,9 +166,10 @@ fn trigger_goes_on_stack_with_priority() {
 
     // The trigger is on the stack -- it hasn't resolved yet.
     // The player can respond (cast instants, activate abilities) before it resolves.
-    let has_trigger_on_stack = state.stack.iter().any(|entry| {
-        matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
-    });
+    let has_trigger_on_stack = state
+        .stack
+        .iter()
+        .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }));
     assert!(
         has_trigger_on_stack,
         "Triggered ability should be on the stack awaiting resolution"

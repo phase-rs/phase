@@ -46,7 +46,10 @@ fn unblocked_attacker_deals_damage_to_player() {
 
     let state = runner.state();
     let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
-    assert_eq!(p1_life, 18, "Defending player should take 2 damage from unblocked 2/2");
+    assert_eq!(
+        p1_life, 18,
+        "Defending player should take 2 damage from unblocked 2/2"
+    );
 }
 
 /// CR 510.1c: Blocked creature and blocker exchange damage
@@ -58,7 +61,11 @@ fn blocked_creature_and_blocker_exchange_damage() {
     let blocker_id = scenario.add_creature(P1, "Bear", 2, 2).id();
     let mut runner = scenario.build();
 
-    run_combat(&mut runner, vec![attacker_id], vec![(blocker_id, attacker_id)]);
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(blocker_id, attacker_id)],
+    );
 
     let state = runner.state();
     // Blocker (2/2) took 3 damage (lethal) -- should be in graveyard after SBAs
@@ -68,7 +75,10 @@ fn blocked_creature_and_blocker_exchange_damage() {
     );
     // Attacker (3/3) took 2 damage -- survives
     let attacker = &state.objects[&attacker_id];
-    assert_eq!(attacker.damage_marked, 2, "3/3 attacker should have 2 damage marked");
+    assert_eq!(
+        attacker.damage_marked, 2,
+        "3/3 attacker should have 2 damage marked"
+    );
     assert!(
         state.battlefield.contains(&attacker_id),
         "3/3 attacker should survive with 2 damage"
@@ -88,7 +98,11 @@ fn first_strike_kills_before_regular_damage() {
     let blocker_id = scenario.add_creature(P1, "Bear", 3, 2).id();
     let mut runner = scenario.build();
 
-    run_combat(&mut runner, vec![attacker_id], vec![(blocker_id, attacker_id)]);
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(blocker_id, attacker_id)],
+    );
 
     let state = runner.state();
     // First strike 2/2 deals 2 to blocker with toughness 2 = lethal.
@@ -103,7 +117,10 @@ fn first_strike_kills_before_regular_damage() {
     );
 
     // Snapshot for regression anchoring
-    insta::assert_json_snapshot!("combat_first_strike_kills_before_regular", runner.snapshot());
+    insta::assert_json_snapshot!(
+        "combat_first_strike_kills_before_regular",
+        runner.snapshot()
+    );
 }
 
 /// CR 510.1c: Double strike deals damage in both steps
@@ -119,7 +136,11 @@ fn double_strike_deals_damage_in_both_steps() {
     let blocker_id = scenario.add_creature(P1, "Rhino", 5, 5).id();
     let mut runner = scenario.build();
 
-    run_combat(&mut runner, vec![attacker_id], vec![(blocker_id, attacker_id)]);
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(blocker_id, attacker_id)],
+    );
 
     let state = runner.state();
     // Double strike 3/3 deals 3 in first strike step + 3 in regular step = 6 total
@@ -175,7 +196,10 @@ fn multiple_attackers_mixed_blocking() {
     let state = runner.state();
     // Unblocked attacker2 (2/2) deals 2 damage to P1
     let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
-    assert_eq!(p1_life, 18, "Unblocked 2/2 should deal 2 damage to defending player");
+    assert_eq!(
+        p1_life, 18,
+        "Unblocked 2/2 should deal 2 damage to defending player"
+    );
 
     // Blocked exchange: 3/3 vs 2/2 -- blocker dies, attacker takes 2 damage
     assert!(
@@ -188,7 +212,10 @@ fn multiple_attackers_mixed_blocking() {
     );
 
     // Snapshot for regression anchoring
-    insta::assert_json_snapshot!("combat_multiple_attackers_mixed_blocking", runner.snapshot());
+    insta::assert_json_snapshot!(
+        "combat_multiple_attackers_mixed_blocking",
+        runner.snapshot()
+    );
 }
 
 /// CR 510.1: Attacker taps when attacking (no vigilance)
@@ -213,4 +240,3 @@ fn attacker_taps_when_attacking() {
         "Attacker without vigilance should be tapped after declaring attack"
     );
 }
-

@@ -586,9 +586,7 @@ pub fn parse_cost(cost_str: &str) -> Option<crate::types::ability::AbilityCost> 
         } else {
             // Unknown non-mana component (e.g. PayLife<2>, Discard<1/Card>, tapXType<...>)
             // Preserve as Mana fallback
-            costs.push(AbilityCost::Mana {
-                cost: comp.clone(),
-            });
+            costs.push(AbilityCost::Mana { cost: comp.clone() });
         }
     }
 
@@ -629,7 +627,9 @@ pub fn parse_ability(raw: &str) -> Result<AbilityDefinition, ParseError> {
     let kind = kind.ok_or(ParseError::MissingAbilityKind)?;
 
     // Extract cost if present (for activated abilities)
-    let cost = params.remove("Cost").and_then(|cost_str| parse_cost(&cost_str));
+    let cost = params
+        .remove("Cost")
+        .and_then(|cost_str| parse_cost(&cost_str));
 
     // Convert known params into a typed Effect; remaining params stay in the HashMap
     let effect = params_to_effect(&api_type, &mut params);
@@ -807,14 +807,24 @@ mod tests {
     fn parse_cost_mana_simple() {
         use crate::types::ability::AbilityCost;
         let cost = parse_cost("3 W").unwrap();
-        assert_eq!(cost, AbilityCost::Mana { cost: "3 W".to_string() });
+        assert_eq!(
+            cost,
+            AbilityCost::Mana {
+                cost: "3 W".to_string()
+            }
+        );
     }
 
     #[test]
     fn parse_cost_mana_single() {
         use crate::types::ability::AbilityCost;
         let cost = parse_cost("R").unwrap();
-        assert_eq!(cost, AbilityCost::Mana { cost: "R".to_string() });
+        assert_eq!(
+            cost,
+            AbilityCost::Mana {
+                cost: "R".to_string()
+            }
+        );
     }
 
     #[test]
@@ -842,7 +852,12 @@ mod tests {
     fn parse_cost_sacrifice() {
         use crate::types::ability::AbilityCost;
         let cost = parse_cost("Sac<1/CARDNAME>").unwrap();
-        assert_eq!(cost, AbilityCost::Sacrifice { target: TargetSpec::None });
+        assert_eq!(
+            cost,
+            AbilityCost::Sacrifice {
+                target: TargetSpec::None
+            }
+        );
     }
 
     #[test]
@@ -853,7 +868,9 @@ mod tests {
             cost,
             AbilityCost::Composite {
                 costs: vec![
-                    AbilityCost::Mana { cost: "2".to_string() },
+                    AbilityCost::Mana {
+                        cost: "2".to_string()
+                    },
                     AbilityCost::Tap,
                 ]
             }
@@ -868,8 +885,12 @@ mod tests {
             cost,
             AbilityCost::Composite {
                 costs: vec![
-                    AbilityCost::Mana { cost: "R".to_string() },
-                    AbilityCost::Sacrifice { target: TargetSpec::None },
+                    AbilityCost::Mana {
+                        cost: "R".to_string()
+                    },
+                    AbilityCost::Sacrifice {
+                        target: TargetSpec::None
+                    },
                 ]
             }
         );
@@ -883,9 +904,13 @@ mod tests {
             cost,
             AbilityCost::Composite {
                 costs: vec![
-                    AbilityCost::Mana { cost: "2".to_string() },
+                    AbilityCost::Mana {
+                        cost: "2".to_string()
+                    },
                     AbilityCost::Tap,
-                    AbilityCost::Sacrifice { target: TargetSpec::None },
+                    AbilityCost::Sacrifice {
+                        target: TargetSpec::None
+                    },
                 ]
             }
         );
@@ -896,7 +921,12 @@ mod tests {
         use crate::types::ability::AbilityCost;
         // Unknown cost components are preserved as Mana fallback
         let cost = parse_cost("PayLife<2>").unwrap();
-        assert_eq!(cost, AbilityCost::Mana { cost: "PayLife<2>".to_string() });
+        assert_eq!(
+            cost,
+            AbilityCost::Mana {
+                cost: "PayLife<2>".to_string()
+            }
+        );
     }
 
     #[test]
@@ -927,7 +957,10 @@ mod tests {
     #[test]
     fn split_cost_components_nested_brackets() {
         let components = split_cost_components("2 T Sac<1/Artifact;Creature/artifact or creature>");
-        assert_eq!(components, vec!["2", "T", "Sac<1/Artifact;Creature/artifact or creature>"]);
+        assert_eq!(
+            components,
+            vec!["2", "T", "Sac<1/Artifact;Creature/artifact or creature>"]
+        );
     }
 
     #[test]
@@ -938,9 +971,13 @@ mod tests {
             cost,
             AbilityCost::Composite {
                 costs: vec![
-                    AbilityCost::Mana { cost: "U".to_string() },
+                    AbilityCost::Mana {
+                        cost: "U".to_string()
+                    },
                     AbilityCost::Tap,
-                    AbilityCost::Mana { cost: "Discard<1/Card>".to_string() },
+                    AbilityCost::Mana {
+                        cost: "Discard<1/Card>".to_string()
+                    },
                 ]
             }
         );
@@ -961,7 +998,9 @@ mod tests {
         let result = parse_ability("AB$ Draw | Cost$ 1 U | NumCards$ 1").unwrap();
         assert_eq!(
             result.cost,
-            Some(crate::types::ability::AbilityCost::Mana { cost: "1 U".to_string() })
+            Some(crate::types::ability::AbilityCost::Mana {
+                cost: "1 U".to_string()
+            })
         );
     }
 }

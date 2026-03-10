@@ -85,11 +85,13 @@ fn stack_resolves_lifo() {
 
     // The life change from bolt 2 (targeted P0) should be applied first
     assert_eq!(
-        runner.state().players[0].life, 17,
+        runner.state().players[0].life,
+        17,
         "P0 should have lost 3 life from bolt 2"
     );
     assert_eq!(
-        runner.state().players[1].life, 20,
+        runner.state().players[1].life,
+        20,
         "P1 should still be at 20 (bolt 1 hasn't resolved yet)"
     );
 }
@@ -216,7 +218,8 @@ fn instant_resolves_with_damage_effect() {
     runner.resolve_top();
 
     assert_eq!(
-        runner.state().players[1].life, 17,
+        runner.state().players[1].life,
+        17,
         "P1 should have lost 3 life from Lightning Bolt"
     );
     assert!(
@@ -288,7 +291,8 @@ fn both_players_must_pass_for_resolution() {
 
     // Bolt's effect should have been applied
     assert_eq!(
-        runner.state().players[1].life, 17,
+        runner.state().players[1].life,
+        17,
         "P1 should have lost 3 life from resolved bolt"
     );
 }

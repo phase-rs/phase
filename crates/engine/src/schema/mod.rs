@@ -161,7 +161,10 @@ mod tests {
     fn schema_includes_face_abilities_definition() {
         let schema = generate_schema();
         let json = serde_json::to_string_pretty(&schema).unwrap();
-        assert!(json.contains("FaceAbilities"), "Schema should include FaceAbilities definition");
+        assert!(
+            json.contains("FaceAbilities"),
+            "Schema should include FaceAbilities definition"
+        );
     }
 
     #[test]

@@ -125,10 +125,7 @@ fn zero_life_player_loses() {
     runner.resolve_top();
 
     // SBAs should detect P1 at 0 life and end the game
-    assert_eq!(
-        runner.state().players[1].life, 0,
-        "P1 should be at 0 life"
-    );
+    assert_eq!(runner.state().players[1].life, 0, "P1 should be at 0 life");
     assert!(
         matches!(
             runner.state().waiting_for,

@@ -38,7 +38,11 @@ fn deathtouch_trample_assigns_one_to_blocker_tramples_rest() {
     let blocker_id = scenario.add_creature(P1, "Bear", 2, 2).id();
     let mut runner = scenario.build();
 
-    run_combat(&mut runner, vec![attacker_id], vec![(blocker_id, attacker_id)]);
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(blocker_id, attacker_id)],
+    );
 
     let state = runner.state();
     // With deathtouch, only 1 damage is needed for lethal. 5 - 1 = 4 tramples to player.
@@ -47,10 +51,16 @@ fn deathtouch_trample_assigns_one_to_blocker_tramples_rest() {
         "Blocker should die to 1 deathtouch damage"
     );
     let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
-    assert_eq!(p1_life, 16, "4 trample damage should go to defending player (5 power - 1 lethal)");
+    assert_eq!(
+        p1_life, 16,
+        "4 trample damage should go to defending player (5 power - 1 lethal)"
+    );
 
     // Snapshot for regression anchoring
-    insta::assert_json_snapshot!("keywords_deathtouch_trample_damage_assignment", runner.snapshot());
+    insta::assert_json_snapshot!(
+        "keywords_deathtouch_trample_damage_assignment",
+        runner.snapshot()
+    );
 }
 
 /// CR 702.15b: Lifelink -- controller gains life equal to damage dealt
@@ -70,7 +80,10 @@ fn lifelink_gains_life_on_combat_damage() {
     let state = runner.state();
     let p0_life = state.players.iter().find(|p| p.id == P0).unwrap().life;
     let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
-    assert_eq!(p0_life, 23, "Lifelink attacker's controller should gain 3 life");
+    assert_eq!(
+        p0_life, 23,
+        "Lifelink attacker's controller should gain 3 life"
+    );
     assert_eq!(p1_life, 17, "Defending player should take 3 damage");
 }
 
@@ -87,7 +100,11 @@ fn lifelink_first_strike_gains_life_in_first_step() {
     let blocker_id = scenario.add_creature(P1, "Beast", 3, 3).id();
     let mut runner = scenario.build();
 
-    run_combat(&mut runner, vec![attacker_id], vec![(blocker_id, attacker_id)]);
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(blocker_id, attacker_id)],
+    );
 
     let state = runner.state();
     // First strike step: 2/2 lifelink+first_strike deals 2 to 3/3 blocker. P0 gains 2 life.
@@ -95,7 +112,10 @@ fn lifelink_first_strike_gains_life_in_first_step() {
     // Regular step: 3/3 blocker deals 3 to 2/2 attacker (lethal). Attacker dies.
     // The 2/2 first_strike already dealt damage so does NOT deal again in regular step.
     let p0_life = state.players.iter().find(|p| p.id == P0).unwrap().life;
-    assert_eq!(p0_life, 22, "P0 should gain 2 life from first strike lifelink damage");
+    assert_eq!(
+        p0_life, 22,
+        "P0 should gain 2 life from first strike lifelink damage"
+    );
 
     // Attacker (2/2) took 3 damage from blocker in regular step -- should die
     assert!(
@@ -152,7 +172,11 @@ fn flying_blocked_by_reach_creature() {
     };
     let mut runner = scenario.build();
 
-    run_combat(&mut runner, vec![attacker_id], vec![(reach_blocker, attacker_id)]);
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(reach_blocker, attacker_id)],
+    );
 
     let state = runner.state();
     // Reach creature can block flying -- combat damage exchanged normally
@@ -184,7 +208,11 @@ fn trample_lifelink_excess_damage() {
     let blocker_id = scenario.add_creature(P1, "Bear", 2, 2).id();
     let mut runner = scenario.build();
 
-    run_combat(&mut runner, vec![attacker_id], vec![(blocker_id, attacker_id)]);
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(blocker_id, attacker_id)],
+    );
 
     let state = runner.state();
     // 5/5 trample+lifelink vs 2/2 blocker:
@@ -196,8 +224,14 @@ fn trample_lifelink_excess_damage() {
         !state.battlefield.contains(&blocker_id),
         "2/2 blocker should die"
     );
-    assert_eq!(p1_life, 17, "3 trample damage should go to defending player");
-    assert_eq!(p0_life, 25, "P0 should gain 5 life from lifelink (2 to blocker + 3 to player)");
+    assert_eq!(
+        p1_life, 17,
+        "3 trample damage should go to defending player"
+    );
+    assert_eq!(
+        p0_life, 25,
+        "P0 should gain 5 life from lifelink (2 to blocker + 3 to player)"
+    );
 
     // Snapshot for regression anchoring
     insta::assert_json_snapshot!("keywords_trample_lifelink_excess", runner.snapshot());

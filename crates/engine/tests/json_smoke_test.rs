@@ -24,8 +24,11 @@ fn data_dir() -> std::path::PathBuf {
 
 fn load_test_db() -> CardDatabase {
     let data = data_dir();
-    CardDatabase::load_json(&data.join("mtgjson/test_fixture.json"), &data.join("abilities"))
-        .expect("CardDatabase::load_json should succeed")
+    CardDatabase::load_json(
+        &data.join("mtgjson/test_fixture.json"),
+        &data.join("abilities"),
+    )
+    .expect("CardDatabase::load_json should succeed")
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +59,9 @@ fn test_load_all_smoke_test_cards() {
 #[test]
 fn test_forest_has_synthesized_mana_ability() {
     let db = load_test_db();
-    let forest = db.get_face_by_name("Forest").expect("Forest should be loaded");
+    let forest = db
+        .get_face_by_name("Forest")
+        .expect("Forest should be loaded");
     let has_mana_ability = forest.abilities.iter().any(|a| {
         matches!(&a.effect, Effect::Mana { produced, .. } if produced == "G")
             && a.cost == Some(AbilityCost::Tap)
@@ -176,8 +181,7 @@ fn test_scryfall_oracle_id_populated() {
 fn test_cross_validation_fixture_cards_have_ability_files() {
     let data = data_dir();
     let abilities_dir = data.join("abilities");
-    let fixture_content =
-        std::fs::read_to_string(data.join("mtgjson/test_fixture.json")).unwrap();
+    let fixture_content = std::fs::read_to_string(data.join("mtgjson/test_fixture.json")).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(&fixture_content).unwrap();
     let mtgjson_data = fixture["data"].as_object().unwrap();
 

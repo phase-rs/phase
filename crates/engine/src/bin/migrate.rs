@@ -111,7 +111,11 @@ struct ReportEntry {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let forge_dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("data/cardsfolder"));
+    let forge_dir = PathBuf::from(
+        args.get(1)
+            .map(|s| s.as_str())
+            .unwrap_or("data/cardsfolder"),
+    );
     let output_dir = PathBuf::from(args.get(2).map(|s| s.as_str()).unwrap_or("data/abilities"));
 
     if !forge_dir.is_dir() {
@@ -124,10 +128,7 @@ fn main() {
     // Track which output filenames we've already written to detect collisions
     let mut written_files: HashMap<String, PathBuf> = HashMap::new();
 
-    for entry in WalkDir::new(&forge_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&forge_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("txt") {
             continue;
@@ -194,11 +195,9 @@ fn main() {
 
         let output_path = output_dir.join(format!("{filename}.json"));
         if let Err(e) = fs::write(&output_path, format!("{json}\n")) {
-            stats.errors.push((
-                path.to_path_buf(),
-                card_name,
-                format!("Write error: {e}"),
-            ));
+            stats
+                .errors
+                .push((path.to_path_buf(), card_name, format!("Write error: {e}")));
             continue;
         }
 
@@ -285,11 +284,8 @@ fn check_oracle_heuristic(
         "flash",
     ];
 
-    let parsed_keywords_lower: Vec<String> = face
-        .keywords
-        .iter()
-        .map(|k| k.to_lowercase())
-        .collect();
+    let parsed_keywords_lower: Vec<String> =
+        face.keywords.iter().map(|k| k.to_lowercase()).collect();
 
     for kw in &common_keywords {
         // Check if the oracle text starts with or contains the keyword as a distinct word
