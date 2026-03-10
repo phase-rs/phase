@@ -7,7 +7,10 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 pub mod attach;
+pub mod bounce;
 pub mod change_zone;
+pub mod choose_card;
+pub mod copy_spell;
 pub mod counter;
 pub mod counters;
 pub mod deal_damage;
@@ -15,9 +18,12 @@ pub mod destroy;
 pub mod dig;
 pub mod discard;
 pub mod draw;
+pub mod explore;
+pub mod fight;
 pub mod gain_control;
 pub mod life;
 pub mod mill;
+pub mod proliferate;
 pub mod pump;
 pub mod sacrifice;
 pub mod scry;
@@ -60,6 +66,12 @@ pub fn build_registry() -> HashMap<String, EffectHandler> {
     registry.insert("GainControl".to_string(), gain_control::resolve);
     registry.insert("Attach".to_string(), attach::resolve);
     registry.insert("Surveil".to_string(), surveil::resolve);
+    registry.insert("Fight".to_string(), fight::resolve);
+    registry.insert("Bounce".to_string(), bounce::resolve);
+    registry.insert("Explore".to_string(), explore::resolve);
+    registry.insert("Proliferate".to_string(), proliferate::resolve);
+    registry.insert("CopySpell".to_string(), copy_spell::resolve);
+    registry.insert("ChooseCard".to_string(), choose_card::resolve);
     registry
 }
 
@@ -251,9 +263,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_25_entries() {
+    fn registry_has_31_entries() {
         let registry = build_registry();
-        assert_eq!(registry.len(), 25);
+        assert_eq!(registry.len(), 31);
     }
 
     #[test]
@@ -285,6 +297,12 @@ mod tests {
             "GainControl",
             "Attach",
             "Surveil",
+            "Fight",
+            "Bounce",
+            "Explore",
+            "Proliferate",
+            "CopySpell",
+            "ChooseCard",
         ];
         for name in &expected {
             assert!(registry.contains_key(*name), "missing: {}", name);
