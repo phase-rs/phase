@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
-status: executing
-stopped_at: Completed 20-08-PLAN.md
-last_updated: "2026-03-10T00:37:22.305Z"
-last_activity: 2026-03-10 — Completed 20-08 Day/Night Global State
+status: completed
+stopped_at: Completed 20-10-PLAN.md
+last_updated: "2026-03-10T00:49:51.231Z"
+last_activity: 2026-03-10 — Completed 20-10 Standard Coverage Gate & CI
 progress:
   total_phases: 8
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 43
-  completed_plans: 42
-  percent: 98
+  completed_plans: 43
+  percent: 100
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 20 of 20 (Implement all remaining effects)
-Plan: 9 of 10 in current phase
-Status: In Progress
-Last activity: 2026-03-10 — Completed 20-08 Day/Night Global State
+Plan: 10 of 10 in current phase
+Status: Complete
+Last activity: 2026-03-10 — Completed 20-10 Standard Coverage Gate & CI
 
-Progress: [██████████] 98%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -85,6 +85,7 @@ Progress: [██████████] 98%
 | Phase 20 P06 | 11min | 2 tasks | 7 files |
 | Phase 20 P09 | 5min | 2 tasks | 7 files |
 | Phase 20 P08 | 5min | 2 tasks | 7 files |
+| Phase 20 P10 | 10min | 2 tasks | 82 files |
 
 ## Accumulated Context
 
@@ -209,6 +210,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 20-09]: Manifested creature cards can turn face up; noncreature manifested cards cannot
 - [Phase 20-09]: TurnFaceUp trigger matcher supports ValidCard filter for conditional triggering
 - [Phase 20]: [Phase 20-08]: Day/night transition checked at cleanup step per MTG Rule 727.2; spells_cast_this_turn uses saturating_add
+- [Phase 20-10]: Standard-legal card subset curated by name (78 cards, 79 faces) since Forge files lack set codes; CI gate via coverage-report --ci
+- [Phase 20]: Standard-legal card subset curated by name (78 cards, 79 faces) since Forge files lack set codes; CI gate via coverage-report --ci
 
 ### Roadmap Evolution
 
@@ -229,6 +232,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-10 - Completed 20-09 Morph/Manifest/Disguise Face-Down Mechanics
-Stopped at: Completed 20-08-PLAN.md
+Last activity: 2026-03-10 - Completed 20-10 Standard Coverage Gate & CI
+Stopped at: Completed 20-10-PLAN.md
 Resume file: None

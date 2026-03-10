@@ -152,8 +152,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **ENG-15**: Replacement effect stubs promoted to real handlers (Attached, ProduceMana, Mill, Transform, etc.)
 - [x] **ENG-16**: Day/Night global state with Daybound/Nightbound creature transformation
 - [x] **ENG-17**: Morph/Manifest/Disguise face-down mechanics with turn-face-up action and hidden information
-- [ ] **ENG-18**: Standard-legal card data subset curated and checked into repository
-- [ ] **ENG-19**: Coverage report CI gate validates 100% Standard-legal card coverage with zero regressions
+- [x] **ENG-18**: Standard-legal card data subset curated and checked into repository
+- [x] **ENG-19**: Coverage report CI gate validates 100% Standard-legal card coverage with zero regressions
 
 ## v2 Requirements
 
