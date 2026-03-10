@@ -1,0 +1,31 @@
+---
+source: crates/engine/src/game/scenario.rs
+expression: snapshot
+---
+{
+  "players": [
+    {
+      "life": 20,
+      "hand": [],
+      "graveyard": []
+    },
+    {
+      "life": 20,
+      "hand": [],
+      "graveyard": []
+    }
+  ],
+  "battlefield": [
+    {
+      "name": "Bear",
+      "owner": 0,
+      "power": 2,
+      "toughness": 2,
+      "tapped": false,
+      "damage": 0,
+      "keywords": []
+    }
+  ],
+  "stack": [],
+  "events": []
+}

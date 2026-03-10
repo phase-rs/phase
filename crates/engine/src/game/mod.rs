@@ -18,6 +18,8 @@ pub mod planeswalker;
 pub mod priority;
 pub mod replacement;
 pub mod sba;
+#[cfg(test)]
+pub mod scenario;
 pub mod stack;
 pub mod static_abilities;
 pub mod targeting;
