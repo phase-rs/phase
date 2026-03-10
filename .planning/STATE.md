@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 20-03-PLAN.md
+stopped_at: Completed 20-04-PLAN.md
 last_updated: "2026-03-10T00:03:00.000Z"
-last_activity: 2026-03-09 — Completed 20-03 Scry/Dig/Surveil Interactive Choices
+last_activity: 2026-03-09 — Completed 20-04 Planeswalker Loyalty
 progress:
   total_phases: 8
   completed_phases: 7
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 20 of 20 (Implement all remaining effects)
-Plan: 4 of 10 in current phase
+Plan: 5 of 10 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 20-03 Scry/Dig/Surveil Interactive Choices
+Last activity: 2026-03-09 — Completed 20-04 Planeswalker Loyalty
 
 Progress: [██████████] 97%
 
@@ -79,6 +79,7 @@ Progress: [██████████] 97%
 | Phase 19 P04 | 2min | 2 tasks | 2 files |
 | Phase 19 P06 | 2min | 2 tasks | 1 files |
 | Phase 20 P03 | 8min | 2 tasks | 12 files |
+| Phase 20 P04 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -180,6 +181,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19-06]: Card fan uses 3-degree increments per card offset from center for subtle fanning
 - [Phase 20-02]: Equip is a direct GameAction (not ActivateAbility), simplifying the sorcery-speed flow
 - [Phase 20-02]: attach_to() is a shared utility for both Attach effect and engine equip action
+- [Phase 20-04]: PW_Cost$ detection in ability text routes ActivateAbility to planeswalker module
+- [Phase 20-04]: loyalty_activated_this_turn resets for active player's permanents at start_next_turn
+- [Phase 20-04]: Damage to planeswalkers uses saturating_sub on loyalty (clamped to 0, SBA handles graveyard)
 - [Phase 20-02]: Equipment SBA clears attached_to silently (no events, stays on battlefield)
 - [Phase 20-03]: Scry SelectCards = cards to keep on top; rest go to bottom of library
 - [Phase 20-03]: Dig SelectCards must contain exactly keep_count cards; validated server-side
@@ -206,6 +210,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 20-03 Scry/Dig/Surveil Interactive Choices
-Stopped at: Completed 20-03-PLAN.md
+Last activity: 2026-03-09 - Completed 20-04 Planeswalker Loyalty
+Stopped at: Completed 20-04-PLAN.md
 Resume file: None

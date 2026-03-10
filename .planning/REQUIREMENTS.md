@@ -142,8 +142,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **ENG-05**: Scry emits WaitingFor::ScryChoice with per-card top/bottom selection (MTGA-style)
 - [x] **ENG-06**: Dig emits WaitingFor::DigChoice for player to select cards to keep
 - [x] **ENG-07**: Surveil effect handler with WaitingFor::SurveilChoice for graveyard/top decision
-- [ ] **ENG-08**: Planeswalker loyalty ability activation with counter cost and once-per-turn restriction
-- [ ] **ENG-09**: Planeswalker SBA (0 loyalty dies) and damage-to-planeswalker removes loyalty counters
+- [x] **ENG-08**: Planeswalker loyalty ability activation with counter cost and once-per-turn restriction
+- [x] **ENG-09**: Planeswalker SBA (0 loyalty dies) and damage-to-planeswalker removes loyalty counters
 - [ ] **ENG-10**: Transform/DFC face switching changes card characteristics (name, P/T, abilities, types)
 - [ ] **ENG-11**: DFCs reset to front face on zone change (Rule 711.8) with hover-to-peek UI for back face
 - [ ] **ENG-12**: Static ability stubs promoted to real handlers (Indestructible, CantBeCountered, FlashBack, keyword-granting statics)
