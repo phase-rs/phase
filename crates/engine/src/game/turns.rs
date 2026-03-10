@@ -66,6 +66,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // Reset per-turn counters
     state.lands_played_this_turn = 0;
+    state.spells_cast_this_turn = 0;
     for player in &mut state.players {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
@@ -608,5 +609,16 @@ mod tests {
         assert_eq!(state.turn_number, 2);
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.phase, Phase::Untap);
+    }
+
+    #[test]
+    fn start_next_turn_resets_spells_cast_this_turn() {
+        let mut state = setup();
+        state.spells_cast_this_turn = 3;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.spells_cast_this_turn, 0);
     }
 }

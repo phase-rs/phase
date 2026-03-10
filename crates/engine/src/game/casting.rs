@@ -367,6 +367,8 @@ fn pay_and_push(
         controller: player,
     });
 
+    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
+
     Ok(WaitingFor::Priority { player })
 }
 

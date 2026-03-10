@@ -20,6 +20,13 @@ fn default_rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(0)
 }
 
+/// Tracks whether the game is in day or night state (MTG Rule 727).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DayNight {
+    Day,
+    Night,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -153,6 +160,10 @@ pub struct GameState {
     // Layer system
     pub layers_dirty: bool,
     pub next_timestamp: u64,
+
+    // Day/night tracking
+    pub day_night: Option<DayNight>,
+    pub spells_cast_this_turn: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,6 +209,8 @@ impl GameState {
             pending_replacement: None,
             layers_dirty: true,
             next_timestamp: 1,
+            day_night: None,
+            spells_cast_this_turn: 0,
         }
     }
 
@@ -237,6 +250,8 @@ impl PartialEq for GameState {
             && self.pending_replacement == other.pending_replacement
             && self.layers_dirty == other.layers_dirty
             && self.next_timestamp == other.next_timestamp
+            && self.day_night == other.day_night
+            && self.spells_cast_this_turn == other.spells_cast_this_turn
     }
 }
 
@@ -434,5 +449,32 @@ mod tests {
             assert!(player.hand.is_empty());
             assert!(player.graveyard.is_empty());
         }
+    }
+
+    #[test]
+    fn day_night_starts_none() {
+        let state = GameState::default();
+        assert_eq!(state.day_night, None);
+    }
+
+    #[test]
+    fn spells_cast_this_turn_starts_zero() {
+        let state = GameState::default();
+        assert_eq!(state.spells_cast_this_turn, 0);
+    }
+
+    #[test]
+    fn day_night_enum_variants() {
+        assert_ne!(DayNight::Day, DayNight::Night);
+    }
+
+    #[test]
+    fn day_night_changed_event_roundtrips() {
+        let event = GameEvent::DayNightChanged {
+            new_state: "Night".to_string(),
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(event, deserialized);
     }
 }
