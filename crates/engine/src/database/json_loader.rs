@@ -180,9 +180,7 @@ fn synthesize_equip(face: &mut CardFace) {
                         filter: "Creature.YouCtrl".to_string(),
                     },
                 },
-                cost: Some(AbilityCost::Mana {
-                    cost: cost_str,
-                }),
+                cost: Some(AbilityCost::Mana { cost: cost_str }),
                 sub_ability: None,
                 remaining_params: HashMap::new(),
             })
@@ -222,10 +220,7 @@ fn build_card_rules(
             replacements: vec![],
         };
         let face_a = build_face(0, ability_file.faces.first().unwrap_or(&empty));
-        let face_b = build_face(
-            1,
-            ability_file.faces.get(1).unwrap_or(&empty),
-        );
+        let face_b = build_face(1, ability_file.faces.get(1).unwrap_or(&empty));
         match layout_kind {
             LayoutKind::Split => CardLayout::Split(face_a, face_b),
             LayoutKind::Flip => CardLayout::Flip(face_a, face_b),
@@ -254,15 +249,16 @@ fn build_card_rules(
     }
 }
 
-/// Normalize a card name for fuzzy matching by stripping punctuation.
-/// Handles cards like "Jace, the Mind Sculptor" matching "Jace The Mind Sculptor".
+/// Normalize a card name for fuzzy matching by keeping only alphanumeric
+/// chars and `/` (for multi-face separators), lowercased, with whitespace collapsed.
+/// Handles apostrophes (e.g. "Healer's Hawk" matching "Healer S Hawk"),
+/// commas (e.g. "Jace, the Mind Sculptor" matching "Jace The Mind Sculptor"),
+/// and other punctuation differences between MTGJSON names and filename-derived names.
 fn normalize_for_match(name: &str) -> String {
     name.chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '/')
+        .filter(|c| c.is_alphanumeric() || *c == '/')
         .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+        .to_lowercase()
 }
 
 /// Convert a snake_case filename stem to Title Case card name.
@@ -338,37 +334,34 @@ pub fn load_json(
             // Try exact match, case-insensitive match, normalized match (strip punctuation),
             // then prefix match for multi-face cards
             let card_name_lower = card_name.to_lowercase();
-            let card_name_normalized = normalize_for_match(&card_name_lower);
-            let mtgjson_entry = atomic
-                .data
-                .get(&card_name)
-                .or_else(|| {
-                    atomic.data.iter().find_map(|(key, val)| {
-                        let key_lower = key.to_lowercase();
-                        // Exact case-insensitive match
-                        if key_lower == card_name_lower {
+            let card_name_normalized = normalize_for_match(&card_name);
+            let mtgjson_entry = atomic.data.get(&card_name).or_else(|| {
+                atomic.data.iter().find_map(|(key, val)| {
+                    let key_lower = key.to_lowercase();
+                    // Exact case-insensitive match
+                    if key_lower == card_name_lower {
+                        return Some(val);
+                    }
+                    // Normalized match (strips commas, apostrophes, spaces, etc.)
+                    if normalize_for_match(key) == card_name_normalized {
+                        return Some(val);
+                    }
+                    // Multi-face: "Name A // Name B" prefix match
+                    if let Some(rest) = key_lower.strip_prefix(&card_name_lower) {
+                        if rest.starts_with(" // ") {
                             return Some(val);
                         }
-                        // Normalized match (strips commas, apostrophes, etc.)
-                        if normalize_for_match(&key_lower) == card_name_normalized {
+                    }
+                    // Multi-face: normalized prefix match (no spaces after normalize)
+                    let key_normalized = normalize_for_match(key);
+                    if let Some(rest) = key_normalized.strip_prefix(&card_name_normalized) {
+                        if rest.starts_with("//") {
                             return Some(val);
                         }
-                        // Multi-face: "Name A // Name B" prefix match
-                        if let Some(rest) = key_lower.strip_prefix(&card_name_lower) {
-                            if rest.starts_with(" // ") {
-                                return Some(val);
-                            }
-                        }
-                        // Multi-face: normalized prefix match
-                        let key_normalized = normalize_for_match(&key_lower);
-                        if let Some(rest) = key_normalized.strip_prefix(&card_name_normalized) {
-                            if rest.starts_with(" // ") {
-                                return Some(val);
-                            }
-                        }
-                        None
-                    })
-                });
+                    }
+                    None
+                })
+            });
 
             let mtgjson_faces = match mtgjson_entry {
                 Some(faces) => faces,
@@ -493,10 +486,7 @@ mod tests {
             &empty_face_abilities(),
             Some("my-oracle-id".to_string()),
         );
-        assert_eq!(
-            face.scryfall_oracle_id.as_deref(),
-            Some("my-oracle-id")
-        );
+        assert_eq!(face.scryfall_oracle_id.as_deref(), Some("my-oracle-id"));
     }
 
     #[test]
@@ -807,10 +797,7 @@ mod tests {
 
         let face = build_card_face(&mtgjson, &empty_face_abilities(), None);
         // ManaCost::NoCost derives empty colors, but MTGJSON says Green
-        assert_eq!(
-            face.color_override,
-            Some(vec![ManaColor::Green])
-        );
+        assert_eq!(face.color_override, Some(vec![ManaColor::Green]));
     }
 
     #[test]
@@ -841,8 +828,8 @@ mod tests {
         std::fs::write(abilities_dir.join("lightning_bolt.json"), bolt_json).unwrap();
 
         // Copy the test fixture as our MTGJSON data
-        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/mtgjson/test_fixture.json");
+        let fixture_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json");
 
         let db = load_json(&fixture_path, &abilities_dir).unwrap();
         assert_eq!(db.card_count(), 1);
@@ -868,8 +855,8 @@ mod tests {
         let json = r#"{ "abilities": [] }"#;
         std::fs::write(abilities_dir.join("nonexistent_card.json"), json).unwrap();
 
-        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/mtgjson/test_fixture.json");
+        let fixture_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json");
 
         let db = load_json(&fixture_path, &abilities_dir).unwrap();
         assert_eq!(db.card_count(), 0);
@@ -893,8 +880,8 @@ mod tests {
         }"#;
         std::fs::write(abilities_dir.join("delver_of_secrets.json"), delver_json).unwrap();
 
-        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/mtgjson/test_fixture.json");
+        let fixture_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json");
 
         let db = load_json(&fixture_path, &abilities_dir).unwrap();
         assert_eq!(db.card_count(), 1);
