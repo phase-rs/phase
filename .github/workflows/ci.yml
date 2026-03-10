@@ -33,6 +33,9 @@ jobs:
       - name: Standard coverage gate
         run: cargo run --bin coverage-report -- data/standard-cards/ --ci
 
+      - name: Standard coverage gate (JSON)
+        run: cargo run --bin coverage-report -- --json data/ --ci
+
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
 
