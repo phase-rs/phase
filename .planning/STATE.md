@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 21-01-PLAN.md
-last_updated: "2026-03-10T16:42:00Z"
-last_activity: 2026-03-10 — Completed Plan 21-01 (Typed Enum Schema)
+stopped_at: Completed 21-03-PLAN.md
+last_updated: "2026-03-10T16:56:00Z"
+last_activity: 2026-03-10 — Completed Plan 21-03 (MTGJSON Loader & Ability Schema)
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 3
-  completed_plans: 1
-  percent: 7
+  completed_plans: 2
+  percent: 14
 ---
 
 # Project State
@@ -26,24 +26,24 @@ See: .planning/PROJECT.md (updated 2026-03-10)
 ## Current Position
 
 Phase: 21 (first of 5 in v1.2) — Schema & MTGJSON Foundation
-Plan: 1/3 complete
+Plan: 2/3 complete (Plan 01, Plan 03 done; Plan 02 remaining)
 Status: Executing — Plan 02 next
-Last activity: 2026-03-10 — Completed Plan 21-01 (Typed Enum Schema)
+Last activity: 2026-03-10 — Completed Plan 21-03 (MTGJSON Loader & Ability Schema)
 
-Progress: [▓░░░░░░░░░] 7%
+Progress: [▓▓░░░░░░░░] 14%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1 (v1.2)
-- Average duration: 19min
-- Total execution time: 0.3 hours
+- Total plans completed: 2 (v1.2)
+- Average duration: 14min
+- Total execution time: 0.5 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 21 | 1/3 | 19min | 19min |
+| 21 | 2/3 | 28min | 14min |
 
 ## Accumulated Context
 
@@ -60,6 +60,9 @@ Recent decisions affecting current work:
 - [21-01]: Display impl on TriggerMode uses Debug formatting for known variants (simple, correct)
 - [21-01]: ResolvedAbility left unchanged per plan — transitional approach for Plan 02
 - [21-01]: Compat methods (api_type(), params(), mode_str(), event_str()) bridge typed enums to string consumers
+- [21-03]: 7-card test fixture instead of full 50MB AtomicCards.json for fast CI
+- [21-03]: Schema generation via test keeps schema.json in sync with Rust types
+- [21-03]: Relative $schema path in ability JSON files for co-located schema
 
 ### Pending Todos
 
@@ -71,6 +74,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T16:42:00Z
-Stopped at: Completed 21-01-PLAN.md
+Last session: 2026-03-10T16:56:00Z
+Stopped at: Completed 21-03-PLAN.md
 Resume file: .planning/phases/21-schema-mtgjson-foundation/21-02-PLAN.md
