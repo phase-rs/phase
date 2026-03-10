@@ -1,0 +1,5 @@
+Name:Counterspell
+ManaCost:U U
+Types:Instant
+A:SP$ Counter | TargetType$ Spell | ValidTgts$ Card | SpellDescription$ Counter target spell.
+Oracle:Counter target spell.

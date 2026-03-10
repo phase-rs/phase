@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::effects::build_registry as build_effect_registry;
@@ -35,7 +35,11 @@ pub struct CoverageSummary {
 /// static abilities (mode not in static registry).
 pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
     // 1. Any Unknown keyword means the parser didn't recognize it
-    if obj.keywords.iter().any(|k| matches!(k, Keyword::Unknown(_))) {
+    if obj
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Unknown(_)))
+    {
         return true;
     }
 
@@ -52,7 +56,8 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
     // 3. Check trigger modes against trigger registry
     let trigger_registry = build_trigger_registry();
     for trig in &obj.trigger_definitions {
-        let mode = TriggerMode::from_str(&trig.mode).unwrap_or(TriggerMode::Unknown(trig.mode.clone()));
+        let mode =
+            TriggerMode::from_str(&trig.mode).unwrap_or(TriggerMode::Unknown(trig.mode.clone()));
         if matches!(&mode, TriggerMode::Unknown(_)) || !trigger_registry.contains_key(&mode) {
             return true;
         }
@@ -212,6 +217,12 @@ fn check_statics(
             }
         }
     }
+}
+
+/// Returns `true` if the coverage summary shows 100% support (CI pass).
+/// Returns `false` if there are any unsupported cards (CI fail).
+pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
+    summary.total_cards > 0 && summary.supported_cards == summary.total_cards
 }
 
 fn layout_faces(layout: &crate::types::card::CardLayout) -> Vec<&crate::types::card::CardFace> {
@@ -402,21 +413,24 @@ mod tests {
     #[test]
     fn object_with_unknown_keyword_has_unimplemented() {
         let mut obj = make_obj();
-        obj.keywords.push(Keyword::Unknown("FutureKeyword".to_string()));
+        obj.keywords
+            .push(Keyword::Unknown("FutureKeyword".to_string()));
         assert!(has_unimplemented_mechanics(&obj));
     }
 
     #[test]
     fn object_with_registered_ability_has_no_unimplemented() {
         let mut obj = make_obj();
-        obj.abilities.push("SP$ DealDamage | Cost$ R | NumDmg$ 3".to_string());
+        obj.abilities
+            .push("SP$ DealDamage | Cost$ R | NumDmg$ 3".to_string());
         assert!(!has_unimplemented_mechanics(&obj));
     }
 
     #[test]
     fn object_with_unregistered_ability_has_unimplemented() {
         let mut obj = make_obj();
-        obj.abilities.push("SP$ Fateseal | Cost$ U | Amount$ 2".to_string());
+        obj.abilities
+            .push("SP$ Fateseal | Cost$ U | Amount$ 2".to_string());
         assert!(has_unimplemented_mechanics(&obj));
     }
 
@@ -426,5 +440,43 @@ mod tests {
         assert!(!obj.has_unimplemented_mechanics());
         obj.keywords.push(Keyword::Unknown("Bogus".to_string()));
         assert!(obj.has_unimplemented_mechanics());
+    }
+
+    #[test]
+    fn ci_passes_when_all_cards_supported() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_card_file(
+            tmp.path(),
+            "bolt",
+            "Name:Lightning Bolt\nManaCost:R\nTypes:Instant\nA:SP$ DealDamage | Cost$ R | NumDmg$ 3\nOracle:Deal 3.",
+        );
+        create_card_file(
+            tmp.path(),
+            "bear",
+            "Name:Bear\nManaCost:1 G\nTypes:Creature\nPT:2/2\nOracle:Vanilla.",
+        );
+
+        let db = CardDatabase::load(tmp.path()).unwrap();
+        let summary = analyze_standard_coverage(&db);
+        assert!(is_fully_covered(&summary));
+    }
+
+    #[test]
+    fn ci_fails_when_any_card_unsupported() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_card_file(
+            tmp.path(),
+            "bolt",
+            "Name:Lightning Bolt\nManaCost:R\nTypes:Instant\nA:SP$ DealDamage | Cost$ R | NumDmg$ 3\nOracle:Deal 3.",
+        );
+        create_card_file(
+            tmp.path(),
+            "custom",
+            "Name:Custom\nManaCost:U\nTypes:Instant\nA:SP$ Fateseal | Cost$ U\nOracle:Fateseal.",
+        );
+
+        let db = CardDatabase::load(tmp.path()).unwrap();
+        let summary = analyze_standard_coverage(&db);
+        assert!(!is_fully_covered(&summary));
     }
 }

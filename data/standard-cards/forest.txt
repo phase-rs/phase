@@ -1,0 +1,4 @@
+Name:Forest
+ManaCost:no cost
+Types:Basic Land Forest
+Oracle:({T}: Add {G}.)

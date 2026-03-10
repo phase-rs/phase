@@ -13,8 +13,9 @@ client/dist/
 # Coverage
 client/coverage/
 
-# Downloaded card data
-data/
+# Downloaded card data (but keep curated Standard subset for CI)
+data/*
+!data/standard-cards/
 
 # OS
 .DS_Store
