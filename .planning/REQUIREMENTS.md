@@ -148,8 +148,8 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **ENG-11**: DFCs reset to front face on zone change (Rule 711.8) with hover-to-peek UI for back face
 - [ ] **ENG-12**: Static ability stubs promoted to real handlers (Indestructible, CantBeCountered, FlashBack, keyword-granting statics)
 - [ ] **ENG-13**: Trigger matcher stubs promoted to real matchers (AttackerBlocked, Attached, Milled, Exiled, etc.)
-- [ ] **ENG-14**: Missing effect handlers implemented (Fight, Bounce, Explore, Proliferate, CopySpell, ChooseCard)
-- [ ] **ENG-15**: Replacement effect stubs promoted to real handlers (Attached, ProduceMana, Mill, Transform, etc.)
+- [x] **ENG-14**: Missing effect handlers implemented (Fight, Bounce, Explore, Proliferate, CopySpell, ChooseCard)
+- [x] **ENG-15**: Replacement effect stubs promoted to real handlers (Attached, ProduceMana, Mill, Transform, etc.)
 - [ ] **ENG-16**: Day/Night global state with Daybound/Nightbound creature transformation
 - [ ] **ENG-17**: Morph/Manifest/Disguise face-down mechanics with turn-face-up action and hidden information
 - [ ] **ENG-18**: Standard-legal card data subset curated and checked into repository

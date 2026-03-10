@@ -4,13 +4,13 @@ milestone: v1.1
 milestone_name: Arena UI
 status: executing
 stopped_at: Completed 20-07-PLAN.md
-last_updated: "2026-03-10T00:15:49.000Z"
+last_updated: "2026-03-10T00:29:46.115Z"
 last_activity: 2026-03-10 — Completed 20-07 Effect Handlers & Replacement Effects
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 43
-  completed_plans: 37
+  completed_plans: 40
   percent: 97
 ---
 
@@ -81,6 +81,8 @@ Progress: [██████████] 97%
 | Phase 20 P03 | 8min | 2 tasks | 12 files |
 | Phase 20 P04 | 5min | 2 tasks | 7 files |
 | Phase 20 P05 | 10min | 2 tasks | 10 files |
+| Phase 20 P07 | 10min | 2 tasks | 8 files |
+| Phase 20 P06 | 11min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -192,9 +194,15 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 20-03]: AI evaluate_card_value uses creature P/T + land bonus + mana cost proxy
 - [Phase 20-03]: CardChoiceModal dispatches to sub-modals based on WaitingFor type (no separate GamePage logic)
 - [Phase 20-03]: ScryModal uses per-card Top/Bottom toggle buttons per MTGA design
+- [Phase 20-07]: Explore reuses WaitingFor::DigChoice with keep_count=1 for nonland card choice
+- [Phase 20-07]: Proliferate auto-selects all eligible permanents (no player choice UI needed)
+- [Phase 20-07]: DealtDamage replacement uses source-object self-referencing to match damage targeting holder
+- [Phase 20-07]: Mill replacement matches Library-to-Graveyard zone changes for redirect
+- [Phase 20-07]: 5 structural replacement handlers await dedicated ProposedEvent variants
 - [Phase 20-05]: BackFaceData swap is symmetric -- both faces preserved for unlimited round-trip transforms
 - [Phase 20-05]: Zone-change reset in move_to_zone enforces Rule 711.8 automatically
 - [Phase 20-05]: inspectedFaceIndex in uiStore drives face-aware CardPreview without modifying CardPreview
+- [Phase 20]: [Phase 20-06]: Static keyword handlers return RuleModification for layer-system integration; CantBeCountered checked both via static ability and direct object definition
 
 ### Roadmap Evolution
 
