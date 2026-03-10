@@ -254,6 +254,17 @@ fn build_card_rules(
     }
 }
 
+/// Normalize a card name for fuzzy matching by stripping punctuation.
+/// Handles cards like "Jace, the Mind Sculptor" matching "Jace The Mind Sculptor".
+fn normalize_for_match(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '/')
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Convert a snake_case filename stem to Title Case card name.
 fn filename_to_card_name(stem: &str) -> String {
     stem.split('_')
@@ -324,8 +335,10 @@ pub fn load_json(
             let card_name = filename_to_card_name(&stem);
 
             // Find matching MTGJSON entry
-            // Try exact match, case-insensitive match, then prefix match for multi-face cards
+            // Try exact match, case-insensitive match, normalized match (strip punctuation),
+            // then prefix match for multi-face cards
             let card_name_lower = card_name.to_lowercase();
+            let card_name_normalized = normalize_for_match(&card_name_lower);
             let mtgjson_entry = atomic
                 .data
                 .get(&card_name)
@@ -336,8 +349,19 @@ pub fn load_json(
                         if key_lower == card_name_lower {
                             return Some(val);
                         }
+                        // Normalized match (strips commas, apostrophes, etc.)
+                        if normalize_for_match(&key_lower) == card_name_normalized {
+                            return Some(val);
+                        }
                         // Multi-face: "Name A // Name B" prefix match
                         if let Some(rest) = key_lower.strip_prefix(&card_name_lower) {
+                            if rest.starts_with(" // ") {
+                                return Some(val);
+                            }
+                        }
+                        // Multi-face: normalized prefix match
+                        let key_normalized = normalize_for_match(&key_lower);
+                        if let Some(rest) = key_normalized.strip_prefix(&card_name_normalized) {
                             if rest.starts_with(" // ") {
                                 return Some(val);
                             }
