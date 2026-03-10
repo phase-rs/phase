@@ -1155,6 +1155,24 @@ fn match_explored(
     )
 }
 
+fn match_turn_face_up(
+    event: &GameEvent,
+    params: &HashMap<String, String>,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::TurnedFaceUp { object_id } = event {
+        if let Some(filter) = params.get("ValidCard") {
+            object_matches_filter(state, *object_id, filter, source_id)
+        } else {
+            // No filter: trigger if the source itself was turned face up
+            *object_id == source_id
+        }
+    } else {
+        false
+    }
+}
+
 /// Fallback matcher for unimplemented trigger modes. Always returns false.
 fn match_unimplemented(
     _event: &GameEvent,

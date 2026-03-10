@@ -226,7 +226,9 @@ export type GameAction =
   | { type: "ChooseReplacement"; data: { index: number } }
   | { type: "CancelCast" }
   | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } }
-  | { type: "Transform"; data: { object_id: ObjectId } };
+  | { type: "Transform"; data: { object_id: ObjectId } }
+  | { type: "PlayFaceDown"; data: { card_id: CardId } }
+  | { type: "TurnFaceUp"; data: { object_id: ObjectId } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
@@ -264,7 +266,9 @@ export type GameEvent =
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "BecomesTarget"; data: { object_id: ObjectId; source_id: ObjectId } }
   | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } }
-  | { type: "Transformed"; data: { object_id: ObjectId } };
+  | { type: "Transformed"; data: { object_id: ObjectId } }
+  | { type: "DayNightChanged"; data: { new_state: string } }
+  | { type: "TurnedFaceUp"; data: { object_id: ObjectId } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 
