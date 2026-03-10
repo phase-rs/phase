@@ -31,7 +31,6 @@ interface DeckGalleryProps {
   difficulty: string;
   onDifficultyChange: (d: string) => void;
   onStartGame: () => void;
-  onBack: () => void;
 }
 
 function listSavedDeckNames(): string[] {
@@ -91,7 +90,6 @@ export function DeckGallery({
   difficulty,
   onDifficultyChange,
   onStartGame,
-  onBack,
 }: DeckGalleryProps) {
   const [deckNames, setDeckNames] = useState<string[]>([]);
 
@@ -174,22 +172,13 @@ export function DeckGallery({
         })}
       </div>
 
-      <div className="flex items-center gap-4">
-        <button
-          onClick={onBack}
-          className={menuButtonClass({ tone: "neutral", size: "sm" })}
-        >
-          Back
-        </button>
-
-        <button
-          onClick={onStartGame}
-          disabled={noDeckSelected}
-          className={menuButtonClass({ tone: "indigo", size: "sm", disabled: noDeckSelected })}
-        >
-          {mode === "ai" ? "Start Game" : "Host Game"}
-        </button>
-      </div>
+      <button
+        onClick={onStartGame}
+        disabled={noDeckSelected}
+        className={menuButtonClass({ tone: "indigo", size: "sm", disabled: noDeckSelected })}
+      >
+        {mode === "ai" ? "Start Game" : "Host Game"}
+      </button>
     </div>
   );
 }

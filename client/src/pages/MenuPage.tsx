@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { initAudioOnInteraction } from "../audio/AudioManager";
+import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { CardCoverageDashboard } from "../components/controls/CardCoverageDashboard";
 import { DeckGallery } from "../components/menu/DeckGallery";
 import { MenuLogo } from "../components/menu/MenuLogo";
@@ -45,6 +46,13 @@ type MenuView =
   | "deck-gallery-online"
   | "online-host-join"
   | "join-code";
+
+const BACK_TARGETS: Partial<Record<MenuView, MenuView>> = {
+  "deck-gallery-ai": "mode-select",
+  "deck-gallery-online": "mode-select",
+  "online-host-join": "deck-gallery-online",
+  "join-code": "online-host-join",
+};
 
 export function MenuPage() {
   const navigate = useNavigate();
@@ -117,11 +125,14 @@ export function MenuPage() {
     }
   };
 
+  const backTarget = BACK_TARGETS[menuView];
+  const handleBack = backTarget ? () => setMenuView(backTarget) : undefined;
   const hasSavedGame = activeGame !== null;
 
   return (
     <div className="relative flex min-h-screen flex-col items-center justify-center">
       <MenuParticles />
+      <ScreenChrome showLogo={menuView !== "mode-select"} onBack={handleBack} />
 
       {menuView === "mode-select" && (
         <div className="relative z-10 flex flex-col items-center gap-8">
@@ -178,7 +189,6 @@ export function MenuPage() {
             difficulty={difficulty}
             onDifficultyChange={setDifficulty}
             onStartGame={handleStartAIGame}
-            onBack={() => setMenuView("mode-select")}
           />
         </div>
       )}
@@ -192,7 +202,6 @@ export function MenuPage() {
             difficulty={difficulty}
             onDifficultyChange={setDifficulty}
             onStartGame={() => setMenuView("online-host-join")}
-            onBack={() => setMenuView("mode-select")}
           />
         </div>
       )}
@@ -213,13 +222,6 @@ export function MenuPage() {
             className={menuButtonClass({ tone: "cyan", size: "md" })}
           >
             Join Game
-          </button>
-
-          <button
-            onClick={() => setMenuView("deck-gallery-online")}
-            className={menuButtonClass({ tone: "neutral", size: "sm" })}
-          >
-            Back
           </button>
         </div>
       )}
@@ -245,13 +247,6 @@ export function MenuPage() {
             className={menuButtonClass({ tone: "cyan", size: "md", disabled: !joinCode.trim() })}
           >
             Join
-          </button>
-
-          <button
-            onClick={() => setMenuView("online-host-join")}
-            className={menuButtonClass({ tone: "neutral", size: "sm" })}
-          >
-            Back
           </button>
         </div>
       )}

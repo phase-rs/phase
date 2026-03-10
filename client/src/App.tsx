@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route } from "react-router";
 
+import { BuildBadge } from "./components/chrome/BuildBadge";
 import { SplashScreen } from "./components/splash/SplashScreen";
 import { MenuPage } from "./pages/MenuPage";
 import { GamePage } from "./pages/GamePage";
@@ -44,9 +45,10 @@ export function App() {
         )}
         <Routes>
           <Route path="/" element={<MenuPage />} />
-          <Route path="/game/:id" element={<GamePage />} />
           <Route path="/deck-builder" element={<DeckBuilderPage />} />
+          <Route path="/game/:id" element={<GamePage />} />
         </Routes>
+        <BuildBadge />
       </div>
     </BrowserRouter>
   );

@@ -30,10 +30,11 @@ import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
+import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
-import { useGameStore, clearGame } from "../stores/gameStore.ts";
+import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
@@ -276,7 +277,7 @@ function GamePageContent({
       </div>
 
       {/* Opponent zones — upper-right: exile badge, library pile, graveyard pile */}
-      <div className="fixed right-2 top-12 z-30 flex items-start gap-2">
+      <div className="fixed right-2 top-2 z-30 flex items-start gap-2">
         <ZoneIndicator
           zone="exile"
           playerId={1}
@@ -294,26 +295,14 @@ function GamePageContent({
         <CombatPhaseIndicator />
       </div>
 
-      {/* AI debug toggle + Concede */}
-      <div className="fixed right-2 top-2 z-40 flex gap-2">
-        {mode === "ai" && (
-          <button
-            onClick={() => setShowAiHand((v) => !v)}
-            className="rounded bg-gray-800/80 px-2 py-1 text-xs text-gray-400 hover:text-gray-200"
-          >
-            {showAiHand ? "Hide AI Hand" : "Show AI Hand"}
-          </button>
-        )}
-        <button
-          onClick={() => {
-            clearGame(gameId);
-            navigate("/");
-          }}
-          className="rounded bg-gray-800/80 px-2 py-1 text-xs text-red-400 hover:text-red-300"
-        >
-          Concede
-        </button>
-      </div>
+      {/* Game menu — top-left hamburger */}
+      <GameMenu
+        gameId={gameId}
+        isAiMode={mode === "ai"}
+        showAiHand={showAiHand}
+        onToggleAiHand={() => setShowAiHand((v) => !v)}
+        onSettingsClick={() => setShowPreferences(true)}
+      />
 
       {/* Host game: show game code while waiting */}
       {waitingForOpponent && hostGameCode && (

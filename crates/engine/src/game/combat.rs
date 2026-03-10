@@ -375,6 +375,95 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// Check if a specific blocker can legally block a specific attacker (per-pair restrictions only).
+/// Does NOT check menace (which is a multi-blocker constraint).
+fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
+    if attacker
+        .static_definitions
+        .iter()
+        .any(|sd| sd.mode == "CantBeBlocked")
+    {
+        return false;
+    }
+    for kw in &attacker.keywords {
+        if let Keyword::Protection(ProtectionTarget::Color(color)) = kw {
+            if blocker.color.contains(color) {
+                return false;
+            }
+        }
+    }
+    if attacker.has_keyword(&Keyword::Flying)
+        && !blocker.has_keyword(&Keyword::Flying)
+        && !blocker.has_keyword(&Keyword::Reach)
+    {
+        return false;
+    }
+    let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
+    let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
+    if attacker_has_shadow && !blocker_has_shadow {
+        return false;
+    }
+    if !attacker_has_shadow && blocker_has_shadow {
+        return false;
+    }
+    if attacker.has_keyword(&Keyword::Fear)
+        && !blocker.card_types.core_types.contains(&CoreType::Artifact)
+        && !blocker.color.contains(&ManaColor::Black)
+    {
+        return false;
+    }
+    if attacker.has_keyword(&Keyword::Intimidate)
+        && !blocker.card_types.core_types.contains(&CoreType::Artifact)
+        && !attacker.color.iter().any(|c| blocker.color.contains(c))
+    {
+        return false;
+    }
+    if attacker.has_keyword(&Keyword::Skulk)
+        && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
+    {
+        return false;
+    }
+    if attacker.has_keyword(&Keyword::Horsemanship)
+        && !blocker.has_keyword(&Keyword::Horsemanship)
+    {
+        return false;
+    }
+    true
+}
+
+/// For each valid blocker, compute which attackers it can legally block.
+pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<ObjectId>> {
+    let valid_blockers = get_valid_blocker_ids(state);
+    let attacker_ids: Vec<ObjectId> = state
+        .combat
+        .as_ref()
+        .map(|c| c.attackers.iter().map(|a| a.object_id).collect())
+        .unwrap_or_default();
+
+    let mut result = HashMap::new();
+    for &blocker_id in &valid_blockers {
+        let blocker = match state.objects.get(&blocker_id) {
+            Some(obj) => obj,
+            None => continue,
+        };
+        let valid_targets: Vec<ObjectId> = attacker_ids
+            .iter()
+            .filter(|&&attacker_id| {
+                state
+                    .objects
+                    .get(&attacker_id)
+                    .map(|attacker| can_block_pair(blocker, attacker))
+                    .unwrap_or(false)
+            })
+            .copied()
+            .collect();
+        if !valid_targets.is_empty() {
+            result.insert(blocker_id, valid_targets);
+        }
+    }
+    result
+}
+
 /// Return the IDs of all creatures the defending player could legally assign as blockers.
 /// A creature is a valid blocker if it's an untapped creature controlled by the defending player.
 /// (Per-attacker blocking restrictions like Flying are checked during validate_blockers.)

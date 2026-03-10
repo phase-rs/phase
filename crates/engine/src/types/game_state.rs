@@ -64,6 +64,7 @@ pub enum WaitingFor {
     DeclareBlockers {
         player: PlayerId,
         valid_blocker_ids: Vec<ObjectId>,
+        valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
     },
     GameOver {
         winner: Option<PlayerId>,
@@ -162,7 +163,9 @@ pub struct GameState {
     pub next_timestamp: u64,
 
     // Day/night tracking
+    #[serde(default)]
     pub day_night: Option<DayNight>,
+    #[serde(default)]
     pub spells_cast_this_turn: u8,
 }
 
@@ -375,6 +378,7 @@ mod tests {
             WaitingFor::DeclareBlockers {
                 player: PlayerId(0),
                 valid_blocker_ids: vec![],
+                valid_block_targets: HashMap::new(),
             },
             WaitingFor::GameOver {
                 winner: Some(PlayerId(0)),

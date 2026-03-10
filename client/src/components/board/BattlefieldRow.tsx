@@ -5,6 +5,7 @@ import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 interface BattlefieldRowProps {
   groups: GroupedPermanent[];
   rowType: "creatures" | "lands" | "other";
+  className?: string;
 }
 
 const ROW_JUSTIFY: Record<string, string> = {
@@ -13,7 +14,7 @@ const ROW_JUSTIFY: Record<string, string> = {
   other: "justify-end",
 };
 
-export function BattlefieldRow({ groups, rowType }: BattlefieldRowProps) {
+export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowProps) {
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
 
   if (groups.length === 0) return null;
@@ -23,10 +24,8 @@ export function BattlefieldRow({ groups, rowType }: BattlefieldRowProps) {
     ? "min-h-[calc(var(--art-crop-h)+24px)]"
     : "min-h-[calc(var(--card-h)+8px)]";
 
-  const landScale = rowType === "lands" ? "scale-75 origin-top-left" : "";
-
   return (
-    <div className={`flex ${minH} flex-wrap items-center gap-2 px-2 ${ROW_JUSTIFY[rowType]} ${landScale}`}>
+    <div className={`flex ${minH} flex-wrap items-center gap-2 px-2 ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}>
       {groups.map((group) => (
         <GroupedPermanentDisplay key={group.ids[0]} group={group} />
       ))}

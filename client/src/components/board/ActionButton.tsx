@@ -59,6 +59,7 @@ export function ActionButton() {
   const selectAllAttackers = useUiStore((s) => s.selectAllAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const assignBlocker = useUiStore((s) => s.assignBlocker);
+  const removeBlockerAssignment = useUiStore((s) => s.removeBlockerAssignment);
   const clearCombatSelection = useUiStore((s) => s.clearCombatSelection);
   const setCombatMode = useUiStore((s) => s.setCombatMode);
   const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
@@ -106,23 +107,36 @@ export function ActionButton() {
       ? (waitingFor.data.valid_blocker_ids ?? [])
       : [];
 
+  // Per-blocker valid attacker targets from engine
+  const validBlockTargets =
+    waitingFor?.type === "DeclareBlockers"
+      ? (waitingFor.data.valid_block_targets ?? {})
+      : {};
+
   // Blocker click handler
   const handleBlockerClick = useCallback(
     (objectId: ObjectId) => {
+      // Click an already-assigned blocker to unassign
+      if (blockerAssignments.has(objectId)) {
+        removeBlockerAssignment(objectId);
+        return;
+      }
+
       if (pendingBlocker === null) {
-        // First click: select a valid blocker
-        if (validBlockerIds.includes(objectId)) {
+        // First click: select a valid blocker (must have at least one valid target)
+        if (validBlockerIds.includes(objectId) && validBlockTargets[objectId]?.length > 0) {
           setPendingBlocker(objectId);
         }
       } else {
-        // Second click: assign to an attacker
-        if (combatAttackerIds.includes(objectId)) {
+        // Second click: assign to an attacker (only if engine says this pair is valid)
+        const validTargetsForBlocker = validBlockTargets[pendingBlocker] ?? [];
+        if (combatAttackerIds.includes(objectId) && validTargetsForBlocker.includes(objectId)) {
           assignBlocker(pendingBlocker, objectId);
           setPendingBlocker(null);
         }
       }
     },
-    [pendingBlocker, validBlockerIds, combatAttackerIds, assignBlocker],
+    [pendingBlocker, validBlockerIds, validBlockTargets, combatAttackerIds, assignBlocker, blockerAssignments, removeBlockerAssignment],
   );
 
   useEffect(() => {
@@ -202,16 +216,17 @@ export function ActionButton() {
   const clearEndTurnMode = useUiStore((s) => s.clearEndTurnMode);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number ?? 0);
 
-  // Auto-reset end-turn mode when turn changes
+  // Reactive auto-pass when end-turn mode is active (with turn-change detection)
   useEffect(() => {
-    if (endTurnMode && endTurnSinceTurn !== null && turnNumber !== endTurnSinceTurn) {
-      clearEndTurnMode();
-    }
-  }, [endTurnMode, endTurnSinceTurn, turnNumber, clearEndTurnMode]);
+    if (!endTurnMode) return;
 
-  // Reactive auto-pass when end-turn mode is active
-  useEffect(() => {
-    if (!endTurnMode || !waitingFor || waitingFor.data.player !== PLAYER_ID) return;
+    // Clear immediately when a new turn starts — before any auto-passing
+    if (endTurnSinceTurn !== null && turnNumber !== endTurnSinceTurn) {
+      clearEndTurnMode();
+      return;
+    }
+
+    if (!waitingFor || waitingFor.data.player !== PLAYER_ID) return;
 
     if (waitingFor.type === "Priority") {
       dispatchAction({ type: "PassPriority" });
@@ -220,7 +235,7 @@ export function ActionButton() {
     } else if (waitingFor.type === "DeclareBlockers") {
       dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } });
     }
-  }, [endTurnMode, waitingFor]);
+  }, [endTurnMode, waitingFor, turnNumber, endTurnSinceTurn, clearEndTurnMode]);
 
   async function resolveAll() {
     resolveAllRef.current = true;
@@ -314,7 +329,7 @@ export function ActionButton() {
                 </button>
               )}
               {pendingBlocker !== null && (
-                <div className="absolute -top-10 rounded-lg bg-blue-900/80 px-4 py-2 text-sm font-medium text-blue-200 shadow-lg">
+                <div className="absolute bottom-full mb-3 right-0 rounded-lg bg-blue-900/80 px-4 py-2 text-sm font-medium text-blue-200 shadow-lg whitespace-nowrap">
                   Click an attacker to assign blocker
                 </div>
               )}

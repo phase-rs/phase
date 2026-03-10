@@ -1,6 +1,8 @@
 import { motion } from "framer-motion";
 import { useCallback } from "react";
 
+import { PLAYER_ID } from "../../constants/game.ts";
+import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -44,6 +46,14 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     (s) => s.gameState?.combat?.attackers,
   );
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const isActivatable = useGameStore((s) => {
+    const wf = s.waitingFor;
+    if (!wf || wf.type !== "Priority" || wf.data.player !== PLAYER_ID) return false;
+    return s.legalActions.some((a) =>
+      (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
+      (a.type === "TapLandForMana" && a.data.object_id === objectId),
+    );
+  });
 
   const longPressHandlers = useLongPress(
     useCallback(() => {
@@ -83,6 +93,9 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   } else if (isValidTarget) {
     glowClass =
       "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]";
+  } else if (isActivatable) {
+    glowClass =
+      "ring-2 ring-cyan-400/60 shadow-[0_0_10px_2px_rgba(34,211,238,0.3)]";
   } else if (isSelected) {
     glowClass =
       "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
@@ -114,6 +127,13 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       combatClickHandler(objectId);
     } else if (targetingMode && isValidTarget) {
       addTarget(objectId);
+    } else if (isActivatable) {
+      const actions = useGameStore.getState().legalActions;
+      const action = actions.find((a) =>
+        (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
+        (a.type === "TapLandForMana" && a.data.object_id === objectId),
+      );
+      if (action) dispatchAction(action);
     } else {
       selectObject(isSelected ? null : objectId);
     }

@@ -751,6 +751,7 @@ mod tests {
         state.waiting_for = WaitingFor::DeclareBlockers {
             player: PlayerId(1),
             valid_blocker_ids: vec![],
+            valid_block_targets: std::collections::HashMap::new(),
         };
         let actions = get_legal_actions(&state);
         assert!(actions.contains(&GameAction::DeclareBlockers {
