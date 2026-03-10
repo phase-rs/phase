@@ -442,6 +442,173 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
     }
 }
 
+/// Split a cost string into components, splitting on spaces but respecting angle bracket nesting.
+/// E.g. `"R Sac<1/CARDNAME>"` -> `["R", "Sac<1/CARDNAME>"]`
+fn split_cost_components(cost_str: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0u32;
+
+    for ch in cost_str.chars() {
+        match ch {
+            '<' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ' ' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    components.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        components.push(trimmed);
+    }
+    components
+}
+
+/// Try to parse a loyalty cost component.
+/// `"AddCounter<N/LOYALTY>"` -> `Some(N)`, `"SubCounter<N/LOYALTY>"` -> `Some(-N)`
+fn parse_loyalty(s: &str) -> Option<i32> {
+    if let Some(rest) = s.strip_prefix("AddCounter<") {
+        if let Some(num_str) = rest.strip_suffix("/LOYALTY>") {
+            return num_str.parse::<i32>().ok();
+        }
+    }
+    if let Some(rest) = s.strip_prefix("SubCounter<") {
+        if let Some(num_str) = rest.strip_suffix("/LOYALTY>") {
+            return num_str.parse::<i32>().ok().map(|n| -n);
+        }
+    }
+    None
+}
+
+/// Parse a single cost component into an AbilityCost.
+fn parse_single_cost(comp: &str) -> crate::types::ability::AbilityCost {
+    use crate::types::ability::AbilityCost;
+
+    // Tap
+    if comp == "T" {
+        return AbilityCost::Tap;
+    }
+    // Untap (Q is the Forge untap symbol)
+    if comp == "Untap" || comp == "Q" {
+        return AbilityCost::Tap;
+    }
+    // Loyalty
+    if let Some(amount) = parse_loyalty(comp) {
+        return AbilityCost::Loyalty { amount };
+    }
+    // Sacrifice: Sac<...>
+    if comp.starts_with("Sac<") {
+        return AbilityCost::Sacrifice {
+            target: TargetSpec::None,
+        };
+    }
+    // Known mana symbols: single digits, color letters, hybrid (e.g. "WB"), X
+    // Anything simple and alphanumeric that looks like mana
+    if is_mana_component(comp) {
+        return AbilityCost::Mana {
+            cost: comp.to_string(),
+        };
+    }
+    // Unknown: preserve as Mana fallback to retain data (matches Effect::Other pattern)
+    AbilityCost::Mana {
+        cost: comp.to_string(),
+    }
+}
+
+/// Heuristic: returns true if a cost component looks like a mana symbol.
+/// Mana components are purely alphanumeric (digits, color letters, hybrid symbols like "WB", "X").
+fn is_mana_component(comp: &str) -> bool {
+    !comp.is_empty() && comp.chars().all(|c| c.is_alphanumeric())
+}
+
+/// Parse a Forge `Cost$` string into a typed `AbilityCost`.
+///
+/// Handles:
+/// - `"T"` -> Tap
+/// - `"AddCounter<N/LOYALTY>"` / `"SubCounter<N/LOYALTY>"` -> Loyalty
+/// - `"Sac<...>"` -> Sacrifice
+/// - Mana symbols like `"3"`, `"W"`, `"3 W"` -> Mana
+/// - Composite costs like `"R Sac<1/CARDNAME>"` -> Composite
+/// - `"Untap"` / `"Q"` -> Tap (reuse)
+/// - Unknown components -> Mana fallback to preserve data
+/// - `"True"` (free cost) -> None
+pub fn parse_cost(cost_str: &str) -> Option<crate::types::ability::AbilityCost> {
+    use crate::types::ability::AbilityCost;
+
+    let cost_str = cost_str.trim();
+    if cost_str.is_empty() || cost_str == "True" {
+        return None;
+    }
+
+    // Single-component fast paths
+    if cost_str == "T" {
+        return Some(AbilityCost::Tap);
+    }
+    if let Some(amount) = parse_loyalty(cost_str) {
+        return Some(AbilityCost::Loyalty { amount });
+    }
+
+    // Split into components
+    let components = split_cost_components(cost_str);
+    if components.len() == 1 {
+        return Some(parse_single_cost(&components[0]));
+    }
+
+    // Multiple components: group mana parts together, other costs separate
+    let mut costs: Vec<AbilityCost> = Vec::new();
+    let mut mana_parts: Vec<String> = Vec::new();
+
+    for comp in &components {
+        if comp == "T" {
+            costs.push(AbilityCost::Tap);
+        } else if comp == "Untap" || comp == "Q" {
+            costs.push(AbilityCost::Tap);
+        } else if let Some(amount) = parse_loyalty(comp) {
+            costs.push(AbilityCost::Loyalty { amount });
+        } else if comp.starts_with("Sac<") {
+            costs.push(AbilityCost::Sacrifice {
+                target: TargetSpec::None,
+            });
+        } else if is_mana_component(comp) {
+            mana_parts.push(comp.clone());
+        } else {
+            // Unknown non-mana component (e.g. PayLife<2>, Discard<1/Card>, tapXType<...>)
+            // Preserve as Mana fallback
+            costs.push(AbilityCost::Mana {
+                cost: comp.clone(),
+            });
+        }
+    }
+
+    // Consolidate mana parts into a single Mana cost at the front
+    if !mana_parts.is_empty() {
+        costs.insert(
+            0,
+            AbilityCost::Mana {
+                cost: mana_parts.join(" "),
+            },
+        );
+    }
+
+    match costs.len() {
+        0 => None,
+        1 => Some(costs.into_iter().next().unwrap()),
+        _ => Some(AbilityCost::Composite { costs }),
+    }
+}
+
 pub fn parse_ability(raw: &str) -> Result<AbilityDefinition, ParseError> {
     let mut params = parse_params(raw);
     let mut kind = None;
@@ -462,10 +629,7 @@ pub fn parse_ability(raw: &str) -> Result<AbilityDefinition, ParseError> {
     let kind = kind.ok_or(ParseError::MissingAbilityKind)?;
 
     // Extract cost if present (for activated abilities)
-    let cost = params.remove("Cost").map(|_cost_str| {
-        // Cost parsing is basic for now -- Plan 02 will enrich this
-        crate::types::ability::AbilityCost::Tap
-    });
+    let cost = params.remove("Cost").and_then(|cost_str| parse_cost(&cost_str));
 
     // Convert known params into a typed Effect; remaining params stay in the HashMap
     let effect = params_to_effect(&api_type, &mut params);
@@ -628,5 +792,176 @@ mod tests {
         let result = parse_ability("SP$ SomeNewEffect | Foo$ Bar").unwrap();
         assert_eq!(result.api_type(), "SomeNewEffect");
         assert!(matches!(result.effect, Effect::Other { .. }));
+    }
+
+    // --- parse_cost tests ---
+
+    #[test]
+    fn parse_cost_tap_only() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("T").unwrap();
+        assert_eq!(cost, AbilityCost::Tap);
+    }
+
+    #[test]
+    fn parse_cost_mana_simple() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("3 W").unwrap();
+        assert_eq!(cost, AbilityCost::Mana { cost: "3 W".to_string() });
+    }
+
+    #[test]
+    fn parse_cost_mana_single() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("R").unwrap();
+        assert_eq!(cost, AbilityCost::Mana { cost: "R".to_string() });
+    }
+
+    #[test]
+    fn parse_cost_loyalty_add() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("AddCounter<2/LOYALTY>").unwrap();
+        assert_eq!(cost, AbilityCost::Loyalty { amount: 2 });
+    }
+
+    #[test]
+    fn parse_cost_loyalty_sub() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("SubCounter<1/LOYALTY>").unwrap();
+        assert_eq!(cost, AbilityCost::Loyalty { amount: -1 });
+    }
+
+    #[test]
+    fn parse_cost_loyalty_zero() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("AddCounter<0/LOYALTY>").unwrap();
+        assert_eq!(cost, AbilityCost::Loyalty { amount: 0 });
+    }
+
+    #[test]
+    fn parse_cost_sacrifice() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("Sac<1/CARDNAME>").unwrap();
+        assert_eq!(cost, AbilityCost::Sacrifice { target: TargetSpec::None });
+    }
+
+    #[test]
+    fn parse_cost_composite_mana_and_tap() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("2 T").unwrap();
+        assert_eq!(
+            cost,
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: "2".to_string() },
+                    AbilityCost::Tap,
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cost_composite_mana_and_sacrifice() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("R Sac<1/CARDNAME>").unwrap();
+        assert_eq!(
+            cost,
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: "R".to_string() },
+                    AbilityCost::Sacrifice { target: TargetSpec::None },
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cost_composite_mana_tap_sacrifice() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("2 T Sac<1/CARDNAME>").unwrap();
+        assert_eq!(
+            cost,
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: "2".to_string() },
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice { target: TargetSpec::None },
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cost_unknown_fallback() {
+        use crate::types::ability::AbilityCost;
+        // Unknown cost components are preserved as Mana fallback
+        let cost = parse_cost("PayLife<2>").unwrap();
+        assert_eq!(cost, AbilityCost::Mana { cost: "PayLife<2>".to_string() });
+    }
+
+    #[test]
+    fn parse_cost_true_is_none() {
+        assert!(parse_cost("True").is_none());
+    }
+
+    #[test]
+    fn parse_cost_empty_is_none() {
+        assert!(parse_cost("").is_none());
+    }
+
+    #[test]
+    fn parse_cost_untap() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("Q").unwrap();
+        assert_eq!(cost, AbilityCost::Tap);
+        let cost = parse_cost("Untap").unwrap();
+        assert_eq!(cost, AbilityCost::Tap);
+    }
+
+    #[test]
+    fn split_cost_components_preserves_angle_brackets() {
+        let components = split_cost_components("R Sac<1/CARDNAME> T");
+        assert_eq!(components, vec!["R", "Sac<1/CARDNAME>", "T"]);
+    }
+
+    #[test]
+    fn split_cost_components_nested_brackets() {
+        let components = split_cost_components("2 T Sac<1/Artifact;Creature/artifact or creature>");
+        assert_eq!(components, vec!["2", "T", "Sac<1/Artifact;Creature/artifact or creature>"]);
+    }
+
+    #[test]
+    fn parse_cost_composite_with_discard() {
+        use crate::types::ability::AbilityCost;
+        let cost = parse_cost("U T Discard<1/Card>").unwrap();
+        assert_eq!(
+            cost,
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: "U".to_string() },
+                    AbilityCost::Tap,
+                    AbilityCost::Mana { cost: "Discard<1/Card>".to_string() },
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cost_loyalty_wired_into_parse_ability() {
+        // Verify that parse_ability correctly uses parse_cost for loyalty costs
+        let result = parse_ability("AB$ Dig | Cost$ AddCounter<2/LOYALTY> | DigNum$ 1").unwrap();
+        assert_eq!(
+            result.cost,
+            Some(crate::types::ability::AbilityCost::Loyalty { amount: 2 })
+        );
+    }
+
+    #[test]
+    fn parse_cost_mana_wired_into_parse_ability() {
+        let result = parse_ability("AB$ Draw | Cost$ 1 U | NumCards$ 1").unwrap();
+        assert_eq!(
+            result.cost,
+            Some(crate::types::ability::AbilityCost::Mana { cost: "1 U".to_string() })
+        );
     }
 }
