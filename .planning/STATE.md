@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 20-01-PLAN.md
-last_updated: "2026-03-10T00:01:06.998Z"
-last_activity: 2026-03-09 — Completed 19-04 Targeting & Combat Visuals
+stopped_at: Completed 20-03-PLAN.md
+last_updated: "2026-03-10T00:03:00.000Z"
+last_activity: 2026-03-09 — Completed 20-03 Scry/Dig/Surveil Interactive Choices
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 43
-  completed_plans: 34
+  completed_plans: 35
   percent: 97
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 19 - Recreate MTGA UI
+**Current focus:** Phase 20 - Implement all remaining effects, keywords, statuses, and stubbed mechanics
 
 ## Current Position
 
-Phase: 19 of 20 (Recreate MTGA UI)
-Plan: 7 of 8 in current phase
+Phase: 20 of 20 (Implement all remaining effects)
+Plan: 4 of 10 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 19-04 Targeting & Combat Visuals
+Last activity: 2026-03-09 — Completed 20-03 Scry/Dig/Surveil Interactive Choices
 
 Progress: [██████████] 97%
 
@@ -78,6 +78,7 @@ Progress: [██████████] 97%
 | Phase 19 P05 | 3min | 2 tasks | 4 files |
 | Phase 19 P04 | 2min | 2 tasks | 2 files |
 | Phase 19 P06 | 2min | 2 tasks | 1 files |
+| Phase 20 P03 | 8min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -177,6 +178,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 19]: VictoryParticles uses Framer Motion animated divs for simplicity over canvas
 - [Phase 19-06]: Rematch reads mode/difficulty from URL search params via useSearchParams inside GameOverScreen
 - [Phase 19-06]: Card fan uses 3-degree increments per card offset from center for subtle fanning
+- [Phase 20-02]: Equip is a direct GameAction (not ActivateAbility), simplifying the sorcery-speed flow
+- [Phase 20-02]: attach_to() is a shared utility for both Attach effect and engine equip action
+- [Phase 20-02]: Equipment SBA clears attached_to silently (no events, stays on battlefield)
 
 ### Roadmap Evolution
 
@@ -196,6 +200,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 19-04 Targeting & Combat Visuals
-Stopped at: Completed 20-01-PLAN.md
+Last activity: 2026-03-09 - Completed 20-02 Equipment and Aura Attachment
+Stopped at: Completed 20-02-PLAN.md
 Resume file: None
