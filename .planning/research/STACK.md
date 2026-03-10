@@ -1,244 +1,309 @@
-# Technology Stack
+# Technology Stack: v1.2 Data Source Migration & Test Infrastructure
 
-**Project:** Forge.rs v1.1 -- Arena UI Port from Alchemy
-**Researched:** 2026-03-08
+**Project:** Forge.rs v1.2
+**Researched:** 2026-03-10
+**Scope:** NEW stack additions for MTGJSON integration, custom ability JSON schema, Forge parser removal, and comprehensive test suite. Excludes existing validated stack (Rust engine, React/TS frontend, Zustand, Framer Motion, Tailwind v4, Tauri v2, Axum, etc.).
 
-## Stack Comparison: Alchemy vs Forge.rs
+## Recommended Stack Additions
 
-### Shared Stack (Already Aligned)
+### MTGJSON Data Integration
 
-Both projects use the same core stack. These require NO changes:
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| **serde_json** (existing) | 1 | Deserialize MTGJSON AtomicCards.json | Already in the workspace. MTGJSON data is JSON -- serde_json is the standard Rust JSON library and already a dependency. |
+| **Own MTGJSON types** (not the `mtgjson` crate) | N/A | Type-safe card metadata deserialization | The `mtgjson` crate (5.2.2) is usable but brings `chrono`, `semver`, and `uuid` as required dependencies for fields we will never use (purchase URLs, rulings, release dates). Rolling our own subset struct with ~15 fields is simpler, avoids 3 transitive deps, and lets us add `defense` (missing from the crate's `AtomicCard`). |
 
-| Technology | Alchemy Version | Forge.rs Version | Status |
-|------------|----------------|-----------------|--------|
-| React | ^19.2.0 | ^19.0.0 | Aligned (minor semver bump fine) |
-| Zustand | ^5.0.11 | ^5.0.11 | Identical |
-| `subscribeWithSelector` | Used in 6 stores | Used in gameStore | Aligned -- Forge.rs already uses this middleware |
-| Framer Motion | ^12.34.3 | ^12.35.1 | Aligned (Forge.rs actually newer) |
-| Tailwind CSS v4 | ^4.2.1 | ^4.2.1 | Identical |
-| `@tailwindcss/vite` | ^4.2.1 | ^4.2.1 | Identical |
-| Vite | ^7.3.1 | ^6.2.0 | **Update needed** (see below) |
-| `vite-plugin-pwa` | ^1.2.0 | ^1.2.0 | Identical |
-| React Router | ^7.13.1 (`react-router-dom`) | ^7.13.1 (`react-router`) | Aligned (same package, different entry point) |
-| Vitest | ^4.0.18 | ^3.0.0 | **Update needed** (see below) |
-| TypeScript | ~5.9.3 | ~5.7.0 | **Update needed** (see below) |
-| `@vitejs/plugin-react` | ^5.1.1 | ^4.4.1 | **Update needed** (see below) |
-| ESLint | ^9.39.1 | ^9.21.0 | Minor update, not blocking |
+**Data file choice: `StandardAtomic.json`** because:
+- Contains only Standard-legal cards (matches the 78-card curated subset scope)
+- Uses the Card (Atomic) model: oracle-like, printing-independent, exactly what a rules engine needs
+- Much smaller than AllPrintings.json (which includes every printing of every card across all sets)
+- Fields we need: `name`, `manaCost`, `manaValue`, `types`, `subtypes`, `supertypes`, `colors`, `colorIdentity`, `colorIndicator`, `power`, `toughness`, `loyalty`, `defense`, `keywords`, `text`, `layout`, `side`, `faceName`, `identifiers.scryfallOracleId`
+- Fields we ignore: `purchaseUrls`, `rulings`, `foreignData`, `printings`, `edhrecRank`, `leadershipSkills`, `hand`, `life`, `attractionLights`
 
-### Version Gaps to Close
+**Why NOT the `mtgjson` crate (5.2.2):**
+1. Missing `defense` field on `AtomicCard` (needed for Battle cards)
+2. Requires `chrono`, `semver`, `uuid` -- adds ~200KB to WASM binary for unused fields
+3. `AtomicCard.identifiers` is `Identifiers` with 16 fields when we need 1 (`scryfallOracleId`)
+4. The crate deserializes ALL fields including `foreignData: Vec<ForeignData>` and `rulings: Option<Vec<Ruling>>` which allocate for data we discard
+5. 15-field custom struct with `#[serde(rename_all = "camelCase")]` is ~50 lines vs. an opaque dependency
 
-These are version bumps on existing dependencies. Update during port setup.
+**Why NOT `mtgjson-sdk` (0.1.2):**
+- Pulls in DuckDB, reqwest, polars, tokio -- designed for runtime querying, not static data embedding
+- Massively heavy for a game engine that just needs to load card metadata at startup
 
-| Package | Current | Target | Why |
-|---------|---------|--------|-----|
-| `vite` | ^6.2.0 | ^7.3.1 | Alchemy uses Vite 7; aligns build tooling, avoids plugin compat issues with `@vitejs/plugin-react` v5 |
-| `@vitejs/plugin-react` | ^4.4.1 | ^5.1.1 | Required by Vite 7 |
-| `typescript` | ~5.7.0 | ~5.9.3 | Alchemy targets 5.9; newer type inference helps with discriminated union patterns |
-| `vitest` | ^3.0.0 | ^4.0.18 | Alchemy uses Vitest 4; aligns test runner |
-| `jsdom` | ^26.0.0 | ^28.1.0 | Test environment alignment |
-| `@testing-library/react` | ^16.3.0 | ^16.3.2 | Trivial patch |
+### Custom Ability JSON Schema
 
-**Confidence:** HIGH -- versions read directly from both package.json files.
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| **schemars** | 1.2.1 | Generate JSON Schema from Rust ability types | Derives `JsonSchema` alongside `Serialize`/`Deserialize`, ensuring the schema always matches Rust types. MIT-licensed, deep serde attribute compatibility. Schema generation is a dev-time tool, not a runtime dep. |
+| **serde** (existing) | 1 | Serialize/deserialize ability definitions | Already used throughout. The custom ability format is JSON, serde handles it. |
+| **serde_json** (existing) | 1 | Parse ability JSON files | Already a dependency. |
 
-### New Dependencies to Add
+**Ability format approach:** Define Rust enums/structs for `AbilityDef`, `TriggerDef`, `StaticDef`, `ReplacementDef` with strongly-typed variants (not `HashMap<String, String>`), then derive `Serialize + Deserialize + JsonSchema`. This replaces the current string-based Forge format where abilities are `"SP$ DealDamage | NumDmg$ 3"` pipe-delimited text parsed at runtime.
 
-#### Required: Audio System
+**Why schemars over hand-written JSON Schema:**
+- Schema auto-updates when Rust types change -- single source of truth
+- `#[serde(tag = "type", content = "data")]` attributes automatically generate discriminated union schemas
+- Can export `.schema.json` files for editor autocompletion when hand-writing card definitions
+- MIT license, v1.2.1 released Feb 2026, actively maintained
 
-Alchemy's audio system uses the **Web Audio API directly** -- no third-party audio library needed. The entire system is pure TypeScript:
+**Why NOT jsonschema crate for validation:**
+- We don't need runtime JSON Schema validation -- serde's deserialization IS the validation
+- If JSON doesn't match the Rust types, `serde_json::from_str` returns `Err` with field path
+- jsonschema is useful when accepting untrusted/external JSON -- our card files are first-party
 
-| Component | Implementation | New Dependency? |
-|-----------|---------------|-----------------|
-| AudioContext singleton | `audioContext.ts` -- lazy singleton with SFX/music gain buses | No -- browser API |
-| Sound synthesis | `sounds.ts` -- procedural SFX via OscillatorNode, BiquadFilter, noise buffers | No -- browser API |
-| Sample playback | `sounds.ts` -- decodeAudioData + BufferSource for .m4a samples | No -- browser API |
-| Ambient music | `ambientMusic.ts` -- OscillatorNode layering with gain envelopes | No -- browser API |
-| Audio store | `audioStore.ts` -- Zustand store for volume/mute preferences | No -- uses existing Zustand |
+### Test Infrastructure
 
-**Key finding:** Alchemy has `howler` (^2.2.4) in package.json but NEVER imports it anywhere in src/. It is a dead dependency. DO NOT add Howler to Forge.rs. The Web Audio API approach is superior because:
-- Zero bundle size for audio (browser-native API)
-- Fine-grained control over synthesis parameters
-- Sample playback with pre-warming and lazy loading
-- Dual gain buses (SFX + music) with independent volume control
-- iOS/iPadOS warm-up pattern already implemented
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| **insta** | 1.46.3 | Snapshot testing for game state assertions | Serde-native: `assert_json_snapshot!` on `GameState` captures exact game state. Snapshot diffs show precisely what changed. Eliminates hand-written assertion chains. `cargo-insta` CLI for review workflow. |
+| **test-case** | 3.3.1 | Parameterized test cases | `#[test_case("Lightning Bolt", 3 ; "bolt deals 3")]` generates named sub-tests. Perfect for "same mechanic, different cards" patterns. Proc macro, zero runtime cost. |
 
-**Audio assets needed:** .m4a sample files in `public/audio/sfx/` organized by type (damage, death, heal, summon, spell, keyword, ui). These are static assets, not npm dependencies.
+**Why insta:**
+- GameState already derives `Serialize` -- zero adaptation cost
+- Snapshot files (`.snap`) provide reviewable, diffable game state records
+- `assert_json_snapshot!` or `assert_yaml_snapshot!` for structured state comparison
+- `cargo insta review` CLI for accepting/rejecting snapshot changes
+- Eliminates brittle hand-written assertions like `assert_eq!(obj.power, Some(5))`
+- Perfect for regression tests: "cast Lightning Bolt targeting creature, snapshot resulting state"
 
-#### Required: Canvas Particle VFX
+**Why test-case over alternatives:**
+- Most popular parameterized test crate (3.3.1 stable)
+- Clean proc macro syntax: `#[test_case(input => expected ; "description")]`
+- Named test cases appear in `cargo test` output for debugging
+- Lighter than `proptest` (which is for property-based testing, not parameterized scenarios)
 
-Alchemy's particle system is a custom `ParticleSystem` class using the **Canvas 2D API directly**. No dependency needed.
+**Why NOT proptest/quickcheck:**
+- MTG rules are deterministic given a seed -- snapshot tests are more appropriate than random generation
+- Game state is deeply structured (not amenable to random generation)
+- XMage-style scenario tests ("set up board, take action, verify result") are the right pattern
 
-Forge.rs already has a basic `ParticleCanvas.tsx` but Alchemy's implementation is significantly more capable:
+### Forge Parser Retention (Dev-Only)
 
-| Feature | Forge.rs Current | Alchemy |
-|---------|-----------------|---------|
-| Particle properties | x, y, vx, vy, alpha, color, decay | + size, gravity, drag, glow, style (circle/ring), start/end size |
-| Rendering | Single pass, basic circles | 3-pass batched: plain circles, glowing (pre-rendered sprites), rings |
-| Blending | Default compositing | Additive blending (`lighter`) for glow effects |
-| Effects system | None | `ActiveEffect` with update/draw/onComplete callbacks |
-| DPR handling | Uses raw window dimensions | Capped at 2x DPR with proper canvas scaling |
-| Texture sprites | None | LRU-cached HTMLImageElement sprites with async loading |
-| Performance | Always runs rAF loop | Auto-starts/stops loop when particles exist |
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| **walkdir** (existing, feature-gated) | 2 | Traverse Forge card directories | Needed only for migration tooling and dev-only conversion scripts. Gate behind `cfg(feature = "forge-compat")` so it's not compiled into release/WASM builds. |
 
-**Action:** Replace Forge.rs's `ParticleCanvas.tsx` with Alchemy's `ParticleSystem` class. This is a pure code port, no new dependencies.
+**Approach:** Move the Forge parser and `walkdir` behind a Cargo feature flag:
+```toml
+[features]
+default = []
+forge-compat = ["dep:walkdir"]
 
-#### Required: PWA Service Worker Registration
-
-Forge.rs uses `vite-plugin-pwa` (already installed) but has no service worker registration code in the client. Alchemy has a complete SW registration system:
-
-| File | Purpose | New Dependency? |
-|------|---------|-----------------|
-| `registerServiceWorker.ts` | Registers SW via `virtual:pwa-register`, handles updates | No -- uses existing `vite-plugin-pwa` |
-| `updateStatus.ts` | Reactive update status for UI (downloading/activating/idle) | No |
-
-**Note:** Alchemy uses `workbox-window` (^7.4.0) in package.json, but the actual registration code uses `virtual:pwa-register` from `vite-plugin-pwa` which wraps Workbox internally. The `workbox-window` direct dependency is NOT imported in src/. DO NOT add `workbox-window` as a direct dependency.
-
-**PWA config change:** Forge.rs currently uses `registerType: "autoUpdate"` and `manifest: false`. Port Alchemy's `registerType: "prompt"` pattern with inline manifest config for better update control. Keep Forge.rs's Scryfall runtime caching rules.
-
-#### Required: CSS Custom Properties for Card Sizing
-
-Alchemy uses CSS custom properties for responsive card dimensions. This is pure CSS, no dependencies:
-
-```css
-:root {
-  --_card-w: 90px;     /* mobile */
-  --_card-h: 130px;
-  --_board-w: 82px;    /* board creatures */
-  --_board-h: 115px;
-}
-/* Scales up via media queries at 768px and 1024px breakpoints */
-/* Uses dvh units with clamp() for viewport-adaptive sizing */
+[dependencies]
+walkdir = { version = "2", optional = true }
 ```
 
-**Action:** Port these CSS custom properties into Forge.rs's `index.css`. Components reference `var(--card-width)` etc. No JS dependency.
-
-### Dependencies to NOT Add
-
-| Alchemy Dependency | Why NOT to Add |
-|--------------------|----------------|
-| `howler` ^2.2.4 | Dead dependency in Alchemy -- never imported. Web Audio API used directly instead |
-| `workbox-window` ^7.4.0 | Not directly imported. `vite-plugin-pwa` handles Workbox internally via `virtual:pwa-register` |
-| `peerjs` ^1.5.5 | P2P networking for Alchemy's multiplayer. Forge.rs uses WebSocket server (`forge-server`) instead -- architecturally different |
-| `uuid` ^13.0.0 | Only used in Alchemy's PeerJS networking layer. Forge.rs generates IDs in the Rust engine |
-| `cypress` ^15.11.0 | E2E testing framework. Forge.rs uses Vitest only. Can add later if needed |
-| `puppeteer` ^24.37.5 | Used for Alchemy's visual regression testing. Not needed for port |
-| `fast-check` ^4.5.3 | Property-based testing. Nice to have but not required for UI port |
-| `husky` ^9.1.7 | Git hooks. Forge.rs has its own CI setup |
-
-### Dependencies to Keep (Forge.rs Only)
-
-| Forge.rs Dependency | Purpose | Keep? |
-|---------------------|---------|-------|
-| `vite-plugin-wasm` ^3.4.1 | WASM module loading | YES -- required for Rust engine |
-| `vite-plugin-top-level-await` ^1.5.0 | Top-level await for WASM init | YES -- required for WASM |
-| `idb-keyval` ^6.2.2 | IndexedDB wrapper for Scryfall image caching | YES -- efficient, tiny (600B), works well |
-| `@vitest/coverage-v8` ^3.2.4 | Code coverage | YES -- update to match Vitest 4 |
-
-## Recommended Stack
-
-### Core Framework (No Changes)
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| React | ^19.2.0 | UI framework | Both projects aligned |
-| Zustand | ^5.0.11 | State management | Both use subscribeWithSelector middleware |
-| Framer Motion | ^12.35.1 | DOM animations | Both aligned, Forge.rs already newer |
-| Tailwind CSS v4 | ^4.2.1 | Styling | Both aligned |
-| React Router | ^7.13.1 | Routing | Both aligned |
-
-### Build Tooling (Version Bumps)
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| Vite | ^7.3.1 | Build tool | Align with Alchemy, required for plugin-react v5 |
-| `@vitejs/plugin-react` | ^5.1.1 | React Fast Refresh | Required by Vite 7 |
-| TypeScript | ~5.9.3 | Type checking | Align with Alchemy |
-| `vite-plugin-pwa` | ^1.2.0 | PWA/Workbox integration | Already installed, needs config update |
-
-### Audio (Browser APIs, Zero Dependencies)
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| Web Audio API | Browser native | Sound synthesis + sample playback | Zero bundle cost, full control, iOS warm-up pattern included |
-
-### VFX (Browser APIs, Zero Dependencies)
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| Canvas 2D API | Browser native | Particle effects, projectiles, shockwaves | Additive blending, glow sprites, auto-start/stop loop |
-| CSS Custom Properties | Browser native | Responsive card sizing | Media query breakpoints with dvh/clamp for viewport adaptation |
-
-### Forge.rs-Specific (Keep)
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| `vite-plugin-wasm` | ^3.4.1 | WASM loading | Required for Rust engine bridge |
-| `vite-plugin-top-level-await` | ^1.5.0 | WASM init | Required for async WASM bootstrap |
-| `idb-keyval` | ^6.2.2 | IndexedDB caching | Scryfall image cache, tiny footprint |
-
-### Testing (Version Bumps)
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| Vitest | ^4.0.18 | Test runner | Align with Alchemy |
-| `@vitest/coverage-v8` | ^3.2.4 -> match v4 | Coverage | Must match Vitest major |
-| jsdom | ^28.1.0 | Test DOM | Align with Alchemy |
-| `@testing-library/react` | ^16.3.2 | Component testing | Minor patch bump |
-
-## Vite Config Changes
-
-Forge.rs's `vite.config.ts` needs these changes for the port:
-
-1. **Add path aliases** matching Alchemy's convention (`@components`, `@hooks`, `@audio`, etc.) -- or adapt to Forge.rs's existing structure
-2. **Update PWA config** from `registerType: "autoUpdate"` to `registerType: "prompt"` with inline manifest
-3. **Keep WASM plugins** (`vite-plugin-wasm`, `vite-plugin-top-level-await`) -- Alchemy doesn't need these but Forge.rs does
-4. **Keep Scryfall caching rules** in workbox config -- Alchemy doesn't have these
-5. **Add `includeAssets`** for audio files: `'**/*.{m4a,mp3,json}'`
-6. **Add build hash/version defines** (`__BUILD_HASH__`, `__APP_VERSION__`) for PWA update UI
-
-## Installation
-
-```bash
-cd client
-
-# Update existing dependencies
-pnpm update vite@^7.3.1 @vitejs/plugin-react@^5.1.1 typescript@~5.9.3 \
-  vitest@^4.0.18 jsdom@^28.1.0 @testing-library/react@^16.3.2
-
-# Update coverage plugin to match Vitest 4
-pnpm update @vitest/coverage-v8
-
-# No new runtime dependencies needed!
-# Audio = Web Audio API (browser native)
-# Particles = Canvas 2D API (browser native)
-# Card sizing = CSS custom properties (browser native)
-# PWA registration = vite-plugin-pwa virtual module (already installed)
-```
+This means:
+- `cargo build` / `cargo build --target wasm32-unknown-unknown` excludes Forge parser
+- `cargo build --features forge-compat` includes it for migration scripts
+- `cargo test --features forge-compat` runs parser tests
+- Release WASM binary stays small (walkdir adds ~15KB)
 
 ## Alternatives Considered
 
 | Category | Recommended | Alternative | Why Not |
 |----------|-------------|-------------|---------|
-| Audio | Web Audio API (native) | Howler.js | Alchemy already proved native API works; Howler adds 10KB for features not needed (spatial audio, audio sprites) |
-| Audio | Web Audio API (native) | Tone.js | Overkill for game SFX; designed for music production, 150KB+ |
-| Particles | Canvas 2D (native) | PixiJS | 300KB+ bundle for 2D rendering engine; overkill for particle effects only |
-| Particles | Canvas 2D (native) | Three.js | 600KB+; 3D renderer unnecessary for 2D particle effects |
-| Particles | Canvas 2D (native) | tsparticles | 50KB+; less control than custom system, Alchemy's implementation already tuned for card game VFX |
-| Card sizing | CSS custom properties | JS resize observer | CSS-only solution has zero JS overhead, works with Tailwind, no layout thrashing |
-| PWA updates | vite-plugin-pwa | Custom SW | Plugin already installed, battle-tested Workbox integration |
+| MTGJSON types | Own subset struct | `mtgjson` crate (5.2.2) | Missing `defense` field, pulls `chrono`/`semver`/`uuid`, deserializes unused fields |
+| MTGJSON types | Own subset struct | `mtgjson-sdk` (0.1.2) | DuckDB + reqwest + polars + tokio -- massive overkill |
+| Schema generation | `schemars` 1.2.1 | Hand-written JSON Schema | Drifts from Rust types, error-prone, no auto-update |
+| Schema validation | serde deserialization | `jsonschema` crate | Runtime validation unnecessary -- serde IS the validator |
+| Snapshot testing | `insta` 1.46.3 | Manual `assert_eq!` chains | Verbose, brittle, no diff visualization, no review workflow |
+| Parameterized tests | `test-case` 3.3.1 | `parameterized` crate | Less popular, similar features, test-case has better named case syntax |
+| Parameterized tests | `test-case` 3.3.1 | `proptest` | Random generation wrong for deterministic rule verification |
+| Data file | `StandardAtomic.json` | `AllPrintings.json` | ~100x larger, includes printing data (art, rarity, set) we don't need |
+| Data file | `StandardAtomic.json` | `AtomicCards.json` | Includes all formats -- Standard subset is what we need |
+| Data file | Checked into repo | Downloaded at build time | Reproducible builds, offline CI, no network dependency |
 
-## Key Insight
+## What NOT to Add
 
-The port requires **zero new npm dependencies**. All new capabilities (audio, particle VFX, responsive card sizing, PWA registration) use browser-native APIs. The only changes are version bumps on existing dependencies to align the two projects. This is by design -- Alchemy was built to minimize external dependencies, and that philosophy carries over cleanly.
+| Technology | Reason |
+|------------|--------|
+| `reqwest` | No runtime HTTP needed -- MTGJSON data is checked into the repo as static JSON |
+| `tokio` (in engine crate) | Engine is synchronous and single-threaded by design (WASM compat) |
+| `duckdb` / `polars` | Query engine for 78 cards is absurd -- HashMap lookup is fine |
+| `chrono` | No date handling needed in card data |
+| `uuid` | Card identity uses `ObjectId(u64)` and string names, not UUIDs |
+| `semver` | No version comparison needed |
+| `jsonschema` | serde deserialization provides validation; schema generation (schemars) is dev-only |
+| `derive_builder` | Card/ability types are simple enough for manual construction |
+| `strum` | Existing enum patterns with serde tag/content work well |
+| Any ORM/database | 78 cards in a HashMap is the right data structure |
+
+## Dependency Changes Summary
+
+### engine crate (`Cargo.toml`)
+
+```toml
+[dependencies]
+# Existing (unchanged)
+serde = { workspace = true }
+rpds = { workspace = true }
+thiserror = "2"
+rand = "0.9"
+rand_chacha = "0.9"
+indexmap = { version = "2", features = ["serde"] }
+petgraph = "0.6"
+serde_json = "1"
+
+# CHANGED: Feature-gate walkdir for Forge compat
+walkdir = { version = "2", optional = true }
+
+[features]
+default = []
+forge-compat = ["dep:walkdir"]
+
+[dev-dependencies]
+tempfile = "3"
+# NEW
+insta = { version = "1.46", features = ["json"] }
+test-case = "3.3"
+schemars = "1.2"   # dev-only: generate .schema.json for ability format
+```
+
+### Workspace-level changes
+
+None. No new workspace dependencies needed.
+
+### Frontend (no changes)
+
+The frontend requires zero new dependencies. Card metadata from MTGJSON is consumed on the Rust side only. The TypeScript types generated by `tsify` from Rust structs will change shape (new ability format fields) but no new npm packages are needed.
+
+## Installation
+
+```bash
+# Rust dev tools:
+cargo install cargo-insta    # Snapshot review CLI
+
+# Download MTGJSON StandardAtomic.json (one-time, check into repo)
+curl -L https://mtgjson.com/api/v5/StandardAtomic.json.gz | gunzip > data/mtgjson/StandardAtomic.json
+```
+
+## Integration Points
+
+### MTGJSON -> Engine Type Mapping
+
+| MTGJSON Field | Engine Type | Notes |
+|---------------|-------------|-------|
+| `name` | `CardFace.name: String` | Direct mapping |
+| `manaCost` | `CardFace.mana_cost: ManaCost` | Parse `"{2}{W}{U}"` format (different from Forge's `2 W U`) |
+| `types` | `CardType.core_types` | `["Creature"]` -> `vec![CoreType::Creature]` |
+| `subtypes` | `CardType.subtypes` | `["Human", "Wizard"]` |
+| `supertypes` | `CardType.supertypes` | `["Legendary"]` |
+| `power` / `toughness` | `CardFace.power/toughness: Option<String>` | Direct mapping (handles `*` values) |
+| `loyalty` | `CardFace.loyalty: Option<String>` | Direct mapping |
+| `defense` | `CardFace.defense: Option<String>` | Direct mapping |
+| `colors` | `CardFace.color_override` | `["W", "U"]` -> `vec![ManaColor::White, ManaColor::Blue]` |
+| `keywords` | `CardFace.keywords: Vec<String>` | Direct mapping |
+| `layout` | `CardLayout` enum | `"transform"` -> `CardLayout::Transform(...)` |
+| `side` | Face ordering in layout | `"a"` = front face, `"b"` = back face |
+| `faceName` | Per-face name for multi-face cards | Used to match faces in `StandardAtomic.json` (cards with `//` in name) |
+| `text` | `CardFace.oracle_text` | Oracle text for display |
+| `identifiers.scryfallOracleId` | Frontend Scryfall image lookup | Replaces name-based lookup for reliability |
+
+### MTGJSON Mana Cost Format Difference
+
+Forge format: `2 W U` (space-separated, bare letters)
+MTGJSON format: `{2}{W}{U}` (curly-brace wrapped)
+
+A new mana cost parser is needed for the `{...}` format. The existing `mana_cost::parse()` handles Forge's format. Add `mana_cost::parse_mtgjson()` that strips braces and delegates to the same internal logic. Hybrid costs in MTGJSON: `{W/U}`, phyrexian: `{W/P}`, X: `{X}`.
+
+### Ability JSON -> Engine Type Mapping
+
+Current Forge format: `"SP$ DealDamage | NumDmg$ 3 | ValidTgts$ Any"`
+New JSON format maps directly to existing Rust types:
+
+```json
+{
+  "type": "Spell",
+  "effect": "DealDamage",
+  "params": { "amount": 3 },
+  "targets": { "valid": "Any", "prompt": "Choose a target" }
+}
+```
+
+This maps to the existing `AbilityDefinition` / `ResolvedAbility` pipeline. The effect registry keys (`"DealDamage"`, `"Draw"`, etc.) remain the same -- only the card definition format changes, not the engine dispatch.
+
+### Scryfall Image Integration Improvement
+
+Current: Frontend fetches by card name (`/cards/named?exact=Lightning+Bolt`)
+With MTGJSON: Can use `identifiers.scryfallOracleId` for direct lookup (`/cards/{scryfallId}`)
+Benefit: More reliable than name matching (handles special characters, alternative names)
+Note: This is a frontend-only optimization, not a hard dependency -- name-based lookup still works as fallback.
+
+### Test Infrastructure Pattern (XMage-Inspired)
+
+XMage tests (MIT-licensed) follow this pattern:
+```java
+addCard(Zone.BATTLEFIELD, playerA, "Lightning Bolt");
+castSpell(1, PhaseStep.PRECOMBAT_MAIN, playerA, "Lightning Bolt");
+assertPermanentCount(playerA, "Some Creature", 0);
+```
+
+Forge.rs equivalent using the new test stack:
+```rust
+#[test_case("Lightning Bolt", "Grizzly Bears", 0 ; "bolt kills bear")]
+#[test_case("Shock", "Grizzly Bears", 0 ; "shock kills bear")]
+#[test_case("Shock", "Hill Giant", 1 ; "shock does not kill giant")]
+fn damage_spell_kills_creature(spell: &str, creature: &str, expected_count: usize) {
+    let mut state = setup_game_at_main_phase();
+    let creature_id = spawn_creature(&mut state, creature, PlayerId(1));
+    cast_and_resolve(&mut state, spell, vec![TargetRef::Object(creature_id)]);
+
+    let battlefield = state.zones.get(&Zone::Battlefield).unwrap();
+    assert_eq!(battlefield.len(), expected_count);
+}
+```
+
+For complex state verification, use insta snapshots:
+```rust
+#[test]
+fn enchantment_enters_and_grants_ability() {
+    let mut state = setup_game_at_main_phase();
+    // ... setup and actions ...
+    assert_json_snapshot!(extract_battlefield_state(&state));
+}
+```
+
+## WASM Size Impact
+
+| Change | Estimated Impact |
+|--------|-----------------|
+| Remove `walkdir` from default build | -15 KB |
+| Own MTGJSON struct vs `mtgjson` crate | -0 KB (no crate added) |
+| `schemars` (dev-only, not in release) | +0 KB |
+| `insta` (dev-dependency only) | +0 KB |
+| `test-case` (dev-dependency only) | +0 KB |
+| Net WASM size change | **-15 KB** (smaller) |
+
+## Confidence Assessment
+
+| Decision | Confidence | Rationale |
+|----------|------------|-----------|
+| Own MTGJSON types over `mtgjson` crate | HIGH | Verified: crate missing `defense`, pulls 3 unnecessary deps. Official docs confirm fields needed. |
+| `StandardAtomic.json` as data source | HIGH | Official MTGJSON docs confirm it's Standard-only atomic data. Perfect match for 78-card scope. |
+| `schemars` for schema generation | HIGH | v1.2.1 released Feb 2026, MIT license, deep serde compat verified on docs.rs. |
+| `insta` for snapshot testing | HIGH | v1.46.3, widely used, GameState already implements Serialize. |
+| `test-case` for parameterized tests | HIGH | v3.3.1, stable proc macro, clean syntax verified on docs.rs. |
+| Feature-gating Forge parser | HIGH | Standard Cargo feature pattern, `optional = true` for walkdir confirmed working. |
+| No frontend stack changes | HIGH | MTGJSON consumed in Rust only; tsify generates new TS types automatically. |
+| MTGJSON mana cost parser needed | HIGH | Format difference verified: `{2}{W}{U}` vs `2 W U`. Straightforward string transformation. |
 
 ## Sources
 
-- Alchemy `package.json` -- direct file read (HIGH confidence)
-- Forge.rs `client/package.json` -- direct file read (HIGH confidence)
-- Alchemy `src/audio/audioContext.ts`, `src/audio/sounds.ts` -- direct file read confirming Web Audio API usage (HIGH confidence)
-- Alchemy `src/components/animation/particleSystem.ts` -- direct file read confirming Canvas 2D usage (HIGH confidence)
-- Alchemy `src/pwa/registerServiceWorker.ts` -- direct file read confirming `virtual:pwa-register` usage (HIGH confidence)
-- Alchemy `src/index.css` -- direct file read confirming CSS custom property card sizing (HIGH confidence)
-- Forge.rs `client/src/stores/gameStore.ts` -- confirmed `subscribeWithSelector` already in use (HIGH confidence)
-- Forge.rs `client/src/components/animation/ParticleCanvas.tsx` -- confirmed basic particle system exists (HIGH confidence)
-- Alchemy `src/` grep for `howler` -- zero imports, confirmed dead dependency (HIGH confidence)
-- Alchemy `src/` grep for `workbox-window` -- zero direct imports (HIGH confidence)
+- [MTGJSON Official Documentation](https://mtgjson.com/getting-started/)
+- [MTGJSON Card (Atomic) Data Model](https://mtgjson.com/data-models/card/card-atomic/)
+- [MTGJSON Card (Set) Data Model](https://mtgjson.com/data-models/card/card-set/)
+- [MTGJSON All Files Downloads](https://mtgjson.com/downloads/all-files/)
+- [mtgjson Rust crate docs (5.2.2)](https://docs.rs/mtgjson/latest/mtgjson/index.html)
+- [mtgjson AtomicCard struct](https://docs.rs/mtgjson/latest/mtgjson/struct.AtomicCard.html)
+- [mtgjson SetCard struct](https://docs.rs/mtgjson/latest/mtgjson/struct.SetCard.html)
+- [mtgjson-sdk crate docs](https://docs.rs/mtgjson-sdk/latest/mtgjson_sdk/index.html)
+- [schemars documentation](https://graham.cool/schemars/)
+- [schemars GitHub](https://github.com/GREsau/schemars)
+- [insta snapshot testing](https://insta.rs/)
+- [insta crate docs](https://docs.rs/insta)
+- [test-case crate docs](https://docs.rs/test-case/latest/test_case/)
+- [jsonschema crate](https://docs.rs/jsonschema)
+- [XMage GitHub (MIT license)](https://github.com/magefree/mage)
+- [XMage Testing Tools Wiki](https://github.com/magefree/mage/wiki/Development-Testing-Tools)

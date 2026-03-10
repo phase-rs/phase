@@ -1,294 +1,237 @@
-# Domain Pitfalls: Arena UI Port (Alchemy to Forge.rs)
+# Domain Pitfalls
 
-**Domain:** Porting a card game UI from a simpler engine to a complex one
-**Researched:** 2026-03-08
-**Source projects:** Alchemy (simple: 5 elements, fixed board slots, sync TS engine) -> Forge.rs (complex: MTG 5 colors, unlimited permanents, async WASM engine, stack/priority)
-
----
+**Domain:** MTGJSON integration, custom ability format, test infrastructure, and MIT relicensing for an existing MTG rules engine
+**Researched:** 2026-03-10
+**Overall Confidence:** HIGH (based on thorough codebase analysis of 54 test modules, 38 effect handlers, 137 trigger modes, 78 curated cards, plus external domain research)
 
 ## Critical Pitfalls
 
-Mistakes that cause rewrites or major issues when porting UI between engines with different complexity levels.
+Mistakes that cause rewrites, regressions, or block the milestone entirely.
 
 ---
 
-### Pitfall 1: Fixed Board Slots vs. Dynamic Permanent Count
+### Pitfall 1: Raw Forge Strings Parsed at Runtime Throughout the Engine
 
-**What goes wrong:** Alchemy's `PlayerState.board` is `(Permanent | null)[]` with a fixed `maxBoardSize` (typically 5 slots per player). The `CreatureSlots` component is designed around this bounded array -- it calculates card sizes against a known maximum, uses slot indices for creature placement (`targetSlot` in `PLAY_CARD`), and the `boardStacking` and `boardSizing` modules assume a bounded upper limit. Forge.rs's battlefield is `ObjectId[]` with no upper bound, partitioned by card type (creatures, lands, other permanents). A single player can control 20+ permanents of different types simultaneously.
+**What goes wrong:** The engine stores abilities as `Vec<String>` in Forge's pipe-delimited format (`"SP$ DealDamage | NumDmg$ 3"`) on both `CardFace` and `GameObject`. These raw strings are parsed on-the-fly by `parse_ability()` during gameplay -- at cast time (`casting.rs:60, 208`), mana ability detection (`mana_abilities.rs:15, 43`), planeswalker activation (`planeswalker.rs:170`), sub-ability chaining (`effects/mod.rs:129`), trigger resolution (`triggers.rs:176`), and coverage analysis (`coverage.rs`). The format is NOT just a load-time concern; it is woven through the entire game loop across at least 20 call sites.
 
-**Why it happens:** Developers port the `CreatureSlots` component and wire it to `gameState.battlefield`, but the layout breaks when a token deck creates 15 creatures, or when lands (which Alchemy doesn't have as permanents) need their own row. The `calculateBoardCardSize` function works well for 5-7 cards but produces unusable sizes at 15+.
+**Why it happens:** A natural assumption is "replace the parser, swap the card files, done." But `GameObject.abilities` is `Vec<String>` containing raw Forge notation that gets re-parsed every time an ability is cast, activated, or chained. Replacing the data source without changing this runtime parsing will either require the new format to still emit Forge-compatible strings (defeating the purpose) or require touching every call site simultaneously.
 
-**Consequences:** Cards shrink to unreadable sizes. Board becomes unscrollable. Layout overflow causes z-index layering bugs. Lands and enchantments have nowhere to display. Touch targets become too small on mobile.
+**Consequences:**
+- If you change `CardFace` to use a new format but `GameObject.abilities` still stores Forge strings, runtime parsing breaks
+- If you change `GameObject.abilities` to typed data, every file that calls `parse_ability()` at runtime must be updated simultaneously
+- Partial migration (some cards new format, some old) creates two code paths through the entire engine
+- The `AbilityDefinition` type already exists as a clean intermediate representation, but it's constructed transiently during parse_ability() and immediately destructured -- never stored on the game object
 
 **Prevention:**
-- Replace the single `CreatureSlots` component with Forge.rs's existing `GameBoard` pattern: separate `BattlefieldRow` components for creatures, lands, and other permanents, each independently scrollable.
-- Port the `groupIntoStacks` logic but parameterize it for unbounded counts -- the stacking threshold in Alchemy (lines 400-407 of `CreatureSlots.tsx`) uses `minWidth = baseWidth * 0.7` which is already decent, but needs a fallback for 15+ cards (e.g., horizontal scroll or multi-row grid).
-- Keep Alchemy's `CardStackGroup` concept but add aggressive stacking by card name for tokens (10 identical 1/1 Soldier tokens should stack to a single visual with a count badge, not 10 individual cards).
-- The Forge.rs `BattlefieldRow` already uses `flex-wrap` -- preserve this. Alchemy's `CreatureSlots` uses `w-fit mx-auto` single-row flex with horizontal scroll, which is fine for 5 cards but poor for 15.
+1. Map every call site of `parse_ability`, `parse_trigger`, `parse_static`, `parse_replacement` in the game loop (identified: `casting.rs`, `engine.rs`, `mana_abilities.rs`, `planeswalker.rs`, `effects/mod.rs`, `effects/effect.rs`, `triggers.rs`, `deck_loading.rs`, `coverage.rs`)
+2. Design the new ability format to serialize directly to `AbilityDefinition`, `TriggerDefinition`, `StaticDefinition`, `ReplacementDefinition` -- these existing Rust types ARE the schema
+3. Two-phase approach: FIRST make `GameObject` store `Vec<AbilityDefinition>` instead of `Vec<String>` (parse once at load time, store typed data), THEN swap the card data source. The first step eliminates runtime parsing regardless of data source.
+4. Never store raw format strings on runtime objects -- parse to typed structures at deck-load time only
 
-**Detection:** Test with token-heavy decks (e.g., a deck that creates 10+ creature tokens). If cards are unreadable or overflow, the layout assumptions are wrong.
+**Detection:** Any test that exercises casting, activating, or resolving abilities will fail immediately if format migration is incomplete. The 78 curated Standard cards' CI gate provides an integration safety net.
 
-**Confidence:** HIGH -- directly observable from code comparison. Alchemy's `RulesetConfig.maxBoardSize` is 5; Forge.rs has no equivalent limit.
-
-**Phase:** Phase 1 (Board Layout Port). Must be resolved before any creature rendering.
+**Phase that must address this:** FIRST phase of the milestone. All other work depends on clean runtime types.
 
 ---
 
-### Pitfall 2: Synchronous Dispatch vs. Async WASM Boundary
+### Pitfall 2: New Ability Schema Fails to Cover the Full Engine Surface Area
 
-**What goes wrong:** Alchemy's `gameStore.dispatch()` is synchronous: it calls `reduce(state, action, actingPlayer, rng)` inline, gets back `{ newState, events }`, and immediately updates the store with `legalActions`. There is zero async gap. Alchemy's animation system relies on this -- `groupEventsIntoSteps` receives events synchronously in the same call stack, and `boardSnapshot` is set before dispatch to preserve dying creatures.
+**What goes wrong:** The custom JSON ability schema is designed to cover common cases but misses edge cases in the existing engine. The engine has:
+- 38 registered effect handlers (DealDamage through Mana -- see `effects/mod.rs:46-86`)
+- 137+ trigger modes (ChangesZone through ElementalBend -- see `types/triggers.rs`)
+- 61+ static ability modes (Continuous, CantAttack, Ward, Protection, etc. -- see `static_abilities.rs:37-84` plus 30+ stubs)
+- 45+ replacement effect event types
+- Complex features: sub-ability chaining via SVar references (`SubAbility$`, `Execute$`), conditional execution (`ConditionCompare$`, `ConditionPresent$`, `ConditionSVarCompare$`), target inheritance (`Defined$ Targeted`), and parameterized keywords (`Ward:1`, `Protection from red`)
 
-Forge.rs's `gameStore.dispatch()` is `async`: it calls `adapter.submitAction(action)` which goes through a promise queue (`WasmAdapter.enqueue`), then calls `adapter.getState()` (another async call). There is a multi-frame gap between dispatching an action and receiving the new state.
+**Why it happens:** Schema design often starts with clean examples (Lightning Bolt, Grizzly Bears). Complex cards use features that are harder to model:
+- SVars as a general-purpose key-value store for cross-ability data sharing
+- Ability chains where a trigger's `Execute$` parameter points to an SVar containing another ability definition
+- Filter expressions embedded in params (`ValidTgts$ Creature.YouCtrl+nonBlack`)
+- Multiple abilities per card face (a card can have 3+ activated abilities)
+- Keywords with varied parameter formats (`K:Ward:1`, `K:Cycling:2 R`, `K:Protection from red`)
 
-**Why it happens:** Alchemy's animation pipeline assumes: (1) capture board snapshot, (2) dispatch action synchronously, (3) immediately receive events, (4) call `groupEventsIntoSteps` with events, (5) enqueue animation steps. In Forge.rs, steps 2-3 are async. If the animation system tries to capture a snapshot and then dispatch, the snapshot may be stale by the time events arrive (other React renders may have occurred).
-
-**Consequences:** Animations show stale positions. "Dying creature" snapshots expire before death animations play. Combat math bubbles appear at wrong positions. Floating damage numbers target elements that have already unmounted.
+**Consequences:**
+- Cards that worked before migration silently break because their ability chain can't be expressed in the new schema
+- The CI coverage gate catches this late -- after the schema is already designed and cards partially migrated
+- Redesigning the schema after partial migration means re-converting all migrated cards
 
 **Prevention:**
-- Forge.rs already has a `dispatchWithAnimations` pattern (via the animation store). Port Alchemy's `groupEventsIntoSteps` but ensure it runs *after* the async dispatch resolves, not synchronously alongside it.
-- The `boardSnapshot` pattern from Alchemy is correct in concept but must be adapted: capture the snapshot *before* the async dispatch, store it in the animation store, and clear it only when the death animation step begins (Alchemy already does this in `advanceStep` line 156).
-- The position registry (`registerPosition`/`unregisterPosition`) is portable as-is -- it's a mutable module-level Map, not tied to React render timing. But the `getPositions()` call must happen at animation-enqueue time (after async dispatch resolves), not at dispatch-start time.
-- Wrap the entire dispatch-animate flow in a serialized queue: `await dispatch(action) -> events -> groupEventsIntoSteps(events, positions) -> enqueueSteps(steps)`. No concurrent dispatches during animation playback.
+1. Before designing the schema, audit every unique parameter key and SVar pattern across all 78 curated Standard cards
+2. The schema should be a **direct JSON serialization of the existing Rust types**: `AbilityDefinition { kind, api_type, params }`, `TriggerDefinition { mode, params }`, `StaticDefinition { mode, params }`, `ReplacementDefinition { event, params }`. This is not a new invention -- it's `serde_json::to_value()` of what already works
+3. Run an automated conversion of all 78 cards (Forge `.txt` -> parse -> serialize to JSON) and verify 100% round-trip fidelity BEFORE committing to the schema
+4. The `HashMap<String, String>` params pattern is ugly but powerful -- resist the temptation to replace it with strongly-typed per-effect-type structs in this milestone (that's a future optimization)
 
-**Detection:** Play a combat round. If damage numbers appear at coordinates (0,0) or at the card's pre-combat position instead of post-attack position, position capture timing is wrong. If dying creatures disappear before their death particle animation, the snapshot timing is wrong.
+**Detection:** Write a test that loads every curated card in both formats and asserts identical `AbilityDefinition` structures.
 
-**Confidence:** HIGH -- directly observable from comparing `gameStore.dispatch` in both projects. Alchemy line 171: `const result = reduce(state, action, actingPlayer, rng)` (sync). Forge.rs line 57: `const events = await adapter.submitAction(action)` (async).
-
-**Phase:** Phase 2 (Animation System Port). The most architecturally sensitive port.
+**Phase that must address this:** Schema design phase, BEFORE any card migration begins.
 
 ---
 
-### Pitfall 3: Type Shape Mismatch -- Alchemy's Flat Model vs. Forge.rs's Object Graph
+### Pitfall 3: MTGJSON Provides Card Metadata, Not Ability Mechanics
 
-**What goes wrong:** Alchemy's `Permanent` is a flat struct with inline stats: `{ permanentId, cardId, ownerId, attack, health, damage, isTapped, summonedThisTurn, temporaryAttackBonus, temporaryHealthBonus }`. Stats are directly on the object. Card data is looked up via `CARD_REGISTRY[cardId]`.
+**What goes wrong:** MTGJSON provides card metadata (name, manaCost, types, power/toughness, colors, keywords list, oracle text, layout, side, otherFaceIds, legalities, set codes, identifiers) but does NOT provide machine-readable ability definitions. The `text` field is human-readable oracle text ("Lightning Bolt deals 3 damage to any target"). The `keywords` array contains keyword names without parameters (["Flying", "Trample"] not ["Ward:1"]). There is NO equivalent to Forge's `A:SP$ DealDamage | NumDmg$ 3`.
 
-Forge.rs's `GameObject` is a deep object from the WASM boundary: `{ id, card_id, owner, controller, zone, tapped, power, toughness, damage_marked, card_types, mana_cost, keywords, counters, attachments, color, ... }`. There is no separate "card registry" in the frontend -- all card data comes from the engine state. Power/toughness are engine-computed (layer system applied). There is no `attack`/`health` -- the fields are `power`/`toughness`.
+**Why it happens:** MTGJSON is a card catalog database, not a game engine data source. Its purpose is card information (printings, legalities, prices, rulings), not executable game rules.
 
-**Why it happens:** Developers copy Alchemy components and try to map props 1:1. `permanent.attack` becomes `gameObject.power`, `permanent.health` becomes `gameObject.toughness`. But these are semantically different: Alchemy's `attack` is base + temporary bonus; Forge.rs's `power` is already layer-evaluated (includes +1/+1 counters, enchantment buffs, type-changing effects, etc.). Applying Alchemy's buff detection logic (`isBuffedAttack = attack > baseAttack`) to Forge.rs data produces wrong visual indicators because `base_power` vs `power` comparison doesn't account for counter-based buffs vs spell-based buffs.
-
-**Consequences:** Buff indicators wrong (card shows "buffed" when it has counters, which are permanent not temporary). Health/toughness display wrong (shows toughness where it should show toughness minus damage). Card type display wrong (Alchemy has `creature | spell`; MTG has creatures, instants, sorceries, enchantments, artifacts, planeswalkers, lands, each needing different visual treatment).
+**Consequences:**
+- MTGJSON supplies the "card shell" (metadata): name, mana cost, types/subtypes/supertypes, colors, P/T, loyalty, defense, keyword names, oracle text, layout, side, face relationships, legalities, set codes, UUIDs
+- MTGJSON CANNOT supply the "card brain" (mechanics): ability definitions, trigger definitions, static ability definitions, replacement effect definitions, SVar data, ability parameters, sub-ability chains, condition logic
+- The custom ability format must be independently authored for every card -- the scope is larger than "integrate MTGJSON"
 
 **Prevention:**
-- Create a mapping layer (adapter component or hook) that converts Forge.rs's `GameObject` into a view model matching Alchemy's `BoardCard` expectations. Do NOT spread `GameObject` props directly into Alchemy components.
-- The view model should compute:
-  - `effectiveAttack` = `gameObject.power` (already layer-evaluated)
-  - `effectiveHealth` = `gameObject.toughness - gameObject.damage_marked`
-  - `isBuffed` = `gameObject.power > gameObject.base_power || gameObject.toughness > gameObject.base_toughness`
-  - `isDamaged` = `gameObject.damage_marked > 0`
-  - `isSummoningSick` = `gameObject.entered_battlefield_turn === currentTurn && !gameObject.keywords.includes("Haste")`
-  - `cardType` = derived from `gameObject.card_types.core_types` (not a simple string enum)
-- The view model replaces Alchemy's `CARD_REGISTRY` lookups -- Forge.rs cards don't have a static registry in the frontend.
+1. Clearly separate the two data sources in architecture: MTGJSON for card metadata, custom JSON for ability mechanics
+2. Budget the effort correctly: each of the 78 cards needs hand-authored (or machine-converted) ability definitions
+3. Use the existing Forge parser as a one-time conversion tool: parse `.txt` files -> serialize `AbilityDefinition` structs to JSON -> validate -> commit as the new format
+4. Do NOT attempt to parse oracle text into ability definitions -- that is an NLP problem far beyond the scope of this milestone
 
-**Detection:** Play a card with +1/+1 counters. If the UI shows it as "temporarily buffed" (with Alchemy's gold buff particles), the mapping is wrong. Play an enchantment -- if the UI doesn't know where to render it, the type mapping is incomplete.
+**Detection:** If card loading produces objects with empty `abilities` / `triggers` / `static_abilities` vectors, MTGJSON data was used without companion ability data.
 
-**Confidence:** HIGH -- directly from comparing `Permanent` (Alchemy types.ts:57-70) with `GameObject` (Forge.rs adapter/types.ts:75-109).
-
-**Phase:** Phase 1 (Component Adapter Layer). Must exist before any Alchemy component renders Forge.rs data.
+**Phase that must address this:** Architecture/design phase. This shapes the entire data pipeline.
 
 ---
 
-### Pitfall 4: Missing Stack/Priority/Instant UI Concepts
+### Pitfall 4: GPL Contamination from Forge Card Definition Content
 
-**What goes wrong:** Alchemy has no stack visualization. Its phase system is linear: `mulligan -> draw -> energy -> play -> battle -> end`. The only instant-speed interaction is a limited `combat_priority` phase. Forge.rs has a full priority system where either player can respond at almost any point with instants and activated abilities. The stack (`StackEntry[]`) can have multiple items, each with their own targets and controllers. There is no Alchemy component for: stack visualization, mana payment modal, priority pass controls, or instant-speed card casting.
+**What goes wrong:** The project wants to relicense as MIT. Forge is GPL-licensed. The `.txt` card definitions in `data/cardsfolder/` are part of Forge's GPL codebase. If the new custom ability JSON files are mechanically derived from Forge's `.txt` files (even through an automated conversion), there is a legal argument they are derivative works of GPL content.
 
-**Why it happens:** Developers port Alchemy's `ActionButton` (which handles `ADVANCE_PHASE`, `CONFIRM_ATTACKERS`, `CONFIRM_BLOCKERS`, `PASS_PRIORITY`) but don't realize Forge.rs's `PassPriority` happens dozens of times per turn. Alchemy's button toggles between 3-4 states; Forge.rs's priority system needs context-aware prompts ("Pass priority (opponent has mana open)", "Respond to Lightning Bolt targeting your creature?").
+**Why it happens:** The ability definitions in Forge's `.txt` files contain creative expression in how game mechanics are decomposed into the `SP$/AB$/DB$` system with specific parameter choices, sub-ability chains, and SVar structures. While the underlying game rules (MTG Comprehensive Rules) are uncopyrightable facts, and the merger doctrine may apply (there are limited ways to express "deal 3 damage"), Forge's specific encoding choices in their DSL are potentially copyrightable creative expression.
 
-**Consequences:** Players cannot interact at instant speed. No way to see what's on the stack. No way to respond to spells. The game auto-passes priority without the player understanding what happened. Mana payment is impossible (Alchemy uses single-element costs; MTG uses multi-color, hybrid, and generic costs requiring interactive payment).
+**Consequences:**
+- If converted JSON files are considered derivative works of GPL code, the entire project cannot be MIT-licensed
+- Clean-room implementation from Comprehensive Rules is legally safest but labor-intensive
+- Partial contamination (some files derived, some clean) risks the whole license
 
 **Prevention:**
-- These are NOT ports from Alchemy -- they are new components built from scratch for Forge.rs:
-  - **Stack display:** Vertical list showing pending spells/abilities with source, controller, targets. Clickable to inspect.
-  - **Priority indicator:** Shows whose priority it is, whether the active player can respond, and a "Pass" button that's always visible during priority windows.
-  - **Mana payment modal:** Shows available mana, required cost, auto-pay suggestion with manual override. Triggered when `WaitingFor.type === "ManaPayment"`.
-  - **Instant-speed casting:** Hand cards must be playable during opponent's turn when the player has priority. Alchemy's hand only allows plays during the `play` phase.
-- Port Alchemy's `ActionButton` as the *base* but extend it significantly. The `WaitingFor` discriminated union in Forge.rs has 8 variants vs Alchemy's simpler phase model.
-- Do NOT try to hide priority complexity. MTG players expect to see it. Auto-pass priority for phases where the player has no legal actions (Alchemy's approach of skipping irrelevant phases is correct, but must not skip phases where the player COULD respond).
+1. **Strongest approach:** Write ability definitions independently using MTG Comprehensive Rules and MTGJSON oracle text as specifications. Do not read or convert Forge `.txt` files.
+2. **Pragmatic approach:** The ability schema maps to generic concepts (deal N damage, draw N cards, target type T). Forge's format is one of very few ways to express MTG game rules programmatically. The merger doctrine provides that when expression merges with idea (because there are limited ways to express the idea), the expression is not protected. For simple cards this is strong; for complex multi-ability chains this is weaker.
+3. **Hybrid approach:** Use Forge conversion for validation only -- write definitions from oracle text, then compare against Forge output to verify correctness. The Forge data validates, it does not source.
+4. **Mandatory:** Remove `data/cardsfolder/` from the repository entirely. Its presence implies GPL content in the project. Retain the Forge parser only behind an optional Cargo feature flag (`forge-compat`) for development validation.
+5. **Document the process:** Keep records showing ability definitions were authored from game rules and oracle text.
 
-**Detection:** Cast an instant during the opponent's combat phase. If the UI doesn't allow it, instant-speed interaction is broken. Check for stack display when multiple spells are pending.
+**Detection:** Git history showing mechanical conversion from `.txt` to `.json` without intermediate human authoring step would be evidence of derivation.
 
-**Confidence:** HIGH -- fundamental game mechanic difference. Alchemy has no equivalent UI to port.
-
-**Phase:** Phase 3 (MTG-Specific UI). After board and animation ports are stable.
+**Phase that must address this:** Must be addressed before removing Forge data. Legal analysis should inform the approach for the card migration phase.
 
 ---
 
-### Pitfall 5: Card Image Loading Model Change (Static Assets vs. Async API)
+### Pitfall 5: Regression in 78 Standard Cards During Migration
 
-**What goes wrong:** Alchemy uses static assets: `getCardArtPath(cardId, element)` returns a synchronous path like `/cards/fire/flame_elemental.webp`. The `CardFace` component uses this as a CSS `background-image` with zero loading state -- the art either exists at that path or an element icon placeholder is shown. There is no loading spinner, no error handling for network failures, no rate limiting.
+**What goes wrong:** A card that worked correctly before migration breaks silently after conversion to the new format. The bug may be subtle -- a missing parameter, a different ability chain order, a condition that doesn't evaluate correctly. The existing CI gate checks "coverage" (all handlers registered) but does NOT test that cards play correctly.
 
-Forge.rs uses `useCardImage(cardName)` which is fully async: checks IndexedDB cache, then fetches from Scryfall API with 75ms rate limiting, returns `{ src: string | null, isLoading: boolean }`. A hand of 7 cards generates up to 7 sequential API calls on first load.
+**Why it happens:** The coverage check in `coverage.rs` only verifies that effect handlers, trigger matchers, and static ability handlers exist for each card's mechanics. It does not verify that abilities resolve correctly during gameplay. A card could pass coverage (all handlers registered) but produce wrong game state when played (wrong damage amount, missing trigger, incorrect targeting).
 
-**Why it happens:** Alchemy's `CardFace` component treats art as an optional decoration -- `getCardArtPath` returns a path unconditionally and the element icon placeholder is always visible behind the art. If the art file doesn't exist (missing asset), the card is still fully readable. Port this to Forge.rs and every card shows the placeholder because there are no static art files -- all art comes from Scryfall.
-
-**Consequences:** All cards show placeholder art until images load (can take 500ms-5s for uncached cards). No loading indicators. Broken or missing images show element icon placeholders that make no sense for MTG (there are no "elements" in MTG). Rate limiting causes cards loaded later in the hand to appear blank for seconds.
+**Consequences:**
+- Cards appear "supported" but have subtle behavioral regressions
+- These bugs surface during playtesting, not CI
+- Players lose trust in the engine's correctness
 
 **Prevention:**
-- Replace `getCardArtPath` calls with `useCardImage(cardName)` hook from Forge.rs, but add a loading skeleton to Alchemy's `CardFace` component:
-  - Show card frame, name, type, stats immediately (these come from engine state, no network needed).
-  - Show a shimmer/skeleton in the art area while `isLoading === true`.
-  - Show the actual card image when `src` resolves.
-- Replace element-based placeholders with generic card back or mana-color-based gradient placeholder. MTG colors (WUBRG) map naturally to gradient backgrounds.
-- Batch-prefetch images: when game initializes, call `prefetchDeckImages` (already exists in Forge.rs scryfall.ts) for both players' decks. This front-loads the Scryfall calls before the board renders.
-- For the card preview modal (`CardPreview`), use `size: "large"` for the detailed view and `size: "normal"` for board/hand cards.
-- Consider using Scryfall's `image_uris.art_crop` for Alchemy-style art-only display (no card frame), keeping Alchemy's custom card frame rendering.
+1. Create gameplay-level integration tests BEFORE migrating any card data. Each test: set up game state -> play a card -> assert resulting state changes (life totals, zone contents, P/T modifications, etc.)
+2. Run the same gameplay tests against both old Forge format and new custom format to verify identical outcomes (A/B comparison)
+3. Use deterministic RNG seeds (`ChaCha20Rng`) to make tests exactly reproducible
+4. Minimum test coverage: one card per effect type actually used in Standard (not all 38, just those in the 78 cards), plus one card per trigger mode, plus one card per static ability mode
+5. Test infrastructure phase MUST precede card migration phase
 
-**Detection:** Start a game with no cached images. If all 7 hand cards and the initial battlefield are blank for >1 second, the loading UX needs work.
+**Detection:** A/B comparison tests between old and new format for every curated card. Any deviation is a regression.
 
-**Confidence:** HIGH -- directly from code comparison. Alchemy `cardUtils.ts:6-8` (sync path) vs Forge.rs `useCardImage.ts` (async with cache).
-
-**Phase:** Phase 1 (Card Rendering). Must be resolved alongside the component adapter layer.
+**Phase that must address this:** Test infrastructure must be built BEFORE card migration starts.
 
 ---
 
 ## Moderate Pitfalls
 
----
+### Pitfall 6: Frontend card-data.json Dependency on Forge Format
 
-### Pitfall 6: Event System Shape Mismatch
-
-**What goes wrong:** Alchemy's `GameEvent` and Forge.rs's `GameEvent` are both discriminated unions with `type` tags, but they have different shapes, different event names, and different data payloads. Alchemy's animation system (`groupEventsIntoSteps`) is tightly coupled to Alchemy's event shapes: it checks for `CREATURE_ENTERED`, `SPELL_RESOLVED`, `DAMAGE_DEALT`, `CREATURE_DIED` etc. Forge.rs events use different names: `ZoneChanged`, `SpellCast`, `DamageDealt`, `CreatureDestroyed`.
+**What goes wrong:** The frontend uses a precompiled `client/public/card-data.json` generated by the `card_data_export` binary from Forge data. This serializes `CardFace` objects. If `CardFace` changes structure, the JSON format changes, and frontend TypeScript types need to match.
 
 **Prevention:**
-- Create an event mapping layer that converts Forge.rs events to Alchemy-compatible event shapes before passing to `groupEventsIntoSteps`. This is preferable to rewriting the animation grouping logic.
-- Key mappings:
-  - `ZoneChanged { to: "Battlefield" }` -> `CREATURE_ENTERED` (when object is a creature)
-  - `DamageDealt` -> `DAMAGE_DEALT` (rename, restructure fields: `target: TargetRef` needs unpacking to `targetId: string`)
-  - `LifeChanged { amount < 0 }` -> `PLAYER_DAMAGED`
-  - `CreatureDestroyed` -> `CREATURE_DIED`
-  - `SpellCast` -> `CARD_PLAYED` + `SPELL_RESOLVED` (Forge.rs separates cast and resolution; Alchemy combines them)
-- Some Forge.rs events have no Alchemy equivalent and need new animation handling: `PermanentTapped`, `CounterAdded`, `TokenCreated`, `SpellCountered`, `ReplacementApplied`.
+- Change the export format incrementally -- add new fields alongside old ones during transition
+- The WASM bridge uses `tsify` for type generation, but `card-data.json` is a separate pipeline from `card_data_export` binary
+- Update TypeScript types in the same PR as Rust `CardFace` changes
+- Consider whether `card-data.json` should contain ability data at all (the frontend doesn't execute abilities -- it only displays card info)
 
-**Detection:** Cast a spell. If no animation plays, the event mapping is missing or wrong.
+### Pitfall 7: SVar System is a General-Purpose Extension Mechanism
 
-**Confidence:** HIGH -- directly from comparing event union types in both adapter/types.ts files.
-
-**Phase:** Phase 2 (Animation System). The event mapper must exist before `groupEventsIntoSteps` can process Forge.rs events.
-
----
-
-### Pitfall 7: Phase/Turn Model Impedance Mismatch
-
-**What goes wrong:** Alchemy's `Phase` is a rich discriminated union carrying state (e.g., `{ type: 'battle', step: 'declare_attackers', tentativeAttackers: string[] }` embeds the list of tentative attackers directly in the phase object). Components read combat state directly from the phase. Forge.rs's `Phase` is a simple string enum (`"DeclareAttackers" | "DeclareBlockers" | ...`) and combat state lives in a separate `CombatState` object on the `GameState`. The `WaitingFor` discriminated union replaces Alchemy's phase as the primary "what should the UI show right now?" signal.
-
-**Why it happens:** Alchemy's `CreatureSlots` reads `phase.tentativeAttackers`, `phase.confirmedAttackers`, `phase.blockers` directly from the phase. These fields don't exist in Forge.rs -- attackers are in `gameState.combat.attackers`, blockers are in `gameState.combat.blocker_assignments`.
-
-**Consequences:** All combat UI code that reads from `phase` breaks. Blocker assignment, attacker declaration, combat resolution displays all fail.
+**What goes wrong:** SVars (`HashMap<String, String>`) serve multiple purposes in Forge cards: sub-ability definitions referenced by `SubAbility$`/`Execute$`, AI hints (`RemAIDeck`, `AILogic`), picture URLs, conditional values, and arbitrary metadata. The new ability format needs to handle everything SVars do, or the sub-ability chaining system breaks.
 
 **Prevention:**
-- Create a `useCombatState()` hook that normalizes combat data from either source:
-  - Reads `gameState.combat` (Forge.rs) or `phase.tentativeAttackers`/`phase.confirmedAttackers` (Alchemy).
-  - Returns a consistent shape: `{ attackers, blockers, blockerToAttacker, step }`.
-- Replace all `phase.type === 'battle' && phase.step === 'declare_attackers'` checks with `waitingFor.type === 'DeclareAttackers'` checks.
-- The `shouldFanOut` function in `CreatureSlots` needs complete rewriting -- it checks Alchemy-specific phase shapes.
-- Alchemy's `ActionButton` component determines button label and action from phase type. Replace with a `WaitingFor`-driven approach.
+- Audit all SVar keys used in the 78 Standard cards and categorize: sub-abilities, AI hints, metadata, display values
+- The new format should have explicit fields for sub-abilities (nested ability definitions) rather than the indirect SVar reference system -- this eliminates an entire class of "SVar not found" bugs
+- AI hints need a separate home: either in the card schema under an `ai_hints` field or in the forge-ai crate's configuration
+- The current `resolve_ability_chain()` function (`effects/mod.rs:105-159`) traverses SVars by name to find sub-abilities. Nested ability definitions would make this traversal unnecessary.
 
-**Detection:** Enter combat. If the UI doesn't show attacker selection or blocker assignment overlays, the phase/combat state mapping is wrong.
+### Pitfall 8: Test Suite Accidentally Uses XMage Patterns Instead of Forge.rs Patterns
 
-**Confidence:** HIGH -- structurally incompatible phase models visible in both type files.
-
-**Phase:** Phase 1 (Board Layout). Combat interaction is core to the board.
-
----
-
-### Pitfall 8: WASM Serialization Artifacts (Map -> Record Conversion)
-
-**What goes wrong:** Forge.rs's `WasmAdapter.fetchState()` includes a `convertMapsToRecords` function (wasm-adapter.ts:17-36) because `serde_wasm_bindgen` serializes Rust `HashMap<NonStringKey, V>` as JavaScript `Map`, not as plain objects. The frontend expects bracket access (`state.objects[id]`). If Alchemy components are ported and receive a `Map` instead of a `Record`, property access silently returns `undefined`.
+**What goes wrong:** XMage is MIT-licensed with extensive card tests, making it an attractive reference. However, XMage tests are Java/JUnit with XMage-specific helper classes (`CardTestPlayerBase`, `addCard()`, `setChoice()`). Copying XMage test patterns verbatim creates tests that don't match Forge.rs's architecture (Rust `#[test]`, `GameState::new_two_player()`, `create_object()`).
 
 **Prevention:**
-- The `convertMapsToRecords` function already exists and works. Ensure it runs before any component receives state data.
-- However, be aware that this recursive conversion is O(n) in state size. For large game states (30+ permanents), this adds measurable overhead on every `getState()` call. If animations are reading state frequently, this compounds.
-- Consider moving hot-path data access to typed getter functions on the WASM side (`get_object(id) -> GameObject`) rather than serializing the entire `objects` map on every state fetch.
+- XMage's MIT license permits using their tests as reference for SCENARIOS (what game state to set up, what outcome to expect), not for code structure
+- Write tests using Forge.rs idioms: `#[test]`, `GameState::new_two_player(seed)`, `create_object()`, direct state assertion
+- XMage test organization by mechanic (`abilities/`, `triggers/`, `damage/`, `protection/`) is a good model for Rust test module organization
+- Each test should reference the specific MTG Comprehensive Rule being tested, not the XMage test it was inspired by
+- Focus on the MTG Comprehensive Rules as the specification document, not any other engine's implementation
 
-**Detection:** If a component reads `gameState.objects[someId]` and gets `undefined` despite the object existing, `convertMapsToRecords` may not have run, or a nested Map was missed.
+### Pitfall 9: MTGJSON Card Name Matching Breaks for Multi-Face Cards
 
-**Confidence:** HIGH -- the `convertMapsToRecords` function in the codebase exists specifically because this problem was already encountered.
-
-**Phase:** Phase 1 (Adapter Integration). Existing mitigation, but new components must be aware.
-
----
-
-### Pitfall 9: Alchemy-Specific Concepts That Don't Map to MTG
-
-**What goes wrong:** Alchemy components reference concepts that don't exist in MTG and will cause errors or nonsensical UI if ported without removal:
-- **Elements** (`fire | water | earth | air | shadow`) -- used for card frame colors, art paths, particle effects, ambient music. MTG has **mana colors** (WUBRG + colorless) which serve a similar visual role but have different values and meanings.
-- **Energy system** (`currentEnergy`, `maxEnergy`, `energyCap`) -- Alchemy uses a Hearthstone-style mana crystal system. MTG uses land-based mana with a pool that empties each phase.
-- **Learning challenges** -- Alchemy's educational overlay system. Entirely absent from Forge.rs.
-- **Tier system** (`apprentice | alchemist | archmage`) -- Alchemy's difficulty tiers. No MTG equivalent.
-- **Creature types** (`angel | beast | dragon | ...`) -- Alchemy has a fixed enum of 12 types. MTG has 200+ creature subtypes as strings.
-- **Spell speed** (`sorcery | instant`) -- Similar concept but Alchemy treats it as a card property; MTG treats it as a card type.
+**What goes wrong:** MTGJSON uses `//` delimiters for multi-face card names (e.g., "Bonecrusher Giant // Stomp") while Forge uses separate face entries. The current engine indexes by primary face name (lowercase). MTGJSON's `faceName` field provides individual face names, but the main `name` field is the combined name. The `side` field ("a" or "b") identifies which face.
 
 **Prevention:**
-- Before porting any component, grep for Alchemy-specific imports: `@engine/types`, `@engine/cards`, `@engine/effects`, `@engine/keywords`. Every one of these needs replacement.
-- Create a color mapping: `Element -> ManaColor[]`. A mono-red MTG card uses similar visuals to Alchemy's `fire`. Multi-color cards need blended gradients.
-- Remove all `LearningChallengeOverlay`, `AdaptiveLearningToast`, `CoachOverlay`, `TutorialHelpPanel` references. These are Alchemy-only.
-- Remove `HeroHUD` energy display. Replace with mana pool display from Forge.rs.
-- The `getElementColor`, `getElementArtGradient`, `getElementFrameGradient`, `getElementIconPath` utility functions in Alchemy's `cardUtils.ts` need MTG equivalents: `getManaColorGradient(colors: ManaColor[])`, handling mono, dual, tri, and 5-color cards.
+- Use `faceName` (not `name`) when matching MTGJSON data to engine cards
+- MTGJSON's `otherFaceIds` field links faces via UUID -- use for reliable cross-referencing
+- Test name matching for all multi-face types present in Standard: Adventure (Lovestruck Beast // Heart's Desire), Transform, Modal DFC
+- The engine's `CardLayout` enum (Single, Split, Transform, Adventure, Modal, etc.) must map correctly to MTGJSON's `layout` field ("normal", "split", "transform", "adventure", "modal_dfc", etc.) -- different string values for the same concept
 
-**Detection:** If the UI references "energy" or shows element icons, Alchemy concepts haven't been fully replaced.
+### Pitfall 10: Database Module Assumes Filesystem Loading of .txt Files
 
-**Confidence:** HIGH -- directly enumerable from Alchemy's type definitions.
-
-**Phase:** Phase 1 (Component Port). Systematic replacement needed for every ported component.
-
----
-
-### Pitfall 10: Legal Action Computation Location
-
-**What goes wrong:** Alchemy computes `legalActions` on the frontend via `enumerateLegalActions(gameState, humanPlayer)` synchronously after every dispatch (gameStore.ts:172). The result is immediately available for UI rendering (highlighting valid attackers, valid targets, playable cards). Forge.rs computes legal actions on the WASM/engine side -- the frontend doesn't have an `enumerateLegalActions` function. The current Forge.rs store doesn't even have a `legalActions` array.
-
-**Why it happens:** Alchemy's `CreatureSlots` builds an `actionIndex` (lines 145-213) from `legalActions` to determine which creatures can attack, block, or be targeted. Every card interaction highlight depends on this array. Without it, the ported UI has no way to show valid moves.
-
-**Consequences:** No visual feedback for legal moves. Players can't tell which creatures can attack or block. Targeting shows no valid targets. The UI feels broken even though the engine works.
+**What goes wrong:** `CardDatabase::load()` uses `walkdir` to traverse directories of `.txt` files, calls `parse_card_file()` on each, and builds HashMap indexes. The new system loads from JSON. Simply changing the file extension is not enough -- the entire load path assumes Forge `.txt` parsing.
 
 **Prevention:**
-- Add a `getLegalActions()` export to the WASM bridge that returns the set of legal actions for the current player. This must be called after every state update.
-- Store `legalActions` in Forge.rs's `gameStore` alongside `gameState`.
-- The `actionIndex` pattern from Alchemy's `CreatureSlots` is excellent and should be ported directly -- it pre-indexes legal actions by type for O(1) lookup.
-- Be aware that Forge.rs's `GameAction` shape differs from Alchemy's: `DeclareAttackers { data: { attacker_ids: ObjectId[] } }` (batch) vs Alchemy's `DECLARE_ATTACKER { permanentId: string }` (individual). The `actionIndex` will need structural changes.
+- Create `CardDatabase::from_cards(cards: Vec<CardRules>)` constructor that accepts pre-parsed cards from any source
+- Create separate loader functions: `load_forge_txt(path)` and `load_json(path)` that both produce `Vec<CardRules>`
+- The `CardDatabase` struct itself (HashMap lookup by name, face index) is format-agnostic -- only the `load` function is Forge-specific
+- Put `load_forge_txt` behind a `forge-compat` feature flag
 
-**Detection:** Start a game. If no cards in hand glow as "playable" and no creatures highlight as valid attackers, legal actions aren't being surfaced.
+### Pitfall 11: Keyword Parameters Lost in Translation
 
-**Confidence:** HIGH -- structural difference between sync frontend validation (Alchemy) and engine-side validation (Forge.rs).
+**What goes wrong:** Some keywords have parameters: `Ward:1`, `Protection from red`, `Hexproof from black`, `Cycling {2}`. Forge encodes these in the keyword string (`K:Ward:1`). MTGJSON's `keywords` array only contains keyword names without parameters (["Ward"] not ["Ward:1"]). The engine's `parse_keywords()` function expects the Forge format.
 
-**Phase:** Phase 1 (Adapter Integration). Legal actions must be available before any interactive UI works.
+**Prevention:**
+- The custom ability format (not MTGJSON) must carry keyword parameters
+- Consider two approaches: (a) keep keywords as parameterized strings and preserve `parse_keywords()`, or (b) encode parameterized keywords as typed Keyword enum variants in the JSON schema
+- Option (a) is simpler and preserves existing code; option (b) is cleaner but requires more changes
+- Test every parameterized keyword in the 78 Standard cards (audit which ones actually appear)
 
 ---
 
 ## Minor Pitfalls
 
----
+### Pitfall 12: WASM Binary Size Increase from Embedded Card Data
 
-### Pitfall 11: CSS Custom Property Naming Collision
+**What goes wrong:** If the 78 Standard cards' JSON definitions are embedded in the WASM binary via `include_str!`, the binary size increases. The current release profile optimizes for size (`opt-level = 'z'`) and the WASM binary is only 19 KB.
 
-**What goes wrong:** Both projects use CSS custom properties for card sizing. Alchemy uses `--card-font-scale`, `--board-card-width`, `--board-card-height`, `--_board-w`, `--_board-h`. Forge.rs uses `--card-h`. If both sets of properties exist during the port, components read the wrong values.
+**Prevention:**
+- Keep card data as a separate JSON file loaded at runtime (like the current `card-data.json`)
+- Don't embed card data in the WASM binary
+- Card data should be loaded via JavaScript/TypeScript and passed to the WASM init function
 
-**Prevention:** Audit all CSS custom properties in both projects. Standardize on one naming convention. Prefer Alchemy's more descriptive names.
+### Pitfall 13: Test Helpers Depend on External Forge Directory
 
-**Phase:** Phase 1 (Board Layout). Resolve before any visual rendering.
+**What goes wrong:** `test_helpers.rs` loads from `../../forge/forge-gui/res/cardsfolder/` which requires a local Forge checkout. Tests using these helpers silently return `None` when the directory is absent (CI-safe but not CI-tested). The new test infrastructure must be self-contained.
 
----
+**Prevention:**
+- New test infrastructure must use embedded test data checked into the repo (the 78 cards in `data/standard-cards/` or their JSON equivalents)
+- Tests MUST NOT silently skip -- a test that returns early without asserting anything is worse than a failing test
+- Replace `OnceLock<Option<CardDatabase>>` pattern with `OnceLock<CardDatabase>` that loads from the repo's own data directory
+- CI must actually exercise card-specific tests, not just compile them
 
-### Pitfall 12: Player ID Type Mismatch
+### Pitfall 14: Forge Parser Retained as Dev Tool But Gradually Bitrot
 
-**What goes wrong:** Alchemy uses string literal union: `PlayerId = 'player1' | 'player2'`. Forge.rs uses numeric: `PlayerId = number` (0 for player, 1 for opponent). Position registry keys in Alchemy use `player:${playerId}` (e.g., `player:player1`). Forge.rs would produce `player:0`. All position lookups for player targeting will silently fail.
+**What goes wrong:** If the Forge parser is kept as an optional dev tool but the canonical format is now custom JSON, the parser will gradually diverge as Rust types evolve. It becomes dead code.
 
-**Prevention:** Normalize player IDs at the adapter layer. Either convert numeric IDs to string labels or update all template literals. The position registry pattern is used extensively in the animation system and must be consistent.
-
-**Detection:** Try to target a player with a spell. If the targeting glow doesn't appear on the player's avatar/HUD, the player ID format is wrong in the position registry.
-
-**Confidence:** HIGH -- directly from type definitions.
-
-**Phase:** Phase 1 (Adapter Layer). One-time mapping.
-
----
-
-### Pitfall 13: Animation Store Intermediate Display State
-
-**What goes wrong:** Alchemy's animation store tracks `displayHealth`, `displayCreatureDamage`, `previousDisplayHealth`, and `previousDisplayCreatureDamage` for per-step animated health changes. These use Alchemy's `PlayerId` (`'player1' | 'player2'`) as keys and `permanentId` strings for creature damage. Forge.rs uses numeric player IDs and `ObjectId` (number) for permanents. The `applyStepHealthDeltas` and `applyStepCreatureDamage` functions hardcode Alchemy's player ID strings.
-
-**Prevention:** The animation store's health/damage tracking functions need the same ID normalization as the rest of the system. If player IDs are mapped at the adapter layer (Pitfall 12), this resolves automatically. But if creature IDs change format (string to number), the damage tracking maps will silently miss updates.
-
-**Phase:** Phase 2 (Animation System). Ensure ID consistency across all stores.
+**Prevention:**
+- Put behind a Cargo feature flag (`forge-compat`) from day one
+- Accept that it will bitrot and set a definite removal milestone (e.g., remove in v1.3)
+- Do not maintain two parsers indefinitely
 
 ---
 
@@ -296,35 +239,50 @@ Forge.rs uses `useCardImage(cardName)` which is fully async: checks IndexedDB ca
 
 | Phase Topic | Likely Pitfall | Mitigation |
 |-------------|---------------|------------|
-| Board Layout (Phase 1) | Fixed slots break with unlimited permanents (1) | Multi-row layout with separate rows per card type, aggressive token stacking |
-| Board Layout (Phase 1) | Phase/combat state shape mismatch (7) | `useCombatState()` hook normalizing both models |
-| Component Adapter (Phase 1) | Type shape mismatch -- flat vs deep (3) | View model mapping layer between `GameObject` and component props |
-| Card Rendering (Phase 1) | Static vs async image loading (5) | `useCardImage` hook with loading skeleton, batch prefetch |
-| Card Rendering (Phase 1) | Alchemy concepts don't map (9) | Systematic element -> mana color replacement, remove learning/energy UI |
-| Adapter Integration (Phase 1) | Legal actions not available (10) | Add `getLegalActions()` to WASM bridge, store in gameStore |
-| Adapter Integration (Phase 1) | Player ID type mismatch (12) | Normalize at adapter layer |
-| Adapter Integration (Phase 1) | WASM Map serialization (8) | Existing `convertMapsToRecords`, consider typed getters |
-| Animation System (Phase 2) | Sync vs async dispatch timing (2) | Serialize dispatch-animate flow, capture positions after async resolves |
-| Animation System (Phase 2) | Event shape mismatch (6) | Event mapping layer before `groupEventsIntoSteps` |
-| Animation System (Phase 2) | Intermediate display state ID formats (13) | Consistent ID normalization |
-| MTG-Specific UI (Phase 3) | No stack/priority/instant UI (4) | New components, not ports. Stack display, priority controls, mana payment modal |
-| Styling (All phases) | CSS custom property collisions (11) | Audit and standardize naming |
+| Runtime Type Migration | `GameObject.abilities` stores raw Forge strings parsed at 20+ runtime sites (#1) | Convert to `Vec<AbilityDefinition>` on load; eliminate all runtime `parse_ability()` calls |
+| Schema Design | Schema can't express all 38 effects + SVar chains (#2) | Schema = JSON serialization of existing Rust types; audit all param keys in 78 cards first |
+| MTGJSON Integration | Expecting ability data from MTGJSON (#3) | MTGJSON is metadata only; ability data must come from custom format |
+| MTGJSON Integration | Multi-face card name mismatch (#9) | Use `faceName` + `otherFaceIds`, not combined `name` field |
+| MTGJSON Integration | Keyword parameters not in MTGJSON (#11) | Custom format must carry parameterized keywords |
+| Card Data Migration | Mechanical conversion from Forge `.txt` creates GPL derivative (#4) | Author from game rules + oracle text; use Forge output only for validation comparison |
+| Card Data Migration | Regression in 78 cards (#5) | Build test infrastructure BEFORE migration; A/B comparison tests |
+| Card Data Migration | SVar system not fully replaced (#7) | Audit all SVar keys; use nested ability definitions instead of SVar references |
+| Test Infrastructure | Tests skip silently when data unavailable (#13) | Self-contained embedded test data; no silent skips |
+| Test Infrastructure | XMage patterns don't match Forge.rs architecture (#8) | Reference XMage scenarios but implement in Rust idioms; cite Comprehensive Rules |
+| License Change | Forge content remains in repo (#4) | Delete `data/cardsfolder/`; check git history; feature-flag parser |
+| Frontend Update | `card-data.json` format changes break TypeScript (#6) | Update TS types in same PR as Rust changes |
+| Database Module | `CardDatabase::load()` assumes `.txt` files (#10) | Create format-agnostic constructor; feature-flag `.txt` loader |
+| WASM Build | Embedded card data inflates binary (#12) | Load card data at runtime via JS, not baked into WASM |
 
 ---
 
 ## Sources
 
-- Alchemy `types.ts` (`/Users/matt/dev/alchemy/src/engine/types.ts`) -- Alchemy type system analysis
-- Alchemy `CreatureSlots.tsx` -- Board layout with fixed slots, stacking logic
-- Alchemy `gameStore.ts` -- Synchronous dispatch pattern
-- Alchemy `animationStore.ts` -- Animation queue and event grouping
-- Alchemy `BoardCard.tsx` -- Card rendering with static art
-- Alchemy `CardFace.tsx` -- Card face rendering with element-based art paths
-- Alchemy `GameBoard.tsx` -- Board layout composition
-- Forge.rs `adapter/types.ts` -- Engine type system (WASM boundary)
-- Forge.rs `wasm-adapter.ts` -- Async dispatch, Map conversion
-- Forge.rs `stores/gameStore.ts` -- Async dispatch pattern
-- Forge.rs `components/board/GameBoard.tsx` -- Existing multi-row battlefield layout
-- Forge.rs `components/board/BattlefieldRow.tsx` -- Dynamic permanent row rendering
-- Forge.rs `services/scryfall.ts` -- Async card image loading with rate limiting
-- Forge.rs `hooks/useCardImage.ts` -- Async image hook with cache
+**Codebase analysis (HIGH confidence):**
+- `crates/engine/src/game/effects/mod.rs` -- 38 effect handlers, `build_registry()`, `resolve_ability_chain()` with runtime `parse_ability()` calls
+- `crates/engine/src/types/triggers.rs` -- 137+ trigger modes
+- `crates/engine/src/game/static_abilities.rs` -- 61+ static ability modes (37 registered + 30 stubs)
+- `crates/engine/src/game/game_object.rs` -- `abilities: Vec<String>` storing raw Forge notation on runtime objects
+- `crates/engine/src/game/casting.rs:60, 208` -- runtime `parse_ability()` at cast time
+- `crates/engine/src/game/mana_abilities.rs:15, 43` -- runtime parsing for mana ability detection
+- `crates/engine/src/game/planeswalker.rs:170` -- runtime parsing for loyalty activation
+- `crates/engine/src/game/triggers.rs:176` -- runtime parsing during trigger resolution
+- `crates/engine/src/game/deck_loading.rs:132-146` -- parsing triggers/statics/replacements at load time
+- `crates/engine/src/game/coverage.rs` -- coverage check limitations (handler presence, not correctness)
+- `crates/engine/src/game/test_helpers.rs` -- external Forge directory dependency
+- `crates/engine/src/database/card_db.rs` -- filesystem/walkdir/.txt coupling
+- `crates/engine/src/types/ability.rs` -- `AbilityDefinition`, `TriggerDefinition`, `StaticDefinition`, `ReplacementDefinition` as clean intermediate types
+- `data/standard-cards/` -- 78 curated Standard cards in Forge `.txt` format
+
+**External research (MEDIUM confidence):**
+- [MTGJSON Card (Atomic) Data Model](https://mtgjson.com/data-models/card/card-atomic/) -- confirms no ability definition fields, only oracle text + keyword list
+- [MTGJSON Card (Set) Data Model](https://mtgjson.com/data-models/card/card-set/) -- layout, side, otherFaceIds, faceName fields
+- [MTGJSON License](https://mtgjson.com/license/) -- MIT license confirmed
+- [XMage GitHub Repository](https://github.com/magefree/mage) -- MIT license confirmed; test organization by mechanic category
+- [XMage Testing Tools Wiki](https://github.com/magefree/mage/wiki/Development-Testing-Tools) -- test structure and practices
+- [Forge GitHub Repository](https://github.com/Card-Forge/forge) -- GPL license confirmed
+
+**Legal analysis (LOW confidence -- not legal advice):**
+- [ABA: Limited Copyright Protection for Playing Cards](https://www.americanbar.org/groups/intellectual_property_law/publications/landslide/2020-21/january-february/limited-copyright-protection-playing-cards/) -- merger doctrine for game rules
+- [GNU GPL FAQ](https://www.gnu.org/licenses/gpl-faq.en.html) -- derivative work definition
+- [Copyleft Guide: Derivative Works](https://copyleft.org/guide/comprehensive-gpl-guidech5.html) -- statute and case law analysis

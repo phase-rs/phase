@@ -1,525 +1,587 @@
-# Architecture Patterns: Alchemy UI Integration with Forge.rs Engine
+# Architecture Patterns
 
-**Domain:** MTG game engine frontend / Arena-style UI port
-**Researched:** 2026-03-08
+**Domain:** MTG game engine data source migration and test infrastructure
+**Researched:** 2026-03-10
 
 ## Executive Summary
 
-Alchemy and Forge.rs share the same foundational patterns (Zustand stores, discriminated union types, event-driven dispatch, animation queues) but differ fundamentally in **where the engine lives** and **how dispatch flows**. Alchemy runs a synchronous TypeScript engine in-process; Forge.rs delegates to an async Rust/WASM engine via the EngineAdapter interface. The port must preserve Forge.rs's EngineAdapter abstraction while adopting Alchemy's superior animation pipeline, controller pattern, and game loop architecture.
+The v1.2 milestone introduces three architectural changes to the existing engine:
 
----
+1. **MTGJSON integration** -- a new data source providing card metadata (names, types, costs, colors, keywords, legalities) from MIT-licensed JSON files
+2. **Custom ability JSON schema** -- replacing Forge's pipe-delimited ability strings (`SP$ DealDamage | NumDmg$ 3`) with a typed JSON format that maps directly to the engine's existing `AbilityDefinition`, `TriggerDefinition`, `StaticDefinition`, and `ReplacementDefinition` types
+3. **Comprehensive test infrastructure** -- scenario-based integration tests that set up game state, execute actions, and assert outcomes, inspired by XMage's MIT-licensed test patterns
 
-## 1. Dispatch Comparison: gameStore.dispatch()
-
-### Alchemy's Pattern (synchronous, in-process)
-
-```
-Component -> dispatchWithAnimations(action, player) -> gameStore.dispatch(action, player)
-                                                         |
-                                                      reduce(state, action, player, rng)
-                                                         |
-                                                      { newState, events }
-                                                         |
-                                                      set({ state: newState, events, legalActions })
-                                                         |
-                                                      return events
-```
-
-Key characteristics:
-- **Synchronous**: `dispatch()` calls `reduce()` directly, returns `GameEvent[]` immediately
-- **Player-aware**: dispatch takes `(action, actingPlayer)` -- the acting player is explicit
-- **Legal actions cached**: After every dispatch, `enumerateLegalActions(newState, humanPlayer)` runs and caches `legalActions` in the store
-- **RNG in store**: The `SeededRNG` lives in the Zustand store, passed to the reducer each call
-- **Auto-save**: Debounced persistence after each dispatch (unless game over)
-
-### Forge.rs's Pattern (async, cross-boundary)
-
-```
-Component -> useGameDispatch() -> gameStore.dispatch(action)
-                                     |
-                                  adapter.submitAction(action)   [async, WASM/Tauri/WS]
-                                     |
-                                  adapter.getState()             [async, separate call]
-                                     |
-                                  set({ gameState, events, waitingFor })
-                                     |
-                                  return events
-```
-
-Key characteristics:
-- **Async**: `dispatch()` is `async`, returns `Promise<GameEvent[]>`
-- **No player parameter**: The Rust engine tracks whose turn it is internally; actions are validated server-side
-- **Two-call pattern**: `submitAction()` returns events, then `getState()` fetches the full state separately
-- **WaitingFor instead of legalActions**: Engine tells the UI *what kind of input it needs* (Priority, ManaPayment, TargetSelection, etc.) rather than enumerating all legal actions
-- **Undo via state history**: Stores previous `GameState` snapshots, restores via `adapter.restoreState()`
-
-### Integration Decision
-
-**Keep Forge.rs's async EngineAdapter pattern.** The ported UI must work with `Promise<GameEvent[]>` returns. This means:
-
-1. `dispatchWithAnimations` must become async (or the animation pipeline must handle async dispatch)
-2. The `OpponentController` pattern needs to use Forge.rs's adapter interface, not direct store dispatch
-3. Legal actions enumeration happens in the Rust engine, exposed via `WaitingFor` -- Alchemy's `legalActions` array pattern does not apply
-
----
-
-## 2. Type Mappings
-
-### Identifiers
-
-| Concept | Alchemy | Forge.rs | Mapping Strategy |
-|---------|---------|----------|------------------|
-| Player ID | `'player1' \| 'player2'` (string literal) | `number` (PlayerId = 0, 1) | Adapter translation layer, or change UI to use numeric IDs |
-| Object ID | `permanentId: string` (UUID) | `ObjectId = number` (incrementing) | Use Forge.rs numeric IDs throughout; Alchemy's string UUIDs are an engine detail |
-| Card ID | `cardId: string` (registry key) | `CardId = number` | Card lookup uses Forge.rs's card database, not Alchemy's `CARD_REGISTRY` |
-
-### Phase / Game State
-
-| Alchemy | Forge.rs | Notes |
-|---------|----------|-------|
-| `Phase` discriminated union (mulligan/draw/energy/play/battle/targeting/learning/game_over) | `Phase` string enum (Untap/Upkeep/Draw/PreCombatMain/...) + `WaitingFor` union | Forge.rs separates "what MTG phase" from "what input is needed". The UI must key off `WaitingFor` for interaction prompts, and `phase` for visual indicators |
-| `state.phase.type === 'battle'` with step sub-union | `phase === 'DeclareAttackers'` + `WaitingFor.DeclareAttackers` | Combat sub-steps are top-level phases in Forge.rs |
-| `state.activePlayer` | `state.active_player` | Same concept, different casing (snake_case from Rust serde) |
-| `state.players.player1.board: (Permanent \| null)[]` | `state.battlefield: ObjectId[]` + `state.objects` lookup | Forge.rs uses a flat object store with zone-based ID lists. Board slot positions do not exist in the engine |
-
-### GameAction
-
-| Alchemy | Forge.rs | Notes |
-|---------|----------|-------|
-| `PLAY_CARD { cardIndex }` | `CastSpell { card_id, targets }` or `PlayLand { card_id }` | Forge.rs distinguishes lands from spells. Targets are part of the cast action, not a separate targeting phase (though `TargetSelection` WaitingFor exists for multi-target) |
-| `ADVANCE_PHASE` | `PassPriority` | Forge.rs uses MTG priority passing; phase advances happen automatically when both players pass |
-| `DECLARE_ATTACKER { permanentId }` | `DeclareAttackers { attacker_ids[] }` | Forge.rs sends all attackers at once, not one at a time |
-| `ASSIGN_BLOCKER { blocker, attacker }` | `DeclareBlockers { assignments: [blocker, attacker][] }` | Same: all blockers sent at once |
-| `CONCEDE` | No equivalent found | May need to add to Forge.rs engine |
-| Learning challenge actions | N/A | Alchemy-specific, will not be ported |
-
-### GameEvent
-
-| Alchemy | Forge.rs | Notes |
-|---------|----------|-------|
-| `CARD_PLAYED { player, cardId, permanentId? }` | `SpellCast { card_id, controller }` + `ZoneChanged` | Forge.rs emits finer-grained events |
-| `CREATURE_ENTERED { permanentId, slot }` | `ZoneChanged { object_id, from, to: 'Battlefield' }` | No slot concept in Forge.rs |
-| `DAMAGE_DEALT { targetId, amount, source }` | `DamageDealt { source_id, target: TargetRef, amount }` | Very similar, different field names |
-| `CREATURE_DIED { permanentId, cardId }` | `CreatureDestroyed { object_id }` | Forge.rs does not include card_id in the event |
-| `PLAYER_DAMAGED { player, amount, source }` | `LifeChanged { player_id, amount }` (negative) | Forge.rs uses signed amount for both damage and healing |
-| `CREATURE_HEALED`, `PLAYER_HEALED` | `LifeChanged` / no direct equivalent | Healing is less explicit in Forge.rs events |
-| `SPELL_RESOLVED { cardId, targets }` | `StackResolved { object_id }` | Forge.rs does not include targets in the resolved event |
-| `ATTACKERS_DECLARED`, `BLOCKERS_DECLARED` | `AttackersDeclared`, `BlockersDeclared` | Similar structure |
-
-### Mapping Strategy
-
-Create an **event normalization layer** that translates Forge.rs `GameEvent[]` into the animation system's expected format. This sits between `adapter.submitAction()` and the animation pipeline.
-
-```
-adapter.submitAction(action)
-  -> Forge.rs GameEvent[]
-  -> normalizeEvents(events, preState, postState)
-  -> NormalizedEvent[] (animation-compatible format)
-  -> groupEventsIntoSteps() (ported from Alchemy)
-  -> AnimationStep[]
-  -> animationStore.enqueueSteps()
-```
-
----
-
-## 3. Animation Pipeline Integration
-
-### Alchemy's dispatchWithAnimations
-
-This is the critical integration point. It does:
-
-1. **Pre-dispatch snapshot**: Reads element positions and board state before dispatch (so dying creatures still have positions for death animations)
-2. **Dispatch**: Calls `gameStore.dispatch(action, player)` (synchronous)
-3. **Controller notification**: Calls `onLocalAction()` for network broadcast
-4. **Audio cues**: Immediate SFX for card draws, summons
-5. **Card reveal injection**: Adds reveal effects for opponent plays / untargeted spells
-6. **Event grouping**: `groupEventsIntoSteps(events, positions, cardIdMap)` converts flat events into timed animation steps
-7. **Display health init**: Initializes intermediate health/damage overlays so values animate per-step
-8. **Board snapshot preservation**: Preserves pre-dispatch board when deaths occur so dying creatures remain visible during preceding combat animations
-9. **Enqueue**: Pushes steps to `animationStore`
-
-### Forge.rs's Current useGameDispatch
-
-Much simpler:
-1. Calls async `gameStore.dispatch(action)`
-2. If events returned, calls `animationStore.enqueueEffects(events)` (basic 1:1 event-to-effect mapping)
-
-### Integration Plan
-
-**Replace Forge.rs's `useGameDispatch` with an adapted version of Alchemy's `dispatchWithAnimations`.**
-
-Key adaptations needed:
-
-1. **Make it async**: Forge.rs dispatch returns `Promise<GameEvent[]>`, so the wrapper must be async
-2. **Event translation**: Insert the normalization layer between Forge.rs events and `groupEventsIntoSteps()`
-3. **Position registry**: Port Alchemy's `positionRegistry` module-level Map pattern (already proven more performant than putting positions in Zustand)
-4. **Remove Alchemy-specific concerns**: Strip learning challenges, TTS narration, easy-read mode
-5. **Preserve pre-dispatch snapshot**: The async gap between "read positions" and "dispatch completes" could be problematic -- positions must be captured before the async call, not after
-
-```typescript
-// Adapted dispatchWithAnimations for Forge.rs
-export async function dispatchWithAnimations(
-  action: GameAction,
-  controller?: OpponentController,
-): Promise<GameEvent[]> {
-  // 1. Capture positions BEFORE async dispatch
-  const positions = getPositions();
-  const preState = useGameStore.getState().gameState;
-  const objectIdMap = buildObjectIdMap(preState); // objectId -> cardId
-
-  // 2. Async dispatch through EngineAdapter
-  const events = await useGameStore.getState().dispatch(action);
-
-  // 3. Notify controller (for network broadcast)
-  controller?.onLocalAction(action);
-
-  // 4. Normalize Forge.rs events to animation format
-  const normalizedEvents = normalizeForgeEvents(events, preState);
-
-  // 5. Group into animation steps (ported from Alchemy)
-  const steps = groupEventsIntoSteps(normalizedEvents, positions, objectIdMap);
-
-  // 6. Initialize display overlays + enqueue
-  if (steps.length > 0) {
-    initializeDisplayOverlays(steps, preState);
-    useAnimationStore.getState().enqueueSteps(steps);
-  }
-
-  return events;
-}
-```
-
-### Animation Store
-
-**Port Alchemy's animationStore wholesale.** It is far more sophisticated than Forge.rs's current version:
-- Step-based queue (grouped effects with durations) vs flat effect queue
-- Board snapshot preservation for death animations
-- Display health/damage overlays for per-step progressive updates
-- Position registry as module-level Map (not in Zustand) for performance
-- Speed multiplier for animation pacing
-
----
-
-## 4. OpponentController Pattern vs Forge.rs AI Integration
-
-### Alchemy's Pattern
-
-Alchemy uses an `OpponentController` interface with two implementations:
-
-```typescript
-interface OpponentController {
-  onOpponentPhase(): void;      // Called when it's the opponent's turn
-  onLocalAction(action, player): void;  // Called after human dispatches
-  dispose(): void;
-}
-```
-
-- **AIController**: Schedules AI actions with randomized delay, waits for animations to finish, calls `store.dispatch()` directly
-- **NetworkController**: Broadcasts local actions to peer, applies remote actions on receipt
-- **GameDispatchProvider**: React context that wraps `dispatchWithAnimations` with controller notification
-
-The `useGameLoop` hook ties everything together:
-- Subscribes to `gameStore.state` and `animationStore.isAnimating`
-- On each tick: detect turn changes, trigger opponent controller, auto-advance trivial phases
-- Auto-actions: skip draw/energy/end phases, auto-confirm empty attack declarations, auto-advance when no playable actions
-
-### Forge.rs's Current Pattern
-
-Forge.rs has no game loop hook, no auto-advance, no controller abstraction. AI is called via `get_ai_action()` WASM export. The AI decision happens in the Rust engine.
-
-### Integration Plan
-
-**Port Alchemy's OpponentController + useGameLoop, adapted for Forge.rs.**
-
-The controller interface maps cleanly, but the implementations differ:
-
-**AIController adaptation:**
-- Instead of calling a TS `chooseAction()`, call Forge.rs's WASM `get_ai_action()`
-- The delay + animation-wait logic ports directly
-- `isOpponentPhase()` maps to checking `WaitingFor.data.player !== humanPlayer`
-
-**NetworkController adaptation:**
-- Maps directly to Forge.rs's `WsAdapter` -- the WebSocket transport already exists
-- Local actions broadcast via WebSocket instead of WebRTC peer
-- Remote actions dispatch through `adapter.submitAction()`
-
-**useGameLoop adaptation:**
-- `getAutoAction()` must map to Forge.rs's `WaitingFor` instead of Alchemy's `Phase.type`
-- Auto-priority-pass when no legal actions (replace Alchemy's `ADVANCE_PHASE` auto-dispatch)
-- MTG has more phases to potentially auto-advance (untap, upkeep, draw are automatic in standard play)
-- Full control / auto-pass toggles (already in Forge.rs's uiStore) control when to stop
-
-```typescript
-// Adapted auto-action logic for MTG
-function getAutoAction(
-  state: GameState,
-  humanPlayer: PlayerId,
-  fullControl: boolean,
-): AutoAction | null {
-  const wf = state.waiting_for;
-  if (wf.data.player !== humanPlayer) return null;
-
-  switch (wf.type) {
-    case 'Priority':
-      // Auto-pass if not in full control and no instant-speed actions available
-      if (!fullControl && !hasInstantSpeedActions(state, humanPlayer)) {
-        return { action: { type: 'PassPriority' }, delay: 200 };
-      }
-      return null;
-    case 'MulliganDecision':
-      return null; // Always wait for player
-    default:
-      return null;
-  }
-}
-```
-
----
+The core insight is that **the engine's internal types remain unchanged**. The migration affects the *input pipeline* (how card data enters the engine) and *validation pipeline* (how correctness is verified), not the engine itself. The `apply(state, action) -> ActionResult` reducer, the `HashMap<ObjectId, GameObject>` store, the effect/trigger/static/replacement registries, and the WASM bridge all stay exactly as they are.
 
 ## Recommended Architecture
 
-### Component Boundaries
-
-| Component | Responsibility | Communicates With |
-|-----------|---------------|-------------------|
-| **EngineAdapter** (existing) | Async WASM/Tauri/WS bridge to Rust engine | gameStore |
-| **gameStore** (adapted) | Holds GameState, dispatches through adapter, tracks waitingFor | EngineAdapter, all UI |
-| **animationStore** (ported from Alchemy) | Step-based animation queue, position registry, display overlays | dispatchWithAnimations, animation components |
-| **uiStore** (merged) | Card selection, targeting, combat mode, full-control/auto-pass | UI components |
-| **dispatchWithAnimations** (ported + adapted) | Pre-snapshot, async dispatch, event normalization, animation grouping | gameStore, animationStore, controller |
-| **GameDispatchProvider** (ported) | React context providing dispatch + controller to component tree | dispatchWithAnimations, OpponentController |
-| **OpponentController** (ported) | AI scheduling / network broadcast abstraction | gameStore, EngineAdapter |
-| **useGameLoop** (ported + adapted) | Auto-advance, turn detection, controller triggering | gameStore, animationStore, OpponentController |
-| **Event Normalizer** (new) | Translates Forge.rs GameEvent[] to animation-compatible format | dispatchWithAnimations |
-
-### Data Flow
+### Current Data Flow (v1.1)
 
 ```
-User Click
-  -> Component handler
-  -> useGameDispatch() (from GameDispatchProvider context)
-  -> dispatchWithAnimations(action)
-      -> capture positions (sync)
-      -> gameStore.dispatch(action) (async, through EngineAdapter)
-      -> controller.onLocalAction(action) (network broadcast)
-      -> normalizeEvents(forgeEvents) -> groupEventsIntoSteps()
-      -> animationStore.enqueueSteps(steps)
-  -> animationStore.isAnimating = true
-  -> AnimationLayer renders active step effects
-  -> animationStore.advanceStep() on timer
-  -> ... repeat until queue empty
-  -> animationStore.isAnimating = false
-  -> useGameLoop tick fires
-  -> check WaitingFor: opponent? -> controller.onOpponentPhase()
-  -> check WaitingFor: auto-advance? -> dispatchWithAnimations(autoAction)
+Forge .txt files  -->  parser/card_parser.rs  -->  CardFace { abilities: Vec<String>, ... }
+                                                       |
+                                              deck_loading.rs / create_object_from_card_face()
+                                                       |
+                                              GameObject { abilities: Vec<String>, ... }
+                                                       |
+                                              engine.rs: parse_ability() at use-time
+                                                       |
+                                              ResolvedAbility { api_type, params, ... }
+                                                       |
+                                              effects::resolve_effect(registry, ...)
 ```
 
-### New Layer: Event Normalization
+### Target Data Flow (v1.2)
 
-This is the critical new component that does not exist in either project. It bridges the gap between Forge.rs's MTG-specific events and the animation system's expected format.
+```
+MTGJSON (card metadata)  +  Custom JSON (ability definitions)
+         |                              |
+    mtgjson/mod.rs                json_abilities/mod.rs
+         |                              |
+         +-------> CardFace <-----------+
+                      |
+              deck_loading.rs (unchanged)
+                      |
+              GameObject (unchanged)
+                      |
+              engine.rs (unchanged)
+```
 
-```typescript
-interface NormalizedEvent {
-  type: 'DAMAGE_DEALT' | 'PLAYER_DAMAGED' | 'CREATURE_DIED' | 'CREATURE_ENTERED'
-       | 'SPELL_RESOLVED' | 'CARD_PLAYED' | 'ATTACKERS_DECLARED' | 'BLOCKERS_DECLARED'
-       | 'CREATURE_HEALED' | 'PLAYER_HEALED' | 'KEYWORD_TRIGGERED';
-  // ... fields matching what groupEventsIntoSteps expects
+The key architectural decision: **MTGJSON provides card metadata, the custom JSON format provides ability behavior, and they merge into the same `CardFace` type the engine already consumes.** No downstream code changes.
+
+## Component Boundaries
+
+### New Components
+
+| Component | Location | Responsibility | Communicates With |
+|-----------|----------|---------------|-------------------|
+| MTGJSON loader | `crates/engine/src/mtgjson/` | Deserialize MTGJSON AtomicCards into internal types | `types/card.rs` (produces `CardFace`) |
+| MTGJSON types | `crates/engine/src/mtgjson/types.rs` | serde structs matching MTGJSON v5 Card (Atomic) schema | MTGJSON loader |
+| Ability JSON schema | `crates/engine/src/abilities/` | Define + deserialize typed JSON ability format | `types/ability.rs` (produces definitions) |
+| Ability JSON cards | `data/cards/` | JSON card files with ability definitions | Ability JSON loader |
+| Unified CardDatabase v2 | `crates/engine/src/database/` | Load cards from MTGJSON + ability JSON, replacing txt-only loading | `mtgjson/`, `abilities/`, `types/card.rs` |
+| Test harness | `crates/engine/src/testing/` | Scenario builder API for game state setup and assertion | `game/engine.rs`, `types/game_state.rs` |
+| Test scenarios | `crates/engine/tests/` or inline `#[cfg(test)]` | Individual rule/card correctness tests | Test harness |
+
+### Modified Components
+
+| Component | File | Change | Risk |
+|-----------|------|--------|------|
+| `CardDatabase` | `database/card_db.rs` | Add `load_json()` method alongside existing `load()` | LOW -- additive |
+| `CardFace` | `types/card.rs` | Possibly add optional fields (MTGJSON identifiers, oracle_id) | LOW -- additive |
+| `deck_loading.rs` | `game/deck_loading.rs` | None if CardFace stays compatible | NONE |
+| `coverage.rs` | `game/coverage.rs` | Update to work with new card source | LOW |
+| `test_helpers.rs` | `game/test_helpers.rs` | Replace Forge DB dependency with JSON-based card loading | MEDIUM |
+| Forge parser | `parser/` | Mark as optional/dev-only, gate behind feature flag | LOW |
+
+### Unchanged Components
+
+Everything downstream of `CardFace` and `GameObject`:
+- `engine.rs` (apply function)
+- All effect handlers (`effects/`)
+- All trigger matchers (`triggers.rs`)
+- All static ability handlers (`static_abilities.rs`)
+- All replacement handlers (`replacement.rs`)
+- Layer system (`layers.rs`)
+- Combat system (`combat.rs`, `combat_damage.rs`)
+- WASM bridge (`engine-wasm/`)
+- AI (`forge-ai/`)
+- Frontend (React/TypeScript)
+- Server (`forge-server/`)
+
+## Detailed Component Design
+
+### 1. MTGJSON Integration
+
+**Source file:** `StandardAtomic.json` from MTGJSON v5 API (MIT license)
+**Size:** A subset of AtomicCards.json (122.8 MB uncompressed). StandardAtomic-equivalent data is much smaller -- only Standard-legal cards.
+**Format:** Top-level `{ "data": { "CardName": [{ ... }], ... }, "meta": { ... } }`
+
+**MTGJSON Rust types** (new module `crates/engine/src/mtgjson/types.rs`):
+
+```rust
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct MtgjsonFile {
+    pub data: HashMap<String, Vec<MtgjsonCard>>,
+    pub meta: MtgjsonMeta,
 }
 
-function normalizeForgeEvents(
-  events: GameEvent[],
-  preState: GameState,
-): NormalizedEvent[] {
-  return events.flatMap(event => {
-    switch (event.type) {
-      case 'DamageDealt': {
-        const target = event.data.target;
-        if ('Player' in target) {
-          return [{
-            type: 'PLAYER_DAMAGED',
-            player: target.Player,
-            amount: event.data.amount,
-            source: String(event.data.source_id),
-          }];
-        }
-        return [{
-          type: 'DAMAGE_DEALT',
-          targetId: String(target.Object),
-          amount: event.data.amount,
-          source: String(event.data.source_id),
-        }];
-      }
+#[derive(Debug, Deserialize)]
+pub struct MtgjsonMeta {
+    pub date: String,
+    pub version: String,
+}
 
-      case 'CreatureDestroyed': {
-        const obj = preState.objects[String(event.data.object_id)];
-        return [{
-          type: 'CREATURE_DIED',
-          permanentId: String(event.data.object_id),
-          cardId: String(obj?.card_id ?? 0),
-        }];
-      }
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MtgjsonCard {
+    pub name: String,
+    pub mana_cost: Option<String>,       // e.g. "{2}{R}"
+    pub mana_value: f32,
+    pub colors: Vec<String>,             // ["R"]
+    pub color_identity: Vec<String>,     // ["R"]
+    pub types: Vec<String>,              // ["Instant"]
+    pub supertypes: Vec<String>,         // ["Legendary"]
+    pub subtypes: Vec<String>,           // ["Goblin", "Warrior"]
+    pub power: Option<String>,           // "2"
+    pub toughness: Option<String>,       // "2"
+    pub loyalty: Option<String>,         // "3"
+    pub defense: Option<String>,         // "3"
+    pub text: Option<String>,            // Oracle text
+    pub keywords: Option<Vec<String>>,   // ["Flying", "Haste"]
+    pub layout: String,                  // "normal", "transform", "split", etc.
+    pub side: Option<String>,            // "a", "b"
+    pub face_name: Option<String>,       // Individual face name
+    pub legalities: MtgjsonLegalities,
+    // Fields we don't need but should tolerate via #[serde(flatten)]
+    // or simply mark as Option and ignore.
+}
 
-      case 'ZoneChanged': {
-        if (event.data.to === 'Battlefield') {
-          return [{
-            type: 'CREATURE_ENTERED',
-            permanentId: String(event.data.object_id),
-            slot: -1,
-          }];
-        }
-        return [];
-      }
+#[derive(Debug, Deserialize)]
+pub struct MtgjsonLegalities {
+    pub standard: Option<String>,        // "Legal", "Banned", "Restricted"
+    pub modern: Option<String>,
+    pub pioneer: Option<String>,
+    // ... other formats
+}
+```
 
-      case 'LifeChanged': {
-        const amount = event.data.amount;
-        if (amount < 0) {
-          return [{
-            type: 'PLAYER_DAMAGED',
-            player: event.data.player_id,
-            amount: Math.abs(amount),
-            source: 'engine',
-          }];
-        }
-        if (amount > 0) {
-          return [{
-            type: 'PLAYER_HEALED',
-            player: event.data.player_id,
-            amount,
-          }];
-        }
-        return [];
-      }
+**Key mapping from MTGJSON to existing types:**
 
-      // ... remaining event mappings
-      default:
-        return [];
+| MTGJSON field | Forge.rs type | Notes |
+|---------------|---------------|-------|
+| `name` | `CardFace.name` | Direct 1:1 |
+| `manaCost` | `CardFace.mana_cost` | Parse `{2}{R}` to `ManaCost` (different format from Forge's `2 R`) |
+| `types` | `CardFace.card_type.core_types` | Map strings to `CoreType` enum |
+| `supertypes` | `CardFace.card_type.supertypes` | Map strings to `Supertype` enum |
+| `subtypes` | `CardFace.card_type.subtypes` | Direct strings |
+| `power` / `toughness` | `CardFace.power` / `CardFace.toughness` | Already `Option<String>` |
+| `loyalty` | `CardFace.loyalty` | Already `Option<String>` |
+| `defense` | `CardFace.defense` | Already `Option<String>` |
+| `colors` | `CardFace.color_override` | Map `["R", "G"]` to `Vec<ManaColor>` |
+| `keywords` | `CardFace.keywords` | Direct strings (already parsed downstream by `parse_keywords()`) |
+| `layout` / `side` | `CardLayout` variant | `"normal"` -> `Single`, `"transform"` + sides -> `Transform(a, b)`, etc. |
+| `text` | `CardFace.oracle_text` | Direct 1:1 |
+| `legalities.standard` | Filter criterion | Used to curate Standard-legal subset |
+
+**What MTGJSON does NOT provide:** Ability definitions. MTGJSON has `text` (oracle text as a string) and `keywords`, but not machine-readable ability definitions like Forge's `SP$ DealDamage | NumDmg$ 3`. This is the exact gap the custom ability JSON format fills.
+
+**Mana cost format difference:** Forge uses `2 R` (space-separated), MTGJSON uses `{2}{R}` (brace-wrapped). A new parser function `parse_mtgjson_mana_cost("{2}{R}") -> ManaCost` is needed alongside the existing `mana_cost::parse("2 R")`.
+
+### 2. Custom Ability JSON Format
+
+The ability format must express the same information currently in Forge's pipe-delimited strings, but as typed JSON that maps 1:1 to the engine's existing Rust types.
+
+**Current Forge format (strings on CardFace):**
+```
+abilities: ["SP$ DealDamage | Cost$ R | NumDmg$ 3 | ValidTgts$ Any"]
+triggers: ["Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | Execute$ TrigDraw"]
+static_abilities: ["Mode$ Continuous | Affected$ Creature.YouCtrl | AddPower$ 1"]
+replacements: ["Event$ DamageDone | ActiveZones$ Battlefield | ValidSource$ Card.Self"]
+svars: {"TrigDraw": "DB$ Draw | NumCards$ 1"}
+```
+
+**Proposed JSON format (per-card file):**
+
+```json
+{
+  "name": "Lightning Bolt",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "api_type": "DealDamage",
+      "params": {
+        "Cost": "R",
+        "NumDmg": "3",
+        "ValidTgts": "Any"
+      }
     }
-  });
+  ],
+  "triggers": [],
+  "static_abilities": [],
+  "replacements": [],
+  "svars": {}
 }
 ```
 
----
+This maps directly to the existing types without any changes:
+
+```rust
+// Already exists in types/ability.rs -- NO changes needed
+pub struct AbilityDefinition {
+    pub kind: AbilityKind,      // Spell | Activated | Database
+    pub api_type: String,       // "DealDamage"
+    pub params: HashMap<String, String>,  // {"NumDmg": "3", ...}
+}
+
+pub struct TriggerDefinition {
+    pub mode: String,           // "ChangesZone"
+    pub params: HashMap<String, String>,
+}
+
+pub struct StaticDefinition {
+    pub mode: String,           // "Continuous"
+    pub params: HashMap<String, String>,
+}
+
+pub struct ReplacementDefinition {
+    pub event: String,          // "DamageDone"
+    pub params: HashMap<String, String>,
+}
+```
+
+**The critical insight:** The engine already has these typed definitions with serde derive. The Forge parser produces them by parsing pipe-delimited strings at parse time via `parse_ability()`, `parse_trigger()`, `parse_static()`, `parse_replacement()`. The JSON format simply skips the string-parsing step and deserializes directly into these same types.
+
+**Multi-face card example:**
+
+```json
+{
+  "name": "Bonecrusher Giant",
+  "layout": "Adventure",
+  "faces": [
+    {
+      "name": "Bonecrusher Giant",
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "BecomesTarget",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDmg"
+          }
+        }
+      ],
+      "static_abilities": [],
+      "replacements": [],
+      "svars": {
+        "TrigDmg": "DB$ DealDamage | NumDmg$ 2 | Defined$ TriggeredSourceController"
+      }
+    },
+    {
+      "name": "Stomp",
+      "abilities": [
+        {
+          "kind": "Spell",
+          "api_type": "DealDamage",
+          "params": { "Cost": "1 R", "NumDmg": "2", "ValidTgts": "Any" }
+        }
+      ],
+      "triggers": [],
+      "static_abilities": [],
+      "replacements": [],
+      "svars": {}
+    }
+  ]
+}
+```
+
+**SVars in JSON:** Currently SVars are stored as `HashMap<String, String>` where values are pipe-delimited ability strings. The JSON ability files keep this same format for SVars because the engine's SVar resolution in `resolve_ability_chain()` calls `parse_ability(raw)` on SVar string values at runtime. Keeping SVar values as strings avoids touching the resolution path. A future optimization could type SVars as `HashMap<String, AbilityDefinition>`, but this is not required for v1.2.
+
+**Why keep params as `HashMap<String, String>` rather than strongly typed enums:** The engine's 38+ effect handlers each consume different param keys. Strongly typing every param combination would mean creating one Rust enum variant per effect type's param schema -- a massive refactor with no gameplay benefit. The handlers already validate params at use-time with `params.get("NumDmg").ok_or(...)`.
+
+### 3. Unified Card Loading Pipeline
+
+**New `CardDatabase` loading path:**
+
+```rust
+impl CardDatabase {
+    /// Existing: load from Forge .txt files (retained behind feature flag)
+    #[cfg(feature = "forge-compat")]
+    pub fn load(root: &Path) -> Result<Self, ParseError> { ... }
+
+    /// New: load from MTGJSON + ability JSON files
+    pub fn load_json(
+        mtgjson_path: &Path,     // StandardAtomic.json or curated subset
+        abilities_dir: &Path,     // data/cards/ directory with per-card JSON
+    ) -> Result<Self, LoadError> {
+        // 1. Deserialize MTGJSON file -> HashMap<String, Vec<MtgjsonCard>>
+        // 2. For each card name, load matching ability JSON from abilities_dir
+        // 3. Merge: MTGJSON provides metadata, ability JSON provides behavior
+        // 4. Produce CardFace + CardLayout (same types as existing parser)
+        // 5. Index into cards HashMap + face_index HashMap
+    }
+}
+```
+
+**Merge strategy:**
+- MTGJSON provides: name, mana_cost, types/supertypes/subtypes, power, toughness, loyalty, defense, colors, keywords, oracle_text, layout, legalities
+- Ability JSON provides: abilities, triggers, static_abilities, replacements, svars
+- If a card has MTGJSON data but no ability JSON, it loads with empty abilities (vanilla creature/land works fine)
+- If a card has ability JSON but no MTGJSON data, this is an error (should not happen in practice)
+
+**Multi-face card handling:**
+- MTGJSON uses `layout` + `side` + `faceName` for multi-face cards. Multi-face cards appear as separate entries in the AtomicCards array, one per face
+- Ability JSON uses a `faces` array with per-face ability definitions
+- The merge groups MTGJSON entries by name (split by `" // "`), matches faces by `faceName`, and combines into `CardLayout::Transform(a, b)`, `CardLayout::Adventure(a, b)`, etc.
+
+**MTGJSON layout string to CardLayout mapping:**
+
+| MTGJSON `layout` | Forge.rs `CardLayout` | Notes |
+|-------------------|----------------------|-------|
+| `"normal"` | `Single` | Single-face cards |
+| `"transform"` | `Transform` | DFCs (Innistrad style) |
+| `"modal_dfc"` | `Modal` | MDFCs (Zendikar Rising style) |
+| `"split"` | `Split` | Split cards (Fire // Ice) |
+| `"flip"` | `Flip` | Flip cards (Kamigawa) |
+| `"adventure"` | `Adventure` | Adventure cards (Eldraine) |
+| `"meld"` | `Meld` | Meld cards (Eldritch Moon) |
+| `"token"`, `"emblem"` | Skipped | Not player cards |
+
+### 4. Test Infrastructure
+
+**Inspiration:** XMage (MIT-licensed) organizes tests by mechanic -- `abilities/`, `triggers/`, `combat/`, `rules/`, `single/` (individual cards). Their test base provides methods like `addCard(Zone.HAND, playerA, "Lightning Bolt", 1)`, action sequencing, and state assertions. This is the pattern to follow.
+
+**Current test state:** The existing `test_helpers.rs` relies on the Forge card database being present on disk (`../../forge/forge-gui/res/cardsfolder/`), which is never available in CI. Tests that use `spawn_creature()` silently skip via `Option`. This is effectively untested.
+
+**Proposed test harness** (new module `crates/engine/src/testing/`):
+
+```rust
+pub struct GameScenario {
+    state: GameState,
+}
+
+impl GameScenario {
+    /// Create a new two-player scenario with a seed
+    pub fn new(seed: u64) -> Self;
+
+    /// Add a card to a player's zone by constructing a GameObject from inline data
+    pub fn add_card(&mut self, name: &str, owner: PlayerId, zone: Zone) -> ObjectId;
+
+    /// Add a card with specific state modifications
+    pub fn add_card_with(
+        &mut self,
+        name: &str,
+        owner: PlayerId,
+        zone: Zone,
+        configure: impl FnOnce(&mut GameObject),
+    ) -> ObjectId;
+
+    /// Set a player's life total
+    pub fn set_life(&mut self, player: PlayerId, life: i32);
+
+    /// Set the current phase and active player
+    pub fn set_phase(&mut self, phase: Phase);
+    pub fn set_active_player(&mut self, player: PlayerId);
+
+    /// Execute an action and return the result
+    pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError>;
+
+    /// Assertion helpers
+    pub fn assert_life(&self, player: PlayerId, expected: i32);
+    pub fn assert_zone_count(&self, player: PlayerId, zone: Zone, expected: usize);
+    pub fn assert_zone_contains(&self, player: PlayerId, zone: Zone, card_name: &str);
+    pub fn assert_battlefield_has(&self, card_name: &str) -> ObjectId;
+    pub fn assert_battlefield_tapped(&self, object_id: ObjectId);
+    pub fn assert_has_keyword(&self, object_id: ObjectId, keyword: Keyword);
+    pub fn assert_waiting_for(&self, variant: &str);  // e.g. "Priority", "ManaPayment"
+
+    /// Get the underlying state for custom assertions
+    pub fn state(&self) -> &GameState;
+    pub fn state_mut(&mut self) -> &mut GameState;
+}
+```
+
+**Card data for tests:** Tests should NOT depend on the MTGJSON pipeline or external files. Instead, the `add_card` method creates `GameObject` instances inline using a small card registry of common test cards (Lightning Bolt, Grizzly Bears, etc.) embedded in the test module. This mirrors how `deck_loading.rs` tests already create `CardFace` instances manually. For card-specific tests that need exact ability definitions, the test can call `add_card_with` and configure abilities directly.
+
+**Test organization:**
+
+```
+crates/engine/tests/
+    rules/
+        combat_test.rs          # Trample, first strike, deathtouch interactions
+        priority_test.rs        # Stack ordering, priority passing
+        state_based_test.rs     # 0 life, 0 toughness, legend rule
+        layers_test.rs          # Layer 613 ordering
+    effects/
+        deal_damage_test.rs     # DealDamage effect correctness
+        draw_test.rs            # Draw effect edge cases
+        token_test.rs           # Token creation
+    cards/
+        lightning_bolt_test.rs  # Individual card behavior
+        bonecrusher_giant_test.rs
+    keywords/
+        flying_test.rs          # Flying/reach blocking
+        trample_test.rs         # Trample damage assignment
+        deathtouch_test.rs      # Deathtouch + trample combo
+```
+
+**CI integration:** Tests run as standard `cargo test` with no external dependencies. No Forge directory, no MTGJSON download. All test data is embedded or in small fixture files checked into the repo.
 
 ## Patterns to Follow
 
-### Pattern 1: Context-Based Dispatch (from Alchemy)
+### Pattern 1: Layered Data Loading (Metadata + Behavior Separation)
 
-**What:** Provide dispatch function via React context, wrapping raw store dispatch with animation and controller logic.
-**When:** Always -- this is the only way components should dispatch actions.
+**What:** Separate card metadata (MTGJSON) from card behavior (ability JSON). Load metadata first, then overlay behavior definitions.
 
-```typescript
-// GameDispatchProvider wraps dispatchWithAnimations + controller
-<GameDispatchProvider controller={controller}>
-  <GameBoard />  {/* all children use useGameDispatch() */}
-</GameDispatchProvider>
+**When:** Loading any card for gameplay.
+
+**Why:** MTGJSON provides comprehensive, MIT-licensed metadata that updates automatically with each set release. Ability definitions are hand-crafted and version-controlled. Separating concerns means MTGJSON updates don't require ability rework, and ability changes don't require re-fetching MTGJSON data.
+
+### Pattern 2: Feature-Gated Parser Retention
+
+**What:** Keep the Forge .txt parser behind a Cargo feature flag (`forge-compat`) rather than deleting it.
+
+**When:** Development/migration tooling needs it.
+
+**Why:** The parser is useful for: (a) validating ability JSON against Forge's known-good definitions during migration, (b) batch-converting additional cards from Forge format to JSON, (c) keeping the option to sync upstream if needed. Feature-gated means it adds zero bytes to the WASM binary in production.
+
+```toml
+# Cargo.toml
+[features]
+default = []
+forge-compat = ["walkdir"]  # enables Forge .txt parser and CardDatabase::load()
 ```
 
-### Pattern 2: Module-Level Position Registry (from Alchemy)
+### Pattern 3: Builder-Based Test Scenarios
 
-**What:** Keep element positions in a module-level `Map<string, ElementPosition>` instead of Zustand.
-**When:** Always for position tracking. Zustand would cause needless re-renders on every ResizeObserver callback.
+**What:** Use a builder pattern for game test setup instead of manual state construction.
 
-### Pattern 3: Pre-Dispatch Snapshot (from Alchemy)
+**When:** Every integration test.
 
-**What:** Capture board positions and state before dispatching, so animations can reference elements that may have been removed.
-**When:** Every dispatch. Critical for death animations during combat.
+**Why:** Manual `GameState::new_two_player()` + manual object creation is verbose and error-prone (see current `test_helpers.rs` which requires Forge DB on disk and silently returns `None` when unavailable). A builder makes tests readable and self-contained.
 
-### Pattern 4: Step-Based Animation Queue (from Alchemy)
+```rust
+#[test]
+fn lightning_bolt_deals_3_damage() {
+    let mut s = GameScenario::new(42);
+    let bolt_id = s.add_card("Lightning Bolt", PlayerId(0), Zone::Hand);
+    s.set_phase(Phase::Main1);
 
-**What:** Group events into `AnimationStep[]` with durations, rather than animating events individually.
-**When:** Always. This enables block links preceding combat strikes preceding deaths -- proper sequencing.
+    s.act(GameAction::CastSpell {
+        card_id: CardId(1),
+        targets: Some(vec![TargetRef::Player(PlayerId(1))]),
+    }).unwrap();
 
----
+    // Resolve the spell (pass priority twice)
+    s.act(GameAction::PassPriority).unwrap();
+    s.act(GameAction::PassPriority).unwrap();
+
+    s.assert_life(PlayerId(1), 17);
+}
+```
+
+### Pattern 4: Preserve Internal String-Based Ability Resolution
+
+**What:** The JSON ability definitions produce the same `CardFace` with `abilities: Vec<String>` and `svars: HashMap<String, String>` that the Forge parser produces. The engine's runtime path remains unchanged.
+
+**When:** During v1.2 migration. This is the safe approach.
+
+**Why:** The engine has 38 effect handlers, 137 trigger matchers, 61 static handlers, and 45 replacement handlers. The `apply()` function, `resolve_ability_chain()`, `process_triggers()`, `check_static_ability()`, and `build_*_registry()` all work with string-based definitions. Changing the runtime representation would touch ~13 source files -- high risk, high effort, zero gameplay value.
+
+**How:** The JSON loader reads typed `AbilityDefinition` from JSON (no string parsing needed), then serializes them back to the pipe-delimited string format for `CardFace.abilities`. This means the JSON gives authoring-time validation (schema errors caught at load time, not runtime) while preserving the proven runtime path.
+
+**Future optimization:** Have `GameObject.abilities` store `Vec<AbilityDefinition>` instead of `Vec<String>`, eliminating the parse step in `engine.rs` and the 13 files that call `parse_ability()`. This is a cleaner end state but a separate refactor.
 
 ## Anti-Patterns to Avoid
 
-### Anti-Pattern 1: Synchronous Dispatch Assumption
+### Anti-Pattern 1: Downloading MTGJSON at Runtime
 
-**What:** Porting Alchemy's `dispatchWithAnimations` without making it async.
-**Why bad:** Forge.rs's EngineAdapter returns promises. Synchronous calls would require blocking or ignoring results.
-**Instead:** Make `dispatchWithAnimations` async. The animation pipeline already handles async (steps enqueue regardless of dispatch timing).
+**What:** Fetching MTGJSON data from the API during game initialization or build.
 
-### Anti-Pattern 2: Duplicating State Between Engine and UI
+**Why bad:** Network dependency makes offline play unreliable, WASM builds cannot make arbitrary HTTP requests, and the full AtomicCards.json is 122.8 MB which would destroy startup time.
 
-**What:** Maintaining board state in both the Rust engine and a TypeScript shadow state.
-**Why bad:** Desync risk, double memory, stale data bugs.
-**Instead:** Single source of truth is the Rust engine via `adapter.getState()`. UI reads from `gameStore.gameState` which is always the latest engine snapshot.
+**Instead:** Curate a subset of MTGJSON data at development time using a build script. Check the resulting compact JSON (<500 KB for Standard) into the repository. Update periodically when new sets release.
 
-### Anti-Pattern 3: String/Number ID Confusion
+### Anti-Pattern 2: One Monolithic Card JSON File
 
-**What:** Mixing Alchemy's string IDs with Forge.rs's numeric IDs without consistent conversion.
-**Why bad:** Map lookups fail silently (`Map.get("1") !== Map.get(1)`).
-**Instead:** Use string-coerced numeric IDs everywhere in the UI (`String(objectId)`), since DOM data attributes and Map keys are strings anyway. Establish this convention early and enforce it.
+**What:** Putting all 78 card ability definitions in a single JSON file.
 
-### Anti-Pattern 4: Porting Alchemy's Learning System
+**Why bad:** Merge conflicts on every card change, hard to review individual cards, hard to diff. Individual card files in Forge's model (`data/cardsfolder/a/act_of_treason.txt`) are one of its strengths.
 
-**What:** Bringing over `START_LEARNING_CHALLENGE`, learning stores, challenge policy.
-**Why bad:** Alchemy-specific feature unrelated to MTG gameplay. Adds dead code and complexity.
-**Instead:** Strip all learning-related code during port. The `dispatchWithAnimations` learning challenge interception (lines 42-88 in Alchemy) should be removed entirely.
+**Instead:** One JSON file per card in `data/cards/`, named by slug (`lightning_bolt.json`, `bonecrusher_giant.json`). A build-time step can concatenate into a single bundled file if needed for WASM binary size.
 
-### Anti-Pattern 5: Porting Alchemy's Engine Types Directly
+### Anti-Pattern 3: Strongly Typing Every Ability Parameter
 
-**What:** Using Alchemy's `GameState`, `Phase`, `Permanent` types alongside Forge.rs's.
-**Why bad:** Two competing type systems for the same concepts. The Rust engine's types (generated via tsify) are the source of truth.
-**Instead:** Use Forge.rs's generated types. Create the normalization layer only for animation events, not for game state.
+**What:** Creating Rust enums for every possible parameter value (`ValidTgts::Any`, `ValidTgts::Creature`, etc.).
 
----
+**Why bad:** There are hundreds of distinct parameter combinations across 38+ effect types. The current `HashMap<String, String>` design is intentional -- it allows adding new parameter patterns without changing the type system. Each effect handler validates its own params at runtime.
 
-## Build Order
+**Instead:** Keep `HashMap<String, String>` for params. The JSON schema provides structural validation (no more malformed pipes/dollars), while the runtime preserves the flexibility that made it possible to implement 202 effect types without a massive type hierarchy.
 
-This ordering respects dependencies (each step builds on the previous):
+### Anti-Pattern 4: Testing Against Forge DB on Disk
 
-### Phase 1: Foundation (no visible UI changes yet)
+**What:** The current `test_helpers.rs` loads `../../forge/forge-gui/res/cardsfolder/` which may or may not exist, and returns `Option::None` when it does not.
 
-1. **Event Normalizer** -- Translate Forge.rs `GameEvent[]` to animation-compatible format
-2. **Port animationStore** -- Alchemy's step-based queue, position registry, display overlays
-3. **Port dispatchWithAnimations** -- Async version, wired to EngineAdapter + new animationStore
+**Why bad:** Tests silently skip when the DB is missing (CI never has it). Tests depend on external unversioned data. There is no way to know if card behavior regressed.
 
-### Phase 2: Game Loop and Controllers
+**Instead:** All tests use self-contained data. Either inline card definitions in the test, or small JSON fixture files checked into the repo. No external filesystem dependencies. Every test runs in CI.
 
-4. **Port OpponentController interface** -- Same interface, adapted for Forge.rs's async dispatch
-5. **Port AIController** -- Uses `get_ai_action()` WASM export instead of TS AI
-6. **Port useGameLoop** -- Auto-advance mapped to `WaitingFor`, turn detection, animation-awareness
-7. **Port GameDispatchProvider** -- Context provider wiring dispatch + controller
+## Data File Organization
 
-### Phase 3: UI Components
+```
+data/
+    mtgjson/
+        standard_cards.json          # Curated MTGJSON Standard subset (~200-500 KB)
+    cards/
+        lightning_bolt.json          # Ability definitions per card
+        bonecrusher_giant.json
+        sheoldred_the_apocalypse.json
+        ...                          # 78 cards for initial migration
+    cardsfolder/                     # Existing Forge .txt files (feature-gated, eventually removed)
+        a/
+        b/
+        ...
+```
 
-8. **Port uiStore** -- Merge Alchemy's interaction state with Forge.rs's targeting/combat modes
-9. **Port board components** -- GameBoard, PlayerArea, CardSlot, CreatureCard
-10. **Port hand components** -- HandDisplay, HandCard (adapt for Forge.rs card data)
-11. **Port combat UI** -- Attacker selection, blocker assignment (adapt for batch declaration)
-12. **Port animation components** -- AnimationLayer, particle effects, floating numbers
+### MTGJSON Data Curation
 
-### Phase 4: MTG-Specific Additions
+Rather than shipping the full 122 MB AtomicCards.json, create a build-time script that:
+1. Downloads AtomicCards.json from `https://mtgjson.com/api/v5/AtomicCards.json`
+2. Filters to Standard-legal cards using `legalities.standard == "Legal"`
+3. Strips unnecessary fields (foreignData, purchaseUrls, identifiers, edhrecRank, etc.)
+4. Retains only: name, manaCost, manaValue, colors, colorIdentity, types, supertypes, subtypes, power, toughness, loyalty, defense, text, keywords, layout, side, faceName, legalities
+5. Writes a compact `standard_cards.json` (~200-500 KB estimated for ~2,000 Standard-legal cards)
+6. This file is checked into the repo and updated when new sets release
 
-13. **Stack visualization** -- Forge.rs has a real stack; Alchemy does not
-14. **Mana payment UI** -- Forge.rs has mana tapping; Alchemy uses simple energy
-15. **Priority/instant-speed interaction** -- Full control toggle, auto-pass logic
-16. **Targeting UI adaptation** -- Forge.rs has richer targeting (any permanent, any player)
+## Build Order (Dependency-Aware)
 
----
+The following build order respects dependencies and minimizes risk:
 
-## Key Integration Points Summary
+```
+Phase 1: MTGJSON types + mana cost parser + loader (no downstream deps)
+    |
+Phase 2: Ability JSON schema + loader (no downstream deps, parallelizable with 1)
+    |
+Phase 3: Unified CardDatabase.load_json() merging MTGJSON + ability JSON
+    |         (depends on Phases 1+2)
+    |
+Phase 4: Test harness -- GameScenario builder (can start during Phase 3)
+    |
+Phase 5: Migrate 78 cards from Forge .txt to MTGJSON + ability JSON
+    |         (depends on Phase 3; uses Phase 4 tests to validate each card)
+    |
+Phase 6: Gate Forge parser behind feature flag (depends on Phase 5)
+    |
+Phase 7: Comprehensive test suite using GameScenario
+    |         (partially parallelizable with Phase 5)
+    |
+Phase 8: License change + cleanup (depends on Phase 6)
+```
 
-| Integration Point | What Changes | New vs Modified |
-|-------------------|-------------|-----------------|
-| `gameStore.dispatch` | Keep existing async adapter dispatch | **Modified** -- add WaitingFor tracking |
-| `animationStore` | Replace entirely with Alchemy's version | **New** (replaces existing) |
-| `dispatchWithAnimations` | Port from Alchemy, make async, add event normalizer | **New** |
-| `GameDispatchProvider` | Port from Alchemy | **New** |
-| `OpponentController` | Port interface + AI/Network implementations | **New** |
-| `useGameLoop` | Port from Alchemy, adapt auto-actions for MTG | **New** |
-| `Event Normalizer` | Bridge Forge.rs events to animation format | **New** |
-| `uiStore` | Merge Alchemy's interaction state into existing store | **Modified** |
-| `useGameDispatch` | Replace with context-based dispatch from Provider | **Modified** (simplified) |
-| Position registry | Port module-level Map from Alchemy | **New** |
+Phases 1 and 2 are fully parallelizable.
+Phases 4 and 5 can overlap (write tests as cards are migrated).
+Phase 7 can start during Phase 5 (rules tests don't need all 78 cards).
+Phase 8 is a non-code task that depends on removing the Forge data dependency.
 
----
+## Scalability Considerations
+
+| Concern | 78 cards (v1.2) | 1,000 cards (full Standard) | 32,000+ cards (all MTG) |
+|---------|-----------------|----------------------------|-------------------------|
+| Card ability files | 78 JSON files, <100 KB total | ~500 JSON files, ~1 MB | ~10,000 files, ~10 MB; consider bundling |
+| MTGJSON data | ~50 KB curated | ~500 KB curated | 122 MB; must use lazy loading or binary format |
+| Load time | Negligible | <100ms | Needs indexed lookup, not full deserialization |
+| WASM binary size | Negligible impact | Card data embedded in binary, ~1 MB | Cannot embed; need external loading |
+| Test fixture size | Inline in tests | Shared fixture files | Test fixture registry with lazy loading |
+
+For v1.2 with 78 cards, every approach works. The architecture is designed to scale to full Standard (~2,000 cards) without redesign.
 
 ## Sources
 
-- Alchemy source: `/Users/matt/dev/alchemy/src/game/` (gameStore, dispatchWithAnimations, controllers, animationStore, uiStore, types)
-- Forge.rs source: `/Users/matt/dev/forge.rs/client/src/` (adapter/, stores/, hooks/)
-- Both projects' type definitions compared directly via source code analysis
-
-**Confidence: HIGH** -- based on direct source code analysis of both projects, no external sources needed.
+- MTGJSON Card (Atomic) Data Model: https://mtgjson.com/data-models/card/card-atomic/ (HIGH confidence -- official documentation)
+- MTGJSON Downloads / File sizes: https://mtgjson.com/api/v5/ (HIGH confidence -- verified file listing, AtomicCards.json is 122.8 MB)
+- MTGJSON Rust crate: https://docs.rs/mtgjson (MEDIUM confidence -- exists with serde support, may not match latest v5 schema exactly; recommend custom types over this crate)
+- XMage test structure: https://github.com/magefree/mage (HIGH confidence -- MIT license confirmed, test organization by mechanic verified)
+- XMage testing tools: https://github.com/magefree/mage/wiki/Development-Testing-Tools (MEDIUM confidence -- wiki documentation, shows init.txt and zone-based card setup pattern)
+- Existing codebase analysis: `crates/engine/src/` (HIGH confidence -- direct code inspection of parser/, database/, types/, game/ modules)
