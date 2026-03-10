@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: in-progress
-stopped_at: Completed 22-02-PLAN.md
-last_updated: "2026-03-10T19:29:23Z"
-last_activity: 2026-03-10 — Completed Plan 22-02 (Rules Correctness Tests)
+stopped_at: Completed 22-03-PLAN.md
+last_updated: "2026-03-10T19:32:05Z"
+last_activity: 2026-03-10 — Completed Plan 22-03 (Combat/Keywords/Layers Tests)
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 8
-  completed_plans: 7
-  percent: 40
+  completed_plans: 8
+  percent: 50
 ---
 
 # Project State
@@ -26,25 +26,25 @@ See: .planning/PROJECT.md (updated 2026-03-10)
 ## Current Position
 
 Phase: 22 (second of 5 in v1.2) — Test Infrastructure
-Plan: 2/3 complete
-Status: Plan 22-02 complete — ready for Plan 22-03
-Last activity: 2026-03-10 — Completed Plan 22-02 (Rules Correctness Tests)
+Plan: 3/3 complete
+Status: Phase 22 complete — all plans finished
+Last activity: 2026-03-10 — Completed Plan 22-03 (Combat/Keywords/Layers Tests)
 
-Progress: [████░░░░░░] 40%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 7 (v1.2)
+- Total plans completed: 8 (v1.2)
 - Average duration: 13min
-- Total execution time: 1.4 hours
+- Total execution time: 1.6 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 21 | 5/5 | 68min | 14min |
-| 22 | 2/3 | 20min | 10min |
+| 22 | 3/3 | 35min | 12min |
 
 ## Accumulated Context
 
@@ -74,6 +74,10 @@ Recent decisions affecting current work:
 - [22-02]: ChangesZone triggers test Hand->Stack zone transitions (not just ETB) -- engine fires on all zone changes
 - [22-02]: Deathtouch SBA test uses direct GameState construction since GameRunner doesn't expose &mut state for dealt_deathtouch_damage
 - [22-02]: Explicit act(PassPriority) loop for stack drain when triggers add entries during resolution
+- [22-03]: CardBuilder must push keywords to both keywords and base_keywords to survive layer evaluation (bug fix)
+- [22-03]: Combat integration tests use run_combat() helper driving full engine pipeline (PassPriority -> DeclareAttackers -> DeclareBlockers)
+- [22-03]: Layer tests trigger evaluation via PassPriority (SBAs run, which evaluate layers when layers_dirty=true)
+- [22-03]: GameRunner::snapshot() for step-by-step snapshot tests
 
 ### Pending Todos
 
@@ -85,6 +89,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T19:29:23Z
-Stopped at: Completed 22-02-PLAN.md
+Last session: 2026-03-10T19:32:05Z
+Stopped at: Completed 22-03-PLAN.md
+Resume file: .planning/phases/22-test-infrastructure/22-03-SUMMARY.md
 Resume file: .planning/phases/22-test-infrastructure/22-02-SUMMARY.md
