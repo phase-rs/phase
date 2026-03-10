@@ -7,11 +7,7 @@ import { partitionByType, groupByName } from "../../viewmodel/battlefieldProps.t
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
 
-/**
- * CSS variable overrides for the land column.
- * By redefining --art-crop-w/h and --card-w/h on this container,
- * all card components inside render at the smaller land size.
- */
+/** Scale for land column (left) */
 const LAND_SCALE = 0.65;
 
 const LAND_COL_STYLE = {
@@ -22,8 +18,20 @@ const LAND_COL_STYLE = {
   width: `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 2 + 1.5rem)`,
 } as React.CSSProperties;
 
-/** Symmetric padding so justify-center aligns creatures to viewport center */
 const LAND_COL_WIDTH = `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 2 + 1.5rem)`;
+
+/** Scale for enchantment/artifact column (right) — larger than lands */
+const OTHER_SCALE = 0.85;
+
+const OTHER_COL_STYLE = {
+  "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
+  "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} * 0.75)`,
+  "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
+  "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE} * 1.4)`,
+  width: `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} + 1.5rem)`,
+} as React.CSSProperties;
+
+const OTHER_COL_WIDTH = `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} + 1.5rem)`;
 
 export function GameBoard() {
   const gameState = useGameStore((s) => s.gameState);
@@ -85,25 +93,31 @@ export function GameBoard() {
     <div className="relative flex min-h-0 flex-1 flex-col overflow-visible">
       {/* Opponent's battlefield */}
       <div className="relative flex flex-1">
-        {/* Opponent lands — absolutely positioned left column */}
+        {/* Opponent lands — left column */}
         <div
-          className="absolute left-0 top-0 bottom-0 z-10 overflow-y-auto px-1 py-2"
+          className="absolute left-0 top-0 bottom-0 z-10 overflow-visible px-1 py-2"
           style={LAND_COL_STYLE}
         >
           {opponent && (
             <BattlefieldRow groups={opponent.lands} rowType="lands" />
           )}
         </div>
-        {/* Opponent creatures + other — symmetric padding keeps center at viewport center */}
+        {/* Opponent creatures — center area */}
         <div
           className="flex flex-1 flex-col justify-end gap-1 py-2"
-          style={{ paddingLeft: LAND_COL_WIDTH, paddingRight: LAND_COL_WIDTH }}
+          style={{ paddingLeft: LAND_COL_WIDTH, paddingRight: OTHER_COL_WIDTH }}
         >
           {opponent && (
-            <>
-              <BattlefieldRow groups={opponent.other} rowType="other" />
-              <BattlefieldRow groups={opponent.creatures} rowType="creatures" />
-            </>
+            <BattlefieldRow groups={opponent.creatures} rowType="creatures" />
+          )}
+        </div>
+        {/* Opponent enchantments/artifacts — right column */}
+        <div
+          className="absolute right-0 top-0 bottom-0 z-10 overflow-visible px-1 py-2"
+          style={OTHER_COL_STYLE}
+        >
+          {opponent && (
+            <BattlefieldRow groups={opponent.other} rowType="other" />
           )}
         </div>
       </div>
@@ -113,9 +127,9 @@ export function GameBoard() {
 
       {/* Player's battlefield */}
       <div className="relative flex flex-1">
-        {/* Player lands — absolutely positioned left column */}
+        {/* Player lands — left column */}
         <div
-          className="absolute left-0 top-0 bottom-0 z-10 flex flex-col overflow-y-auto px-1 py-2"
+          className="absolute left-0 top-0 bottom-0 z-10 flex flex-col overflow-visible px-1 py-2"
           style={LAND_COL_STYLE}
         >
           {player && (
@@ -133,16 +147,22 @@ export function GameBoard() {
             </button>
           )}
         </div>
-        {/* Player creatures + other — symmetric padding keeps center at viewport center */}
+        {/* Player creatures — center area */}
         <div
           className="flex flex-1 flex-col gap-1 pt-2 pb-4"
-          style={{ paddingLeft: LAND_COL_WIDTH, paddingRight: LAND_COL_WIDTH }}
+          style={{ paddingLeft: LAND_COL_WIDTH, paddingRight: OTHER_COL_WIDTH }}
         >
           {player && (
-            <>
-              <BattlefieldRow groups={sortedPlayerCreatures} rowType="creatures" />
-              <BattlefieldRow groups={player.other} rowType="other" />
-            </>
+            <BattlefieldRow groups={sortedPlayerCreatures} rowType="creatures" />
+          )}
+        </div>
+        {/* Player enchantments/artifacts — right column */}
+        <div
+          className="absolute right-0 top-0 bottom-0 z-10 overflow-visible px-1 py-2"
+          style={OTHER_COL_STYLE}
+        >
+          {player && (
+            <BattlefieldRow groups={player.other} rowType="other" />
           )}
         </div>
       </div>
