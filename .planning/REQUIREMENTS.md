@@ -11,7 +11,7 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 
 - [x] **DATA-01**: Engine loads card metadata (name, mana cost, types, P/T, colors, keywords, oracle text, layout) from MTGJSON AllCards AtomicCards.json using custom Rust types
 - [x] **DATA-02**: Engine defines a typed JSON ability schema mapping to AbilityDefinition, TriggerDefinition, StaticDefinition, and ReplacementDefinition types
-- [ ] **DATA-03**: CardDatabase::load_json() merges MTGJSON metadata + ability JSON into CardFace, becoming the primary card loading path
+- [x] **DATA-03**: CardDatabase::load_json() merges MTGJSON metadata + ability JSON into CardFace, becoming the primary card loading path
 - [x] **DATA-04**: Ability JSON schema exports a JSON Schema definition via schemars for editor autocompletion and build-time validation
 
 ### Card Migration
@@ -19,7 +19,7 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 - [ ] **MIGR-01**: All engine-supported cards (thousands — every card whose mechanics have registered handlers) are converted from Forge .txt to MTGJSON metadata + ability JSON via automated migration
 - [ ] **MIGR-02**: data/cardsfolder/ and data/standard-cards/ are removed from the repository; Forge parser is feature-gated behind forge-compat
 - [ ] **MIGR-03**: Automated Forge-to-JSON migration tool converts all 32,300+ Forge .txt card definitions to the new ability JSON format, producing ability files for every engine-supported card
-- [ ] **MIGR-04**: Card data includes MTGJSON scryfallOracleId for reliable frontend image lookups via Scryfall API
+- [x] **MIGR-04**: Card data includes MTGJSON scryfallOracleId for reliable frontend image lookups via Scryfall API
 - [ ] **MIGR-05**: CI coverage gate updated to validate against JSON card data; all previously supported cards remain supported after migration
 
 ### Testing
@@ -65,12 +65,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | DATA-01 | Phase 21 | Complete |
 | DATA-02 | Phase 21 | **Complete** (21-01) |
-| DATA-03 | Phase 23 | Pending |
+| DATA-03 | Phase 23 | Complete |
 | DATA-04 | Phase 21 | Complete |
 | MIGR-01 | Phase 24 | Pending |
 | MIGR-02 | Phase 25 | Pending |
 | MIGR-03 | Phase 24 | Pending |
-| MIGR-04 | Phase 23 | Pending |
+| MIGR-04 | Phase 23 | Complete |
 | MIGR-05 | Phase 24 | Pending |
 | TEST-01 | Phase 22 | Complete |
 | TEST-02 | Phase 22 | Complete |

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: completed
-stopped_at: Phase 23 context gathered
-last_updated: "2026-03-10T20:02:20.089Z"
-last_activity: 2026-03-10 — Completed Plan 22-03 (Combat/Keywords/Layers Tests)
+status: active
+stopped_at: Completed 23-01-PLAN.md
+last_updated: "2026-03-10T20:52:04Z"
+last_activity: 2026-03-10 — Completed Plan 23-01 (JSON Card Loader)
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 7
-  completed_plans: 7
-  percent: 50
+  total_plans: 9
+  completed_plans: 8
+  percent: 60
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 22 — Test Infrastructure
+**Current focus:** Phase 23 — Unified Card Loader
 
 ## Current Position
 
-Phase: 22 (second of 5 in v1.2) — Test Infrastructure
-Plan: 3/3 complete
-Status: Phase 22 complete — all plans finished
-Last activity: 2026-03-10 — Completed Plan 22-03 (Combat/Keywords/Layers Tests)
+Phase: 23 (third of 5 in v1.2) — Unified Card Loader
+Plan: 1/2 complete
+Status: Plan 23-01 complete, Plan 23-02 pending
+Last activity: 2026-03-10 — Completed Plan 23-01 (JSON Card Loader)
 
-Progress: [█████░░░░░] 50%
+Progress: [██████░░░░] 60%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8 (v1.2)
+- Total plans completed: 9 (v1.2)
 - Average duration: 13min
-- Total execution time: 1.6 hours
+- Total execution time: 1.8 hours
 
 **By Phase:**
 
@@ -45,6 +45,7 @@ Progress: [█████░░░░░] 50%
 |-------|-------|-------|----------|
 | 21 | 5/5 | 68min | 14min |
 | 22 | 3/3 | 35min | 12min |
+| 23 | 1/2 | 9min | 9min |
 
 ## Accumulated Context
 
@@ -78,6 +79,10 @@ Recent decisions affecting current work:
 - [22-03]: Combat integration tests use run_combat() helper driving full engine pipeline (PassPriority -> DeclareAttackers -> DeclareBlockers)
 - [22-03]: Layer tests trigger evaluation via PassPriority (SBAs run, which evaluate layers when layers_dirty=true)
 - [22-03]: GameRunner::snapshot() for step-by-step snapshot tests
+- [23-01]: Case-insensitive MTGJSON name matching for filename-to-card lookup (handles title-cased prepositions)
+- [23-01]: FaceAbilities struct with flat #[serde(default)] fields mirroring AbilityFile for multi-face cards
+- [23-01]: Equip synthesis uses Effect::Attach with TargetSpec::Filtered for Creature.YouCtrl
+- [23-01]: CardDatabase fields made pub(crate) for cross-module construction by json_loader
 
 ### Pending Todos
 
@@ -89,7 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T20:02:20.086Z
-Stopped at: Phase 23 context gathered
-Resume file: .planning/phases/23-unified-card-loader/23-CONTEXT.md
-Resume file: .planning/phases/22-test-infrastructure/22-02-SUMMARY.md
+Last session: 2026-03-10T20:52:04Z
+Stopped at: Completed 23-01-PLAN.md
+Resume file: .planning/phases/23-unified-card-loader/23-01-SUMMARY.md
