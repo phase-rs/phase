@@ -330,6 +330,7 @@ export interface EngineAdapter {
   submitAction(action: GameAction): Promise<GameEvent[]>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<GameAction[]>;
+  getAiAction(difficulty: string): Promise<GameAction | null> | GameAction | null;
   restoreState(state: GameState): void;
   dispose(): void;
 }

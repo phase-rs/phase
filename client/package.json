@@ -9,9 +9,13 @@
     "lint": "eslint .",
     "type-check": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "vitest"
+    "test": "vitest",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2",
     "@tailwindcss/vite": "^4.2.1",
     "framer-motion": "^12.35.1",
     "idb-keyval": "^6.2.2",
@@ -24,6 +28,7 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2",
     "@eslint/js": "^9.21.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",

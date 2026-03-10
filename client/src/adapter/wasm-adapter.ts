@@ -4,6 +4,7 @@ import init, {
   initialize_game,
   submit_action,
   get_game_state,
+  get_ai_action,
   get_legal_actions_js,
   restore_game_state,
 } from "../wasm/engine_wasm";
@@ -68,6 +69,13 @@ export class WasmAdapter implements EngineAdapter {
       if (actions === null) return [];
       return convertMapsToRecords(actions) as GameAction[];
     });
+  }
+
+  getAiAction(difficulty: string): GameAction | null {
+    this.assertInitialized();
+    const result = get_ai_action(difficulty);
+    if (result == null) return null;
+    return result as GameAction;
   }
 
   restoreState(state: GameState): void {

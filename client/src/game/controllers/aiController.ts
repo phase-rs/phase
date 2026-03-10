@@ -1,7 +1,6 @@
 import type { GameAction } from "../../adapter/types";
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, AI_PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
-import { get_ai_action } from "../../wasm/engine_wasm";
 import { dispatchAction } from "../dispatch";
 import type { OpponentController } from "./types";
 
@@ -47,12 +46,16 @@ export function createAIController(config: AIControllerConfig): AIController {
     const delay = AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
     timeoutId = setTimeout(async () => {
       try {
-        const actionValue = get_ai_action(config.difficulty);
-        if (actionValue == null) {
+        const { adapter } = useGameStore.getState();
+        if (!adapter) {
           pending = false;
           return;
         }
-        const action = actionValue as GameAction;
+        const action = await adapter.getAiAction(config.difficulty);
+        if (action == null) {
+          pending = false;
+          return;
+        }
         await dispatchAction(action);
       } catch (e) {
         console.error("[AI] Error choosing action:", e);

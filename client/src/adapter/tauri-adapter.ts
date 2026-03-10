@@ -1,4 +1,4 @@
-import type { EngineAdapter, GameAction, GameEvent, GameState } from "./types";
+import type { ActionResult, EngineAdapter, GameAction, GameEvent, GameState } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
 
 /**
@@ -22,15 +22,19 @@ export class TauriAdapter implements EngineAdapter {
 
   async initializeGame(deckData?: unknown): Promise<GameEvent[]> {
     this.assertInitialized();
-    const result = await this.invoke!("initialize_game", { deckData: deckData ?? null });
-    return (result as GameEvent[]) ?? [];
+    const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+    const result = await this.invoke!("initialize_game", {
+      deckData: deckData ?? null,
+      seed,
+    });
+    return (result as ActionResult).events ?? [];
   }
 
   async submitAction(action: GameAction): Promise<GameEvent[]> {
     this.assertInitialized();
     try {
       const result = await this.invoke!("submit_action", { action });
-      return result as GameEvent[];
+      return (result as ActionResult).events ?? [];
     } catch (error) {
       throw new AdapterError(
         AdapterErrorCode.INVALID_ACTION,
@@ -62,6 +66,12 @@ export class TauriAdapter implements EngineAdapter {
     } catch {
       return [];
     }
+  }
+
+  async getAiAction(difficulty: string): Promise<GameAction | null> {
+    this.assertInitialized();
+    const result = await this.invoke!("get_ai_action", { difficulty });
+    return (result as GameAction) ?? null;
   }
 
   restoreState(_state: GameState): void {
