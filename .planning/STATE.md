@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: completed
-stopped_at: Completed 24-03-PLAN.md
-last_updated: "2026-03-10T23:20:29.343Z"
+stopped_at: Phase 25 context gathered
+last_updated: "2026-03-10T23:34:48.367Z"
 last_activity: 2026-03-10 — Completed Plan 24-03 (CI Coverage Gates)
 progress:
   total_phases: 5
@@ -109,6 +109,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T23:12:00.000Z
-Stopped at: Completed 24-03-PLAN.md
-Resume file: .planning/phases/24-card-migration/24-03-SUMMARY.md
+Last session: 2026-03-10T23:34:48.362Z
+Stopped at: Phase 25 context gathered
+Resume file: .planning/phases/25-forge-removal-relicensing/25-CONTEXT.md
