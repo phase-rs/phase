@@ -143,7 +143,7 @@ export function GameProvider({
     const { initGame, resumeGame, reset } = useGameStore.getState();
 
     const isOnline = mode === "online";
-    const hasSession = sessionStorage.getItem("forge-ws-session") !== null;
+    const hasSession = sessionStorage.getItem("phase-ws-session") !== null;
     const isReconnect = isOnline && !joinCode && hasSession;
 
     let cancelled = false;

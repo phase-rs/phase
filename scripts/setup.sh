@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Forge.rs Setup ==="
+echo "=== phase.rs Setup ==="
 echo ""
 
 echo "Step 1/4: Generating card data..."

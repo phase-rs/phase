@@ -27,7 +27,7 @@ export type WsAdapterEvent =
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
-const WS_STORAGE_KEY = "forge-ws-session";
+const WS_STORAGE_KEY = "phase-ws-session";
 
 interface SessionData {
   gameCode: string;
@@ -36,7 +36,7 @@ interface SessionData {
 
 /**
  * WebSocket-backed implementation of EngineAdapter.
- * Communicates with the forge-server via WebSocket protocol
+ * Communicates with the phase-server via WebSocket protocol
  * for multiplayer games.
  */
 export class WebSocketAdapter implements EngineAdapter {

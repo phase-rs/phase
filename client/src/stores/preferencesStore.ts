@@ -80,6 +80,6 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBattlefieldCardDisplay: (display) => set({ battlefieldCardDisplay: display }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
     }),
-    { name: "forge-preferences" },
+    { name: "phase-preferences" },
   ),
 );

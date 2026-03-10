@@ -102,13 +102,13 @@ describe("preferencesStore", () => {
     expect(state.boardBackground).toBe("auto-wubrg");
   });
 
-  it("persists to localStorage with forge-preferences key", () => {
+  it("persists to localStorage with phase-preferences key", () => {
     act(() => {
       usePreferencesStore.getState().setCardSize("small");
     });
 
     // Zustand persist writes to localStorage
-    const stored = localStorage.getItem("forge-preferences");
+    const stored = localStorage.getItem("phase-preferences");
     expect(stored).toBeTruthy();
 
     const parsed = JSON.parse(stored!);
@@ -172,7 +172,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setSfxVolume(30);
     });
 
-    const stored = localStorage.getItem("forge-preferences");
+    const stored = localStorage.getItem("phase-preferences");
     expect(stored).toBeTruthy();
 
     const parsed = JSON.parse(stored!);
@@ -204,7 +204,7 @@ describe("preferencesStore", () => {
       },
       version: 0,
     };
-    localStorage.setItem("forge-preferences", JSON.stringify(stored));
+    localStorage.setItem("phase-preferences", JSON.stringify(stored));
 
     // Force rehydration
     act(() => {

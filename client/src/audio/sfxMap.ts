@@ -1,6 +1,5 @@
 /**
- * Maps GameEvent type strings to Forge SFX filenames (without extension).
- * Only maps to confirmed-existing files from Forge's res/sound/ directory.
+ * Maps GameEvent type strings to SFX filenames (without extension).
  */
 export const SFX_MAP: Record<string, string> = {
   DamageDealt: "destroy",
@@ -20,7 +19,7 @@ export const SFX_MAP: Record<string, string> = {
   AbilityActivated: "enchant",
 };
 
-/** Forge battle music tracks (Kevin MacLeod, CC-BY 3.0). */
+/** Battle music tracks (Kevin MacLeod, CC-BY 3.0). */
 export const MUSIC_TRACKS: string[] = [
   "Dangerous",
   "Failing Defense",
