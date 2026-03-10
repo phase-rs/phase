@@ -57,17 +57,16 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
                   <CardImage cardName={obj.name} size="small" />
                 </div>
               ) : (
-                <div
-                  className="rounded-lg border border-gray-600 bg-gradient-to-br from-gray-800 via-gray-700 to-gray-800 shadow-md"
+                <img
+                  src="/card-back.png"
+                  alt="Card back"
+                  className="rounded-lg border border-gray-600 shadow-md object-cover"
                   style={{
                     width: "calc(var(--card-w) * 0.6)",
                     height: "calc(var(--card-h) * 0.6)",
                   }}
-                >
-                  <div className="flex h-full items-center justify-center">
-                    <div className="h-[70%] w-[70%] rounded border border-gray-500 bg-gradient-to-br from-amber-900/40 via-amber-800/30 to-amber-900/40" />
-                  </div>
-                </div>
+                  draggable={false}
+                />
               )}
             </motion.div>
           );

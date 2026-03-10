@@ -78,9 +78,12 @@ export function LibraryPile({ playerId }: LibraryPileProps) {
         {isPeeking ? (
           <TopCard cardName={topCardName} />
         ) : (
-          <div className="flex h-full w-full items-center justify-center rounded-lg bg-gradient-to-br from-indigo-950 to-gray-900">
-            <div className="h-[60%] w-[65%] rounded border border-amber-700/40 bg-gradient-to-br from-amber-900/30 to-indigo-900/30" />
-          </div>
+          <img
+            src="/card-back.png"
+            alt="Library"
+            className="h-full w-full rounded-lg object-cover"
+            draggable={false}
+          />
         )}
       </div>
 
