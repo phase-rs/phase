@@ -74,7 +74,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .expect("failed to bind");
-    println!("forge-server listening on port {}", port);
+    println!("phase-server listening on port {}", port);
     axum::serve(listener, app).await.expect("server error");
 }
 

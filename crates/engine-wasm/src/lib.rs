@@ -12,9 +12,9 @@ use engine::game::{load_deck_into_state, start_game, DeckPayload};
 use engine::types::player::PlayerId;
 use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
 
-use forge_ai::choose_action;
-use forge_ai::config::{create_config, AiDifficulty, Platform};
-use forge_ai::legal_actions::get_legal_actions;
+use phase_ai::choose_action;
+use phase_ai::config::{create_config, AiDifficulty, Platform};
+use phase_ai::legal_actions::get_legal_actions;
 
 thread_local! {
     static GAME_STATE: RefCell<Option<GameState>> = const { RefCell::new(None) };

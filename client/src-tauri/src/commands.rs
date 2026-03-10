@@ -9,8 +9,8 @@ use engine::types::game_state::ActionResult;
 use engine::types::player::PlayerId;
 use engine::types::{GameAction, GameState};
 
-use forge_ai::choose_action;
-use forge_ai::config::{create_config, AiDifficulty, Platform};
+use phase_ai::choose_action;
+use phase_ai::config::{create_config, AiDifficulty, Platform};
 
 pub struct AppState {
     pub game: Mutex<Option<GameState>>,
@@ -81,7 +81,7 @@ pub fn get_legal_actions(state: tauri::State<AppState>) -> Result<Vec<GameAction
     let guard = state.game.lock().map_err(|e| e.to_string())?;
     let game = guard.as_ref().ok_or("Game not initialized")?;
 
-    Ok(forge_ai::legal_actions::get_legal_actions(game))
+    Ok(phase_ai::legal_actions::get_legal_actions(game))
 }
 
 #[tauri::command]

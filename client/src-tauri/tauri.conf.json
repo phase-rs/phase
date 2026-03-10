@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/config.schema.json",
-  "productName": "Forge",
+  "productName": "Phase",
   "version": "0.1.0",
-  "identifier": "rs.forge.app",
+  "identifier": "rs.phase.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Forge",
+        "title": "phase.rs",
         "width": 1280,
         "height": 800,
         "resizable": true

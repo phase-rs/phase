@@ -17,5 +17,5 @@ pub fn run() {
             commands::dispose_game,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Forge");
+        .expect("error while running phase.rs");
 }

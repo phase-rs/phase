@@ -7,7 +7,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
-use forge_ai::get_legal_actions;
+use phase_ai::get_legal_actions;
 use rand::Rng;
 
 use crate::filter::filter_state_for_player;

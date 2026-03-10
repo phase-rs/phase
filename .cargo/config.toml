@@ -4,4 +4,4 @@ wasm-release = "build --package engine-wasm --target wasm32-unknown-unknown --re
 test-all = "test --all"
 clippy-strict = "clippy --all-targets -- -D warnings"
 export-cards = "run --release --bin card-data-export --"
-serve = "run --release --bin forge-server"
+serve = "run --release --bin phase-server"

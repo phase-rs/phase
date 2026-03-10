@@ -1,10 +1,10 @@
 [package]
-name = "forge-server"
+name = "phase-server"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "forge-server"
+name = "phase-server"
 path = "src/main.rs"
 
 [dependencies]
