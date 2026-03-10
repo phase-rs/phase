@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: active
-stopped_at: Roadmap created, ready to plan Phase 21
-last_updated: "2026-03-10"
+status: planning
+stopped_at: Phase 21 context gathered
+last_updated: "2026-03-10T15:54:48.520Z"
 last_activity: 2026-03-10 — Roadmap created for v1.2
 progress:
   total_phases: 5
@@ -66,6 +66,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10
-Stopped at: Roadmap created for v1.2 milestone
-Resume file: None
+Last session: 2026-03-10T15:54:48.517Z
+Stopped at: Phase 21 context gathered
+Resume file: .planning/phases/21-schema-mtgjson-foundation/21-CONTEXT.md
