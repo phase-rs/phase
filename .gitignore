@@ -16,6 +16,8 @@ client/coverage/
 # Downloaded card data (but keep curated Standard subset for CI)
 data/*
 !data/standard-cards/
+!data/mtgjson/
+!data/abilities/
 
 # OS
 .DS_Store

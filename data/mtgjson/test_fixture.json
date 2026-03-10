@@ -1,0 +1,170 @@
+{
+    "meta": {
+        "date": "2026-03-01",
+        "version": "5.3.0"
+    },
+    "data": {
+        "Lightning Bolt": [
+            {
+                "name": "Lightning Bolt",
+                "manaCost": "{R}",
+                "manaValue": 1.0,
+                "colors": ["R"],
+                "colorIdentity": ["R"],
+                "types": ["Instant"],
+                "subtypes": [],
+                "supertypes": [],
+                "text": "Lightning Bolt deals 3 damage to any target.",
+                "layout": "normal",
+                "type": "Instant",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "5d547462-7cf4-4848-b8b1-48cf63bde68d"
+                }
+            }
+        ],
+        "Grizzly Bears": [
+            {
+                "name": "Grizzly Bears",
+                "manaCost": "{1}{G}",
+                "manaValue": 2.0,
+                "colors": ["G"],
+                "colorIdentity": ["G"],
+                "types": ["Creature"],
+                "subtypes": ["Bear"],
+                "supertypes": [],
+                "power": "2",
+                "toughness": "2",
+                "text": "",
+                "layout": "normal",
+                "type": "Creature — Bear",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "a8d813e2-3c58-4463-bf5c-1f38b3f73e2f"
+                }
+            }
+        ],
+        "Counterspell": [
+            {
+                "name": "Counterspell",
+                "manaCost": "{U}{U}",
+                "manaValue": 2.0,
+                "colors": ["U"],
+                "colorIdentity": ["U"],
+                "types": ["Instant"],
+                "subtypes": [],
+                "supertypes": [],
+                "text": "Counter target spell.",
+                "layout": "normal",
+                "type": "Instant",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "21b2e422-cce9-4cf2-a24a-1d58c01c9a9b"
+                }
+            }
+        ],
+        "Wrath of God": [
+            {
+                "name": "Wrath of God",
+                "manaCost": "{2}{W}{W}",
+                "manaValue": 4.0,
+                "colors": ["W"],
+                "colorIdentity": ["W"],
+                "types": ["Sorcery"],
+                "subtypes": [],
+                "supertypes": [],
+                "text": "Destroy all creatures. They can't be regenerated.",
+                "layout": "normal",
+                "type": "Sorcery",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "c6e2f5b8-abc3-47d5-81a0-1db8b3a87e75"
+                }
+            }
+        ],
+        "Delver of Secrets // Insectile Aberration": [
+            {
+                "name": "Delver of Secrets // Insectile Aberration",
+                "manaCost": "{U}",
+                "manaValue": 1.0,
+                "colors": ["U"],
+                "colorIdentity": ["U"],
+                "types": ["Creature"],
+                "subtypes": ["Human", "Wizard"],
+                "supertypes": [],
+                "power": "1",
+                "toughness": "1",
+                "text": "At the beginning of your upkeep, look at the top card of your library. You may reveal that card. If an instant or sorcery card is revealed this way, transform Delver of Secrets.",
+                "layout": "transform",
+                "type": "Creature — Human Wizard",
+                "side": "a",
+                "faceName": "Delver of Secrets",
+                "keywords": ["Transform"],
+                "identifiers": {
+                    "scryfallOracleId": "f3625aaa-5c53-4234-b475-f31df5e81a98"
+                }
+            },
+            {
+                "name": "Delver of Secrets // Insectile Aberration",
+                "manaCost": "",
+                "manaValue": 1.0,
+                "colors": ["U"],
+                "colorIdentity": ["U"],
+                "types": ["Creature"],
+                "subtypes": ["Human", "Insect"],
+                "supertypes": [],
+                "power": "3",
+                "toughness": "2",
+                "text": "Flying",
+                "layout": "transform",
+                "type": "Creature — Human Insect",
+                "side": "b",
+                "faceName": "Insectile Aberration",
+                "keywords": ["Flying", "Transform"],
+                "identifiers": {
+                    "scryfallOracleId": "f3625aaa-5c53-4234-b475-f31df5e81a98"
+                }
+            }
+        ],
+        "Mox Pearl": [
+            {
+                "name": "Mox Pearl",
+                "manaCost": "{0}",
+                "manaValue": 0.0,
+                "colors": [],
+                "colorIdentity": ["W"],
+                "types": ["Artifact"],
+                "subtypes": [],
+                "supertypes": [],
+                "text": "{T}: Add {W}.",
+                "layout": "normal",
+                "type": "Artifact",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "d57b56d7-da10-4629-92a7-c5adec36a6c2"
+                }
+            }
+        ],
+        "Sphinx of the Steel Wind": [
+            {
+                "name": "Sphinx of the Steel Wind",
+                "manaCost": "{5}{W}{U}{B}",
+                "manaValue": 8.0,
+                "colors": ["B", "U", "W"],
+                "colorIdentity": ["B", "U", "W"],
+                "types": ["Artifact", "Creature"],
+                "subtypes": ["Sphinx"],
+                "supertypes": [],
+                "power": "6",
+                "toughness": "6",
+                "text": "Flying, first strike, vigilance, lifelink, protection from red and from green",
+                "layout": "normal",
+                "type": "Artifact Creature — Sphinx",
+                "keywords": ["First strike", "Flying", "Lifelink", "Protection", "Vigilance"],
+                "identifiers": {
+                    "scryfallOracleId": "d0f8f5bb-2850-41c0-aef0-39d71f45c8f5"
+                }
+            }
+        ]
+    }
+}
