@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::process;
 
 use engine::database::CardDatabase;
-use engine::game::coverage::{analyze_standard_coverage, is_fully_covered, CoverageSummary};
+use engine::game::coverage::{
+    analyze_standard_coverage, is_fully_covered, CardCoverageResult, CoverageSummary,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -29,7 +31,9 @@ fn main() {
         eprintln!();
         eprintln!("Flags:");
         eprintln!("  --ci    Exit with code 1 if any cards are unsupported");
-        eprintln!("  --json  Load cards via JSON (mtgjson + abilities) instead of Forge .txt files");
+        eprintln!(
+            "  --json  Load cards via JSON (mtgjson + abilities) instead of Forge .txt files"
+        );
         eprintln!();
         eprintln!("Outputting empty coverage summary to stdout.");
         let empty = CoverageSummary {
@@ -51,7 +55,11 @@ fn main() {
         match CardDatabase::load_json(&mtgjson_path, &abilities_dir) {
             Ok(db) => db,
             Err(e) => {
-                eprintln!("Error loading JSON card database from {}: {}", path.display(), e);
+                eprintln!(
+                    "Error loading JSON card database from {}: {}",
+                    path.display(),
+                    e
+                );
                 let empty = CoverageSummary {
                     total_cards: 0,
                     supported_cards: 0,
@@ -153,11 +161,14 @@ fn load_manifest(path: &PathBuf) -> Result<HashSet<String>, std::io::Error> {
 }
 
 /// Filter a CoverageSummary to only include cards whose names are in the manifest.
+/// In JSON mode, also strips benign MTGJSON keyword mismatches (bare parameterized
+/// keywords and action keywords like Scry/Mill that MTGJSON tracks but Forge doesn't).
 fn filter_to_manifest(summary: CoverageSummary, manifest: &HashSet<String>) -> CoverageSummary {
     let cards: Vec<_> = summary
         .cards
         .into_iter()
         .filter(|c| manifest.contains(&c.card_name.to_lowercase()))
+        .map(strip_benign_keyword_mismatches)
         .collect();
 
     let total_cards = cards.len();
@@ -185,4 +196,76 @@ fn filter_to_manifest(summary: CoverageSummary, manifest: &HashSet<String>) -> C
         cards,
         missing_handler_frequency,
     }
+}
+
+/// MTGJSON provides bare keyword names (e.g. "Flashback", "Protection") without
+/// the colon-delimited parameters that Forge uses (e.g. "Flashback:{2}{U}",
+/// "Protection:Demon"). The engine's Keyword::from_str treats these bare names as
+/// Unknown because they're parameterized keywords missing their parameter.
+///
+/// Additionally, MTGJSON tracks action keywords (Scry, Mill) that Forge doesn't
+/// include in its K: keyword lines -- these are handled as effects, not keywords.
+///
+/// This function strips these known-benign mismatches from a card's missing handlers,
+/// matching the same allowlisting pattern established in the parity tests (Plan 02).
+fn strip_benign_keyword_mismatches(mut card: CardCoverageResult) -> CardCoverageResult {
+    // Keywords that the engine supports as parameterized variants but MTGJSON sends bare
+    const KNOWN_PARAMETERIZED: &[&str] = &[
+        "Protection",
+        "Flashback",
+        "Cycling",
+        "Ward",
+        "Kicker",
+        "Equip",
+        "Landwalk",
+        "Ninjutsu",
+        "Morph",
+        "Madness",
+        "Dash",
+        "Emerge",
+        "Escape",
+        "Evoke",
+        "Foretell",
+        "Mutate",
+        "Disturb",
+        "Disguise",
+        "Blitz",
+        "Overload",
+        "Spectacle",
+        "Surge",
+        "Buyback",
+        "Echo",
+        "Outlast",
+        "Bestow",
+        "Embalm",
+        "Eternalize",
+        "Unearth",
+        "Reconfigure",
+    ];
+
+    // MTGJSON action keywords not in the engine's Keyword enum (handled as effects)
+    const MTGJSON_ACTION_KEYWORDS: &[&str] = &["Scry", "Mill", "Fateseal", "Surveil"];
+
+    card.missing_handlers.retain(|handler| {
+        if let Some(kw_name) = handler.strip_prefix("Keyword:") {
+            // Strip if it's a known parameterized keyword sent bare by MTGJSON
+            if KNOWN_PARAMETERIZED
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(kw_name))
+            {
+                return false;
+            }
+            // Strip if it's an MTGJSON-only action keyword
+            if MTGJSON_ACTION_KEYWORDS
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(kw_name))
+            {
+                return false;
+            }
+        }
+        true
+    });
+
+    card.supported = card.missing_handlers.is_empty();
+    card
 }
