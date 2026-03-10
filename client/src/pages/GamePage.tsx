@@ -478,18 +478,13 @@ function MulliganDecisionPrompt({
 
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
   const nextHandSize = 7 - mulliganCount - 1;
-  const cardCount = handObjects.length;
-
-  // Calculate fan rotation for each card
-  const getFanRotation = (index: number) => {
-    if (cardCount <= 1) return 0;
-    const mid = (cardCount - 1) / 2;
-    return (index - mid) * 3;
-  };
-
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center"
-      style={{ background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)" }}
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
+      style={{
+        background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
+        "--card-w": "clamp(100px, 14vw, 180px)",
+        "--card-h": "clamp(140px, 19.6vw, 252px)",
+      } as React.CSSProperties}
     >
       {/* Title */}
       <motion.div
@@ -509,24 +504,24 @@ function MulliganDecisionPrompt({
         )}
       </motion.div>
 
-      {/* Card display — fanned row */}
-      <div className="mb-10 flex items-center justify-center gap-4">
+      {/* Card display — overlapping row */}
+      <div className="mb-10 flex items-center justify-center">
         {handObjects.map((obj, index) => (
           <motion.div
             key={obj.id}
-            className="cursor-pointer rounded-lg transition-shadow duration-200 hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
-            style={{ rotate: `${getFanRotation(index)}deg` }}
+            className="cursor-pointer flex-shrink-0 rounded-lg transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
+            style={{ marginLeft: index === 0 ? 0 : "clamp(-40px, -4vw, -25px)" }}
             initial={{ opacity: 0, y: 80, scale: 0.8 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
-            whileHover={{ scale: 1.05, y: -8 }}
+            whileHover={{ scale: 1.1, y: -20 }}
             onAnimationComplete={() => {
-              if (index === cardCount - 1) setButtonsVisible(true);
+              if (index === handObjects.length - 1) setButtonsVisible(true);
             }}
             onMouseEnter={() => inspectObject(obj.id)}
             onMouseLeave={() => inspectObject(null)}
           >
-            <CardImage cardName={obj.name} size="normal" className="!w-[160px] !h-[224px]" />
+            <CardImage cardName={obj.name} size="normal" />
           </motion.div>
         ))}
       </div>
@@ -535,22 +530,22 @@ function MulliganDecisionPrompt({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="flex gap-4"
+            className="flex flex-wrap justify-center gap-3 px-4"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3 }}
           >
             <button
               onClick={() => onChoose("keep")}
-              className="rounded-lg bg-emerald-600 px-12 py-4 text-xl font-bold text-white shadow-lg transition hover:bg-emerald-500 hover:shadow-emerald-500/30"
+              className="rounded-lg bg-emerald-600 px-8 py-3 text-lg font-bold text-white shadow-lg transition hover:bg-emerald-500 hover:shadow-emerald-500/30"
             >
               Keep Hand
             </button>
             <button
               onClick={() => onChoose("mulligan")}
-              className="rounded-lg border border-gray-500 bg-transparent px-12 py-4 text-xl font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white"
+              className="rounded-lg border border-gray-500 bg-transparent px-8 py-3 text-lg font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white"
             >
-              Mulligan (Draw {nextHandSize} cards)
+              Mulligan ({nextHandSize} cards)
             </button>
           </motion.div>
         )}
@@ -581,8 +576,12 @@ function MulliganBottomCardsPrompt({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center"
-      style={{ background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)" }}
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
+      style={{
+        background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
+        "--card-w": "clamp(100px, 14vw, 180px)",
+        "--card-h": "clamp(140px, 19.6vw, 252px)",
+      } as React.CSSProperties}
     >
       {/* Title */}
       <motion.div
@@ -602,8 +601,8 @@ function MulliganBottomCardsPrompt({
         </p>
       </motion.div>
 
-      {/* Card display */}
-      <div className="mb-10 flex items-center justify-center gap-4">
+      {/* Card display — overlapping row */}
+      <div className="mb-10 flex items-center justify-center">
         {handObjects.map((obj, index) => {
           const isSelected = selectedTargets.includes(obj.id);
           return (
@@ -614,19 +613,20 @@ function MulliganBottomCardsPrompt({
                   addTarget(obj.id);
                 }
               }}
-              className={`rounded-lg p-1 transition ${
+              className={`flex-shrink-0 rounded-lg p-1 transition hover:z-50 ${
                 isSelected
-                  ? "ring-3 ring-cyan-400 opacity-70"
+                  ? "z-40 ring-3 ring-cyan-400 opacity-70"
                   : "hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
               }`}
+              style={{ marginLeft: index === 0 ? 0 : "clamp(-40px, -4vw, -25px)" }}
               initial={{ opacity: 0, y: 80, scale: 0.8 }}
               animate={{ opacity: isSelected ? 0.7 : 1, y: 0, scale: 1 }}
               transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
-              whileHover={{ scale: 1.05, y: -8 }}
+              whileHover={{ scale: 1.1, y: -20 }}
               onMouseEnter={() => inspectObject(obj.id)}
               onMouseLeave={() => inspectObject(null)}
             >
-              <CardImage cardName={obj.name} size="normal" className="!w-[160px] !h-[224px]" />
+              <CardImage cardName={obj.name} size="normal" />
             </motion.button>
           );
         })}

@@ -52,12 +52,12 @@ function CardPreviewInner({
       style={style}
     >
       {isLoading || !src ? (
-        <div className="w-[472px] h-[659px] rounded-xl bg-gray-700 border border-gray-600 shadow-2xl animate-pulse" />
+        <div className="max-h-[80vh] max-w-[45vw] w-[472px] aspect-[5/7] rounded-xl bg-gray-700 border border-gray-600 shadow-2xl animate-pulse" />
       ) : (
         <img
           src={src}
           alt={cardName}
-          className="w-[472px] h-[659px] rounded-xl border border-gray-600 shadow-2xl object-cover"
+          className="max-h-[80vh] max-w-[45vw] w-[472px] rounded-xl border border-gray-600 shadow-2xl object-cover"
           draggable={false}
         />
       )}
