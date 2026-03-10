@@ -101,8 +101,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 23-01-PLAN.md — JSON loader module with merge logic, implicit ability synthesis, type contracts, and load_json()
-- [ ] 23-02-PLAN.md — Ability JSON files for 8 smoke test cards, integration smoke test, and cross-validation
+- [x] 23-01-PLAN.md — JSON loader module with merge logic, implicit ability synthesis, type contracts, and load_json()
+- [x] 23-02-PLAN.md — Ability JSON files for 8 smoke test cards, integration smoke test, and cross-validation
 
 ### Phase 24: Card Migration
 **Goal**: All engine-supported cards are converted to the new format with automated tooling, and behavioral parity is validated
@@ -116,12 +116,12 @@ Plans:
 **Known Concerns** (from Phase 21 review):
   - Migration tool must generate explicit ability JSON for implicit abilities: basic lands (mana production), equipment (Equip activated ability from keyword), planeswalkers (loyalty cost in `AbilityCost::Loyalty` not string params)
   - Migration tool should validate generated ability JSON against MTGJSON oracle text to catch omissions
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 24-01: TBD
-- [ ] 24-02: TBD
-- [ ] 24-03: TBD
+- [ ] 24-01-PLAN.md — Cost parser enhancement + migration tool binary + execute migration
+- [ ] 24-02-PLAN.md — Standard card manifest, MTGJSON fixture expansion, and Forge vs JSON parity tests
+- [ ] 24-03-PLAN.md — JSON coverage gate in coverage report binary + CI dual-gate update
 
 ### Phase 25: Forge Removal & Relicensing
 **Goal**: The project contains no GPL-licensed data and is relicensed as MIT/Apache-2.0
@@ -151,5 +151,5 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 21. Schema & MTGJSON Foundation | v1.2 | Complete    | 2026-03-10 | 2026-03-10 |
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
 | 23. Unified Card Loader | 2/2 | Complete    | 2026-03-10 | - |
-| 24. Card Migration | v1.2 | 0/? | Not started | - |
+| 24. Card Migration | v1.2 | 0/3 | Not started | - |
 | 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |
