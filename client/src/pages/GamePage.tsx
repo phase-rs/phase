@@ -176,10 +176,16 @@ function GamePageContent({
   const [showPreferences, setShowPreferences] = useState(false);
 
   const isDragging = useUiStore((s) => s.isDragging);
-  const inspectedCardName =
+  const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
+  const inspectedObj =
     !isDragging && inspectedObjectId != null && objects
-      ? (objects[inspectedObjectId]?.name ?? null)
+      ? objects[inspectedObjectId] ?? null
       : null;
+  const inspectedCardName = inspectedObj
+    ? (inspectedFaceIndex === 1 && inspectedObj.back_face
+      ? inspectedObj.back_face.name
+      : inspectedObj.name)
+    : null;
 
   useKeyboardShortcuts();
 

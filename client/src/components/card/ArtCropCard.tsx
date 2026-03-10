@@ -1,5 +1,6 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import { computePTDisplay } from "../../viewmodel/cardProps.ts";
 import { PTBox } from "../board/PTBox.tsx";
 
@@ -29,12 +30,14 @@ function getBorderColor(colors: string[]): string {
 
 export function ArtCropCard({ objectId }: ArtCropCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const inspectObject = useUiStore((s) => s.inspectObject);
 
   const cardName = obj?.name ?? "";
   const { src, isLoading } = useCardImage(cardName, { size: "art_crop" });
 
   if (!obj) return null;
 
+  const hasDfc = obj.back_face != null;
   const borderColor = getBorderColor(obj.color);
   const isToken = obj.card_id === 0;
   const borderWidth = isToken ? 2 : 3;
@@ -121,6 +124,19 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
           >
             !
           </span>
+        )}
+
+        {/* DFC indicator — hover to peek at back face */}
+        {hasDfc && (
+          <button
+            type="button"
+            className="absolute bottom-0.5 left-0.5 z-20 bg-gray-900/80 border border-gray-500 rounded-sm px-1 py-0.5 text-[8px] font-bold text-gray-300 hover:bg-gray-700/90 hover:text-white cursor-pointer"
+            title={`Back face: ${obj.back_face!.name}`}
+            onMouseEnter={() => inspectObject(objectId, 1)}
+            onMouseLeave={() => inspectObject(objectId, 0)}
+          >
+            DFC
+          </button>
         )}
       </div>
     </div>

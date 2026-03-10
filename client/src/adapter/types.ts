@@ -108,6 +108,15 @@ export interface GameObject {
   entered_battlefield_turn: number | null;
   has_unimplemented_mechanics?: boolean;
   has_summoning_sickness?: boolean;
+  back_face?: {
+    name: string;
+    power: number | null;
+    toughness: number | null;
+    card_types: CardType;
+    keywords: string[];
+    abilities: string[];
+    color: ManaColor[];
+  } | null;
 }
 
 // ── Player ───────────────────────────────────────────────────────────────
@@ -215,7 +224,8 @@ export type GameAction =
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseReplacement"; data: { index: number } }
   | { type: "CancelCast" }
-  | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } };
+  | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } }
+  | { type: "Transform"; data: { object_id: ObjectId } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
@@ -252,7 +262,8 @@ export type GameEvent =
   | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId } }
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "BecomesTarget"; data: { object_id: ObjectId; source_id: ObjectId } }
-  | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } };
+  | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } }
+  | { type: "Transformed"; data: { object_id: ObjectId } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 

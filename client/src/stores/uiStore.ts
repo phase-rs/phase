@@ -5,6 +5,7 @@ interface UiStoreState {
   selectedObjectId: ObjectId | null;
   hoveredObjectId: ObjectId | null;
   inspectedObjectId: ObjectId | null;
+  inspectedFaceIndex: number;
   targetingMode: boolean;
   validTargetIds: ObjectId[];
   sourceObjectId: ObjectId | null;
@@ -16,12 +17,14 @@ interface UiStoreState {
   blockerAssignments: Map<ObjectId, ObjectId>;
   combatClickHandler: ((id: ObjectId) => void) | null;
   isDragging: boolean;
+  endTurnMode: boolean;
+  endTurnSinceTurn: number | null;
 }
 
 interface UiStoreActions {
   selectObject: (id: ObjectId | null) => void;
   hoverObject: (id: ObjectId | null) => void;
-  inspectObject: (id: ObjectId | null) => void;
+  inspectObject: (id: ObjectId | null, faceIndex?: number) => void;
   startTargeting: (validIds: ObjectId[], sourceId: ObjectId | null) => void;
   addTarget: (id: ObjectId) => void;
   clearTargets: () => void;
@@ -35,6 +38,8 @@ interface UiStoreActions {
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setDragging: (dragging: boolean) => void;
+  toggleEndTurnMode: (turnNumber: number) => void;
+  clearEndTurnMode: () => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -43,6 +48,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   selectedObjectId: null,
   hoveredObjectId: null,
   inspectedObjectId: null,
+  inspectedFaceIndex: 0,
   targetingMode: false,
   validTargetIds: [],
   sourceObjectId: null,
@@ -54,10 +60,12 @@ export const useUiStore = create<UiStore>()((set) => ({
   blockerAssignments: new Map(),
   combatClickHandler: null,
   isDragging: false,
+  endTurnMode: false,
+  endTurnSinceTurn: null,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
-  inspectObject: (id) => set({ inspectedObjectId: id }),
+  inspectObject: (id, faceIndex) => set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 }),
 
   startTargeting: (validIds, sourceId) =>
     set({ targetingMode: true, validTargetIds: validIds, sourceObjectId: sourceId, selectedTargets: [] }),
@@ -111,4 +119,10 @@ export const useUiStore = create<UiStore>()((set) => ({
 
   setCombatClickHandler: (handler) => set({ combatClickHandler: handler }),
   setDragging: (dragging) => set({ isDragging: dragging }),
+  toggleEndTurnMode: (turnNumber) =>
+    set((state) => ({
+      endTurnMode: !state.endTurnMode,
+      endTurnSinceTurn: !state.endTurnMode ? turnNumber : null,
+    })),
+  clearEndTurnMode: () => set({ endTurnMode: false, endTurnSinceTurn: null }),
 }));

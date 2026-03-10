@@ -44,6 +44,9 @@ pub enum GameAction {
         equipment_id: ObjectId,
         target_id: ObjectId,
     },
+    Transform {
+        object_id: ObjectId,
+    },
 }
 
 #[cfg(test)]

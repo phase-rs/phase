@@ -270,6 +270,30 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             let p = *player;
             handle_equip_activation(state, p, equipment_id, &mut events)?
         }
+        (WaitingFor::Priority { player }, GameAction::Transform { object_id }) => {
+            let p = *player;
+            let obj = state
+                .objects
+                .get(&object_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if obj.zone != Zone::Battlefield {
+                return Err(EngineError::InvalidAction(
+                    "Object is not on the battlefield".to_string(),
+                ));
+            }
+            if obj.controller != p {
+                return Err(EngineError::InvalidAction(
+                    "You don't control this permanent".to_string(),
+                ));
+            }
+            if obj.back_face.is_none() {
+                return Err(EngineError::InvalidAction(
+                    "Card has no back face".to_string(),
+                ));
+            }
+            super::transform::transform_permanent(state, object_id, &mut events)?;
+            WaitingFor::Priority { player: p }
+        }
         // Scry: player selects cards to put on TOP (in order), rest go to bottom
         (
             WaitingFor::ScryChoice { player, cards },
