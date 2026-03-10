@@ -17,6 +17,7 @@ import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { DamageAssignmentModal } from "../components/combat/DamageAssignmentModal.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
+import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -401,6 +402,9 @@ function GamePageContent({
       {waitingFor?.type === "TargetSelection" && waitingFor.data.player === PLAYER_ID && <TargetingOverlay />}
       {waitingFor?.type === "ManaPayment" && waitingFor.data.player === PLAYER_ID && <ManaPaymentUI />}
       {waitingFor?.type === "ReplacementChoice" && waitingFor.data.player === PLAYER_ID && <ReplacementModal />}
+
+      {/* Scry/Dig/Surveil card choice modal */}
+      <CardChoiceModal />
 
       {waitingFor?.type === "MulliganDecision" && waitingFor.data.player === PLAYER_ID && (
         <MulliganDecisionPrompt
