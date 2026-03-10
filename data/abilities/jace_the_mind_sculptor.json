@@ -1,0 +1,51 @@
+{
+    "$schema": "schema.json",
+    "abilities": [
+        {
+            "kind": "Activated",
+            "cost": { "type": "Loyalty", "amount": 2 },
+            "effect": {
+                "type": "Other",
+                "api_type": "LookAtTopCard",
+                "params": {
+                    "MayPutOnBottom": "True",
+                    "LookAt": "TargetedPlayer"
+                }
+            }
+        },
+        {
+            "kind": "Activated",
+            "cost": { "type": "Loyalty", "amount": 0 },
+            "effect": {
+                "type": "Other",
+                "api_type": "Brainstorm",
+                "params": {
+                    "DrawNum": "3",
+                    "PutBackNum": "2"
+                }
+            }
+        },
+        {
+            "kind": "Activated",
+            "cost": { "type": "Loyalty", "amount": -1 },
+            "effect": {
+                "type": "Bounce",
+                "target": { "type": "Filtered", "filter": "Creature" }
+            }
+        },
+        {
+            "kind": "Activated",
+            "cost": { "type": "Loyalty", "amount": -12 },
+            "effect": {
+                "type": "Other",
+                "api_type": "ExileLibraryShuffleHandIntoLibrary",
+                "params": {
+                    "Target": "TargetedPlayer"
+                }
+            }
+        }
+    ],
+    "triggers": [],
+    "statics": [],
+    "replacements": []
+}

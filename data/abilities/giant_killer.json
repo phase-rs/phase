@@ -1,0 +1,44 @@
+{
+    "$schema": "schema.json",
+    "abilities": [],
+    "triggers": [],
+    "statics": [],
+    "replacements": [],
+    "faces": [
+        {
+            "abilities": [
+                {
+                    "kind": "Activated",
+                    "cost": {
+                        "type": "Composite",
+                        "costs": [
+                            { "type": "Mana", "cost": "{1}{W}" },
+                            { "type": "Tap" }
+                        ]
+                    },
+                    "effect": {
+                        "type": "Tap",
+                        "target": { "type": "Filtered", "filter": "Creature.powerGE4" }
+                    }
+                }
+            ],
+            "triggers": [],
+            "statics": [],
+            "replacements": []
+        },
+        {
+            "abilities": [
+                {
+                    "kind": "Spell",
+                    "effect": {
+                        "type": "Destroy",
+                        "target": { "type": "Filtered", "filter": "Creature.powerGE4" }
+                    }
+                }
+            ],
+            "triggers": [],
+            "statics": [],
+            "replacements": []
+        }
+    ]
+}

@@ -1,0 +1,46 @@
+{
+    "$schema": "schema.json",
+    "abilities": [
+        {
+            "kind": "Spell",
+            "effect": {
+                "type": "Attach",
+                "target": { "type": "Filtered", "filter": "Creature" }
+            }
+        }
+    ],
+    "triggers": [
+        {
+            "mode": "ChangesZone",
+            "params": {
+                "Origin": "Battlefield",
+                "Destination": "Graveyard",
+                "ValidCard": "Card.Self"
+            },
+            "effect": {
+                "type": "ChangeZone",
+                "origin": "Graveyard",
+                "destination": "Hand",
+                "target": { "type": "Filtered", "filter": "Card.Self" }
+            }
+        }
+    ],
+    "statics": [
+        {
+            "mode": "Continuous",
+            "params": {
+                "Affected": "Card.EnchantedBy",
+                "AddPower": "2",
+                "AddToughness": "0"
+            }
+        },
+        {
+            "mode": "Continuous",
+            "params": {
+                "Affected": "Card.EnchantedBy",
+                "AddKeyword": "Trample"
+            }
+        }
+    ],
+    "replacements": []
+}

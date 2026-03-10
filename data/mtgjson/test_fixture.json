@@ -165,6 +165,124 @@
                     "scryfallOracleId": "d0f8f5bb-2850-41c0-aef0-39d71f45c8f5"
                 }
             }
+        ],
+        "Forest": [
+            {
+                "name": "Forest",
+                "manaValue": 0.0,
+                "colors": [],
+                "colorIdentity": ["G"],
+                "types": ["Land"],
+                "subtypes": ["Forest"],
+                "supertypes": ["Basic"],
+                "text": "({T}: Add {G}.)",
+                "layout": "normal",
+                "type": "Basic Land — Forest",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "b34bb2dc-c1af-4d77-b0b3-a57d1571d571"
+                }
+            }
+        ],
+        "Rancor": [
+            {
+                "name": "Rancor",
+                "manaCost": "{G}",
+                "manaValue": 1.0,
+                "colors": ["G"],
+                "colorIdentity": ["G"],
+                "types": ["Enchantment"],
+                "subtypes": ["Aura"],
+                "supertypes": [],
+                "text": "Enchant creature\nEnchanted creature gets +2/+0 and has trample.\nWhen Rancor is put into a graveyard from the battlefield, return Rancor to its owner's hand.",
+                "layout": "normal",
+                "type": "Enchantment — Aura",
+                "keywords": ["Enchant"],
+                "identifiers": {
+                    "scryfallOracleId": "07070135-fd85-4e03-bf39-d9297bfb8d92"
+                }
+            }
+        ],
+        "Bonesplitter": [
+            {
+                "name": "Bonesplitter",
+                "manaCost": "{1}",
+                "manaValue": 1.0,
+                "colors": [],
+                "colorIdentity": [],
+                "types": ["Artifact"],
+                "subtypes": ["Equipment"],
+                "supertypes": [],
+                "text": "Equipped creature gets +2/+0.\nEquip {1}",
+                "layout": "normal",
+                "type": "Artifact — Equipment",
+                "keywords": ["Equip:1"],
+                "identifiers": {
+                    "scryfallOracleId": "3b0e49e0-5261-4977-80a7-18748a4e4258"
+                }
+            }
+        ],
+        "Jace, the Mind Sculptor": [
+            {
+                "name": "Jace, the Mind Sculptor",
+                "manaCost": "{2}{U}{U}",
+                "manaValue": 4.0,
+                "colors": ["U"],
+                "colorIdentity": ["U"],
+                "types": ["Planeswalker"],
+                "subtypes": ["Jace"],
+                "supertypes": ["Legendary"],
+                "loyalty": "3",
+                "text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n−1: Return target creature to its owner's hand.\n−12: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+                "layout": "normal",
+                "type": "Legendary Planeswalker — Jace",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "01524ea0-1466-4b6b-be45-1d22b1faded8"
+                }
+            }
+        ],
+        "Giant Killer // Chop Down": [
+            {
+                "name": "Giant Killer // Chop Down",
+                "manaCost": "{W}",
+                "manaValue": 1.0,
+                "colors": ["W"],
+                "colorIdentity": ["W"],
+                "types": ["Creature"],
+                "subtypes": ["Human", "Peasant"],
+                "supertypes": [],
+                "power": "1",
+                "toughness": "2",
+                "text": "{1}{W}, {T}: Tap target creature.",
+                "layout": "adventure",
+                "type": "Creature — Human Peasant",
+                "side": "a",
+                "faceName": "Giant Killer",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "5f251bed-010f-4631-9660-34f4d0da3f0c"
+                }
+            },
+            {
+                "name": "Giant Killer // Chop Down",
+                "manaCost": "{2}{W}",
+                "manaValue": 3.0,
+                "colors": ["W"],
+                "colorIdentity": ["W"],
+                "types": ["Instant"],
+                "subtypes": ["Adventure"],
+                "supertypes": [],
+                "text": "Destroy target creature with power 4 or greater.",
+                "layout": "adventure",
+                "type": "Instant — Adventure",
+                "side": "b",
+                "faceName": "Chop Down",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "5f251bed-010f-4631-9660-34f4d0da3f0c"
+                }
+            }
         ]
     }
 }

@@ -1,0 +1,16 @@
+{
+    "$schema": "schema.json",
+    "abilities": [],
+    "triggers": [],
+    "statics": [
+        {
+            "mode": "Continuous",
+            "params": {
+                "Affected": "Card.EquippedBy",
+                "AddPower": "2",
+                "AddToughness": "0"
+            }
+        }
+    ],
+    "replacements": []
+}
