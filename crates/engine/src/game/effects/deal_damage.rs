@@ -43,7 +43,16 @@ pub fn resolve(
                                 .objects
                                 .get_mut(obj_id)
                                 .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-                            obj.damage_marked += amount;
+                            if obj.card_types.core_types.contains(
+                                &crate::types::card_type::CoreType::Planeswalker,
+                            ) {
+                                // Damage to planeswalker removes loyalty counters
+                                let current = obj.loyalty.unwrap_or(0);
+                                obj.loyalty =
+                                    Some(current.saturating_sub(amount));
+                            } else {
+                                obj.damage_marked += amount;
+                            }
                         }
                         TargetRef::Player(player_id) => {
                             let player = state
@@ -277,5 +286,54 @@ mod tests {
 
         assert_eq!(state.objects[&bear1].damage_marked, 2);
         assert_eq!(state.objects[&bear2].damage_marked, 2);
+    }
+
+    #[test]
+    fn damage_to_planeswalker_removes_loyalty() {
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pw_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(5);
+        }
+        let ability = make_ability(3, vec![TargetRef::Object(pw_id)]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Damage removes loyalty, not damage_marked
+        assert_eq!(state.objects[&pw_id].loyalty, Some(2)); // 5 - 3
+        assert_eq!(state.objects[&pw_id].damage_marked, 0);
+    }
+
+    #[test]
+    fn lethal_damage_to_planeswalker_sets_loyalty_zero() {
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Liliana".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pw_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(2);
+        }
+        let ability = make_ability(5, vec![TargetRef::Object(pw_id)]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Damage exceeds loyalty: clamped to 0 via saturating_sub
+        assert_eq!(state.objects[&pw_id].loyalty, Some(0));
     }
 }

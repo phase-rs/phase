@@ -51,6 +51,9 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // 704.5p: Equipment with invalid attached_to gets unattached (stays on battlefield)
         check_unattached_equipment(state, &mut any_performed);
 
+        // 704.5i: Planeswalker with 0 loyalty goes to graveyard
+        check_zero_loyalty(state, events, &mut any_performed);
+
         if !any_performed {
             break;
         }
@@ -282,6 +285,33 @@ fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
         if let Some(equipment) = state.objects.get_mut(&equipment_id) {
             equipment.attached_to = None;
         }
+        *any_performed = true;
+    }
+}
+
+fn check_zero_loyalty(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    let to_destroy: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    obj.card_types.core_types.contains(&CoreType::Planeswalker)
+                        && obj.loyalty.is_some_and(|l| l == 0)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for id in to_destroy {
+        zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
 }
@@ -626,5 +656,43 @@ mod tests {
         assert!(!state.battlefield.contains(&aura_id));
         // Aura goes to graveyard (not stays on battlefield like equipment)
         assert!(state.players[0].graveyard.contains(&aura_id));
+    }
+
+    fn create_planeswalker(
+        state: &mut GameState,
+        card_id: CardId,
+        owner: PlayerId,
+        name: &str,
+        loyalty: u32,
+    ) -> ObjectId {
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(loyalty);
+        obj.entered_battlefield_turn = Some(state.turn_number);
+        id
+    }
+
+    #[test]
+    fn sba_zero_loyalty_planeswalker_dies() {
+        let mut state = setup();
+        let pw = create_planeswalker(&mut state, CardId(1), PlayerId(0), "Jace", 0);
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.battlefield.contains(&pw));
+        assert!(state.players[0].graveyard.contains(&pw));
+    }
+
+    #[test]
+    fn sba_positive_loyalty_planeswalker_survives() {
+        let mut state = setup();
+        let pw = create_planeswalker(&mut state, CardId(1), PlayerId(0), "Jace", 3);
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.battlefield.contains(&pw));
     }
 }

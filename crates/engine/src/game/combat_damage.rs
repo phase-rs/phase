@@ -378,8 +378,15 @@ fn apply_combat_damage(
                                     }
                                 }
                                 state.layers_dirty = true;
-                            } else {
-                                if let Some(target_obj) = state.objects.get_mut(target_id) {
+                            } else if let Some(target_obj) = state.objects.get_mut(target_id) {
+                                if target_obj.card_types.core_types.contains(
+                                    &crate::types::card_type::CoreType::Planeswalker,
+                                ) {
+                                    // Damage to planeswalker removes loyalty
+                                    let current = target_obj.loyalty.unwrap_or(0);
+                                    target_obj.loyalty =
+                                        Some(current.saturating_sub(amount));
+                                } else {
                                     target_obj.damage_marked += amount;
                                     if source_has_deathtouch {
                                         target_obj.dealt_deathtouch_damage = true;
