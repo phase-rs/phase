@@ -214,7 +214,8 @@ export type GameAction =
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseReplacement"; data: { index: number } }
-  | { type: "CancelCast" };
+  | { type: "CancelCast" }
+  | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 

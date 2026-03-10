@@ -48,6 +48,9 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // 704.5n: Unattached aura goes to graveyard
         check_unattached_auras(state, events, &mut any_performed);
 
+        // 704.5p: Equipment with invalid attached_to gets unattached (stays on battlefield)
+        check_unattached_equipment(state, &mut any_performed);
+
         if !any_performed {
             break;
         }
@@ -240,6 +243,45 @@ fn check_unattached_auras(
 
     for id in to_remove {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
+        *any_performed = true;
+    }
+}
+
+fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
+    let to_unattach: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    obj.card_types
+                        .subtypes
+                        .contains(&"Equipment".to_string())
+                        && obj.attached_to.is_some()
+                        && !is_valid_attachment_target(state, obj.attached_to.unwrap())
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for equipment_id in to_unattach {
+        // Clear the attachment reference on the equipment
+        if let Some(old_target_id) = state
+            .objects
+            .get(&equipment_id)
+            .and_then(|obj| obj.attached_to)
+        {
+            // Remove from old target's attachments if it still exists
+            if let Some(old_target) = state.objects.get_mut(&old_target_id) {
+                old_target.attachments.retain(|&id| id != equipment_id);
+            }
+        }
+        if let Some(equipment) = state.objects.get_mut(&equipment_id) {
+            equipment.attached_to = None;
+        }
         *any_performed = true;
     }
 }
@@ -491,5 +533,98 @@ mod tests {
 
         // No zone change events should have been generated
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn sba_equipment_unattaches_when_creature_dies() {
+        let mut state = setup();
+        // Create a creature that will die
+        let creature_id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&creature_id).unwrap().damage_marked = 3; // lethal
+
+        // Create equipment attached to that creature
+        let equip_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sword".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&equip_id).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.attached_to = Some(creature_id);
+
+        state
+            .objects
+            .get_mut(&creature_id)
+            .unwrap()
+            .attachments
+            .push(equip_id);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Creature should be dead
+        assert!(!state.battlefield.contains(&creature_id));
+        // Equipment should still be on battlefield but unattached
+        assert!(state.battlefield.contains(&equip_id));
+        assert_eq!(state.objects.get(&equip_id).unwrap().attached_to, None);
+    }
+
+    #[test]
+    fn sba_equipment_on_battlefield_without_attachment_stays() {
+        let mut state = setup();
+        // Equipment on battlefield with no attached_to is a valid state
+        let equip_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sword".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&equip_id).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Equipment should stay on battlefield, no events generated
+        assert!(state.battlefield.contains(&equip_id));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn sba_aura_still_goes_to_graveyard_when_target_leaves() {
+        let mut state = setup();
+        // Create a creature that will die
+        let creature_id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&creature_id).unwrap().damage_marked = 3;
+
+        // Create an aura attached to the creature
+        let aura_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Pacifism".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&aura_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.attached_to = Some(creature_id);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Both should be gone from battlefield
+        assert!(!state.battlefield.contains(&creature_id));
+        assert!(!state.battlefield.contains(&aura_id));
+        // Aura goes to graveyard (not stays on battlefield like equipment)
+        assert!(state.players[0].graveyard.contains(&aura_id));
     }
 }
