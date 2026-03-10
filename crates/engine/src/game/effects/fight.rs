@@ -99,7 +99,7 @@ mod tests {
     ) -> ObjectId {
         let id = create_object(
             state,
-            CardId(state.next_object_id as u64),
+            CardId(state.next_object_id),
             owner,
             name.to_string(),
             Zone::Battlefield,
