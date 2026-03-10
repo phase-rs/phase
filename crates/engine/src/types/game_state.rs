@@ -64,6 +64,7 @@ pub enum WaitingFor {
     DeclareBlockers {
         player: PlayerId,
         valid_blocker_ids: Vec<ObjectId>,
+        #[serde(default)]
         valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
     },
     GameOver {
