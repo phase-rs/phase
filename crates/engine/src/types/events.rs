@@ -132,6 +132,12 @@ pub enum GameEvent {
     Transformed {
         object_id: ObjectId,
     },
+    DayNightChanged {
+        new_state: String,
+    },
+    TurnedFaceUp {
+        object_id: ObjectId,
+    },
 }
 
 #[cfg(test)]
