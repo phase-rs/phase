@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: in-progress
-stopped_at: Completed 24-02-PLAN.md
-last_updated: "2026-03-10T22:57:00.000Z"
-last_activity: 2026-03-10 — Completed Plan 24-02 (Parity Tests & Standard Card Manifest)
+stopped_at: Completed 24-03-PLAN.md
+last_updated: "2026-03-10T23:12:00.000Z"
+last_activity: 2026-03-10 — Completed Plan 24-03 (CI Coverage Gates)
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 12
-  completed_plans: 11
-  percent: 92
+  completed_plans: 12
+  percent: 100
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 24 Card Migration — Plans 01-02 complete, Plan 03 pending
+**Current focus:** Phase 24 Card Migration — All 3 plans complete
 
 ## Current Position
 
 Phase: 24 (fourth of 5 in v1.2) — Card Migration
-Plan: 2/3 complete
-Status: Plan 24-02 complete, Plan 24-03 pending
-Last activity: 2026-03-10 — Completed Plan 24-02 (Parity Tests & Standard Card Manifest)
+Plan: 3/3 complete
+Status: Phase 24 complete
+Last activity: 2026-03-10 — Completed Plan 24-03 (CI Coverage Gates)
 
-Progress: [█████████░] 92%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12 (v1.2)
+- Total plans completed: 13 (v1.2)
 - Average duration: 13min
-- Total execution time: 2.6 hours
+- Total execution time: 2.8 hours
 
 **By Phase:**
 
@@ -46,7 +46,7 @@ Progress: [█████████░] 92%
 | 21 | 5/5 | 68min | 14min |
 | 22 | 3/3 | 35min | 12min |
 | 23 | 2/2 | 18min | 9min |
-| 24 | 2/3 | 34min | 17min |
+| 24 | 3/3 | 43min | 14min |
 
 ## Accumulated Context
 
@@ -95,6 +95,9 @@ Recent decisions affecting current work:
 - [24-02]: NoCost and Cost{0,[]} treated as equivalent for basic land mana cost comparison
 - [24-02]: Extra MTGJSON-only keywords (Scry, Mill) allowed -- action keywords Forge doesn't track
 - [24-02]: normalize_for_match strips all non-alphanumeric chars (fixes apostrophe card matching)
+- [24-03]: Benign MTGJSON keyword mismatches stripped in coverage binary (bare parameterized keywords, action keywords like Scry/Mill)
+- [24-03]: Coverage manifest filtering applied after analyze_standard_coverage() -- binary-local logic, coverage.rs unchanged
+- [24-03]: MTGJSON action keywords (Scry, Mill, Surveil, Fateseal) excluded from coverage since handled as effects, not keywords
 
 ### Pending Todos
 
@@ -106,6 +109,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T22:57:00.000Z
-Stopped at: Completed 24-02-PLAN.md
-Resume file: .planning/phases/24-card-migration/24-02-SUMMARY.md
+Last session: 2026-03-10T23:12:00.000Z
+Stopped at: Completed 24-03-PLAN.md
+Resume file: .planning/phases/24-card-migration/24-03-SUMMARY.md
