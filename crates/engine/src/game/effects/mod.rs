@@ -11,6 +11,7 @@ pub mod attach;
 pub mod bounce;
 pub mod change_zone;
 pub mod choose_card;
+pub mod cleanup;
 pub mod copy_spell;
 pub mod counter;
 pub mod counters;
@@ -24,6 +25,7 @@ pub mod explore;
 pub mod fight;
 pub mod gain_control;
 pub mod life;
+pub mod mana;
 pub mod mill;
 pub mod proliferate;
 pub mod pump;
@@ -78,6 +80,9 @@ pub fn build_registry() -> HashMap<String, EffectHandler> {
     registry.insert("MultiplyCounter".to_string(), counters::resolve_multiply);
     registry.insert("Animate".to_string(), animate::resolve);
     registry.insert("Effect".to_string(), effect::resolve);
+    registry.insert("Cleanup".to_string(), cleanup::resolve);
+    registry.insert("Mana".to_string(), mana::resolve);
+    registry.insert("Discard".to_string(), discard::resolve);
     registry
 }
 
@@ -269,9 +274,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_35_entries() {
+    fn registry_has_38_entries() {
         let registry = build_registry();
-        assert_eq!(registry.len(), 35);
+        assert_eq!(registry.len(), 38);
     }
 
     #[test]
