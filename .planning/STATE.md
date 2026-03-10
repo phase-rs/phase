@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 20-04-PLAN.md
-last_updated: "2026-03-10T00:03:00.000Z"
-last_activity: 2026-03-09 — Completed 20-04 Planeswalker Loyalty
+stopped_at: Completed 20-05-PLAN.md
+last_updated: "2026-03-10T00:15:49.000Z"
+last_activity: 2026-03-09 — Completed 20-05 Transform/DFC Mechanics
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 43
-  completed_plans: 35
+  completed_plans: 36
   percent: 97
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 20 of 20 (Implement all remaining effects)
-Plan: 5 of 10 in current phase
+Plan: 6 of 10 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 20-04 Planeswalker Loyalty
+Last activity: 2026-03-09 — Completed 20-05 Transform/DFC Mechanics
 
 Progress: [██████████] 97%
 
@@ -80,6 +80,7 @@ Progress: [██████████] 97%
 | Phase 19 P06 | 2min | 2 tasks | 1 files |
 | Phase 20 P03 | 8min | 2 tasks | 12 files |
 | Phase 20 P04 | 5min | 2 tasks | 7 files |
+| Phase 20 P05 | 10min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -191,6 +192,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 20-03]: AI evaluate_card_value uses creature P/T + land bonus + mana cost proxy
 - [Phase 20-03]: CardChoiceModal dispatches to sub-modals based on WaitingFor type (no separate GamePage logic)
 - [Phase 20-03]: ScryModal uses per-card Top/Bottom toggle buttons per MTGA design
+- [Phase 20-05]: BackFaceData swap is symmetric -- both faces preserved for unlimited round-trip transforms
+- [Phase 20-05]: Zone-change reset in move_to_zone enforces Rule 711.8 automatically
+- [Phase 20-05]: inspectedFaceIndex in uiStore drives face-aware CardPreview without modifying CardPreview
 
 ### Roadmap Evolution
 
@@ -210,6 +214,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 20-04 Planeswalker Loyalty
-Stopped at: Completed 20-04-PLAN.md
+Last activity: 2026-03-09 - Completed 20-05 Transform/DFC Mechanics
+Stopped at: Completed 20-05-PLAN.md
 Resume file: None
