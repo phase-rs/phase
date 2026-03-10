@@ -19,6 +19,8 @@ interface UiStoreState {
   isDragging: boolean;
   endTurnMode: boolean;
   endTurnSinceTurn: number | null;
+  showTurnBanner: boolean;
+  turnBannerText: string;
 }
 
 interface UiStoreActions {
@@ -40,6 +42,7 @@ interface UiStoreActions {
   setDragging: (dragging: boolean) => void;
   toggleEndTurnMode: (turnNumber: number) => void;
   clearEndTurnMode: () => void;
+  flashTurnBanner: (text: string) => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -62,6 +65,8 @@ export const useUiStore = create<UiStore>()((set) => ({
   isDragging: false,
   endTurnMode: false,
   endTurnSinceTurn: null,
+  showTurnBanner: false,
+  turnBannerText: "",
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -125,4 +130,8 @@ export const useUiStore = create<UiStore>()((set) => ({
       endTurnSinceTurn: !state.endTurnMode ? turnNumber : null,
     })),
   clearEndTurnMode: () => set({ endTurnMode: false, endTurnSinceTurn: null }),
+  flashTurnBanner: (text) => {
+    set({ showTurnBanner: true, turnBannerText: text });
+    setTimeout(() => set({ showTurnBanner: false }), 1500);
+  },
 }));

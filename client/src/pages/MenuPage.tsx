@@ -4,6 +4,7 @@ import { useNavigate } from "react-router";
 import { initAudioOnInteraction } from "../audio/AudioManager";
 import { CardCoverageDashboard } from "../components/controls/CardCoverageDashboard";
 import { DeckGallery } from "../components/menu/DeckGallery";
+import { MenuLogo } from "../components/menu/MenuLogo";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
@@ -123,11 +124,7 @@ export function MenuPage() {
 
       {menuView === "mode-select" && (
         <div className="relative z-10 flex flex-col items-center gap-8">
-          <img
-            src="/logo.webp"
-            alt="Forge.rs"
-            className="w-[120px]"
-          />
+          <MenuLogo />
           <p className="text-gray-400">Magic: The Gathering Engine</p>
 
           <div className="flex flex-col gap-4">

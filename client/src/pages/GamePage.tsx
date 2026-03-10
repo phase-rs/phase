@@ -3,6 +3,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
+import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
@@ -388,6 +389,7 @@ function GamePageContent({
 
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
+      <TurnBanner />
 
       {/* Block assignment lines (animated SVG overlay for combat) */}
       <BlockAssignmentLines />

@@ -1,269 +1,217 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 
-import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useUiStore } from "../../stores/uiStore";
 
-interface TurnBannerProps {
-  turnNumber: number;
-  isPlayerTurn: boolean;
-  speedMultiplier: number;
-  onComplete?: () => void;
-}
+/**
+ * Cinematic turn banner — dramatic horizontal sweep with glowing text,
+ * decorative lines, and light rays. Mimics MTG Arena-style turn transitions.
+ *
+ * Self-contained: reads showTurnBanner / turnBannerText from the UI store.
+ * Triggered via uiStore.flashTurnBanner().
+ */
+export function TurnBanner() {
+  const showTurnBanner = useUiStore((s) => s.showTurnBanner);
+  const turnBannerText = useUiStore((s) => s.turnBannerText);
+  const shouldReduceMotion = useReducedMotion();
 
-const AMBER = {
-  banner: "rgba(245, 158, 11, 0.8)",
-  glow: "#F59E0B",
-  diamond: "rgba(245, 158, 11, 0.7)",
-  textShadow: (blur: number) => `0 0 ${blur}px #F59E0B`,
-};
+  const isYourTurn = turnBannerText.toUpperCase().includes("YOUR");
 
-const SLATE = {
-  banner: "rgba(100, 116, 139, 0.8)",
-  glow: "#64748B",
-  diamond: "rgba(100, 116, 139, 0.7)",
-  textShadow: (blur: number) => `0 0 ${blur}px #64748B`,
-};
+  const colors = isYourTurn
+    ? {
+        primary: "#fbbf24",
+        glow: "rgba(251, 191, 36, 0.7)",
+        glowStrong: "rgba(251, 191, 36, 0.9)",
+        line: "rgba(251, 191, 36, 0.6)",
+        lineFade: "rgba(251, 191, 36, 0)",
+        bg: "rgba(120, 80, 0, 0.25)",
+        ray: "rgba(251, 191, 36, 0.08)",
+      }
+    : {
+        primary: "#94a3b8",
+        glow: "rgba(148, 163, 184, 0.5)",
+        glowStrong: "rgba(148, 163, 184, 0.7)",
+        line: "rgba(148, 163, 184, 0.4)",
+        lineFade: "rgba(148, 163, 184, 0)",
+        bg: "rgba(51, 65, 85, 0.2)",
+        ray: "rgba(148, 163, 184, 0.06)",
+      };
 
-export function TurnBanner({
-  turnNumber,
-  isPlayerTurn,
-  speedMultiplier,
-  onComplete,
-}: TurnBannerProps) {
-  const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
-  const theme = isPlayerTurn ? AMBER : SLATE;
-  const label = isPlayerTurn ? "YOUR TURN" : "THEIR TURN";
-  const totalDuration = 1.5 * speedMultiplier;
-
-  const tripleGlow = `${theme.textShadow(8)}, ${theme.textShadow(20)}, ${theme.textShadow(40)}`;
-
-  // Minimal: just text with fade
-  if (vfxQuality === "minimal") {
+  if (shouldReduceMotion) {
     return (
-      <AnimatePresence onExitComplete={onComplete}>
+      <AnimatePresence>
+        {showTurnBanner && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
+            role="status"
+            aria-live="polite"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <div className="absolute inset-0 bg-black/50" />
+            <span
+              className="relative text-5xl font-extrabold tracking-wider select-none"
+              style={{ color: colors.primary }}
+            >
+              {turnBannerText}
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    );
+  }
+
+  return (
+    <AnimatePresence>
+      {showTurnBanner && (
         <motion.div
-          key={`turn-${turnNumber}`}
+          className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
+          role="status"
+          aria-live="polite"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: 0.3 * speedMultiplier }}
-          style={{
-            position: "fixed",
-            top: "50%",
-            left: 0,
-            right: 0,
-            transform: "translateY(-50%)",
-            zIndex: 50,
-            pointerEvents: "none",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            padding: "1rem 0",
-          }}
+          transition={{ duration: 0.25 }}
         >
-          <span
-            style={{
-              color: "white",
-              fontSize: "2rem",
-              fontWeight: 800,
-              letterSpacing: "0.15em",
-              textTransform: "uppercase",
-              textShadow: tripleGlow,
-            }}
-          >
-            {label}
-          </span>
-        </motion.div>
-      </AnimatePresence>
-    );
-  }
-
-  // Reduced: banner strip + text, no light burst or diamonds
-  if (vfxQuality === "reduced") {
-    return (
-      <AnimatePresence onExitComplete={onComplete}>
-        <motion.div
-          key={`turn-${turnNumber}`}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0, x: "100%" }}
-          transition={{ duration: totalDuration, times: [0, 0.1, 0.8, 1] }}
-          style={{
-            position: "fixed",
-            top: "50%",
-            left: 0,
-            right: 0,
-            transform: "translateY(-50%)",
-            zIndex: 50,
-            pointerEvents: "none",
-          }}
-        >
-          {/* Banner strip */}
+          {/* Dark overlay */}
           <motion.div
-            initial={{ x: "-100%" }}
-            animate={{ x: "0%" }}
-            exit={{ x: "100%", opacity: 0 }}
-            transition={{
-              duration: 0.3 * speedMultiplier,
-              ease: "easeOut",
-            }}
+            className="absolute inset-0 bg-black/60"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          />
+
+          {/* Horizontal light ray burst from center */}
+          <motion.div
+            className="absolute inset-0"
             style={{
-              height: 60,
-              backgroundColor: theme.banner,
-              display: "flex",
-              justifyContent: "center",
-              alignItems: "center",
+              background: `radial-gradient(ellipse 120% 40% at 50% 50%, ${colors.ray}, transparent)`,
+            }}
+            initial={{ opacity: 0, scaleX: 0.3 }}
+            animate={{ opacity: [0, 1, 0.7], scaleX: [0.3, 1.2, 1] }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.6, ease: "easeOut" }}
+          />
+
+          {/* Banner strip background — horizontal bar */}
+          <motion.div
+            className="absolute left-0 right-0 flex items-center justify-center"
+            style={{
+              height: 80,
+              top: "50%",
+              marginTop: -40,
+              background: `linear-gradient(180deg, transparent, ${colors.bg} 30%, ${colors.bg} 70%, transparent)`,
+            }}
+            initial={{ scaleX: 0, opacity: 0 }}
+            animate={{ scaleX: 1, opacity: 1 }}
+            exit={{ scaleX: 0, opacity: 0 }}
+            transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+          />
+
+          {/* Top decorative line */}
+          <motion.div
+            className="absolute left-0 right-0"
+            style={{
+              height: 2,
+              top: "calc(50% - 36px)",
+              background: `linear-gradient(90deg, ${colors.lineFade}, ${colors.line} 30%, ${colors.primary} 50%, ${colors.line} 70%, ${colors.lineFade})`,
+            }}
+            initial={{ scaleX: 0, opacity: 0 }}
+            animate={{ scaleX: 1, opacity: 1 }}
+            exit={{ scaleX: 0, opacity: 0 }}
+            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.05 }}
+          />
+
+          {/* Bottom decorative line */}
+          <motion.div
+            className="absolute left-0 right-0"
+            style={{
+              height: 2,
+              top: "calc(50% + 34px)",
+              background: `linear-gradient(90deg, ${colors.lineFade}, ${colors.line} 30%, ${colors.primary} 50%, ${colors.line} 70%, ${colors.lineFade})`,
+            }}
+            initial={{ scaleX: 0, opacity: 0 }}
+            animate={{ scaleX: 1, opacity: 1 }}
+            exit={{ scaleX: 0, opacity: 0 }}
+            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.05 }}
+          />
+
+          {/* Diamond accent — left */}
+          <motion.div
+            className="absolute"
+            style={{
+              width: 10,
+              height: 10,
+              top: "calc(50% - 5px)",
+              left: "calc(50% - 160px)",
+              background: colors.primary,
+              transform: "rotate(45deg)",
+              boxShadow: `0 0 12px ${colors.glow}`,
+            }}
+            initial={{ opacity: 0, scale: 0 }}
+            animate={{ opacity: [0, 1, 0.8], scale: [0, 1.2, 1] }}
+            exit={{ opacity: 0, scale: 0 }}
+            transition={{ duration: 0.3, delay: 0.2 }}
+          />
+
+          {/* Diamond accent — right */}
+          <motion.div
+            className="absolute"
+            style={{
+              width: 10,
+              height: 10,
+              top: "calc(50% - 5px)",
+              left: "calc(50% + 150px)",
+              background: colors.primary,
+              transform: "rotate(45deg)",
+              boxShadow: `0 0 12px ${colors.glow}`,
+            }}
+            initial={{ opacity: 0, scale: 0 }}
+            animate={{ opacity: [0, 1, 0.8], scale: [0, 1.2, 1] }}
+            exit={{ opacity: 0, scale: 0 }}
+            transition={{ duration: 0.3, delay: 0.2 }}
+          />
+
+          {/* Banner text — scales in with punch */}
+          <motion.span
+            className="relative text-5xl font-extrabold tracking-[0.2em] uppercase select-none"
+            style={{
+              color: colors.primary,
+              textShadow: `0 0 20px ${colors.glow}, 0 0 40px ${colors.glow}, 0 0 60px ${colors.glowStrong}, 0 2px 4px rgba(0,0,0,0.5)`,
+            }}
+            initial={{ opacity: 0, scale: 1.6, y: 0 }}
+            animate={{ opacity: [0, 1, 1], scale: [1.6, 0.95, 1], y: 0 }}
+            exit={{ opacity: 0, scale: 0.9, y: 10 }}
+            transition={{
+              duration: 0.45,
+              ease: [0.22, 1, 0.36, 1],
+              delay: 0.08,
             }}
           >
-            {/* Text */}
-            <motion.span
-              initial={{ scale: 0.5, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{
-                delay: 0.2 * speedMultiplier,
-                duration: 0.3 * speedMultiplier,
-                ease: "easeOut",
-              }}
-              style={{
-                color: "white",
-                fontSize: "2rem",
-                fontWeight: 800,
-                letterSpacing: "0.15em",
-                textTransform: "uppercase",
-                textShadow: tripleGlow,
-              }}
-            >
-              {label}
-            </motion.span>
-          </motion.div>
+            {turnBannerText}
+          </motion.span>
+
+          {/* Center glow pulse behind text */}
+          <motion.div
+            className="absolute"
+            style={{
+              width: 300,
+              height: 60,
+              top: "calc(50% - 30px)",
+              left: "calc(50% - 150px)",
+              borderRadius: "50%",
+              background: `radial-gradient(ellipse, ${colors.glow}, transparent 70%)`,
+              filter: "blur(8px)",
+            }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: [0, 0.6, 0.3, 0.5] }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 1.2, ease: "easeOut" }}
+          />
         </motion.div>
-      </AnimatePresence>
-    );
-  }
-
-  // Full quality: layered cinematic effect
-  return (
-    <AnimatePresence onExitComplete={onComplete}>
-      <motion.div
-        key={`turn-${turnNumber}`}
-        initial={{ opacity: 1 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0, x: "10%" }}
-        transition={{
-          exit: { duration: 0.3 * speedMultiplier, ease: "easeIn" },
-        }}
-        style={{
-          position: "fixed",
-          top: "50%",
-          left: 0,
-          right: 0,
-          transform: "translateY(-50%)",
-          zIndex: 50,
-          pointerEvents: "none",
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          height: 120,
-        }}
-      >
-        {/* Phase 1: Light burst (0-0.3s) */}
-        <motion.div
-          initial={{ scale: 0, opacity: 0.4 }}
-          animate={{ scale: 3, opacity: 0 }}
-          transition={{
-            duration: 0.3 * speedMultiplier,
-            ease: "easeOut",
-          }}
-          style={{
-            position: "absolute",
-            width: 200,
-            height: 200,
-            borderRadius: "50%",
-            background: `radial-gradient(circle, rgba(255,255,255,0.3), transparent)`,
-          }}
-        />
-
-        {/* Phase 2: Banner strip (0.1-0.4s) */}
-        <motion.div
-          initial={{ x: "-100%" }}
-          animate={{ x: "0%" }}
-          transition={{
-            delay: 0.1 * speedMultiplier,
-            duration: 0.3 * speedMultiplier,
-            ease: "easeOut",
-          }}
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            height: 60,
-            backgroundColor: theme.banner,
-          }}
-        />
-
-        {/* Phase 3: Diamond accents (0.3-0.5s) */}
-        <motion.div
-          initial={{ scale: 0, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{
-            delay: 0.3 * speedMultiplier,
-            duration: 0.2 * speedMultiplier,
-            ease: "easeOut",
-          }}
-          style={{
-            position: "absolute",
-            left: 40,
-            width: 16,
-            height: 16,
-            border: `2px solid ${theme.diamond}`,
-            transform: "rotate(45deg)",
-          }}
-        />
-        <motion.div
-          initial={{ scale: 0, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{
-            delay: 0.3 * speedMultiplier,
-            duration: 0.2 * speedMultiplier,
-            ease: "easeOut",
-          }}
-          style={{
-            position: "absolute",
-            right: 40,
-            width: 16,
-            height: 16,
-            border: `2px solid ${theme.diamond}`,
-            transform: "rotate(45deg)",
-          }}
-        />
-
-        {/* Phase 4: Text punch (0.3-0.6s) with hold pulse (0.6-1.2s) */}
-        <motion.span
-          initial={{ scale: 0.5, opacity: 0 }}
-          animate={{
-            scale: [0.5, 1, 1, 1.02, 1, 1.02, 1],
-            opacity: [0, 1, 1, 1, 1, 1, 1],
-          }}
-          transition={{
-            delay: 0.3 * speedMultiplier,
-            duration: 0.9 * speedMultiplier,
-            times: [0, 0.33, 0.4, 0.55, 0.7, 0.85, 1],
-            ease: "easeOut",
-          }}
-          style={{
-            position: "relative",
-            zIndex: 1,
-            color: "white",
-            fontSize: "2.25rem",
-            fontWeight: 800,
-            letterSpacing: "0.15em",
-            textTransform: "uppercase",
-            textShadow: tripleGlow,
-          }}
-        >
-          {label}
-        </motion.span>
-      </motion.div>
+      )}
     </AnimatePresence>
   );
 }

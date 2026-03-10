@@ -7,6 +7,7 @@ import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { useAnimationStore } from "../stores/animationStore";
 import { useGameStore, saveGame } from "../stores/gameStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useUiStore } from "../stores/uiStore";
 
 /** Schedule SFX for each animation step, offset to sync with visual timing. */
 function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
@@ -55,10 +56,17 @@ async function processAction(action: GameAction): Promise<void> {
   // 3. Call WASM — get events without updating state yet
   const events: GameEvent[] = await adapter.submitAction(action);
 
-  // 4. Normalize events into animation steps
+  // 4. Flash turn banner directly (bypasses animation queue for reliability)
+  const turnEvent = events.find((e) => e.type === "TurnStarted");
+  if (turnEvent && "data" in turnEvent) {
+    const playerId = (turnEvent.data as { player_id: number }).player_id;
+    useUiStore.getState().flashTurnBanner(playerId === 0 ? "YOUR TURN" : "THEIR TURN");
+  }
+
+  // 5. Normalize events into animation steps
   const steps = normalizeEvents(events);
 
-  // 5. Play animations (unless instant)
+  // 6. Play animations (unless instant)
   const speed = usePreferencesStore.getState().animationSpeed;
   const multiplier = SPEED_MULTIPLIERS[speed];
 
@@ -81,7 +89,7 @@ async function processAction(action: GameAction): Promise<void> {
     }
   }
 
-  // 6. Update game state (deferred after animations)
+  // 7. Update game state (deferred after animations)
   const newState = await adapter.getState();
   const legalActions = await adapter.getLegalActions();
 

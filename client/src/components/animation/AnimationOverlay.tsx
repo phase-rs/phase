@@ -17,7 +17,7 @@ import { FloatingNumber } from "./FloatingNumber.tsx";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
-import { TurnBanner } from "./TurnBanner.tsx";
+
 
 interface ActiveFloat {
   id: number;
@@ -62,24 +62,18 @@ let shatterIdCounter = 0;
 let castArcIdCounter = 0;
 
 export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
-  const steps = useAnimationStore((s) => s.steps);
-  const isPlaying = useAnimationStore((s) => s.isPlaying);
-  const playNextStep = useAnimationStore((s) => s.playNextStep);
+  const activeStep = useAnimationStore((s) => s.activeStep);
+  const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
   const [activeFloats, setActiveFloats] = useState<ActiveFloat[]>([]);
   const [activeDeathClones, setActiveDeathClones] = useState<DeathClone[]>([]);
-  const [activeTurnBanner, setActiveTurnBanner] = useState<{
-    turnNumber: number;
-    isPlayerTurn: boolean;
-  } | null>(null);
   const [activeVignette, setActiveVignette] = useState<{
     damageAmount: number;
   } | null>(null);
   const [activeReveals, setActiveReveals] = useState<ActiveReveal[]>([]);
   const [activeShatters, setActiveShatters] = useState<ActiveShatter[]>([]);
   const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
-  const processingRef = useRef(false);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const animationSpeed = usePreferencesStore((s) => s.animationSpeed);
@@ -257,20 +251,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           break;
         }
 
-        case "TurnStarted": {
-          const turnNumber = (data.turn_number as number) ?? 1;
-          const activePlayer = (data.active_player as number) ?? 0;
-          setActiveTurnBanner({
-            turnNumber,
-            isPlayerTurn: activePlayer === 0,
-          });
-          // Auto-clear after banner animation
-          setTimeout(
-            () => setActiveTurnBanner(null),
-            1200 * speedMultiplier,
-          );
+        case "TurnStarted":
+          // Handled directly in dispatch.ts via uiStore.flashTurnBanner
           break;
-        }
 
         case "ZoneChanged": {
           const toZone = data.to as string | undefined;
@@ -349,28 +332,17 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     ],
   );
 
+  // Process effects when activeStep changes, then advance after its duration
   useEffect(() => {
-    if (!isPlaying || steps.length === 0 || processingRef.current) return;
+    if (!activeStep) return;
 
-    processingRef.current = true;
-    const step = playNextStep();
-    if (!step) {
-      processingRef.current = false;
-      return;
-    }
-
-    // Process all effects in the step in parallel
-    for (const effect of step.effects) {
+    for (const effect of activeStep.effects) {
       processEffect(effect);
     }
 
-    // Wait for step duration * speed multiplier before processing next step
-    const timer = setTimeout(() => {
-      processingRef.current = false;
-    }, step.duration * speedMultiplier);
-
+    const timer = setTimeout(advanceStep, activeStep.duration * speedMultiplier);
     return () => clearTimeout(timer);
-  }, [isPlaying, steps, playNextStep, processEffect, speedMultiplier]);
+  }, [activeStep, advanceStep, processEffect, speedMultiplier]);
 
   const handleFloatComplete = useCallback((id: number) => {
     setActiveFloats((prev) => prev.filter((f) => f.id !== id));
@@ -468,18 +440,6 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         damageAmount={activeVignette?.damageAmount ?? 0}
         speedMultiplier={speedMultiplier}
       />
-
-      {/* Turn banner (z-50) */}
-      <AnimatePresence>
-        {activeTurnBanner && (
-          <TurnBanner
-            turnNumber={activeTurnBanner.turnNumber}
-            isPlayerTurn={activeTurnBanner.isPlayerTurn}
-            speedMultiplier={speedMultiplier}
-            onComplete={() => setActiveTurnBanner(null)}
-          />
-        )}
-      </AnimatePresence>
 
       {/* Card reveals */}
       <AnimatePresence>

@@ -13,63 +13,70 @@ describe("animationStore", () => {
   });
 
   describe("enqueueSteps", () => {
-    it("adds steps to the queue and sets isPlaying", () => {
+    it("promotes first step to activeStep when idle", () => {
       const steps = [makeStep(300), makeStep(400)];
       useAnimationStore.getState().enqueueSteps(steps);
 
       const state = useAnimationStore.getState();
-      expect(state.steps).toHaveLength(2);
+      expect(state.activeStep).toEqual(steps[0]);
+      expect(state.queue).toHaveLength(1);
       expect(state.isPlaying).toBe(true);
     });
 
-    it("appends to existing steps", () => {
+    it("appends to queue when already playing", () => {
       useAnimationStore.getState().enqueueSteps([makeStep()]);
       useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
 
-      expect(useAnimationStore.getState().steps).toHaveLength(3);
+      const state = useAnimationStore.getState();
+      expect(state.activeStep).toBeTruthy();
+      expect(state.queue).toHaveLength(2);
     });
   });
 
-  describe("playNextStep", () => {
-    it("returns steps in order", () => {
+  describe("advanceStep", () => {
+    it("advances through steps in order", () => {
       const step1 = makeStep(100);
       const step2 = makeStep(200);
       useAnimationStore.getState().enqueueSteps([step1, step2]);
 
-      const first = useAnimationStore.getState().playNextStep();
-      expect(first).toEqual(step1);
-      expect(useAnimationStore.getState().steps).toHaveLength(1);
+      expect(useAnimationStore.getState().activeStep).toEqual(step1);
       expect(useAnimationStore.getState().isPlaying).toBe(true);
 
-      const second = useAnimationStore.getState().playNextStep();
-      expect(second).toEqual(step2);
-      expect(useAnimationStore.getState().steps).toHaveLength(0);
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().activeStep).toEqual(step2);
+      expect(useAnimationStore.getState().isPlaying).toBe(true);
+
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().activeStep).toBeNull();
       expect(useAnimationStore.getState().isPlaying).toBe(false);
     });
 
-    it("returns undefined when queue is empty", () => {
-      const result = useAnimationStore.getState().playNextStep();
-      expect(result).toBeUndefined();
-      expect(useAnimationStore.getState().isPlaying).toBe(false);
+    it("clears when queue is empty", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep()]);
+      useAnimationStore.getState().advanceStep();
+
+      const state = useAnimationStore.getState();
+      expect(state.activeStep).toBeNull();
+      expect(state.isPlaying).toBe(false);
     });
   });
 
   describe("clearQueue", () => {
-    it("resets steps and isPlaying", () => {
+    it("resets all animation state", () => {
       useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
       expect(useAnimationStore.getState().isPlaying).toBe(true);
 
       useAnimationStore.getState().clearQueue();
 
       const state = useAnimationStore.getState();
-      expect(state.steps).toHaveLength(0);
+      expect(state.queue).toHaveLength(0);
+      expect(state.activeStep).toBeNull();
       expect(state.isPlaying).toBe(false);
     });
   });
 
   describe("captureSnapshot", () => {
     it("reads data-object-id elements from DOM", () => {
-      // Mock DOM elements with data-object-id
       const mockRect = {
         x: 10,
         y: 20,

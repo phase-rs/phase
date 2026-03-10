@@ -2,14 +2,15 @@ import { create } from "zustand";
 import type { AnimationStep, PositionSnapshot } from "../animation/types";
 
 interface AnimationStoreState {
-  steps: AnimationStep[];
+  queue: AnimationStep[];
+  activeStep: AnimationStep | null;
   isPlaying: boolean;
   positionRegistry: Map<number, DOMRect>;
 }
 
 interface AnimationStoreActions {
   enqueueSteps: (steps: AnimationStep[]) => void;
-  playNextStep: () => AnimationStep | undefined;
+  advanceStep: () => void;
   captureSnapshot: () => PositionSnapshot;
   registerPosition: (objectId: number, rect: DOMRect) => void;
   getPosition: (objectId: number) => DOMRect | undefined;
@@ -19,27 +20,33 @@ interface AnimationStoreActions {
 export type AnimationStore = AnimationStoreState & AnimationStoreActions;
 
 export const useAnimationStore = create<AnimationStore>()((set, get) => ({
-  steps: [],
+  queue: [],
+  activeStep: null,
   isPlaying: false,
   positionRegistry: new Map(),
 
   enqueueSteps: (steps) => {
-    set((state) => ({
-      steps: [...state.steps, ...steps],
-      isPlaying: true,
-    }));
+    if (steps.length === 0) return;
+
+    const { activeStep, queue } = get();
+    if (activeStep) {
+      // Already animating — append to queue
+      set({ queue: [...queue, ...steps] });
+    } else {
+      // Nothing playing — promote first step immediately
+      const [first, ...rest] = steps;
+      set({ activeStep: first, queue: rest, isPlaying: true });
+    }
   },
 
-  playNextStep: () => {
-    const { steps } = get();
-    if (steps.length === 0) {
-      set({ isPlaying: false });
-      return undefined;
+  advanceStep: () => {
+    const { queue } = get();
+    if (queue.length > 0) {
+      const [next, ...rest] = queue;
+      set({ activeStep: next, queue: rest });
+    } else {
+      set({ activeStep: null, isPlaying: false });
     }
-
-    const [next, ...rest] = steps;
-    set({ steps: rest, isPlaying: rest.length > 0 });
-    return next;
   },
 
   captureSnapshot: () => {
@@ -64,5 +71,5 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
 
   getPosition: (objectId) => get().positionRegistry.get(objectId),
 
-  clearQueue: () => set({ steps: [], isPlaying: false }),
+  clearQueue: () => set({ queue: [], activeStep: null, isPlaying: false }),
 }));
