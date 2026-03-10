@@ -151,5 +151,5 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 21. Schema & MTGJSON Foundation | v1.2 | Complete    | 2026-03-10 | 2026-03-10 |
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
 | 23. Unified Card Loader | 2/2 | Complete    | 2026-03-10 | - |
-| 24. Card Migration | 3/3 | Complete   | 2026-03-10 | - |
+| 24. Card Migration | 3/3 | Complete    | 2026-03-10 | - |
 | 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |
