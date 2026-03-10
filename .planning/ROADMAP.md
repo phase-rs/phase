@@ -44,7 +44,7 @@
 
 **Milestone Goal:** Replace Forge's GPL card data with MTGJSON (MIT) + custom ability JSON format, add comprehensive test coverage, and relicense the project as MIT/Apache-2.0.
 
-- [ ] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on
+- [x] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on (completed 2026-03-10)
 - [ ] **Phase 22: Test Infrastructure** - Build the GameScenario test harness and rules correctness test suite before any cards are migrated
 - [ ] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards
 - [ ] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation
@@ -139,7 +139,7 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
-| 21. Schema & MTGJSON Foundation | 2/3 | In Progress|  | - |
+| 21. Schema & MTGJSON Foundation | 3/3 | Complete   | 2026-03-10 | - |
 | 22. Test Infrastructure | v1.2 | 0/? | Not started | - |
 | 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |

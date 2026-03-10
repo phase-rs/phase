@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: executing
-stopped_at: Completed 21-03-PLAN.md
-last_updated: "2026-03-10T16:56:00Z"
-last_activity: 2026-03-10 — Completed Plan 21-03 (MTGJSON Loader & Ability Schema)
+status: completed
+stopped_at: Completed 21-02-PLAN.md (Phase 21 complete)
+last_updated: "2026-03-10T17:13:01.821Z"
+last_activity: 2026-03-10 — Completed Plan 21-02 (Typed Ability Vectors)
 progress:
   total_phases: 5
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
-  percent: 14
+  completed_plans: 3
+  percent: 20
 ---
 
 # Project State
@@ -25,25 +25,25 @@ See: .planning/PROJECT.md (updated 2026-03-10)
 
 ## Current Position
 
-Phase: 21 (first of 5 in v1.2) — Schema & MTGJSON Foundation
-Plan: 2/3 complete (Plan 01, Plan 03 done; Plan 02 remaining)
-Status: Executing — Plan 02 next
-Last activity: 2026-03-10 — Completed Plan 21-03 (MTGJSON Loader & Ability Schema)
+Phase: 21 (first of 5 in v1.2) — Schema & MTGJSON Foundation -- COMPLETE
+Plan: 3/3 complete (all plans done)
+Status: Phase 21 complete — ready for Phase 22
+Last activity: 2026-03-10 — Completed Plan 21-02 (Typed Ability Vectors)
 
-Progress: [▓▓░░░░░░░░] 14%
+Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2 (v1.2)
+- Total plans completed: 3 (v1.2)
 - Average duration: 14min
-- Total execution time: 0.5 hours
+- Total execution time: 0.7 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 21 | 2/3 | 28min | 14min |
+| 21 | 3/3 | 41min | 14min |
 
 ## Accumulated Context
 
@@ -63,6 +63,8 @@ Recent decisions affecting current work:
 - [21-03]: 7-card test fixture instead of full 50MB AtomicCards.json for fast CI
 - [21-03]: Schema generation via test keeps schema.json in sync with Rust types
 - [21-03]: Relative $schema path in ability JSON files for co-located schema
+- [Phase 21-02]: Kept compat bridge methods (api_type, params) for transitional dispatch rather than full pattern-matching migration
+- [Phase 21-02]: parse_test_ability() helpers in test modules for readable typed test data construction
 
 ### Pending Todos
 
@@ -74,6 +76,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T16:56:00Z
-Stopped at: Completed 21-03-PLAN.md
-Resume file: .planning/phases/21-schema-mtgjson-foundation/21-02-PLAN.md
+Last session: 2026-03-10T17:13:01.818Z
+Stopped at: Completed 21-02-PLAN.md (Phase 21 complete)
+Resume file: None
