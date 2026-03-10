@@ -71,6 +71,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.lands_played_this_turn = 0;
     }
 
+    // Reset loyalty_activated_this_turn for all permanents controlled by the active player
+    let active = state.active_player;
+    for obj in state.objects.values_mut() {
+        if obj.controller == active && obj.loyalty_activated_this_turn {
+            obj.loyalty_activated_this_turn = false;
+        }
+    }
+
     events.push(GameEvent::TurnStarted {
         player_id: state.active_player,
         turn_number: state.turn_number,

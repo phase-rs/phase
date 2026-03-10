@@ -13,6 +13,7 @@ use super::effects;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mulligan;
+use super::planeswalker;
 use super::priority;
 use super::sba;
 use super::triggers;
@@ -88,6 +89,18 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                     &mut events,
                 )?;
                 WaitingFor::Priority { player: *player }
+            } else if obj.loyalty.is_some()
+                && ability_index < obj.abilities.len()
+                && obj.abilities[ability_index].contains("PW_Cost$")
+            {
+                // Planeswalker loyalty ability
+                planeswalker::handle_activate_loyalty(
+                    state,
+                    *player,
+                    source_id,
+                    ability_index,
+                    &mut events,
+                )?
             } else {
                 casting::handle_activate_ability(
                     state,

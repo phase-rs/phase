@@ -10,6 +10,19 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+/// Stored back-face data for double-faced cards (DFCs).
+/// Populated when a Transform-layout card enters the game.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackFaceData {
+    pub name: String,
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub card_types: CardType,
+    pub keywords: Vec<Keyword>,
+    pub abilities: Vec<String>,
+    pub color: Vec<ManaColor>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CounterType {
     Plus1Plus1,
@@ -58,6 +71,9 @@ pub struct GameObject {
     pub svars: HashMap<String, String>,
     pub color: Vec<ManaColor>,
 
+    // Back face data for double-faced cards (DFCs)
+    pub back_face: Option<BackFaceData>,
+
     // Base characteristics (for layer system)
     pub base_power: Option<i32>,
     pub base_toughness: Option<i32>,
@@ -78,6 +94,10 @@ pub struct GameObject {
     // Computed before serialization, not persisted.
     #[serde(skip_deserializing, default)]
     pub has_summoning_sickness: bool,
+
+    // Planeswalker: whether a loyalty ability has been activated this turn
+    #[serde(skip_deserializing, default)]
+    pub loyalty_activated_this_turn: bool,
 }
 
 impl GameObject {
@@ -110,6 +130,7 @@ impl GameObject {
             static_definitions: Vec::new(),
             svars: HashMap::new(),
             color: Vec::new(),
+            back_face: None,
             base_power: None,
             base_toughness: None,
             base_keywords: Vec::new(),
@@ -118,6 +139,7 @@ impl GameObject {
             entered_battlefield_turn: None,
             has_unimplemented_mechanics: false,
             has_summoning_sickness: false,
+            loyalty_activated_this_turn: false,
         }
     }
 
