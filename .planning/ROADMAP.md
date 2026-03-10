@@ -81,8 +81,8 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 22-01-PLAN.md — GameScenario builder, CardBuilder, GameRunner, GameSnapshot, and integration test scaffolding
-- [ ] 22-02-PLAN.md — Rules tests: ETB triggers, stack resolution, state-based actions, targeting
+- [x] 22-01-PLAN.md — GameScenario builder, CardBuilder, GameRunner, GameSnapshot, and integration test scaffolding — completed 2026-03-10
+- [x] 22-02-PLAN.md — Rules tests: ETB triggers, stack resolution, state-based actions, targeting — completed 2026-03-10
 - [ ] 22-03-PLAN.md — Rules tests: combat damage, keyword interactions, layer system, and snapshot golden masters
 
 ### Phase 23: Unified Card Loader
@@ -149,7 +149,7 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
 | 21. Schema & MTGJSON Foundation | v1.2 | Complete    | 2026-03-10 | 2026-03-10 |
-| 22. Test Infrastructure | 1/3 | In Progress|  | - |
+| 22. Test Infrastructure | 2/3 | In Progress|  | - |
 | 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |
 | 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |

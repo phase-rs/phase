@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: in-progress
-stopped_at: Completed 22-01-PLAN.md
-last_updated: "2026-03-10T19:13:14Z"
-last_activity: 2026-03-10 — Completed Plan 22-01 (GameScenario Test Harness)
+stopped_at: Completed 22-02-PLAN.md
+last_updated: "2026-03-10T19:29:23Z"
+last_activity: 2026-03-10 — Completed Plan 22-02 (Rules Correctness Tests)
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 8
-  completed_plans: 6
-  percent: 30
+  completed_plans: 7
+  percent: 40
 ---
 
 # Project State
@@ -26,25 +26,25 @@ See: .planning/PROJECT.md (updated 2026-03-10)
 ## Current Position
 
 Phase: 22 (second of 5 in v1.2) — Test Infrastructure
-Plan: 1/3 complete
-Status: Plan 22-01 complete — ready for Plan 22-02
-Last activity: 2026-03-10 — Completed Plan 22-01 (GameScenario Test Harness)
+Plan: 2/3 complete
+Status: Plan 22-02 complete — ready for Plan 22-03
+Last activity: 2026-03-10 — Completed Plan 22-02 (Rules Correctness Tests)
 
-Progress: [███░░░░░░░] 30%
+Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6 (v1.2)
+- Total plans completed: 7 (v1.2)
 - Average duration: 13min
-- Total execution time: 1.2 hours
+- Total execution time: 1.4 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 21 | 5/5 | 68min | 14min |
-| 22 | 1/3 | 8min | 8min |
+| 22 | 2/3 | 20min | 10min |
 
 ## Accumulated Context
 
@@ -71,6 +71,9 @@ Recent decisions affecting current work:
 - [22-01]: CardBuilder borrows &mut GameState (not &mut GameScenario) to avoid borrow checker conflicts
 - [22-01]: scenario.rs not #[cfg(test)] gated -- integration tests compile crate as dependency, can't access cfg(test) modules
 - [22-01]: #[path] attributes for integration test module resolution in Cargo test binaries
+- [22-02]: ChangesZone triggers test Hand->Stack zone transitions (not just ETB) -- engine fires on all zone changes
+- [22-02]: Deathtouch SBA test uses direct GameState construction since GameRunner doesn't expose &mut state for dealt_deathtouch_damage
+- [22-02]: Explicit act(PassPriority) loop for stack drain when triggers add entries during resolution
 
 ### Pending Todos
 
@@ -82,6 +85,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T19:13:14Z
-Stopped at: Completed 22-01-PLAN.md
-Resume file: .planning/phases/22-test-infrastructure/22-01-SUMMARY.md
+Last session: 2026-03-10T19:29:23Z
+Stopped at: Completed 22-02-PLAN.md
+Resume file: .planning/phases/22-test-infrastructure/22-02-SUMMARY.md
