@@ -30,6 +30,9 @@ jobs:
       - name: Run tests
         run: cargo test --all
 
+      - name: Standard coverage gate
+        run: cargo run --bin coverage-report -- data/standard-cards/ --ci
+
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
 
