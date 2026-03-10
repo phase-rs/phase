@@ -1,12 +1,12 @@
 const FRAME_COLORS: Record<string, string> = {
-  W: "#F5E6C8",
-  U: "#0E68AB",
-  B: "#2B2B2B",
-  R: "#D32029",
-  G: "#00733E",
+  White: "#F5E6C8",
+  Blue: "#0E68AB",
+  Black: "#2B2B2B",
+  Red: "#D32029",
+  Green: "#00733E",
 };
 
-function getFrameColor(colors: string[]): string {
+export function getFrameColor(colors: string[]): string {
   if (colors.length === 0) return "#8E8E8E";
   if (colors.length >= 2) return "#C9B037";
   return FRAME_COLORS[colors[0]] ?? "#8E8E8E";
