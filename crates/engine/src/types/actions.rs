@@ -47,6 +47,12 @@ pub enum GameAction {
     Transform {
         object_id: ObjectId,
     },
+    PlayFaceDown {
+        card_id: CardId,
+    },
+    TurnFaceUp {
+        object_id: ObjectId,
+    },
 }
 
 #[cfg(test)]

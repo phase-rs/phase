@@ -128,6 +128,24 @@ class AudioManager {
     this.currentSource = null;
   }
 
+  /**
+   * Resume audio playback after a user gesture (e.g. unmute button click).
+   * Warms up the AudioContext if needed, resumes it if suspended,
+   * and starts music if no track is currently playing.
+   */
+  ensurePlayback(): void {
+    this.warmUp();
+    this.preloadSfx();
+
+    if (this.ctx?.state === "suspended") {
+      this.ctx.resume();
+    }
+
+    if (!this.currentAudio) {
+      this.startMusic();
+    }
+  }
+
   /** Read current preferences and update gain node values. */
   updateVolumes(): void {
     if (!this.sfxGain || !this.musicGain || !this.ctx) return;

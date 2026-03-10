@@ -376,6 +376,29 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             // Cards not in to_graveyard stay on top of library (already there)
             WaitingFor::Priority { player: p }
         }
+        (WaitingFor::Priority { player }, GameAction::PlayFaceDown { card_id }) => {
+            if state.priority_player != *player {
+                return Err(EngineError::NotYourPriority);
+            }
+            let p = *player;
+            // Find the object with this card_id in the player's hand
+            let object_id = state
+                .objects
+                .iter()
+                .find(|(_, obj)| obj.card_id == card_id && obj.owner == p && obj.zone == Zone::Hand)
+                .map(|(id, _)| *id)
+                .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))?;
+            super::morph::play_face_down(state, p, object_id, &mut events)?;
+            WaitingFor::Priority { player: p }
+        }
+        (WaitingFor::Priority { player }, GameAction::TurnFaceUp { object_id }) => {
+            if state.priority_player != *player {
+                return Err(EngineError::NotYourPriority);
+            }
+            let p = *player;
+            super::morph::turn_face_up(state, p, object_id, &mut events)?;
+            WaitingFor::Priority { player: p }
+        }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",

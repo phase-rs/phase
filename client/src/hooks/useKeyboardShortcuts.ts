@@ -5,11 +5,12 @@ import { useUiStore } from "../stores/uiStore";
 
 /**
  * Registers global keyboard shortcuts for the game.
- * - Space/Enter: Pass priority (when waiting for Priority)
+ * - Space: Pass priority / advance phase
+ * - Enter: Toggle end-turn mode
  * - F: Toggle full control
  * - Z: Undo last unrevealed-info action
  * - T: Tap all untapped lands (when in ManaPayment)
- * - Escape: Cancel current action
+ * - Escape: Cancel current action / cancel end-turn mode
  * - D: Copy game state JSON to clipboard (debug)
  */
 export function useKeyboardShortcuts(): void {
@@ -32,12 +33,18 @@ export function useKeyboardShortcuts(): void {
 
       switch (e.key) {
         case " ":
-        case "Enter":
           if (waitingFor?.type === "Priority") {
             e.preventDefault();
             dispatch({ type: "PassPriority" });
           }
           break;
+
+        case "Enter": {
+          e.preventDefault();
+          const turnNumber = gameState?.turn_number ?? 0;
+          uiState.toggleEndTurnMode(turnNumber);
+          break;
+        }
 
         case "f":
         case "F":
@@ -72,7 +79,11 @@ export function useKeyboardShortcuts(): void {
 
         case "Escape":
           e.preventDefault();
-          uiState.clearTargets();
+          if (uiState.endTurnMode) {
+            uiState.clearEndTurnMode();
+          } else {
+            uiState.clearTargets();
+          }
           break;
 
         case "d":

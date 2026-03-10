@@ -60,9 +60,12 @@ export function PlayerHand() {
           (a.type === "PlayLand" || a.type === "CastSpell") &&
           Number((a as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.card_id) === Number(obj.card_id),
       );
-      if (action) dispatchAction(action);
+      if (action) {
+        inspectObject(null);
+        dispatchAction(action);
+      }
     },
-    [hasPriority, objects, legalActions],
+    [hasPriority, objects, legalActions, inspectObject],
   );
 
   const handleDragEnd = useCallback(
@@ -219,7 +222,7 @@ function HandCard({
         rotate: rotation,
       }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: -30 + arcOffset, rotate: 0, scale: 1.08, rotateX: 5, zIndex: 30 }}
+      whileHover={{ y: -30 + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 50 }}
       transition={{ delay: index * 0.03, duration: 0.25 }}
       drag

@@ -64,6 +64,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
                   style={{
                     width: "calc(var(--card-w) * 0.6)",
                     height: "calc(var(--card-h) * 0.6)",
+                    transform: "rotate(180deg)",
                   }}
                   draggable={false}
                 />

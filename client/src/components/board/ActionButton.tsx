@@ -196,22 +196,31 @@ export function ActionButton() {
     setCombatMode("blockers");
   }
 
-  const endTurnRef = useRef(false);
+  const endTurnMode = useUiStore((s) => s.endTurnMode);
+  const endTurnSinceTurn = useUiStore((s) => s.endTurnSinceTurn);
+  const toggleEndTurnMode = useUiStore((s) => s.toggleEndTurnMode);
+  const clearEndTurnMode = useUiStore((s) => s.clearEndTurnMode);
+  const turnNumber = useGameStore((s) => s.gameState?.turn_number ?? 0);
 
-  async function endTurn() {
-    endTurnRef.current = true;
-    const startTurn = useGameStore.getState().gameState?.turn_number ?? 0;
-    for (let i = 0; i < 50; i++) {
-      if (!endTurnRef.current) break;
-      const current = useGameStore.getState();
-      const currentTurn = current.gameState?.turn_number ?? 0;
-      if (currentTurn !== startTurn) break;
-      if (current.waitingFor?.type !== "Priority") break;
-      if (current.waitingFor.data.player !== PLAYER_ID) break;
-      await dispatchAction({ type: "PassPriority" });
+  // Auto-reset end-turn mode when turn changes
+  useEffect(() => {
+    if (endTurnMode && endTurnSinceTurn !== null && turnNumber !== endTurnSinceTurn) {
+      clearEndTurnMode();
     }
-    endTurnRef.current = false;
-  }
+  }, [endTurnMode, endTurnSinceTurn, turnNumber, clearEndTurnMode]);
+
+  // Reactive auto-pass when end-turn mode is active
+  useEffect(() => {
+    if (!endTurnMode || !waitingFor || waitingFor.data.player !== PLAYER_ID) return;
+
+    if (waitingFor.type === "Priority") {
+      dispatchAction({ type: "PassPriority" });
+    } else if (waitingFor.type === "DeclareAttackers") {
+      dispatchAction({ type: "DeclareAttackers", data: { attacker_ids: [] } });
+    } else if (waitingFor.type === "DeclareBlockers") {
+      dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } });
+    }
+  }, [endTurnMode, waitingFor]);
 
   async function resolveAll() {
     resolveAllRef.current = true;
@@ -230,7 +239,7 @@ export function ActionButton() {
     resolveAllRef.current = false;
   }
 
-  const visible = mode !== "hidden";
+  const visible = mode !== "hidden" || endTurnMode;
 
   return (
     <AnimatePresence>
@@ -243,7 +252,7 @@ export function ActionButton() {
           transition={{ duration: 0.15 }}
           className="fixed bottom-28 right-4 z-30 flex items-center gap-2"
         >
-          {mode === "combat-attackers" && (
+          {mode === "combat-attackers" && !endTurnMode && (
             <>
               <button
                 onClick={() => {
@@ -277,7 +286,7 @@ export function ActionButton() {
             </>
           )}
 
-          {mode === "combat-blockers" && (
+          {mode === "combat-blockers" && !endTurnMode && (
             <>
               {blockerAssignments.size > 0 ? (
                 <>
@@ -312,7 +321,7 @@ export function ActionButton() {
             </>
           )}
 
-          {mode === "priority-stack" && (
+          {mode === "priority-stack" && !endTurnMode && (
             <>
               <button
                 onClick={() => dispatchAction({ type: "PassPriority" })}
@@ -329,19 +338,19 @@ export function ActionButton() {
             </>
           )}
 
-          {mode === "priority-empty" && (
+          {mode === "priority-empty" && !endTurnMode && (
             <>
               <button
                 onClick={() => dispatchAction({ type: "PassPriority" })}
                 className={gameButtonClass({
-                  tone: advanceLabel === "Done" ? "blue" : "emerald",
+                  tone: "emerald",
                   size: "md",
                 })}
               >
                 {advanceLabel}
               </button>
               <button
-                onClick={endTurn}
+                onClick={() => toggleEndTurnMode(turnNumber)}
                 className={gameButtonClass({ tone: "slate", size: "md" })}
               >
                 <span className="flex items-center gap-1">
@@ -352,6 +361,20 @@ export function ActionButton() {
                 </span>
               </button>
             </>
+          )}
+
+          {endTurnMode && (
+            <button
+              onClick={clearEndTurnMode}
+              className={gameButtonClass({ tone: "amber", size: "md", className: "animate-pulse" })}
+            >
+              <span className="flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 animate-spin">
+                  <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.451a.75.75 0 0 0 0-1.5H4.5a.75.75 0 0 0-.75.75v3.75a.75.75 0 0 0 1.5 0v-2.033l.364.363a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm-10.624-2.85a5.5 5.5 0 0 1 9.201-2.465l.312.31H11.75a.75.75 0 0 0 0 1.5h3.75a.75.75 0 0 0 .75-.75V3.42a.75.75 0 0 0-1.5 0v2.033l-.364-.364A7 7 0 0 0 3.074 8.227a.75.75 0 0 0 1.449.39l.165-.044Z" clipRule="evenodd" />
+                </svg>
+                Ending Turn...
+              </span>
+            </button>
           )}
         </motion.div>
       )}

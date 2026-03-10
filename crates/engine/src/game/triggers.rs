@@ -286,6 +286,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::Always, match_always);
     r.insert(TriggerMode::Explored, match_explored);
 
+    // Promoted trigger matchers -- face-down mechanics
+    r.insert(TriggerMode::TurnFaceUp, match_turn_face_up);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -301,7 +304,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::PayLife,
         TriggerMode::PayCumulativeUpkeep,
         TriggerMode::PayEcho,
-        TriggerMode::TurnFaceUp,
         TriggerMode::PhaseIn,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,

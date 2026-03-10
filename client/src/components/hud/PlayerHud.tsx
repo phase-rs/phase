@@ -1,3 +1,4 @@
+import { audioManager } from "../../audio/AudioManager.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
@@ -18,7 +19,11 @@ export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
         <LifeTotal playerId={0} size="lg" />
         <ManaPoolSummary playerId={0} />
         <button
-          onClick={() => setMasterMuted(!masterMuted)}
+          onClick={() => {
+            const willUnmute = masterMuted;
+            setMasterMuted(!masterMuted);
+            if (willUnmute) audioManager.ensurePlayback();
+          }}
           className={`rounded p-1 transition-colors hover:bg-white/10 hover:text-gray-300 ${
             masterMuted ? "text-red-400" : "text-gray-500"
           }`}

@@ -74,9 +74,8 @@ const COMBAT_PHASES = new Set<Phase>([
 
 function getAdvanceLabel(phase: Phase, hasStackItems: boolean): string {
   if (hasStackItems) return "Resolve";
-  if (phase === "PreCombatMain") return "Battle!";
-  if (phase === "PostCombatMain") return "End Turn";
-  return "Done";
+  if (phase === "PreCombatMain") return "To Combat";
+  return "Next";
 }
 
 export function usePhaseInfo(): PhaseInfo {
