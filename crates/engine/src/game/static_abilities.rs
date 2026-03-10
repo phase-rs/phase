@@ -80,6 +80,7 @@ pub fn build_static_registry() -> HashMap<String, StaticAbilityHandler> {
     registry.insert("MustBeBlocked".to_string(), handle_rule_mod);
     registry.insert("CantAttackAlone".to_string(), handle_rule_mod);
     registry.insert("CantBlockAlone".to_string(), handle_rule_mod);
+    registry.insert("MayLookAtTopOfLibrary".to_string(), handle_rule_mod);
 
     // Stub modes -- recognized but no-op until needed
     let stubs = [

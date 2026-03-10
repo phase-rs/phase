@@ -1,6 +1,6 @@
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntryKind};
+use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 
 /// CopySpell: duplicate the top spell on the stack.
@@ -46,7 +46,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::game_state::StackEntry;
+    use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use std::collections::HashMap;

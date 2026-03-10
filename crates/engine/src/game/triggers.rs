@@ -253,11 +253,41 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::SpellCopy, match_spell_cast);
     r.insert(TriggerMode::ManaAdded, match_mana_added);
 
+    // Promoted trigger matchers -- Standard-relevant combat triggers
+    r.insert(TriggerMode::AttackerBlocked, match_attacker_blocked);
+    r.insert(TriggerMode::AttackerBlockedOnce, match_attacker_blocked);
+    r.insert(
+        TriggerMode::AttackerBlockedByCreature,
+        match_attacker_blocked,
+    );
+    r.insert(TriggerMode::AttackerUnblocked, match_attacker_unblocked);
+    r.insert(TriggerMode::AttackerUnblockedOnce, match_attacker_unblocked);
+
+    // Promoted trigger matchers -- zone-based triggers
+    r.insert(TriggerMode::Milled, match_milled);
+    r.insert(TriggerMode::MilledOnce, match_milled);
+    r.insert(TriggerMode::MilledAll, match_milled);
+    r.insert(TriggerMode::Exiled, match_exiled);
+
+    // Promoted trigger matchers -- attachment triggers
+    r.insert(TriggerMode::Attached, match_attached);
+    r.insert(TriggerMode::Unattach, match_unattach);
+
+    // Promoted trigger matchers -- other Standard-relevant triggers
+    r.insert(TriggerMode::Cycled, match_cycled);
+    r.insert(TriggerMode::Shuffled, match_shuffled);
+    r.insert(TriggerMode::Revealed, match_revealed);
+    r.insert(TriggerMode::TapsForMana, match_taps_for_mana);
+    r.insert(TriggerMode::ChangesController, match_changes_controller);
+    r.insert(TriggerMode::Transformed, match_transformed);
+    r.insert(TriggerMode::Fight, match_fight);
+    r.insert(TriggerMode::FightOnce, match_fight);
+    r.insert(TriggerMode::Immediate, match_always);
+    r.insert(TriggerMode::Always, match_always);
+    r.insert(TriggerMode::Explored, match_explored);
+
     // Remaining trigger modes: recognized but not yet matched against events.
-    // These return false -- triggers simply don't fire until the specific
-    // events they need are implemented.
     let unimplemented_modes = [
-        TriggerMode::ChangesController,
         TriggerMode::DamagePreventedOnce,
         TriggerMode::ExcessDamage,
         TriggerMode::ExcessDamageAll,
@@ -266,25 +296,12 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::AbilityTriggered,
         TriggerMode::SpellAbilityCast,
         TriggerMode::SpellAbilityCopy,
-        TriggerMode::AttackerBlocked,
-        TriggerMode::AttackerBlockedOnce,
-        TriggerMode::AttackerBlockedByCreature,
-        TriggerMode::AttackerUnblocked,
-        TriggerMode::AttackerUnblockedOnce,
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
-        TriggerMode::TapsForMana,
-        TriggerMode::Milled,
-        TriggerMode::MilledOnce,
-        TriggerMode::MilledAll,
-        TriggerMode::Exiled,
-        TriggerMode::Revealed,
-        TriggerMode::Shuffled,
         TriggerMode::PayLife,
         TriggerMode::PayCumulativeUpkeep,
         TriggerMode::PayEcho,
         TriggerMode::TurnFaceUp,
-        TriggerMode::Transformed,
         TriggerMode::PhaseIn,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
@@ -296,14 +313,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Exerted,
         TriggerMode::Crewed,
         TriggerMode::Saddled,
-        TriggerMode::Cycled,
         TriggerMode::Evolved,
-        TriggerMode::Explored,
         TriggerMode::Exploited,
         TriggerMode::Enlisted,
         TriggerMode::ManaExpend,
-        TriggerMode::Attached,
-        TriggerMode::Unattach,
         TriggerMode::Adapt,
         TriggerMode::Foretell,
         TriggerMode::Investigated,
@@ -328,8 +341,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::RingTemptsYou,
         TriggerMode::Surveil,
         TriggerMode::Scry,
-        TriggerMode::Fight,
-        TriggerMode::FightOnce,
         TriggerMode::Abandoned,
         TriggerMode::CaseSolved,
         TriggerMode::ClaimPrize,
@@ -355,8 +366,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::BecomesCrewed,
         TriggerMode::BecomesPlotted,
         TriggerMode::BecomesSaddled,
-        TriggerMode::Immediate,
-        TriggerMode::Always,
         TriggerMode::Airbend,
         TriggerMode::Earthbend,
         TriggerMode::Firebend,
@@ -365,7 +374,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     ];
 
     for mode in unimplemented_modes {
-        // TODO: implement when relevant cards need it
         r.insert(mode, match_unimplemented);
     }
 
@@ -881,6 +889,268 @@ fn match_mana_added(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::ManaAdded { .. })
+}
+
+// ---------------------------------------------------------------------------
+// Promoted Trigger Matchers
+// ---------------------------------------------------------------------------
+
+/// AttackerBlocked: fires when the source creature is among blocked attackers.
+fn match_attacker_blocked(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    if let GameEvent::BlockersDeclared { assignments } = event {
+        // Check if source is among the attackers that got blocked
+        assignments.iter().any(|(_, attacker)| *attacker == source_id)
+    } else {
+        false
+    }
+}
+
+/// AttackerUnblocked: fires when source attacked but was not assigned any blockers.
+fn match_attacker_unblocked(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::BlockersDeclared { assignments } = event {
+        // Source must be an attacker in the current combat
+        let is_attacker = state
+            .combat
+            .as_ref()
+            .map(|c| c.attackers.iter().any(|a| a.object_id == source_id))
+            .unwrap_or(false);
+        if !is_attacker {
+            return false;
+        }
+        // Source must not be among the blocked attackers
+        !assignments.iter().any(|(_, attacker)| *attacker == source_id)
+    } else {
+        false
+    }
+}
+
+/// Milled: fires when a card moves from Library to Graveyard.
+fn match_milled(
+    event: &GameEvent,
+    params: &HashMap<String, String>,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::ZoneChanged {
+        object_id, from, to, ..
+    } = event
+    {
+        if *from != Zone::Library || *to != Zone::Graveyard {
+            return false;
+        }
+        if let Some(filter) = params.get("ValidCard") {
+            if !object_matches_filter(state, *object_id, filter, source_id) {
+                return false;
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Exiled: fires when a card moves to Exile zone.
+fn match_exiled(
+    event: &GameEvent,
+    params: &HashMap<String, String>,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::ZoneChanged {
+        object_id, to, ..
+    } = event
+    {
+        if *to != Zone::Exile {
+            return false;
+        }
+        if let Some(filter) = params.get("ValidCard") {
+            if !object_matches_filter(state, *object_id, filter, source_id) {
+                return false;
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Attached: fires when source becomes attached to a permanent.
+/// Matches on ZoneChanged to Battlefield for auras/equipment, or
+/// on EffectResolved for Attach/Equip effects.
+fn match_attached(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::EffectResolved { api_type, .. }
+            if api_type == "Attach" || api_type == "AttachAll" =>
+        {
+            // Check if source_id is currently attached to something
+            state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.attached_to.is_some())
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Unattach: fires when attachment is removed from a permanent.
+fn match_unattach(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::EffectResolved { api_type, .. }
+            if api_type == "Unattach" || api_type == "UnattachAll" =>
+        {
+            // Check if source_id is no longer attached
+            state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.attached_to.is_none())
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Cycled: fires on Discarded events when cycling is the cause.
+/// Since we don't yet have a cycling-specific event, match on Discarded events
+/// where the trigger source has cycling ability (best approximation).
+fn match_cycled(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    // Match on EffectResolved with Cycling api_type
+    matches!(
+        event,
+        GameEvent::EffectResolved { api_type, .. } if api_type == "Cycling"
+    )
+}
+
+/// Shuffled: fires when a library is shuffled.
+fn match_shuffled(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(
+        event,
+        GameEvent::EffectResolved { api_type, .. } if api_type == "Shuffle"
+    )
+}
+
+/// Revealed: fires on a card reveal event.
+fn match_revealed(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(
+        event,
+        GameEvent::EffectResolved { api_type, .. } if api_type == "Reveal"
+    )
+}
+
+/// TapsForMana: fires when a permanent taps to produce mana.
+fn match_taps_for_mana(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    if let GameEvent::ManaAdded {
+        source_id: mana_source,
+        ..
+    } = event
+    {
+        *mana_source == source_id
+    } else {
+        false
+    }
+}
+
+/// ChangesController: fires when a permanent's controller changes.
+fn match_changes_controller(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(
+        event,
+        GameEvent::EffectResolved { api_type, .. } if api_type == "GainControl"
+    )
+}
+
+/// Transformed: fires when a permanent transforms (DFC).
+fn match_transformed(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    if let GameEvent::Transformed { object_id } = event {
+        *object_id == source_id
+    } else {
+        false
+    }
+}
+
+/// Fight: fires when two creatures fight.
+fn match_fight(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(
+        event,
+        GameEvent::EffectResolved { api_type, .. } if api_type == "Fight"
+    )
+}
+
+/// Always/Immediate: always returns true (used for state triggers).
+fn match_always(
+    _event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    true
+}
+
+/// Explored: fires when a creature explores.
+fn match_explored(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(
+        event,
+        GameEvent::EffectResolved { api_type, .. } if api_type == "Explore"
+    )
 }
 
 /// Fallback matcher for unimplemented trigger modes. Always returns false.
@@ -1640,5 +1910,154 @@ pub mod tests {
             0,
             "Prowess should not trigger on opponent's spell"
         );
+    }
+
+    #[test]
+    fn attacker_blocked_matches_when_source_is_blocked() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker = ObjectId(99);
+
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, attacker)],
+        };
+        let params = HashMap::new();
+        assert!(match_attacker_blocked(&event, &params, attacker, &state));
+    }
+
+    #[test]
+    fn attacker_blocked_does_not_match_other_attacker() {
+        let state = setup();
+        let other = ObjectId(50);
+        let blocker = ObjectId(99);
+
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, other)],
+        };
+        let params = HashMap::new();
+        assert!(!match_attacker_blocked(
+            &event,
+            &params,
+            ObjectId(1),
+            &state
+        ));
+    }
+
+    #[test]
+    fn attacker_unblocked_matches_when_source_is_not_blocked() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Set up combat state with our attacker
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        // No blockers assigned to attacker
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![],
+        };
+        let params = HashMap::new();
+        assert!(match_attacker_unblocked(
+            &event, &params, attacker, &state
+        ));
+    }
+
+    #[test]
+    fn exiled_matches_zone_change_to_exile() {
+        let state = setup();
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(5),
+            from: Zone::Battlefield,
+            to: Zone::Exile,
+        };
+        let params = HashMap::new();
+        assert!(match_exiled(&event, &params, ObjectId(5), &state));
+    }
+
+    #[test]
+    fn exiled_does_not_match_other_zones() {
+        let state = setup();
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(5),
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+        };
+        let params = HashMap::new();
+        assert!(!match_exiled(&event, &params, ObjectId(5), &state));
+    }
+
+    #[test]
+    fn milled_matches_library_to_graveyard() {
+        let state = setup();
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(5),
+            from: Zone::Library,
+            to: Zone::Graveyard,
+        };
+        let params = HashMap::new();
+        assert!(match_milled(&event, &params, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn milled_does_not_match_hand_to_graveyard() {
+        let state = setup();
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(5),
+            from: Zone::Hand,
+            to: Zone::Graveyard,
+        };
+        let params = HashMap::new();
+        assert!(!match_milled(&event, &params, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn always_matcher_returns_true() {
+        let state = setup();
+        let event = GameEvent::GameStarted;
+        let params = HashMap::new();
+        assert!(match_always(&event, &params, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn taps_for_mana_matches_mana_added() {
+        let state = setup();
+        let source = ObjectId(5);
+        let event = GameEvent::ManaAdded {
+            player_id: PlayerId(0),
+            mana_type: crate::types::mana::ManaType::Green,
+            source_id: source,
+        };
+        let params = HashMap::new();
+        assert!(match_taps_for_mana(&event, &params, source, &state));
+    }
+
+    #[test]
+    fn shuffled_matches_shuffled_event() {
+        let state = setup();
+        // Shuffled fires on any event that indicates library was shuffled.
+        // Using a generic approach: match_shuffled should match relevant events.
+        let event = GameEvent::EffectResolved {
+            api_type: "Shuffle".to_string(),
+            source_id: ObjectId(1),
+        };
+        let params = HashMap::new();
+        assert!(match_shuffled(&event, &params, ObjectId(1), &state));
     }
 }

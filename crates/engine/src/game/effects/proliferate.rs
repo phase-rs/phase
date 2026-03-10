@@ -2,7 +2,6 @@ use crate::game::game_object::CounterType;
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::zones::Zone;
 
 /// Proliferate: for each permanent that has a counter and each player that has a
 /// poison counter, add one additional counter of each type already present.
@@ -80,6 +79,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
     use std::collections::HashMap;
 
     fn make_proliferate_ability() -> ResolvedAbility {

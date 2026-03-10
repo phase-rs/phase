@@ -1,7 +1,6 @@
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::zones::Zone;
 
 /// ChooseCard: generic "choose a card" effect that presents cards from a zone
 /// for the player to select from.
@@ -103,6 +102,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
     use std::collections::HashMap;
 
     #[test]

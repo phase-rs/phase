@@ -6,7 +6,45 @@ use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
+
+/// Add a +1/+1 counter to the exploring creature via the replacement pipeline.
+fn add_explore_counter(
+    state: &mut GameState,
+    explorer_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    let proposed = ProposedEvent::AddCounter {
+        object_id: explorer_id,
+        counter_type: "P1P1".to_string(),
+        count: 1,
+        applied: HashSet::new(),
+    };
+
+    if let ReplacementResult::Execute(ProposedEvent::AddCounter {
+        object_id,
+        counter_type,
+        count,
+        ..
+    }) = replacement::replace_event(state, proposed, events)
+    {
+        let ct = match counter_type.as_str() {
+            "P1P1" => CounterType::Plus1Plus1,
+            _ => CounterType::Generic(counter_type.clone()),
+        };
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            let entry = obj.counters.entry(ct).or_insert(0);
+            *entry += count;
+            state.layers_dirty = true;
+        }
+        events.push(GameEvent::CounterAdded {
+            object_id,
+            counter_type,
+            count,
+        });
+    }
+}
 
 /// Explore: the exploring creature reveals the top card of its controller's library.
 /// - If the card is a land: put a +1/+1 counter on the creature, the card stays on top.
@@ -53,39 +91,7 @@ pub fn resolve(
 
     if player.library.is_empty() {
         // Nothing to explore -- just put a +1/+1 counter (per MTG rules, explore with empty library)
-        let proposed = ProposedEvent::AddCounter {
-            object_id: explorer_id,
-            counter_type: "P1P1".to_string(),
-            count: 1,
-            applied: HashSet::new(),
-        };
-
-        if let ReplacementResult::Execute(event) =
-            replacement::replace_event(state, proposed, events)
-        {
-            if let ProposedEvent::AddCounter {
-                object_id,
-                counter_type,
-                count,
-                ..
-            } = event
-            {
-                let ct = match counter_type.as_str() {
-                    "P1P1" => CounterType::Plus1Plus1,
-                    _ => CounterType::Generic(counter_type.clone()),
-                };
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    let entry = obj.counters.entry(ct).or_insert(0);
-                    *entry += count;
-                    state.layers_dirty = true;
-                }
-                events.push(GameEvent::CounterAdded {
-                    object_id,
-                    counter_type,
-                    count,
-                });
-            }
-        }
+        add_explore_counter(state, explorer_id, events);
 
         events.push(GameEvent::EffectResolved {
             api_type: ability.api_type.clone(),
@@ -106,39 +112,7 @@ pub fn resolve(
 
     if is_land {
         // Land: put +1/+1 counter on exploring creature, card stays on top
-        let proposed = ProposedEvent::AddCounter {
-            object_id: explorer_id,
-            counter_type: "P1P1".to_string(),
-            count: 1,
-            applied: HashSet::new(),
-        };
-
-        if let ReplacementResult::Execute(event) =
-            replacement::replace_event(state, proposed, events)
-        {
-            if let ProposedEvent::AddCounter {
-                object_id,
-                counter_type,
-                count,
-                ..
-            } = event
-            {
-                let ct = match counter_type.as_str() {
-                    "P1P1" => CounterType::Plus1Plus1,
-                    _ => CounterType::Generic(counter_type.clone()),
-                };
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    let entry = obj.counters.entry(ct).or_insert(0);
-                    *entry += count;
-                    state.layers_dirty = true;
-                }
-                events.push(GameEvent::CounterAdded {
-                    object_id,
-                    counter_type,
-                    count,
-                });
-            }
-        }
+        add_explore_counter(state, explorer_id, events);
 
         events.push(GameEvent::EffectResolved {
             api_type: ability.api_type.clone(),
