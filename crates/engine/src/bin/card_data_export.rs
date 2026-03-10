@@ -22,12 +22,12 @@ fn primary_face(rules: &engine::types::card::CardRules) -> &CardFace {
 fn main() {
     let path = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("FORGE_CARDS_PATH").ok())
+        .or_else(|| std::env::var("PHASE_CARDS_PATH").ok())
         .map(PathBuf::from);
 
     let Some(path) = path else {
         eprintln!("Usage: card-data-export <card-data-dir>");
-        eprintln!("  Or set FORGE_CARDS_PATH environment variable");
+        eprintln!("  Or set PHASE_CARDS_PATH environment variable");
         eprintln!();
         eprintln!("Outputting empty card map to stdout.");
         let empty: HashMap<String, &CardFace> = HashMap::new();

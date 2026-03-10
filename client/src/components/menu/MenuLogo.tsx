@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 
 export function MenuLogo() {
   return (
-    <div className="relative flex items-center justify-center -mb-10">
+    <div className="relative flex items-center justify-center">
       {/* Outer ambient glow — slow pulse like a flame */}
       <motion.div
         className="pointer-events-none absolute"

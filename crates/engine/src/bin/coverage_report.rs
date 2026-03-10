@@ -18,21 +18,21 @@ fn main() {
         .skip(1)
         .find(|a| !a.starts_with("--"))
         .cloned()
-        .or_else(|| std::env::var("FORGE_CARDS_PATH").ok())
+        .or_else(|| std::env::var("PHASE_CARDS_PATH").ok())
         .map(PathBuf::from);
 
     let Some(path) = path else {
         eprintln!("Usage: coverage-report <path> [--ci] [--json]");
-        eprintln!("  Or set FORGE_CARDS_PATH environment variable");
+        eprintln!("  Or set PHASE_CARDS_PATH environment variable");
         eprintln!();
         eprintln!("Modes:");
-        eprintln!("  Forge (default):  coverage-report <forge-cards-dir> [--ci]");
+        eprintln!("  Text (default):   coverage-report <cards-dir> [--ci]");
         eprintln!("  JSON:             coverage-report --json <data-root> [--ci]");
         eprintln!();
         eprintln!("Flags:");
         eprintln!("  --ci    Exit with code 1 if any cards are unsupported");
         eprintln!(
-            "  --json  Load cards via JSON (mtgjson + abilities) instead of Forge .txt files"
+            "  --json  Load cards via JSON (mtgjson + abilities) instead of .txt files"
         );
         eprintln!();
         eprintln!("Outputting empty coverage summary to stdout.");
@@ -72,7 +72,7 @@ fn main() {
             }
         }
     } else {
-        // Forge mode (unchanged)
+        // Text mode (unchanged)
         match CardDatabase::load(&path) {
             Ok(db) => db,
             Err(e) => {

@@ -31,7 +31,6 @@ struct SocketIdentity {
 async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let cards_dir = std::env::var("PHASE_CARDS_DIR")
-        .or_else(|_| std::env::var("FORGE_CARDS_DIR"))
         .unwrap_or_else(|_| "data/cards".to_string());
     let card_db = CardDatabase::load(Path::new(&cards_dir)).expect("Failed to load card database");
     println!("Loaded {} cards", card_db.card_count());
