@@ -181,6 +181,12 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 20-02]: Equip is a direct GameAction (not ActivateAbility), simplifying the sorcery-speed flow
 - [Phase 20-02]: attach_to() is a shared utility for both Attach effect and engine equip action
 - [Phase 20-02]: Equipment SBA clears attached_to silently (no events, stays on battlefield)
+- [Phase 20-03]: Scry SelectCards = cards to keep on top; rest go to bottom of library
+- [Phase 20-03]: Dig SelectCards must contain exactly keep_count cards; validated server-side
+- [Phase 20-03]: Surveil SelectCards = cards to send to graveyard; rest stay on top
+- [Phase 20-03]: AI evaluate_card_value uses creature P/T + land bonus + mana cost proxy
+- [Phase 20-03]: CardChoiceModal dispatches to sub-modals based on WaitingFor type (no separate GamePage logic)
+- [Phase 20-03]: ScryModal uses per-card Top/Bottom toggle buttons per MTGA design
 
 ### Roadmap Evolution
 
@@ -200,6 +206,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 20-02 Equipment and Aura Attachment
-Stopped at: Completed 20-02-PLAN.md
+Last activity: 2026-03-09 - Completed 20-03 Scry/Dig/Surveil Interactive Choices
+Stopped at: Completed 20-03-PLAN.md
 Resume file: None

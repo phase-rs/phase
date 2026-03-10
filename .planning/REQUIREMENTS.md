@@ -139,9 +139,9 @@ Requirements for Arena UI port. Each maps to roadmap phases.
 - [x] **ENG-02**: Nonbasic lands and mana creatures produce mana via proper mana ability resolution (not just TapLandForMana shortcut)
 - [x] **ENG-03**: Equipment equip action attaches equipment to creatures with sorcery-speed timing and mana cost
 - [x] **ENG-04**: Aura and equipment attachment state properly managed with SBA cleanup on host death
-- [ ] **ENG-05**: Scry emits WaitingFor::ScryChoice with per-card top/bottom selection (MTGA-style)
-- [ ] **ENG-06**: Dig emits WaitingFor::DigChoice for player to select cards to keep
-- [ ] **ENG-07**: Surveil effect handler with WaitingFor::SurveilChoice for graveyard/top decision
+- [x] **ENG-05**: Scry emits WaitingFor::ScryChoice with per-card top/bottom selection (MTGA-style)
+- [x] **ENG-06**: Dig emits WaitingFor::DigChoice for player to select cards to keep
+- [x] **ENG-07**: Surveil effect handler with WaitingFor::SurveilChoice for graveyard/top decision
 - [ ] **ENG-08**: Planeswalker loyalty ability activation with counter cost and once-per-turn restriction
 - [ ] **ENG-09**: Planeswalker SBA (0 loyalty dies) and damage-to-planeswalker removes loyalty counters
 - [ ] **ENG-10**: Transform/DFC face switching changes card characteristics (name, P/T, abilities, types)
