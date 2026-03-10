@@ -82,8 +82,8 @@ pub fn handle_activate_loyalty(
         ));
     }
 
-    let ability_text = &obj.abilities[ability_index];
-    let loyalty_cost = parse_loyalty_cost(ability_text);
+    let ability_def = &obj.abilities[ability_index];
+    let loyalty_cost = parse_loyalty_cost(ability_def);
     let current_loyalty = obj.loyalty.unwrap_or(0) as i32;
 
     // For minus abilities, must have enough loyalty
@@ -93,8 +93,8 @@ pub fn handle_activate_loyalty(
         ));
     }
 
-    // Parse the ability to get a ResolvedAbility for the stack
-    let resolved = parse_pw_ability(ability_text, pw_id, player);
+    // Build a ResolvedAbility for the stack from the typed definition
+    let resolved = build_pw_resolved(ability_def, pw_id, player);
 
     // Adjust loyalty
     let new_loyalty = (current_loyalty + loyalty_cost).max(0) as u32;
@@ -141,51 +141,34 @@ pub fn handle_activate_loyalty(
     Ok(WaitingFor::Priority { player })
 }
 
-/// Parse the loyalty cost from an ability string.
+/// Extract the loyalty cost from a typed ability definition.
 ///
-/// Looks for patterns like:
-/// - `AB$ ... | PW_Cost$ +1 | ...` -> +1
-/// - `AB$ ... | PW_Cost$ -3 | ...` -> -3
-/// - `AB$ ... | PW_Cost$ 0 | ...`  -> 0
+/// The PW_Cost parameter is stored in `remaining_params` as it is
+/// not part of the typed Effect.
 ///
 /// Falls back to 0 if no PW_Cost found.
-fn parse_loyalty_cost(ability_text: &str) -> i32 {
-    for part in ability_text.split('|') {
-        let trimmed = part.trim();
-        if let Some(cost_str) = trimmed.strip_prefix("PW_Cost$") {
-            let cost_str = cost_str.trim();
-            return cost_str.parse::<i32>().unwrap_or(0);
-        }
-    }
-    0
+fn parse_loyalty_cost(ability_def: &crate::types::ability::AbilityDefinition) -> i32 {
+    ability_def
+        .remaining_params
+        .get("PW_Cost")
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0)
 }
 
-/// Parse a planeswalker ability text into a ResolvedAbility.
-fn parse_pw_ability(
-    ability_text: &str,
+/// Build a ResolvedAbility from a typed AbilityDefinition for the stack.
+fn build_pw_resolved(
+    ability_def: &crate::types::ability::AbilityDefinition,
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
-    // Try to parse via the standard parser; fall back to a minimal ability
-    match crate::parser::ability::parse_ability(ability_text) {
-        Ok(def) => ResolvedAbility {
-            api_type: def.api_type().to_string(),
-            params: def.params(),
-            targets: Vec::new(),
-            source_id,
-            controller,
-            sub_ability: None,
-            svars: HashMap::new(),
-        },
-        Err(_) => ResolvedAbility {
-            api_type: String::new(),
-            params: HashMap::new(),
-            targets: Vec::new(),
-            source_id,
-            controller,
-            sub_ability: None,
-            svars: HashMap::new(),
-        },
+    ResolvedAbility {
+        api_type: ability_def.api_type().to_string(),
+        params: ability_def.params(),
+        targets: Vec::new(),
+        source_id,
+        controller,
+        sub_ability: None,
+        svars: HashMap::new(),
     }
 }
 
@@ -209,12 +192,16 @@ mod tests {
         state
     }
 
+    fn parse_test_ability(raw: &str) -> crate::types::ability::AbilityDefinition {
+        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
+    }
+
     fn create_planeswalker(
         state: &mut GameState,
         owner: PlayerId,
         name: &str,
         loyalty: u32,
-        abilities: Vec<String>,
+        abilities: Vec<crate::types::ability::AbilityDefinition>,
     ) -> ObjectId {
         let id = create_object(
             state,
@@ -239,7 +226,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec!["AB$ Draw | PW_Cost$ +1 | NumCards$ 1".to_string()],
+            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
         );
 
         let mut events = Vec::new();
@@ -259,7 +246,7 @@ mod tests {
             PlayerId(0),
             "Liliana",
             5,
-            vec!["AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature".to_string()],
+            vec![parse_test_ability("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature")],
         );
 
         let mut events = Vec::new();
@@ -277,7 +264,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec!["AB$ Draw | PW_Cost$ +1 | NumCards$ 1".to_string()],
+            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
         );
 
         let mut events = Vec::new();
@@ -299,7 +286,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec!["AB$ Draw | PW_Cost$ +1 | NumCards$ 1".to_string()],
+            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
         );
 
         // Activate loyalty
@@ -329,7 +316,7 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec!["AB$ Draw | PW_Cost$ +1 | NumCards$ 1".to_string()],
+            vec![parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")],
         );
 
         // Not main phase
@@ -375,7 +362,7 @@ mod tests {
             PlayerId(0),
             "Liliana",
             2,
-            vec!["AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature".to_string()],
+            vec![parse_test_ability("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature")],
         );
 
         let mut events = Vec::new();
@@ -386,14 +373,20 @@ mod tests {
     #[test]
     fn parse_loyalty_cost_extracts_values() {
         assert_eq!(
-            parse_loyalty_cost("AB$ Draw | PW_Cost$ +1 | NumCards$ 1"),
+            parse_loyalty_cost(&parse_test_ability("AB$ Draw | PW_Cost$ +1 | NumCards$ 1")),
             1
         );
         assert_eq!(
-            parse_loyalty_cost("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature"),
+            parse_loyalty_cost(&parse_test_ability("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature")),
             -3
         );
-        assert_eq!(parse_loyalty_cost("AB$ Mill | PW_Cost$ 0 | NumCards$ 3"), 0);
-        assert_eq!(parse_loyalty_cost("AB$ Draw | NumCards$ 1"), 0); // no PW_Cost
+        assert_eq!(
+            parse_loyalty_cost(&parse_test_ability("AB$ Mill | PW_Cost$ 0 | NumCards$ 3")),
+            0
+        );
+        assert_eq!(
+            parse_loyalty_cost(&parse_test_ability("AB$ Draw | NumCards$ 1")),
+            0
+        ); // no PW_Cost
     }
 }

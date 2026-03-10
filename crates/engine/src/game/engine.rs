@@ -80,18 +80,20 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             if ability_index < obj.abilities.len()
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
-                let ability_text = obj.abilities[ability_index].clone();
+                let ability_def = obj.abilities[ability_index].clone();
                 mana_abilities::resolve_mana_ability(
                     state,
                     source_id,
                     *player,
-                    &ability_text,
+                    &ability_def,
                     &mut events,
                 )?;
                 WaitingFor::Priority { player: *player }
             } else if obj.loyalty.is_some()
                 && ability_index < obj.abilities.len()
-                && obj.abilities[ability_index].contains("PW_Cost$")
+                && obj.abilities[ability_index]
+                    .remaining_params
+                    .contains_key("PW_Cost")
             {
                 // Planeswalker loyalty ability
                 planeswalker::handle_activate_loyalty(
@@ -143,12 +145,12 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             if ability_index < obj.abilities.len()
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
-                let ability_text = obj.abilities[ability_index].clone();
+                let ability_def = obj.abilities[ability_index].clone();
                 mana_abilities::resolve_mana_ability(
                     state,
                     source_id,
                     *player,
-                    &ability_text,
+                    &ability_def,
                     &mut events,
                 )?;
                 WaitingFor::ManaPayment { player: *player }
@@ -751,10 +753,15 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::ResolvedAbility;
+    use crate::types::ability::{AbilityDefinition, ResolvedAbility};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use std::collections::HashMap;
+
+    /// Parse a Forge ability string into an AbilityDefinition for test convenience.
+    fn parse_test_ability(raw: &str) -> AbilityDefinition {
+        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
+    }
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = new_game(42);
@@ -1330,7 +1337,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities.push("SP$ Draw | NumCards$ 2".to_string());
+            obj.abilities.push(parse_test_ability("SP$ Draw | NumCards$ 2"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -1388,7 +1395,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities.push("SP$ Draw | NumCards$ 2".to_string());
+            obj.abilities.push(parse_test_ability("SP$ Draw | NumCards$ 2"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -1478,7 +1485,7 @@ mod tests {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities
-                .push("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3".to_string());
+                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1571,7 +1578,7 @@ mod tests {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities
-                .push("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3".to_string());
+                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1621,7 +1628,7 @@ mod tests {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities
-                .push("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 3".to_string());
+                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 3"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1682,7 +1689,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&creature_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.abilities.push("SP$ ".to_string());
+            // Vanilla creature has no abilities (empty vec is the default)
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 1,
@@ -1719,7 +1726,7 @@ mod tests {
             let obj = state.objects.get_mut(&counter_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities
-                .push("SP$ Counter | ValidTgts$ Card | TargetType$ Spell".to_string());
+                .push(parse_test_ability("SP$ Counter | ValidTgts$ Card | TargetType$ Spell"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
                 generic: 0,
@@ -1783,7 +1790,7 @@ mod tests {
             let obj = state.objects.get_mut(&growth_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities
-                .push("SP$ Pump | ValidTgts$ Creature.YouCtrl | NumAtt$ 3 | NumDef$ 3".to_string());
+                .push(parse_test_ability("SP$ Pump | ValidTgts$ Creature.YouCtrl | NumAtt$ 3 | NumDef$ 3"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 0,
@@ -1844,7 +1851,7 @@ mod tests {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities
-                .push("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3".to_string());
+                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1907,7 +1914,7 @@ mod tests {
             let obj = state.objects.get_mut(&spell_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities.push(
-                "SP$ DealDamage | ValidTgts$ Player | NumDmg$ 2 | SubAbility$ DBDraw".to_string(),
+                parse_test_ability("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 2 | SubAbility$ DBDraw"),
             );
             obj.svars
                 .insert("DBDraw".to_string(), "DB$ Draw | NumCards$ 1".to_string());
@@ -2311,7 +2318,7 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.abilities
-                .push("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.".to_string());
+                .push(parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}."));
         }
 
         let result = apply(
@@ -2366,7 +2373,7 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.abilities
-                .push("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.".to_string());
+                .push(parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}."));
         }
 
         let result = apply(

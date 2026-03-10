@@ -1,7 +1,6 @@
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-use crate::parser::ability::{parse_replacement, parse_static, parse_trigger};
 use crate::types::card::CardFace;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -125,27 +124,6 @@ pub fn create_object_from_card_face(
         .clone()
         .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
 
-    // Parse trigger definitions, skipping failures
-    let trigger_definitions = card_face
-        .triggers
-        .iter()
-        .filter_map(|raw| parse_trigger(raw).ok())
-        .collect();
-
-    // Parse static definitions, skipping failures
-    let static_definitions = card_face
-        .static_abilities
-        .iter()
-        .filter_map(|raw| parse_static(raw).ok())
-        .collect();
-
-    // Parse replacement definitions, skipping failures
-    let replacement_definitions = card_face
-        .replacements
-        .iter()
-        .filter_map(|raw| parse_replacement(raw).ok())
-        .collect();
-
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     obj.card_types = card_face.card_type.clone();
     obj.mana_cost = card_face.mana_cost.clone();
@@ -158,9 +136,9 @@ pub fn create_object_from_card_face(
     obj.base_keywords = keywords;
     obj.abilities = card_face.abilities.clone();
     obj.svars = card_face.svars.clone();
-    obj.trigger_definitions = trigger_definitions;
-    obj.static_definitions = static_definitions;
-    obj.replacement_definitions = replacement_definitions;
+    obj.trigger_definitions = card_face.triggers.clone();
+    obj.static_definitions = card_face.static_abilities.clone();
+    obj.replacement_definitions = card_face.replacements.clone();
     obj.color = color.clone();
     obj.base_color = color;
 
@@ -196,6 +174,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetSpec};
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCostShard;
@@ -221,7 +200,17 @@ mod tests {
             non_ability_text: None,
             flavor_name: None,
             keywords: vec!["Trample".to_string()],
-            abilities: vec!["AB$ Pump | Cost$ G".to_string()],
+            abilities: vec![AbilityDefinition {
+                kind: AbilityKind::Activated,
+                effect: Effect::Pump {
+                    power: 0,
+                    toughness: 0,
+                    target: TargetSpec::Any,
+                },
+                cost: Some(crate::types::ability::AbilityCost::Tap),
+                sub_ability: None,
+                remaining_params: HashMap::new(),
+            }],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
@@ -250,7 +239,16 @@ mod tests {
             non_ability_text: None,
             flavor_name: None,
             keywords: vec![],
-            abilities: vec!["SP$ DealDamage | NumDmg$ 3".to_string()],
+            abilities: vec![AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::DealDamage {
+                    amount: DamageAmount::Fixed(3),
+                    target: TargetSpec::Any,
+                },
+                cost: None,
+                sub_ability: None,
+                remaining_params: HashMap::new(),
+            }],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
@@ -388,8 +386,13 @@ mod tests {
     fn create_object_with_trigger_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.triggers =
-            vec!["Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield".to_string()];
+        face.triggers = vec![crate::types::ability::TriggerDefinition {
+            mode: crate::types::triggers::TriggerMode::ChangesZone,
+            params: HashMap::from([
+                ("Origin".to_string(), "Any".to_string()),
+                ("Destination".to_string(), "Battlefield".to_string()),
+            ]),
+        }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
@@ -404,8 +407,13 @@ mod tests {
     fn create_object_with_static_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.static_abilities =
-            vec!["Mode$ Continuous | Affected$ Card.Self | AddPower$ 2".to_string()];
+        face.static_abilities = vec![crate::types::ability::StaticDefinition {
+            mode: crate::types::statics::StaticMode::Continuous,
+            params: HashMap::from([
+                ("Affected".to_string(), "Card.Self".to_string()),
+                ("AddPower".to_string(), "2".to_string()),
+            ]),
+        }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
@@ -420,9 +428,13 @@ mod tests {
     fn create_object_with_replacement_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.replacements = vec![
-            "Event$ DamageDone | ActiveZones$ Battlefield | ValidSource$ Card.Self".to_string(),
-        ];
+        face.replacements = vec![crate::types::ability::ReplacementDefinition {
+            event: crate::types::replacements::ReplacementEvent::DamageDone,
+            params: HashMap::from([
+                ("ActiveZones".to_string(), "Battlefield".to_string()),
+                ("ValidSource".to_string(), "Card.Self".to_string()),
+            ]),
+        }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];

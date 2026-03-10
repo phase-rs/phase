@@ -121,8 +121,8 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
             if obj.controller == player {
-                for (i, ability_str) in obj.abilities.iter().enumerate() {
-                    if ability_str.contains("AB$") || ability_str.contains("Activated") {
+                for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    if ability_def.kind == engine::types::ability::AbilityKind::Activated {
                         actions.push(GameAction::ActivateAbility {
                             source_id: obj_id,
                             ability_index: i,

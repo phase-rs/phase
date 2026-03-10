@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::parser::ability::parse_ability;
 use crate::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -46,7 +45,7 @@ pub fn handle_cast_spell(
 
     let obj = state.objects.get(&object_id).unwrap();
 
-    // 2. Parse the first ability (or use default for vanilla permanents)
+    // 2. Get the first ability (or use default for vanilla permanents)
     let ability_def = if obj.abilities.is_empty() {
         // Vanilla creatures/enchantments/etc. have no explicit ability text
         // but are still castable — they resolve by entering the battlefield.
@@ -62,8 +61,7 @@ pub fn handle_cast_spell(
             remaining_params: HashMap::new(),
         }
     } else {
-        parse_ability(&obj.abilities[0])
-            .map_err(|e| EngineError::InvalidAction(format!("Failed to parse ability: {}", e)))?
+        obj.abilities[0].clone()
     };
 
     // 3. Validate timing
@@ -211,8 +209,7 @@ pub fn handle_activate_ability(
         ));
     }
 
-    let ability_def = parse_ability(&obj.abilities[ability_index])
-        .map_err(|e| EngineError::InvalidAction(format!("Failed to parse ability: {}", e)))?;
+    let ability_def = obj.abilities[ability_index].clone();
 
     // Handle tap cost
     let has_tap_cost = matches!(
@@ -507,6 +504,10 @@ mod tests {
         }
     }
 
+    fn parse_test_ability(raw: &str) -> crate::types::ability::AbilityDefinition {
+        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
+    }
+
     fn create_instant_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         let obj_id = create_object(
             state,
@@ -519,7 +520,7 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.abilities
-                .push("SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3".to_string());
+                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -539,7 +540,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities.push("SP$ Draw | NumCards$ 2".to_string());
+            obj.abilities.push(parse_test_ability("SP$ Draw | NumCards$ 2"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -645,7 +646,7 @@ mod tests {
         // Instead, create a card with Creature.OppCtrl targeting
         let bolt_id = state.players[0].hand[0];
         state.objects.get_mut(&bolt_id).unwrap().abilities[0] =
-            "SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3".to_string();
+            parse_test_ability("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3");
 
         // Create one creature for opponent
         let creature_id = create_object(

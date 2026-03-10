@@ -1,4 +1,4 @@
-use crate::parser::ability::parse_ability;
+use crate::types::ability::AbilityDefinition;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -8,14 +8,10 @@ use crate::types::player::PlayerId;
 use super::engine::EngineError;
 use super::mana_payment;
 
-/// Check if an ability string represents a mana ability (MTG Rule 605).
+/// Check if a typed ability definition represents a mana ability (MTG Rule 605).
 /// Mana abilities produce mana and resolve immediately without using the stack.
-/// In Forge format, these have api_type "Mana".
-pub fn is_mana_ability(ability_text: &str) -> bool {
-    let Ok(def) = parse_ability(ability_text) else {
-        return false;
-    };
-    def.api_type() == "Mana"
+pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
+    ability_def.api_type() == "Mana"
 }
 
 /// Map a Forge "Produced$" color code to ManaType.
@@ -37,14 +33,14 @@ pub fn resolve_mana_ability(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
-    ability_text: &str,
+    ability_def: &AbilityDefinition,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    let def = parse_ability(ability_text)
-        .map_err(|e| EngineError::InvalidAction(format!("Failed to parse ability: {}", e)))?;
-
     // Pay tap cost if present
-    let has_tap_cost = matches!(def.cost, Some(crate::types::ability::AbilityCost::Tap));
+    let has_tap_cost = matches!(
+        ability_def.cost,
+        Some(crate::types::ability::AbilityCost::Tap)
+    );
 
     if has_tap_cost {
         let obj = state
@@ -64,7 +60,7 @@ pub fn resolve_mana_ability(
     }
 
     // Determine produced mana color from the typed Effect
-    let compat_params = def.params();
+    let compat_params = ability_def.params();
     let produced = compat_params
         .get("Produced")
         .cloned()
@@ -103,23 +99,30 @@ mod tests {
     use crate::types::mana::ManaType;
     use crate::types::zones::Zone;
 
+    fn parse_test_ability(raw: &str) -> AbilityDefinition {
+        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
+    }
+
     #[test]
     fn mana_api_type_detected_as_mana_ability() {
-        assert!(is_mana_ability(
-            "AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}."
-        ));
+        let def = parse_test_ability(
+            "AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.",
+        );
+        assert!(is_mana_ability(&def));
     }
 
     #[test]
     fn non_mana_api_type_not_detected() {
-        assert!(!is_mana_ability(
-            "AB$ DealDamage | Cost$ T | NumDmg$ 1 | ValidTgts$ Any"
-        ));
+        let def = parse_test_ability(
+            "AB$ DealDamage | Cost$ T | NumDmg$ 1 | ValidTgts$ Any",
+        );
+        assert!(!is_mana_ability(&def));
     }
 
     #[test]
     fn draw_ability_is_not_mana_ability() {
-        assert!(!is_mana_ability("AB$ Draw | Cost$ T | NumCards$ 1"));
+        let def = parse_test_ability("AB$ Draw | Cost$ T | NumCards$ 1");
+        assert!(!is_mana_ability(&def));
     }
 
     #[test]
@@ -133,15 +136,11 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let mut events = Vec::new();
-        resolve_mana_ability(
-            &mut state,
-            obj_id,
-            PlayerId(0),
+        let def = parse_test_ability(
             "AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.",
-            &mut events,
-        )
-        .unwrap();
+        );
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
 
         // Object should be tapped
         assert!(state.objects.get(&obj_id).unwrap().tapped);
@@ -170,14 +169,9 @@ mod tests {
         );
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
 
+        let def = parse_test_ability("AB$ Mana | Cost$ T | Produced$ G");
         let mut events = Vec::new();
-        let result = resolve_mana_ability(
-            &mut state,
-            obj_id,
-            PlayerId(0),
-            "AB$ Mana | Cost$ T | Produced$ G",
-            &mut events,
-        );
+        let result = resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events);
 
         assert!(result.is_err());
     }
@@ -193,15 +187,9 @@ mod tests {
             Zone::Battlefield,
         );
 
+        let def = parse_test_ability("AB$ Mana | Cost$ T | Produced$ C | Amount$ 2");
         let mut events = Vec::new();
-        resolve_mana_ability(
-            &mut state,
-            obj_id,
-            PlayerId(0),
-            "AB$ Mana | Cost$ T | Produced$ C | Amount$ 2",
-            &mut events,
-        )
-        .unwrap();
+        resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
 
         assert_eq!(
             state.players[0].mana_pool.count_color(ManaType::Colorless),

@@ -42,13 +42,13 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
 
             // Categorize by abilities/svars
             let has_destroy = obj.svars.values().any(|v| v.contains("Destroy"))
-                || obj.abilities.iter().any(|a| a.contains("Destroy"));
+                || obj.abilities.iter().any(|a| a.api_type() == "Destroy");
             let has_damage = obj.svars.values().any(|v| v.contains("DealDamage"))
-                || obj.abilities.iter().any(|a| a.contains("DealDamage"));
+                || obj.abilities.iter().any(|a| a.api_type() == "DealDamage");
             let has_pump = obj.svars.values().any(|v| v.contains("Pump"))
-                || obj.abilities.iter().any(|a| a.contains("Pump"));
+                || obj.abilities.iter().any(|a| a.api_type() == "Pump");
             let has_counter = obj.svars.values().any(|v| v.contains("Counter"))
-                || obj.abilities.iter().any(|a| a.contains("Counter"));
+                || obj.abilities.iter().any(|a| a.api_type() == "Counter");
 
             // Removal: higher priority when opponent has high-value creatures
             if has_destroy || has_damage {

@@ -125,7 +125,16 @@ mod tests {
         };
         obj.keywords = vec![Keyword::Vigilance];
         obj.base_keywords = vec![Keyword::Vigilance];
-        obj.abilities = vec!["Front ability".to_string()];
+        obj.abilities = vec![crate::types::ability::AbilityDefinition {
+            kind: crate::types::ability::AbilityKind::Spell,
+            effect: crate::types::ability::Effect::Other {
+                api_type: "FrontAbility".to_string(),
+                params: std::collections::HashMap::new(),
+            },
+            cost: None,
+            sub_ability: None,
+            remaining_params: std::collections::HashMap::new(),
+        }];
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
 
@@ -139,7 +148,16 @@ mod tests {
                 subtypes: vec!["Werewolf".to_string()],
             },
             keywords: vec![Keyword::Trample],
-            abilities: vec!["Back ability".to_string()],
+            abilities: vec![crate::types::ability::AbilityDefinition {
+                kind: crate::types::ability::AbilityKind::Spell,
+                effect: crate::types::ability::Effect::Other {
+                    api_type: "BackAbility".to_string(),
+                    params: std::collections::HashMap::new(),
+                },
+                cost: None,
+                sub_ability: None,
+                remaining_params: std::collections::HashMap::new(),
+            }],
             color: vec![ManaColor::Green, ManaColor::Red],
         });
 
@@ -160,7 +178,7 @@ mod tests {
         assert_eq!(obj.power, Some(4));
         assert_eq!(obj.toughness, Some(4));
         assert_eq!(obj.keywords, vec![Keyword::Trample]);
-        assert_eq!(obj.abilities, vec!["Back ability".to_string()]);
+        assert_eq!(obj.abilities[0].api_type(), "BackAbility");
         assert_eq!(obj.color, vec![ManaColor::Green, ManaColor::Red]);
         assert!(state.layers_dirty);
         assert_eq!(events.len(), 1);
@@ -184,7 +202,7 @@ mod tests {
         assert_eq!(obj.power, Some(2));
         assert_eq!(obj.toughness, Some(3));
         assert_eq!(obj.keywords, vec![Keyword::Vigilance]);
-        assert_eq!(obj.abilities, vec!["Front ability".to_string()]);
+        assert_eq!(obj.abilities[0].api_type(), "FrontAbility");
         assert_eq!(obj.color, vec![ManaColor::Green]);
         assert_eq!(events.len(), 2);
     }

@@ -7,7 +7,8 @@ use crate::game::effects::build_registry as build_effect_registry;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::build_static_registry;
 use crate::game::triggers::build_trigger_registry;
-use crate::parser::ability::{parse_ability, parse_static, parse_trigger};
+use crate::parser::ability::parse_ability;
+use crate::types::ability::{AbilityDefinition, StaticDefinition, TriggerDefinition};
 use crate::types::keywords::Keyword;
 use crate::types::triggers::TriggerMode;
 
@@ -45,12 +46,10 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
 
     // 2. Check abilities against effect registry
     let effect_registry = build_effect_registry();
-    for raw in &obj.abilities {
-        if let Ok(def) = parse_ability(raw) {
-            let api = def.api_type();
-            if !api.is_empty() && !effect_registry.contains_key(api) {
-                return true;
-            }
+    for def in &obj.abilities {
+        let api = def.api_type();
+        if !api.is_empty() && !effect_registry.contains_key(api) {
+            return true;
         }
     }
 
@@ -157,37 +156,33 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
 }
 
 fn check_abilities(
-    abilities: &[String],
+    abilities: &[AbilityDefinition],
     effect_registry: &HashMap<String, crate::game::effects::EffectHandler>,
     missing: &mut Vec<String>,
 ) {
-    for raw in abilities {
-        if let Ok(def) = parse_ability(raw) {
-            let api = def.api_type();
-            if !api.is_empty() && !effect_registry.contains_key(api) {
-                let label = format!("Effect:{api}");
-                if !missing.contains(&label) {
-                    missing.push(label);
-                }
+    for def in abilities {
+        let api = def.api_type();
+        if !api.is_empty() && !effect_registry.contains_key(api) {
+            let label = format!("Effect:{api}");
+            if !missing.contains(&label) {
+                missing.push(label);
             }
         }
     }
 }
 
 fn check_triggers(
-    triggers: &[String],
+    triggers: &[TriggerDefinition],
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
     missing: &mut Vec<String>,
 ) {
-    for raw in triggers {
-        if let Ok(def) = parse_trigger(raw) {
-            if matches!(&def.mode, TriggerMode::Unknown(_))
-                || !trigger_registry.contains_key(&def.mode)
-            {
-                let label = format!("Trigger:{}", def.mode);
-                if !missing.contains(&label) {
-                    missing.push(label);
-                }
+    for def in triggers {
+        if matches!(&def.mode, TriggerMode::Unknown(_))
+            || !trigger_registry.contains_key(&def.mode)
+        {
+            let label = format!("Trigger:{}", def.mode);
+            if !missing.contains(&label) {
+                missing.push(label);
             }
         }
     }
@@ -206,17 +201,15 @@ fn check_keywords(keywords: &[String], missing: &mut Vec<String>) {
 }
 
 fn check_statics(
-    statics: &[String],
+    statics: &[StaticDefinition],
     static_registry: &HashMap<String, crate::game::static_abilities::StaticAbilityHandler>,
     missing: &mut Vec<String>,
 ) {
-    for raw in statics {
-        if let Ok(def) = parse_static(raw) {
-            if !static_registry.contains_key(&def.mode_str()) {
-                let label = format!("Static:{}", def.mode);
-                if !missing.contains(&label) {
-                    missing.push(label);
-                }
+    for def in statics {
+        if !static_registry.contains_key(&def.mode_str()) {
+            let label = format!("Static:{}", def.mode);
+            if !missing.contains(&label) {
+                missing.push(label);
             }
         }
     }
@@ -421,11 +414,15 @@ mod tests {
         assert!(has_unimplemented_mechanics(&obj));
     }
 
+    fn parse_test_ability(raw: &str) -> crate::types::ability::AbilityDefinition {
+        crate::parser::ability::parse_ability(raw).expect("test ability should parse")
+    }
+
     #[test]
     fn object_with_registered_ability_has_no_unimplemented() {
         let mut obj = make_obj();
         obj.abilities
-            .push("SP$ DealDamage | Cost$ R | NumDmg$ 3".to_string());
+            .push(parse_test_ability("SP$ DealDamage | Cost$ R | NumDmg$ 3"));
         assert!(!has_unimplemented_mechanics(&obj));
     }
 
@@ -433,7 +430,7 @@ mod tests {
     fn object_with_unregistered_ability_has_unimplemented() {
         let mut obj = make_obj();
         obj.abilities
-            .push("SP$ Fateseal | Cost$ U | Amount$ 2".to_string());
+            .push(parse_test_ability("SP$ Fateseal | Cost$ U | Amount$ 2"));
         assert!(has_unimplemented_mechanics(&obj));
     }
 

@@ -72,7 +72,9 @@ mod tests {
             "Lightning Bolt".to_string(),
             Zone::Hand,
         );
-        state.objects.get_mut(&id0).unwrap().abilities = vec!["DealDamage".to_string()];
+        state.objects.get_mut(&id0).unwrap().abilities = vec![
+            engine::parser::ability::parse_ability("SP$ DealDamage | NumDmg$ 3").unwrap(),
+        ];
 
         // Add cards to player 1's hand
         let id1 = create_object(
@@ -82,7 +84,9 @@ mod tests {
             "Counterspell".to_string(),
             Zone::Hand,
         );
-        state.objects.get_mut(&id1).unwrap().abilities = vec!["Counter".to_string()];
+        state.objects.get_mut(&id1).unwrap().abilities = vec![
+            engine::parser::ability::parse_ability("SP$ Counter | ValidTgts$ Card").unwrap(),
+        ];
 
         // Add cards to libraries
         create_object(
