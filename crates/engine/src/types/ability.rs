@@ -705,7 +705,6 @@ pub enum TargetRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
     pub effect: Effect,
-    pub api_type: String,
     pub params: HashMap<String, String>,
     pub targets: Vec<TargetRef>,
     pub source_id: ObjectId,
@@ -715,7 +714,12 @@ pub struct ResolvedAbility {
 }
 
 impl ResolvedAbility {
-    /// Build from a typed Effect. Populates api_type and params automatically
+    /// Derive the api_type string from the typed Effect.
+    pub fn api_type(&self) -> &str {
+        self.effect.api_type()
+    }
+
+    /// Build from a typed Effect. Populates params automatically
     /// from the Effect's compat bridge methods.
     pub fn new(
         effect: Effect,
@@ -723,11 +727,9 @@ impl ResolvedAbility {
         source_id: ObjectId,
         controller: PlayerId,
     ) -> Self {
-        let api_type = effect.api_type().to_string();
         let params = effect.to_params();
         Self {
             effect,
-            api_type,
             params,
             targets,
             source_id,
@@ -748,12 +750,11 @@ impl ResolvedAbility {
     ) -> Self {
         let api_type = api_type.into();
         let effect = Effect::Other {
-            api_type: api_type.clone(),
+            api_type,
             params: params.clone(),
         };
         Self {
             effect,
-            api_type,
             params,
             targets,
             source_id,
@@ -821,7 +822,6 @@ mod tests {
                 api_type: "DealDamage".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "DealDamage".to_string(),
             params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Object(ObjectId(10))],
             source_id: ObjectId(1),
@@ -841,7 +841,6 @@ mod tests {
                 api_type: "Draw".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Draw".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
             targets: vec![],
             source_id: ObjectId(1),
@@ -854,7 +853,6 @@ mod tests {
                 api_type: "DealDamage".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "DealDamage".to_string(),
             params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Player(PlayerId(1))],
             source_id: ObjectId(1),

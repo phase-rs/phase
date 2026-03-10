@@ -1,24 +1,29 @@
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::zones::Zone;
 
 /// Bounce: return target permanent(s) to their owner's hand.
-/// Reads `Defined` param for target selection (Targeted, Self, etc.).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Determine targets: from ability.targets, or Self (source_id)
-    let defined = ability
-        .params
-        .get("Defined")
-        .map(|s| s.as_str())
-        .unwrap_or("Targeted");
+    // Determine targets using typed Effect::Bounce target field, falling back to params
+    let use_self = match &ability.effect {
+        Effect::Bounce { target, .. } => matches!(target, TargetSpec::None),
+        _ => {
+            ability
+                .params
+                .get("Defined")
+                .map(|s| s.as_str())
+                .unwrap_or("Targeted")
+                == "Self"
+        }
+    };
 
-    let targets: Vec<_> = if defined == "Self" {
+    let targets: Vec<_> = if use_self {
         vec![ability.source_id]
     } else {
         ability
@@ -48,7 +53,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -79,7 +84,6 @@ mod tests {
                 api_type: "Bounce".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Bounce".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
             source_id: ObjectId(100),
@@ -111,7 +115,6 @@ mod tests {
                 api_type: "Bounce".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Bounce".to_string(),
             params: HashMap::from([("Defined".to_string(), "Self".to_string())]),
             targets: vec![],
             source_id: obj_id,
@@ -143,7 +146,6 @@ mod tests {
                 api_type: "Bounce".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Bounce".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
             source_id: ObjectId(100),

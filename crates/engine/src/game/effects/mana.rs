@@ -1,13 +1,13 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::mana::{ManaType, ManaUnit};
 
 /// Mana effect: adds mana to the controller's mana pool.
 ///
-/// Reads params:
-///   - `Produced` — mana color(s) to produce (e.g., "R", "W U", "C", "Combo R G")
-///   - `Amount` — number of each mana unit to add (default 1)
+/// Reads from `Effect::Mana { produced, params }`:
+///   - `produced` — mana color(s) to produce (e.g., "R", "W U", "C", "Combo R G")
+///   - `params["Amount"]` — number of each mana unit to add (default 1)
 ///
 /// Color codes: W=White, U=Blue, B=Black, R=Red, G=Green, C=Colorless.
 /// "Combo X Y" means choose one from the listed colors (treated as first option
@@ -18,16 +18,31 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let produced = ability
-        .params
-        .get("Produced")
-        .ok_or_else(|| EffectError::MissingParam("Produced".to_string()))?;
-
-    let amount: u32 = ability
-        .params
-        .get("Amount")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let (produced, amount) = match &ability.effect {
+        Effect::Mana {
+            produced,
+            params: effect_params,
+        } => {
+            let amt = effect_params
+                .get("Amount")
+                .map(|v| v.parse().unwrap_or(1))
+                .unwrap_or(1u32);
+            (produced.as_str(), amt)
+        }
+        _ => {
+            let p = ability
+                .params
+                .get("Produced")
+                .ok_or_else(|| EffectError::MissingParam("Produced".to_string()))?
+                .as_str();
+            let amt = ability
+                .params
+                .get("Amount")
+                .map(|v| v.parse().unwrap_or(1))
+                .unwrap_or(1u32);
+            (p, amt)
+        }
+    };
 
     let colors = parse_produced(produced);
 
@@ -56,7 +71,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

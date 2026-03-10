@@ -1,24 +1,40 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    DamageAmount, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 
 /// Deal damage to each target.
-/// Reads `NumDmg` param for the amount.
+/// Reads amount from `Effect::DealDamage { amount }`, with fallback to `NumDmg` param.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_dmg: u32 = ability
-        .params
-        .get("NumDmg")
-        .ok_or_else(|| EffectError::MissingParam("NumDmg".to_string()))?
-        .parse()
-        .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?;
+    let num_dmg: u32 = match &ability.effect {
+        Effect::DealDamage {
+            amount: DamageAmount::Fixed(n),
+            ..
+        } => *n as u32,
+        Effect::DealDamage {
+            amount: DamageAmount::Variable(_),
+            ..
+        } => ability
+            .params
+            .get("NumDmg")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        _ => ability
+            .params
+            .get("NumDmg")
+            .ok_or_else(|| EffectError::MissingParam("NumDmg".to_string()))?
+            .parse()
+            .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?,
+    };
 
     for target in &ability.targets {
         let proposed = ProposedEvent::Damage {
@@ -90,7 +106,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -98,24 +114,48 @@ pub fn resolve(
 }
 
 /// Deal damage to all permanents (and optionally players) matching the `Valid` filter.
-/// Reads `NumDmg` and `Valid` params.
+/// Reads amount and filter from `Effect::DamageAll { amount, target }`, with fallback to params.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_dmg: u32 = ability
-        .params
-        .get("NumDmg")
-        .ok_or_else(|| EffectError::MissingParam("NumDmg".to_string()))?
-        .parse()
-        .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?;
-
-    let filter = ability
-        .params
-        .get("Valid")
-        .map(|s| s.as_str())
-        .unwrap_or("Creature");
+    let (num_dmg, filter_owned): (u32, String) = match &ability.effect {
+        Effect::DamageAll { amount, target } => {
+            let dmg = match amount {
+                DamageAmount::Fixed(n) => *n as u32,
+                DamageAmount::Variable(_) => ability
+                    .params
+                    .get("NumDmg")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            };
+            let f = match target {
+                TargetSpec::All { filter } if !filter.is_empty() => filter.clone(),
+                _ => ability
+                    .params
+                    .get("Valid")
+                    .cloned()
+                    .unwrap_or_else(|| "Creature".to_string()),
+            };
+            (dmg, f)
+        }
+        _ => {
+            let dmg = ability
+                .params
+                .get("NumDmg")
+                .ok_or_else(|| EffectError::MissingParam("NumDmg".to_string()))?
+                .parse()
+                .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?;
+            let f = ability
+                .params
+                .get("Valid")
+                .cloned()
+                .unwrap_or_else(|| "Creature".to_string());
+            (dmg, f)
+        }
+    };
+    let filter = filter_owned.as_str();
 
     // Collect matching object IDs
     let matching: Vec<_> = state
@@ -145,7 +185,7 @@ pub fn resolve_all(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

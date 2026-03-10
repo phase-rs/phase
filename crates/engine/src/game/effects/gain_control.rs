@@ -19,7 +19,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

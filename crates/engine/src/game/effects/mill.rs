@@ -1,23 +1,25 @@
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 /// Mill target player: move top N cards from their library to their graveyard.
-/// Reads `NumCards` param (default 1).
 /// Target is resolved from ability.targets (first TargetRef::Player), or defaults to opponent of controller.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_cards: usize = ability
-        .params
-        .get("NumCards")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let num_cards: usize = match &ability.effect {
+        Effect::Mill { count, .. } => *count as usize,
+        _ => ability
+            .params
+            .get("NumCards")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+    };
 
     // Find target player: first TargetRef::Player, or opponent of controller
     let target_player = ability
@@ -51,7 +53,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

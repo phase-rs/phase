@@ -425,7 +425,6 @@ mod tests {
                         api_type: String::new(),
                         params: std::collections::HashMap::new(),
                     },
-                    api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],
                     source_id: ObjectId(2),

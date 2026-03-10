@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, ResolvedAbility, StaticDefinition, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, StaticDefinition, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -11,8 +11,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Collect static ability SVars referenced by the StaticAbilities param
-    if let Some(static_keys) = ability.params.get("StaticAbilities") {
+    // Read StaticAbilities from the typed Effect's inner params when available
+    let params_source = match &ability.effect {
+        Effect::GenericEffect { params } | Effect::Cleanup { params } => params,
+        _ => &ability.params,
+    };
+    if let Some(static_keys) = params_source.get("StaticAbilities") {
         for key in static_keys.split(',') {
             let key = key.trim();
             if let Some(svar_val) = ability.svars.get(key) {
@@ -25,7 +29,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

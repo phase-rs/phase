@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
@@ -107,25 +107,30 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
     Ok(())
 }
 
-/// Destroy all permanents matching the `Valid` filter.
-/// Reads `Valid` param and optionally `NoRegen`.
+/// Destroy all permanents matching the filter.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let filter = ability
-        .params
-        .get("Valid")
-        .map(|s| s.as_str())
-        .unwrap_or("Creature");
+    let filter = match &ability.effect {
+        Effect::DestroyAll {
+            target: TargetSpec::All { filter },
+        } if !filter.is_empty() => filter.as_str(),
+        Effect::DestroyAll { .. } => "Creature",
+        _ => ability
+            .params
+            .get("Valid")
+            .map(|s| s.as_str())
+            .unwrap_or("Creature"),
+    };
 
     // Collect matching object IDs that are on the battlefield and not indestructible
     let matching: Vec<_> = state
@@ -156,7 +161,7 @@ pub fn resolve_all(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -187,7 +192,6 @@ mod tests {
                 api_type: "Destroy".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Destroy".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
             source_id: ObjectId(100),
@@ -225,7 +229,6 @@ mod tests {
                 api_type: "Destroy".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Destroy".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
             source_id: ObjectId(100),
@@ -255,7 +258,6 @@ mod tests {
                 api_type: "Destroy".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Destroy".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
             source_id: ObjectId(100),
@@ -319,7 +321,6 @@ mod tests {
                 api_type: "DestroyAll".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "DestroyAll".to_string(),
             params: HashMap::from([("Valid".to_string(), "Creature".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),

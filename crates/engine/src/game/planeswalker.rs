@@ -163,7 +163,6 @@ fn build_pw_resolved(
 ) -> ResolvedAbility {
     ResolvedAbility {
         effect: ability_def.effect.clone(),
-        api_type: ability_def.api_type().to_string(),
         params: ability_def.params(),
         targets: Vec::new(),
         source_id,
@@ -347,7 +346,6 @@ mod tests {
                         api_type: String::new(),
                         params: std::collections::HashMap::new(),
                     },
-                    api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],
                     source_id: ObjectId(99),

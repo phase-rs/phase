@@ -30,7 +30,7 @@ pub fn resolve(
     // this handler will clear those fields based on the params above.
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -52,7 +52,6 @@ mod tests {
                 api_type: "Cleanup".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Cleanup".to_string(),
             params: HashMap::from([("ClearRemembered".to_string(), "True".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
@@ -77,7 +76,6 @@ mod tests {
                 api_type: "Cleanup".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Cleanup".to_string(),
             params: HashMap::new(),
             targets: vec![],
             source_id: ObjectId(100),
@@ -98,7 +96,6 @@ mod tests {
                 api_type: "Cleanup".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Cleanup".to_string(),
             params: HashMap::from([
                 ("ClearRemembered".to_string(), "True".to_string()),
                 ("ClearChosenPlayer".to_string(), "True".to_string()),

@@ -76,7 +76,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -106,7 +106,6 @@ mod tests {
                 api_type: "Sacrifice".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Sacrifice".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
             source_id: ObjectId(100),
@@ -137,7 +136,6 @@ mod tests {
                 api_type: "Sacrifice".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Sacrifice".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
             source_id: ObjectId(100),

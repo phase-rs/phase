@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -10,17 +10,31 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Create a token creature on the battlefield.
-/// Reads `Name`, `Power`, `Toughness`, `Types`, `Colors` params.
+/// Reads token attributes from `Effect::Token { name, power, toughness, .. }`,
+/// with fallback to `Name`, `Power`, `Toughness` params.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let name = ability
-        .params
-        .get("Name")
-        .cloned()
-        .unwrap_or_else(|| "Token".to_string());
+    let (name, power, toughness) = match &ability.effect {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            ..
+        } => (name.clone(), Some(*power), Some(*toughness)),
+        _ => {
+            let n = ability
+                .params
+                .get("Name")
+                .cloned()
+                .unwrap_or_else(|| "Token".to_string());
+            let p = ability.params.get("Power").and_then(|v| v.parse().ok());
+            let t = ability.params.get("Toughness").and_then(|v| v.parse().ok());
+            (n, p, t)
+        }
+    };
 
     let proposed = ProposedEvent::CreateToken {
         owner: ability.controller,
@@ -36,11 +50,6 @@ pub fn resolve(
                 ..
             } = event
             {
-                let power: Option<i32> = ability.params.get("Power").and_then(|v| v.parse().ok());
-
-                let toughness: Option<i32> =
-                    ability.params.get("Toughness").and_then(|v| v.parse().ok());
-
                 // Use CardId(0) for tokens
                 let obj_id = zones::create_object(
                     state,
@@ -80,7 +89,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -102,7 +111,6 @@ mod tests {
                 api_type: "Token".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Token".to_string(),
             params: HashMap::from([
                 ("Name".to_string(), "Soldier".to_string()),
                 ("Power".to_string(), "1".to_string()),
@@ -135,7 +143,6 @@ mod tests {
                 api_type: "Token".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Token".to_string(),
             params: HashMap::from([("Name".to_string(), "Angel".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),

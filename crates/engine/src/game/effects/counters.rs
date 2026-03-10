@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::game_object::CounterType;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
@@ -18,22 +18,36 @@ fn parse_counter_type(s: &str) -> CounterType {
 }
 
 /// Add counters to target objects.
-/// Reads `CounterType` and `CounterNum` params.
 pub fn resolve_add(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let counter_type_str = ability
-        .params
-        .get("CounterType")
-        .cloned()
-        .unwrap_or_else(|| "P1P1".to_string());
-    let counter_num: u32 = ability
-        .params
-        .get("CounterNum")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let (counter_type_str, counter_num) = match &ability.effect {
+        Effect::AddCounter {
+            counter_type,
+            count,
+            ..
+        }
+        | Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } => (counter_type.clone(), *count as u32),
+        _ => {
+            let ct = ability
+                .params
+                .get("CounterType")
+                .cloned()
+                .unwrap_or_else(|| "P1P1".to_string());
+            let num = ability
+                .params
+                .get("CounterNum")
+                .map(|v| v.parse().unwrap_or(1))
+                .unwrap_or(1);
+            (ct, num)
+        }
+    };
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
@@ -91,7 +105,7 @@ pub fn resolve_add(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -99,22 +113,31 @@ pub fn resolve_add(
 }
 
 /// Multiply counters on target objects (default: double).
-/// Reads `CounterType` and optional `Multiplier` params.
 pub fn resolve_multiply(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let counter_type_str = ability
-        .params
-        .get("CounterType")
-        .cloned()
-        .unwrap_or_else(|| "P1P1".to_string());
-    let multiplier: u32 = ability
-        .params
-        .get("Multiplier")
-        .map(|v| v.parse().unwrap_or(2))
-        .unwrap_or(2);
+    let (counter_type_str, multiplier) = match &ability.effect {
+        Effect::MultiplyCounter {
+            counter_type,
+            multiplier,
+            ..
+        } => (counter_type.clone(), *multiplier as u32),
+        _ => {
+            let ct = ability
+                .params
+                .get("CounterType")
+                .cloned()
+                .unwrap_or_else(|| "P1P1".to_string());
+            let mult = ability
+                .params
+                .get("Multiplier")
+                .map(|v| v.parse().unwrap_or(2))
+                .unwrap_or(2);
+            (ct, mult)
+        }
+    };
 
     let targets = resolve_defined_or_targets(ability, state);
     for obj_id in targets {
@@ -142,24 +165,39 @@ pub fn resolve_multiply(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
     Ok(())
 }
 
-/// Resolve `Defined$` param to object IDs, falling back to targets.
+/// Resolve targeting to object IDs using the typed TargetSpec, falling back to params.
 fn resolve_defined_or_targets(
     ability: &ResolvedAbility,
     _state: &GameState,
 ) -> Vec<crate::types::identifiers::ObjectId> {
-    if let Some(defined) = ability.params.get("Defined") {
-        if defined == "Self" {
-            return vec![ability.source_id];
-        }
-        // For other Defined$ values, fall through to targets
+    let target_spec = match &ability.effect {
+        Effect::MultiplyCounter { target, .. }
+        | Effect::AddCounter { target, .. }
+        | Effect::RemoveCounter { target, .. }
+        | Effect::PutCounter { target, .. } => Some(target),
+        _ => None,
+    };
+
+    if let Some(TargetSpec::None) = target_spec {
+        return vec![ability.source_id];
     }
+
+    // Fall back to legacy Defined$ param check
+    if target_spec.is_none() {
+        if let Some(defined) = ability.params.get("Defined") {
+            if defined == "Self" {
+                return vec![ability.source_id];
+            }
+        }
+    }
+
     ability
         .targets
         .iter()
@@ -174,22 +212,31 @@ fn resolve_defined_or_targets(
 }
 
 /// Remove counters from target objects, clamping at 0.
-/// Reads `CounterType` and `CounterNum` params.
 pub fn resolve_remove(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let counter_type_str = ability
-        .params
-        .get("CounterType")
-        .cloned()
-        .unwrap_or_else(|| "P1P1".to_string());
-    let counter_num: u32 = ability
-        .params
-        .get("CounterNum")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let (counter_type_str, counter_num) = match &ability.effect {
+        Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        } => (counter_type.clone(), *count as u32),
+        _ => {
+            let ct = ability
+                .params
+                .get("CounterType")
+                .cloned()
+                .unwrap_or_else(|| "P1P1".to_string());
+            let num = ability
+                .params
+                .get("CounterNum")
+                .map(|v| v.parse().unwrap_or(1))
+                .unwrap_or(1);
+            (ct, num)
+        }
+    };
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
@@ -246,7 +293,7 @@ pub fn resolve_remove(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

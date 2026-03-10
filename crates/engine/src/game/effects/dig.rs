@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -6,19 +6,21 @@ use crate::types::game_state::{GameState, WaitingFor};
 /// rest go to graveyard.
 /// Sets WaitingFor::DigChoice so the player can select which cards to keep.
 ///
-/// Reads `DigNum` or `NumCards` param for how many to reveal.
 /// Reads `ChangeNum` param for how many to keep (put in hand).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let dig_num: usize = ability
-        .params
-        .get("DigNum")
-        .or_else(|| ability.params.get("NumCards"))
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let dig_num: usize = match &ability.effect {
+        Effect::Dig { count, .. } => *count as usize,
+        _ => ability
+            .params
+            .get("DigNum")
+            .or_else(|| ability.params.get("NumCards"))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+    };
 
     let change_num: usize = ability
         .params
@@ -47,7 +49,7 @@ pub fn resolve(
     };
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

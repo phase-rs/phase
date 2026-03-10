@@ -2,25 +2,27 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Discard cards from the controller's hand.
-/// Reads `NumCards` param (default 1).
 /// If targets specify specific cards, discard those; otherwise discard from end of hand.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_cards: u32 = ability
-        .params
-        .get("NumCards")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let num_cards: u32 = match &ability.effect {
+        Effect::DiscardCard { count, .. } | Effect::Discard { count, .. } => *count,
+        _ => ability
+            .params
+            .get("NumCards")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+    };
 
     // Check if targets specify specific cards to discard
     let specific_targets: Vec<_> = ability
@@ -150,7 +152,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -180,7 +182,6 @@ mod tests {
                 api_type: "DiscardCard".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "DiscardCard".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
@@ -218,7 +219,6 @@ mod tests {
                 api_type: "DiscardCard".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "DiscardCard".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(c2)],
             source_id: ObjectId(100),
@@ -249,7 +249,6 @@ mod tests {
                 api_type: "DiscardCard".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "DiscardCard".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),

@@ -164,7 +164,6 @@ pub fn resolve_ability_chain(
                 let params = def.params();
                 let mut sub_resolved = ResolvedAbility {
                     effect: def.effect.clone(),
-                    api_type: def.api_type().to_string(),
                     params,
                     targets: Vec::new(),
                     source_id: ability.source_id,
@@ -407,7 +406,6 @@ mod tests {
         params.insert("SubAbility".to_string(), "DBDraw".to_string());
         let ability = ResolvedAbility {
             effect,
-            api_type: "DealDamage".to_string(),
             params,
             targets: vec![TargetRef::Player(PlayerId(1))],
             source_id: ObjectId(100),

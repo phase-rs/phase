@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -6,18 +6,19 @@ use crate::types::game_state::{GameState, WaitingFor};
 /// Sets WaitingFor::ScryChoice so the player can choose which cards
 /// go to top vs bottom. The engine processes the SelectCards response
 /// in engine.rs to reorder the library.
-///
-/// Reads `ScryNum` param (default 1).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let scry_num: usize = ability
-        .params
-        .get("ScryNum")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let scry_num: usize = match &ability.effect {
+        Effect::Scry { count } => *count as usize,
+        _ => ability
+            .params
+            .get("ScryNum")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+    };
 
     let player = state
         .players
@@ -28,7 +29,7 @@ pub fn resolve(
     let count = scry_num.min(player.library.len());
     if count == 0 {
         events.push(GameEvent::EffectResolved {
-            api_type: ability.api_type.clone(),
+            api_type: ability.api_type().to_string(),
             source_id: ability.source_id,
         });
         return Ok(());
@@ -43,7 +44,7 @@ pub fn resolve(
     };
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

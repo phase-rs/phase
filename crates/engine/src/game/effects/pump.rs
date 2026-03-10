@@ -1,25 +1,33 @@
 use crate::game::filter::object_matches_filter_controlled;
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// Temporarily pump target creatures' power and toughness.
-/// Reads `NumAtt` and `NumDef` params (default "0").
+/// Reads power/toughness from `Effect::Pump`, with fallback to `NumAtt`/`NumDef` params.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_att: i32 = ability
-        .params
-        .get("NumAtt")
-        .map(|v| v.parse().unwrap_or(0))
-        .unwrap_or(0);
-    let num_def: i32 = ability
-        .params
-        .get("NumDef")
-        .map(|v| v.parse().unwrap_or(0))
-        .unwrap_or(0);
+    let (num_att, num_def) = match &ability.effect {
+        Effect::Pump {
+            power, toughness, ..
+        } => (*power, *toughness),
+        _ => {
+            let att = ability
+                .params
+                .get("NumAtt")
+                .map(|v| v.parse().unwrap_or(0))
+                .unwrap_or(0);
+            let def = ability
+                .params
+                .get("NumDef")
+                .map(|v| v.parse().unwrap_or(0))
+                .unwrap_or(0);
+            (att, def)
+        }
+    };
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
@@ -37,7 +45,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -45,27 +53,48 @@ pub fn resolve(
 }
 
 /// Pump all creatures matching the `Valid` filter on the battlefield.
-/// Reads `NumAtt`, `NumDef`, and `Valid` params.
+/// Reads power/toughness/filter from `Effect::PumpAll`, with fallback to params.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_att: i32 = ability
-        .params
-        .get("NumAtt")
-        .map(|v| v.parse().unwrap_or(0))
-        .unwrap_or(0);
-    let num_def: i32 = ability
-        .params
-        .get("NumDef")
-        .map(|v| v.parse().unwrap_or(0))
-        .unwrap_or(0);
-    let filter = ability
-        .params
-        .get("Valid")
-        .map(|s| s.as_str())
-        .unwrap_or("Creature");
+    let (num_att, num_def, filter_owned) = match &ability.effect {
+        Effect::PumpAll {
+            power,
+            toughness,
+            target,
+        } => {
+            let f = match target {
+                TargetSpec::All { filter } if !filter.is_empty() => filter.clone(),
+                _ => ability
+                    .params
+                    .get("Valid")
+                    .cloned()
+                    .unwrap_or_else(|| "Creature".to_string()),
+            };
+            (*power, *toughness, f)
+        }
+        _ => {
+            let att = ability
+                .params
+                .get("NumAtt")
+                .map(|v| v.parse().unwrap_or(0))
+                .unwrap_or(0);
+            let def = ability
+                .params
+                .get("NumDef")
+                .map(|v| v.parse().unwrap_or(0))
+                .unwrap_or(0);
+            let f = ability
+                .params
+                .get("Valid")
+                .cloned()
+                .unwrap_or_else(|| "Creature".to_string());
+            (att, def, f)
+        }
+    };
+    let filter = filter_owned.as_str();
 
     // Collect matching object IDs first to avoid borrow conflicts
     let matching: Vec<_> = state
@@ -95,7 +124,7 @@ pub fn resolve_all(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -130,7 +159,6 @@ mod tests {
                 api_type: "Pump".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Pump".to_string(),
             params: HashMap::from([
                 ("NumAtt".to_string(), "3".to_string()),
                 ("NumDef".to_string(), "3".to_string()),
@@ -167,7 +195,6 @@ mod tests {
                 api_type: "Pump".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Pump".to_string(),
             params: HashMap::from([
                 ("NumAtt".to_string(), "-2".to_string()),
                 ("NumDef".to_string(), "-2".to_string()),
@@ -247,7 +274,6 @@ mod tests {
                 api_type: "PumpAll".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "PumpAll".to_string(),
             params: HashMap::from([
                 ("NumAtt".to_string(), "1".to_string()),
                 ("NumDef".to_string(), "1".to_string()),

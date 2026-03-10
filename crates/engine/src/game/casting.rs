@@ -96,7 +96,6 @@ pub fn handle_cast_spell(
     let compat_params = ability_def.params();
     let mut resolved = ResolvedAbility {
         effect: ability_def.effect.clone(),
-        api_type: ability_def.api_type().to_string(),
         params: compat_params.clone(),
         targets: Vec::new(),
         source_id: object_id,
@@ -235,7 +234,6 @@ pub fn handle_activate_ability(
     let compat_params2 = ability_def.params();
     let mut resolved = ResolvedAbility {
         effect: ability_def.effect.clone(),
-        api_type: ability_def.api_type().to_string(),
         params: compat_params2.clone(),
         targets: Vec::new(),
         source_id,
@@ -598,7 +596,6 @@ mod tests {
                         api_type: String::new(),
                         params: std::collections::HashMap::new(),
                     },
-                    api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],
                     source_id: ObjectId(99),

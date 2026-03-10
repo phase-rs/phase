@@ -1,24 +1,26 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 
 /// Gain life for the controller.
-/// Reads `LifeAmount` param.
 pub fn resolve_gain(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let amount: i32 = ability
-        .params
-        .get("LifeAmount")
-        .ok_or_else(|| EffectError::MissingParam("LifeAmount".to_string()))?
-        .parse()
-        .map_err(|_| EffectError::InvalidParam("LifeAmount must be a number".to_string()))?;
+    let amount: i32 = match &ability.effect {
+        Effect::GainLife { amount } => *amount,
+        _ => ability
+            .params
+            .get("LifeAmount")
+            .ok_or_else(|| EffectError::MissingParam("LifeAmount".to_string()))?
+            .parse()
+            .map_err(|_| EffectError::InvalidParam("LifeAmount must be a number".to_string()))?,
+    };
 
     let proposed = ProposedEvent::LifeGain {
         player_id: ability.controller,
@@ -63,7 +65,7 @@ pub fn resolve_gain(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -71,20 +73,20 @@ pub fn resolve_gain(
 }
 
 /// Lose life for the target player (or controller if no target).
-/// Reads `LifeAmount` param.
 pub fn resolve_lose(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    use crate::types::ability::TargetRef;
-
-    let amount: i32 = ability
-        .params
-        .get("LifeAmount")
-        .ok_or_else(|| EffectError::MissingParam("LifeAmount".to_string()))?
-        .parse()
-        .map_err(|_| EffectError::InvalidParam("LifeAmount must be a number".to_string()))?;
+    let amount: i32 = match &ability.effect {
+        Effect::LoseLife { amount } => *amount,
+        _ => ability
+            .params
+            .get("LifeAmount")
+            .ok_or_else(|| EffectError::MissingParam("LifeAmount".to_string()))?
+            .parse()
+            .map_err(|_| EffectError::InvalidParam("LifeAmount must be a number".to_string()))?,
+    };
 
     // Determine target player: use first player target or fall back to controller
     let target_player_id = ability
@@ -142,7 +144,7 @@ pub fn resolve_lose(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -165,7 +167,6 @@ mod tests {
                 api_type: "GainLife".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "GainLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "5".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
@@ -188,7 +189,6 @@ mod tests {
                 api_type: "LoseLife".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "LoseLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Player(PlayerId(1))],
             source_id: ObjectId(100),
@@ -211,7 +211,6 @@ mod tests {
                 api_type: "GainLife".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "GainLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "4".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
@@ -236,7 +235,6 @@ mod tests {
                 api_type: "LoseLife".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "LoseLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "2".to_string())]),
             targets: vec![TargetRef::Player(PlayerId(0))],
             source_id: ObjectId(100),

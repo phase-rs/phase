@@ -34,7 +34,7 @@ pub fn resolve(
     events.push(GameEvent::StackPushed { object_id: copy_id });
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -59,7 +59,6 @@ mod tests {
                 api_type: "DealDamage".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "DealDamage".to_string(),
             params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![],
             source_id: ObjectId(10),
@@ -83,7 +82,6 @@ mod tests {
                 api_type: "CopySpell".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "CopySpell".to_string(),
             params: HashMap::new(),
             targets: vec![],
             source_id: ObjectId(20),
@@ -112,7 +110,7 @@ mod tests {
                 },
             ) => {
                 assert_eq!(c1, c2);
-                assert_eq!(a1.api_type, a2.api_type);
+                assert_eq!(a1.api_type(), a2.api_type());
             }
             _ => panic!("Expected both entries to be Spells"),
         }
@@ -128,7 +126,6 @@ mod tests {
                 api_type: "CopySpell".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "CopySpell".to_string(),
             params: HashMap::new(),
             targets: vec![],
             source_id: ObjectId(20),

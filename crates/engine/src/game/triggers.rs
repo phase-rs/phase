@@ -97,7 +97,6 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         };
                         let prowess_ability = ResolvedAbility {
                             effect: prowess_effect.clone(),
-                            api_type: prowess_effect.api_type().to_string(),
                             params: prowess_effect.to_params(),
                             targets: Vec::new(),
                             source_id: obj_id,
@@ -177,7 +176,6 @@ fn build_triggered_ability(
             if let Ok(ability_def) = crate::parser::ability::parse_ability(svar_value) {
                 return ResolvedAbility {
                     effect: ability_def.effect.clone(),
-                    api_type: ability_def.api_type().to_string(),
                     params: ability_def.params(),
                     targets: Vec::new(),
                     source_id,
@@ -200,7 +198,6 @@ fn build_triggered_ability(
     };
     ResolvedAbility {
         effect,
-        api_type,
         params,
         targets: Vec::new(),
         source_id,
@@ -1632,7 +1629,7 @@ pub mod tests {
         match &entry.kind {
             StackEntryKind::TriggeredAbility { source_id, ability } => {
                 assert_eq!(*source_id, trigger_creature);
-                assert_eq!(ability.api_type, "Draw");
+                assert_eq!(ability.api_type(), "Draw");
                 assert_eq!(ability.params.get("NumCards").unwrap(), "1");
             }
             _ => panic!("Expected TriggeredAbility on stack"),

@@ -73,7 +73,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -124,7 +124,6 @@ mod tests {
                 api_type: "Fight".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Fight".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(wolf)],
             source_id: bear,
@@ -153,7 +152,6 @@ mod tests {
                 api_type: "Fight".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Fight".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(wolf)],
             source_id: bear,
@@ -184,7 +182,6 @@ mod tests {
                 api_type: "Fight".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "Fight".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(bear)],
             source_id: wall,

@@ -74,7 +74,7 @@ pub fn resolve(
 
     if cards.is_empty() {
         events.push(GameEvent::EffectResolved {
-            api_type: ability.api_type.clone(),
+            api_type: ability.api_type().to_string(),
             source_id: ability.source_id,
         });
         return Ok(());
@@ -89,7 +89,7 @@ pub fn resolve(
     };
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -128,7 +128,6 @@ mod tests {
                 api_type: "ChooseCard".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "ChooseCard".to_string(),
             params: HashMap::from([("Origin".to_string(), "Graveyard".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
@@ -166,7 +165,6 @@ mod tests {
                 api_type: "ChooseCard".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "ChooseCard".to_string(),
             params: HashMap::from([("Origin".to_string(), "Graveyard".to_string())]),
             targets: vec![],
             source_id: ObjectId(100),
@@ -200,7 +198,6 @@ mod tests {
                 api_type: "ChooseCard".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "ChooseCard".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Graveyard".to_string()),
                 ("ChangeNum".to_string(), "2".to_string()),

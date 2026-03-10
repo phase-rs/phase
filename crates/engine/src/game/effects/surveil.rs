@@ -1,22 +1,23 @@
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
 /// Surveil N: controller looks at top N cards of their library.
 /// Sets WaitingFor::SurveilChoice so the player can choose which cards
 /// go to graveyard vs stay on top of library.
-///
-/// Reads `SurveilNum` param (default 1).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let surveil_num: usize = ability
-        .params
-        .get("SurveilNum")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let surveil_num: usize = match &ability.effect {
+        Effect::Surveil { count } => *count as usize,
+        _ => ability
+            .params
+            .get("SurveilNum")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+    };
 
     let player = state
         .players
@@ -27,7 +28,7 @@ pub fn resolve(
     let count = surveil_num.min(player.library.len());
     if count == 0 {
         events.push(GameEvent::EffectResolved {
-            api_type: ability.api_type.clone(),
+            api_type: ability.api_type().to_string(),
             source_id: ability.source_id,
         });
         return Ok(());
@@ -41,7 +42,7 @@ pub fn resolve(
     };
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

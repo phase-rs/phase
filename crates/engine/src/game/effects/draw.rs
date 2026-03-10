@@ -2,24 +2,26 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Draw cards for the ability's controller.
-/// Reads `NumCards` param (default 1).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_cards: u32 = ability
-        .params
-        .get("NumCards")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    let num_cards = match &ability.effect {
+        Effect::Draw { count } => *count,
+        _ => ability
+            .params
+            .get("NumCards")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+    };
 
     let proposed = ProposedEvent::Draw {
         player_id: ability.controller,
@@ -73,7 +75,7 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 

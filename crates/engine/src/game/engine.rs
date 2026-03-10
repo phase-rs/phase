@@ -1075,7 +1075,6 @@ mod tests {
                             api_type: String::new(),
                             params: std::collections::HashMap::new(),
                         },
-                        api_type: String::new(),
                         params: HashMap::new(),
                         targets: vec![],
                         source_id: id1,
@@ -1100,7 +1099,6 @@ mod tests {
                             api_type: String::new(),
                             params: std::collections::HashMap::new(),
                         },
-                        api_type: String::new(),
                         params: HashMap::new(),
                         targets: vec![],
                         source_id: id2,
@@ -2052,7 +2050,6 @@ mod tests {
                     api_type: "Destroy".to_string(),
                     params: std::collections::HashMap::new(),
                 },
-                api_type: "Destroy".to_string(),
                 params: HashMap::new(),
                 targets: vec![crate::types::ability::TargetRef::Object(creature)],
                 source_id: ObjectId(100),
@@ -2285,7 +2282,6 @@ mod tests {
                     api_type: "Destroy".to_string(),
                     params: std::collections::HashMap::new(),
                 },
-                api_type: "Destroy".to_string(),
                 params: HashMap::new(),
                 targets: vec![crate::types::ability::TargetRef::Object(creature_a)],
                 source_id: ObjectId(200),
@@ -2316,7 +2312,7 @@ mod tests {
             let top = &state.stack.last().unwrap();
             match &top.kind {
                 crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => {
-                    assert_eq!(ability.api_type, "Draw", "trigger should resolve Draw");
+                    assert_eq!(ability.api_type(), "Draw", "trigger should resolve Draw");
                 }
                 _ => panic!("expected TriggeredAbility on stack"),
             }
@@ -2641,7 +2637,6 @@ mod tests {
                             api_type: String::new(),
                             params: std::collections::HashMap::new(),
                         },
-                        api_type: String::new(),
                         params: std::collections::HashMap::new(),
                         targets: vec![],
                         source_id: ObjectId(99),

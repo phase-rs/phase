@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
@@ -23,16 +23,19 @@ fn parse_zone(s: &str) -> Result<Zone, EffectError> {
 }
 
 /// Move target objects between zones.
-/// Reads `Origin` and `Destination` params.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let destination = ability
-        .params
-        .get("Destination")
-        .ok_or_else(|| EffectError::MissingParam("Destination".to_string()))?;
+    let destination = match &ability.effect {
+        Effect::ChangeZone { destination, .. } => destination.as_str(),
+        _ => ability
+            .params
+            .get("Destination")
+            .ok_or_else(|| EffectError::MissingParam("Destination".to_string()))?
+            .as_str(),
+    };
     let dest_zone = parse_zone(destination)?;
 
     for target in &ability.targets {
@@ -78,37 +81,55 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
     Ok(())
 }
 
-/// Move all objects matching the `Valid` filter from `Origin` zone to `Destination` zone.
-/// Reads `Origin`, `Destination`, and `Valid` params.
+/// Move all objects matching the filter from `Origin` zone to `Destination` zone.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let origin = ability
-        .params
-        .get("Origin")
-        .ok_or_else(|| EffectError::MissingParam("Origin".to_string()))?;
-    let origin_zone = parse_zone(origin)?;
-
-    let destination = ability
-        .params
-        .get("Destination")
-        .ok_or_else(|| EffectError::MissingParam("Destination".to_string()))?;
-    let dest_zone = parse_zone(destination)?;
-
-    let filter = ability
-        .params
-        .get("Valid")
-        .map(|s| s.as_str())
-        .unwrap_or("Permanent");
+    let (origin_zone, dest_zone, filter_str);
+    if let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+    } = &ability.effect
+    {
+        origin_zone = parse_zone(origin.as_str())?;
+        dest_zone = parse_zone(destination.as_str())?;
+        filter_str = if let crate::types::ability::TargetSpec::All { filter } = target {
+            if filter.is_empty() {
+                "Permanent".to_string()
+            } else {
+                filter.clone()
+            }
+        } else {
+            "Permanent".to_string()
+        };
+    } else {
+        let origin = ability
+            .params
+            .get("Origin")
+            .ok_or_else(|| EffectError::MissingParam("Origin".to_string()))?;
+        let destination = ability
+            .params
+            .get("Destination")
+            .ok_or_else(|| EffectError::MissingParam("Destination".to_string()))?;
+        origin_zone = parse_zone(origin.as_str())?;
+        dest_zone = parse_zone(destination.as_str())?;
+        filter_str = ability
+            .params
+            .get("Valid")
+            .cloned()
+            .unwrap_or_else(|| "Permanent".to_string());
+    }
+    let filter = filter_str.as_str();
 
     // Collect matching object IDs from the origin zone
     let matching: Vec<_> = state
@@ -135,7 +156,7 @@ pub fn resolve_all(
     }
 
     events.push(GameEvent::EffectResolved {
-        api_type: ability.api_type.clone(),
+        api_type: ability.api_type().to_string(),
         source_id: ability.source_id,
     });
 
@@ -166,7 +187,6 @@ mod tests {
                 api_type: "ChangeZone".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "ChangeZone".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Hand".to_string()),
                 ("Destination".to_string(), "Battlefield".to_string()),
@@ -200,7 +220,6 @@ mod tests {
                 api_type: "ChangeZone".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "ChangeZone".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Battlefield".to_string()),
                 ("Destination".to_string(), "Exile".to_string()),
@@ -272,7 +291,6 @@ mod tests {
                 api_type: "ChangeZoneAll".to_string(),
                 params: std::collections::HashMap::new(),
             },
-            api_type: "ChangeZoneAll".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Battlefield".to_string()),
                 ("Destination".to_string(), "Hand".to_string()),
