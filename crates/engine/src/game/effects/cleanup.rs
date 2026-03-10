@@ -48,6 +48,10 @@ mod tests {
     fn cleanup_emits_effect_resolved() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Cleanup".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Cleanup".to_string(),
             params: HashMap::from([("ClearRemembered".to_string(), "True".to_string())]),
             targets: vec![],
@@ -69,6 +73,10 @@ mod tests {
     fn cleanup_succeeds_with_no_params() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Cleanup".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Cleanup".to_string(),
             params: HashMap::new(),
             targets: vec![],
@@ -86,6 +94,10 @@ mod tests {
     fn cleanup_succeeds_with_multiple_clear_params() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Cleanup".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Cleanup".to_string(),
             params: HashMap::from([
                 ("ClearRemembered".to_string(), "True".to_string()),

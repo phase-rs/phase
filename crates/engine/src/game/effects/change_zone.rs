@@ -162,6 +162,10 @@ mod tests {
             Zone::Hand,
         );
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "ChangeZone".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "ChangeZone".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Hand".to_string()),
@@ -192,6 +196,10 @@ mod tests {
             Zone::Battlefield,
         );
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "ChangeZone".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "ChangeZone".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Battlefield".to_string()),
@@ -260,6 +268,10 @@ mod tests {
             .push(CoreType::Creature);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "ChangeZoneAll".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "ChangeZoneAll".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Battlefield".to_string()),

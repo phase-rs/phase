@@ -60,15 +60,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_scry_ability(scry_num: u32) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "Scry".to_string(),
-            params: HashMap::from([("ScryNum".to_string(), scry_num.to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw(
+            "Scry",
+            HashMap::from([("ScryNum".to_string(), scry_num.to_string())]),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

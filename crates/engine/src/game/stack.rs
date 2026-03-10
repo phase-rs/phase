@@ -1,12 +1,9 @@
-use std::collections::HashMap;
-
-use crate::types::ability::ResolvedAbility;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
-use super::effects::{self, EffectHandler};
+use super::effects;
 use super::targeting;
 use super::zones;
 
@@ -17,11 +14,7 @@ pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<
     state.stack.push(entry);
 }
 
-pub fn resolve_top(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    registry: &HashMap<String, EffectHandler>,
-) {
+pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let entry = match state.stack.pop() {
         Some(e) => e,
         None => return,
@@ -57,12 +50,12 @@ pub fn resolve_top(
             // Update ability with only still-legal targets
             let mut ability = ability;
             ability.targets = legal;
-            execute_effect(registry, state, &ability, events);
+            execute_effect(state, &ability, events);
         } else {
-            execute_effect(registry, state, &ability, events);
+            execute_effect(state, &ability, events);
         }
     } else {
-        execute_effect(registry, state, &ability, events);
+        execute_effect(state, &ability, events);
     }
 
     // Determine destination zone for spells
@@ -82,16 +75,18 @@ pub fn resolve_top(
 }
 
 fn execute_effect(
-    registry: &HashMap<String, EffectHandler>,
     state: &mut GameState,
-    ability: &ResolvedAbility,
+    ability: &crate::types::ability::ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) {
-    if ability.api_type.is_empty() {
+    if matches!(
+        ability.effect,
+        crate::types::ability::Effect::Other { ref api_type, .. } if api_type.is_empty()
+    ) {
         return; // No-op ability (used in tests with empty api_type)
     }
     // Use resolve_ability_chain to support SubAbility/Execute chaining
-    let _ = effects::resolve_ability_chain(state, ability, events, registry, 0);
+    let _ = effects::resolve_ability_chain(state, ability, events, 0);
 }
 
 pub fn stack_is_empty(state: &GameState) -> bool {

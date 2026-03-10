@@ -58,15 +58,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_surveil_ability(surveil_num: u32) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "Surveil".to_string(),
-            params: HashMap::from([("SurveilNum".to_string(), surveil_num.to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw(
+            "Surveil",
+            HashMap::from([("SurveilNum".to_string(), surveil_num.to_string())]),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

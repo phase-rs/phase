@@ -120,6 +120,10 @@ mod tests {
         let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Fight".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Fight".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(wolf)],
@@ -145,6 +149,10 @@ mod tests {
         let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Fight".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Fight".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(wolf)],
@@ -172,6 +180,10 @@ mod tests {
         let bear = make_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Fight".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Fight".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(bear)],

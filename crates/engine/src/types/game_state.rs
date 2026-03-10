@@ -421,6 +421,10 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
                 ability: ResolvedAbility {
+                    effect: crate::types::ability::Effect::Other {
+                        api_type: String::new(),
+                        params: std::collections::HashMap::new(),
+                    },
                     api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],

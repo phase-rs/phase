@@ -64,18 +64,16 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_dig_ability(dig_num: u32, change_num: u32) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "Dig".to_string(),
-            params: HashMap::from([
+        ResolvedAbility::from_raw(
+            "Dig",
+            HashMap::from([
                 ("DigNum".to_string(), dig_num.to_string()),
                 ("ChangeNum".to_string(), change_num.to_string()),
             ]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

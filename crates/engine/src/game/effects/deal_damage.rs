@@ -163,15 +163,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_ability(num_dmg: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "DealDamage".to_string(),
-            params: HashMap::from([("NumDmg".to_string(), num_dmg.to_string())]),
+        ResolvedAbility::from_raw(
+            "DealDamage",
+            HashMap::from([("NumDmg".to_string(), num_dmg.to_string())]),
             targets,
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]
@@ -222,15 +220,13 @@ mod tests {
     #[test]
     fn missing_num_dmg_returns_error() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            api_type: "DealDamage".to_string(),
-            params: HashMap::new(),
-            targets: vec![TargetRef::Player(PlayerId(0))],
-            source_id: ObjectId(1),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = ResolvedAbility::from_raw(
+            "DealDamage",
+            HashMap::new(),
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
         assert!(matches!(result, Err(EffectError::MissingParam(_))));
@@ -269,18 +265,16 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let ability = ResolvedAbility {
-            api_type: "DamageAll".to_string(),
-            params: HashMap::from([
+        let ability = ResolvedAbility::from_raw(
+            "DamageAll",
+            HashMap::from([
                 ("NumDmg".to_string(), "2".to_string()),
                 ("Valid".to_string(), "Creature".to_string()),
             ]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_all(&mut state, &ability, &mut events).unwrap();

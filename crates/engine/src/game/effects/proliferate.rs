@@ -83,15 +83,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_proliferate_ability() -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "Proliferate".to_string(),
-            params: HashMap::new(),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw(
+            "Proliferate",
+            HashMap::new(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

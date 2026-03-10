@@ -105,17 +105,14 @@ mod tests {
 
     #[test]
     fn mana_api_type_detected_as_mana_ability() {
-        let def = parse_test_ability(
-            "AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.",
-        );
+        let def =
+            parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.");
         assert!(is_mana_ability(&def));
     }
 
     #[test]
     fn non_mana_api_type_not_detected() {
-        let def = parse_test_ability(
-            "AB$ DealDamage | Cost$ T | NumDmg$ 1 | ValidTgts$ Any",
-        );
+        let def = parse_test_ability("AB$ DealDamage | Cost$ T | NumDmg$ 1 | ValidTgts$ Any");
         assert!(!is_mana_ability(&def));
     }
 
@@ -136,9 +133,8 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let def = parse_test_ability(
-            "AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.",
-        );
+        let def =
+            parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.");
         let mut events = Vec::new();
         resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
 

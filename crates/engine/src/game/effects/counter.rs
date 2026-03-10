@@ -88,6 +88,10 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: ResolvedAbility {
+                    effect: crate::types::ability::Effect::Other {
+                        api_type: String::new(),
+                        params: std::collections::HashMap::new(),
+                    },
                     api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],
@@ -100,6 +104,10 @@ mod tests {
         });
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Counter".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Counter".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
@@ -149,6 +157,10 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: ResolvedAbility {
+                    effect: crate::types::ability::Effect::Other {
+                        api_type: String::new(),
+                        params: std::collections::HashMap::new(),
+                    },
                     api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],
@@ -161,6 +173,10 @@ mod tests {
         });
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Counter".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Counter".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],

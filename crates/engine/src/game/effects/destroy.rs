@@ -183,6 +183,10 @@ mod tests {
             Zone::Battlefield,
         );
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Destroy".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Destroy".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
@@ -217,6 +221,10 @@ mod tests {
             .push(crate::types::keywords::Keyword::Indestructible);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Destroy".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Destroy".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
@@ -243,6 +251,10 @@ mod tests {
             Zone::Battlefield,
         );
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Destroy".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Destroy".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
@@ -303,6 +315,10 @@ mod tests {
         );
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "DestroyAll".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "DestroyAll".to_string(),
             params: HashMap::from([("Valid".to_string(), "Creature".to_string())]),
             targets: vec![],

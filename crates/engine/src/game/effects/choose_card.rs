@@ -124,6 +124,10 @@ mod tests {
         );
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "ChooseCard".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "ChooseCard".to_string(),
             params: HashMap::from([("Origin".to_string(), "Graveyard".to_string())]),
             targets: vec![],
@@ -158,6 +162,10 @@ mod tests {
         assert!(state.players[0].graveyard.is_empty());
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "ChooseCard".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "ChooseCard".to_string(),
             params: HashMap::from([("Origin".to_string(), "Graveyard".to_string())]),
             targets: vec![],
@@ -188,6 +196,10 @@ mod tests {
         }
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "ChooseCard".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "ChooseCard".to_string(),
             params: HashMap::from([
                 ("Origin".to_string(), "Graveyard".to_string()),

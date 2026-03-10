@@ -161,6 +161,10 @@ mod tests {
     fn gain_life_increases_controller_life() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "GainLife".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "GainLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "5".to_string())]),
             targets: vec![],
@@ -180,6 +184,10 @@ mod tests {
     fn lose_life_decreases_target_life() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "LoseLife".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "LoseLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Player(PlayerId(1))],
@@ -199,6 +207,10 @@ mod tests {
     fn gain_life_emits_positive_life_changed() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "GainLife".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "GainLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "4".to_string())]),
             targets: vec![],
@@ -220,6 +232,10 @@ mod tests {
     fn lose_life_emits_negative_life_changed() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "LoseLife".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "LoseLife".to_string(),
             params: HashMap::from([("LifeAmount".to_string(), "2".to_string())]),
             targets: vec![TargetRef::Player(PlayerId(0))],

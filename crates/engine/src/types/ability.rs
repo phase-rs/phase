@@ -704,6 +704,7 @@ pub enum TargetRef {
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
+    pub effect: Effect,
     pub api_type: String,
     pub params: HashMap<String, String>,
     pub targets: Vec<TargetRef>,
@@ -711,6 +712,56 @@ pub struct ResolvedAbility {
     pub controller: PlayerId,
     pub sub_ability: Option<Box<ResolvedAbility>>,
     pub svars: HashMap<String, String>,
+}
+
+impl ResolvedAbility {
+    /// Build from a typed Effect. Populates api_type and params automatically
+    /// from the Effect's compat bridge methods.
+    pub fn new(
+        effect: Effect,
+        targets: Vec<TargetRef>,
+        source_id: ObjectId,
+        controller: PlayerId,
+    ) -> Self {
+        let api_type = effect.api_type().to_string();
+        let params = effect.to_params();
+        Self {
+            effect,
+            api_type,
+            params,
+            targets,
+            source_id,
+            controller,
+            sub_ability: None,
+            svars: HashMap::new(),
+        }
+    }
+
+    /// Build from raw string api_type + params (backward compat for tests and
+    /// SubAbility chain parsing). Wraps in Effect::Other if no better match.
+    pub fn from_raw(
+        api_type: impl Into<String>,
+        params: HashMap<String, String>,
+        targets: Vec<TargetRef>,
+        source_id: ObjectId,
+        controller: PlayerId,
+    ) -> Self {
+        let api_type = api_type.into();
+        let effect = Effect::Other {
+            api_type: api_type.clone(),
+            params: params.clone(),
+        };
+        Self {
+            effect,
+            api_type,
+            params,
+            targets,
+            source_id,
+            controller,
+            sub_ability: None,
+            svars: HashMap::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -766,6 +817,10 @@ mod tests {
     #[test]
     fn resolved_ability_serializes_and_roundtrips() {
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "DealDamage".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "DealDamage".to_string(),
             params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Object(ObjectId(10))],
@@ -782,6 +837,10 @@ mod tests {
     #[test]
     fn resolved_ability_with_sub_ability_roundtrips() {
         let sub = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Draw".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Draw".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
             targets: vec![],
@@ -791,6 +850,10 @@ mod tests {
             svars: HashMap::new(),
         };
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "DealDamage".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "DealDamage".to_string(),
             params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![TargetRef::Player(PlayerId(1))],

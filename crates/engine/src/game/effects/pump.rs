@@ -126,6 +126,10 @@ mod tests {
         state.objects.get_mut(&obj_id).unwrap().toughness = Some(2);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Pump".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Pump".to_string(),
             params: HashMap::from([
                 ("NumAtt".to_string(), "3".to_string()),
@@ -159,6 +163,10 @@ mod tests {
         state.objects.get_mut(&obj_id).unwrap().toughness = Some(3);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Pump".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Pump".to_string(),
             params: HashMap::from([
                 ("NumAtt".to_string(), "-2".to_string()),
@@ -235,6 +243,10 @@ mod tests {
             .push(CoreType::Creature);
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "PumpAll".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "PumpAll".to_string(),
             params: HashMap::from([
                 ("NumAtt".to_string(), "1".to_string()),

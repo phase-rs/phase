@@ -162,6 +162,7 @@ fn build_pw_resolved(
     controller: PlayerId,
 ) -> ResolvedAbility {
     ResolvedAbility {
+        effect: ability_def.effect.clone(),
         api_type: ability_def.api_type().to_string(),
         params: ability_def.params(),
         targets: Vec::new(),
@@ -246,7 +247,9 @@ mod tests {
             PlayerId(0),
             "Liliana",
             5,
-            vec![parse_test_ability("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature")],
+            vec![parse_test_ability(
+                "AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature",
+            )],
         );
 
         let mut events = Vec::new();
@@ -340,6 +343,10 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
                 ability: ResolvedAbility {
+                    effect: crate::types::ability::Effect::Other {
+                        api_type: String::new(),
+                        params: std::collections::HashMap::new(),
+                    },
                     api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],
@@ -362,7 +369,9 @@ mod tests {
             PlayerId(0),
             "Liliana",
             2,
-            vec![parse_test_ability("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature")],
+            vec![parse_test_ability(
+                "AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature",
+            )],
         );
 
         let mut events = Vec::new();
@@ -377,7 +386,9 @@ mod tests {
             1
         );
         assert_eq!(
-            parse_loyalty_cost(&parse_test_ability("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature")),
+            parse_loyalty_cost(&parse_test_ability(
+                "AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature"
+            )),
             -3
         );
         assert_eq!(

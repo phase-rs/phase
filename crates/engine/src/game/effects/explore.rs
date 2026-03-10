@@ -144,15 +144,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_explore_ability(source_id: ObjectId) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "Explore".to_string(),
-            params: HashMap::new(),
-            targets: vec![],
-            source_id,
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw("Explore", HashMap::new(), vec![], source_id, PlayerId(0))
     }
 
     #[test]

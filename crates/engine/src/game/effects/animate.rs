@@ -101,6 +101,10 @@ mod tests {
         );
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Animate".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Animate".to_string(),
             params: HashMap::from([
                 ("Power".to_string(), "7".to_string()),

@@ -98,6 +98,10 @@ mod tests {
     fn token_creates_object_on_battlefield() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Token".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Token".to_string(),
             params: HashMap::from([
                 ("Name".to_string(), "Soldier".to_string()),
@@ -127,6 +131,10 @@ mod tests {
     fn token_emits_token_created_event() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Token".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Token".to_string(),
             params: HashMap::from([("Name".to_string(), "Angel".to_string())]),
             targets: vec![],

@@ -95,6 +95,7 @@ pub fn handle_cast_spell(
     let svars = obj.svars.clone();
     let compat_params = ability_def.params();
     let mut resolved = ResolvedAbility {
+        effect: ability_def.effect.clone(),
         api_type: ability_def.api_type().to_string(),
         params: compat_params.clone(),
         targets: Vec::new(),
@@ -233,6 +234,7 @@ pub fn handle_activate_ability(
 
     let compat_params2 = ability_def.params();
     let mut resolved = ResolvedAbility {
+        effect: ability_def.effect.clone(),
         api_type: ability_def.api_type().to_string(),
         params: compat_params2.clone(),
         targets: Vec::new(),
@@ -519,8 +521,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3"));
+            obj.abilities.push(parse_test_ability(
+                "SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3",
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -540,7 +543,8 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities.push(parse_test_ability("SP$ Draw | NumCards$ 2"));
+            obj.abilities
+                .push(parse_test_ability("SP$ Draw | NumCards$ 2"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -590,6 +594,10 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
                 ability: ResolvedAbility {
+                    effect: crate::types::ability::Effect::Other {
+                        api_type: String::new(),
+                        params: std::collections::HashMap::new(),
+                    },
                     api_type: String::new(),
                     params: HashMap::new(),
                     targets: vec![],

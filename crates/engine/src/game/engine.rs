@@ -34,7 +34,6 @@ pub enum EngineError {
 
 pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
     let mut events = Vec::new();
-    let registry = effects::build_registry();
 
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
@@ -42,7 +41,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
             }
-            priority::handle_priority_pass(state, &mut events, &registry)
+            priority::handle_priority_pass(state, &mut events)
         }
         (WaitingFor::Priority { player }, GameAction::PlayLand { card_id }) => {
             if state.priority_player != *player {
@@ -1072,6 +1071,10 @@ mod tests {
                 kind: StackEntryKind::Spell {
                     card_id: CardId(1),
                     ability: ResolvedAbility {
+                        effect: crate::types::ability::Effect::Other {
+                            api_type: String::new(),
+                            params: std::collections::HashMap::new(),
+                        },
                         api_type: String::new(),
                         params: HashMap::new(),
                         targets: vec![],
@@ -1093,6 +1096,10 @@ mod tests {
                 kind: StackEntryKind::Spell {
                     card_id: CardId(2),
                     ability: ResolvedAbility {
+                        effect: crate::types::ability::Effect::Other {
+                            api_type: String::new(),
+                            params: std::collections::HashMap::new(),
+                        },
                         api_type: String::new(),
                         params: HashMap::new(),
                         targets: vec![],
@@ -1108,15 +1115,13 @@ mod tests {
 
         assert_eq!(state.stack.len(), 2);
 
-        let registry = crate::game::effects::build_registry();
-
         // Resolve top (LIFO) -- should be id2 (Bear, creature -> battlefield)
-        stack::resolve_top(&mut state, &mut events, &registry);
+        stack::resolve_top(&mut state, &mut events);
         assert_eq!(state.stack.len(), 1);
         assert!(state.battlefield.contains(&id2)); // Creature goes to battlefield
 
         // Resolve next -- should be id1 (Bolt, instant -> graveyard)
-        stack::resolve_top(&mut state, &mut events, &registry);
+        stack::resolve_top(&mut state, &mut events);
         assert_eq!(state.stack.len(), 0);
         assert!(state.players[0].graveyard.contains(&id1)); // Instant goes to graveyard
     }
@@ -1337,7 +1342,8 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities.push(parse_test_ability("SP$ Draw | NumCards$ 2"));
+            obj.abilities
+                .push(parse_test_ability("SP$ Draw | NumCards$ 2"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -1395,7 +1401,8 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities.push(parse_test_ability("SP$ Draw | NumCards$ 2"));
+            obj.abilities
+                .push(parse_test_ability("SP$ Draw | NumCards$ 2"));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -1484,8 +1491,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3"));
+            obj.abilities.push(parse_test_ability(
+                "SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3",
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1577,8 +1585,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3"));
+            obj.abilities.push(parse_test_ability(
+                "SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3",
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1627,8 +1636,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 3"));
+            obj.abilities.push(parse_test_ability(
+                "SP$ DealDamage | ValidTgts$ Player | NumDmg$ 3",
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1725,8 +1735,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&counter_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push(parse_test_ability("SP$ Counter | ValidTgts$ Card | TargetType$ Spell"));
+            obj.abilities.push(parse_test_ability(
+                "SP$ Counter | ValidTgts$ Card | TargetType$ Spell",
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
                 generic: 0,
@@ -1789,8 +1800,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&growth_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push(parse_test_ability("SP$ Pump | ValidTgts$ Creature.YouCtrl | NumAtt$ 3 | NumDef$ 3"));
+            obj.abilities.push(parse_test_ability(
+                "SP$ Pump | ValidTgts$ Creature.YouCtrl | NumAtt$ 3 | NumDef$ 3",
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 0,
@@ -1850,8 +1862,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&bolt_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities
-                .push(parse_test_ability("SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3"));
+            obj.abilities.push(parse_test_ability(
+                "SP$ DealDamage | ValidTgts$ Creature.OppCtrl | NumDmg$ 3",
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1913,9 +1926,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&spell_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities.push(
-                parse_test_ability("SP$ DealDamage | ValidTgts$ Player | NumDmg$ 2 | SubAbility$ DBDraw"),
-            );
+            obj.abilities.push(parse_test_ability(
+                "SP$ DealDamage | ValidTgts$ Player | NumDmg$ 2 | SubAbility$ DBDraw",
+            ));
             obj.svars
                 .insert("DBDraw".to_string(), "DB$ Draw | NumCards$ 1".to_string());
             obj.mana_cost = ManaCost::Cost {
@@ -2035,6 +2048,10 @@ mod tests {
 
             // Destroy the creature via the destroy effect handler
             let ability = crate::types::ability::ResolvedAbility {
+                effect: crate::types::ability::Effect::Other {
+                    api_type: "Destroy".to_string(),
+                    params: std::collections::HashMap::new(),
+                },
                 api_type: "Destroy".to_string(),
                 params: HashMap::new(),
                 targets: vec![crate::types::ability::TargetRef::Object(creature)],
@@ -2264,6 +2281,10 @@ mod tests {
 
             // Destroy creature A
             let ability = crate::types::ability::ResolvedAbility {
+                effect: crate::types::ability::Effect::Other {
+                    api_type: "Destroy".to_string(),
+                    params: std::collections::HashMap::new(),
+                },
                 api_type: "Destroy".to_string(),
                 params: HashMap::new(),
                 targets: vec![crate::types::ability::TargetRef::Object(creature_a)],
@@ -2317,8 +2338,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.abilities
-                .push(parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}."));
+            obj.abilities.push(parse_test_ability(
+                "AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.",
+            ));
         }
 
         let result = apply(
@@ -2372,8 +2394,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.abilities
-                .push(parse_test_ability("AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}."));
+            obj.abilities.push(parse_test_ability(
+                "AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Add {G}.",
+            ));
         }
 
         let result = apply(
@@ -2614,6 +2637,10 @@ mod tests {
                 kind: crate::types::game_state::StackEntryKind::Spell {
                     card_id: CardId(99),
                     ability: crate::types::ability::ResolvedAbility {
+                        effect: crate::types::ability::Effect::Other {
+                            api_type: String::new(),
+                            params: std::collections::HashMap::new(),
+                        },
                         api_type: String::new(),
                         params: std::collections::HashMap::new(),
                         targets: vec![],

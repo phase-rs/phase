@@ -55,6 +55,10 @@ mod tests {
 
         // Put a spell on the stack
         let original_ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "DealDamage".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "DealDamage".to_string(),
             params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
             targets: vec![],
@@ -75,6 +79,10 @@ mod tests {
         });
 
         let copy_ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "CopySpell".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "CopySpell".to_string(),
             params: HashMap::new(),
             targets: vec![],
@@ -116,6 +124,10 @@ mod tests {
         assert!(state.stack.is_empty());
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "CopySpell".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "CopySpell".to_string(),
             params: HashMap::new(),
             targets: vec![],

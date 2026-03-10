@@ -69,15 +69,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_mill_ability(num_cards: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "Mill".to_string(),
-            params: HashMap::from([("NumCards".to_string(), num_cards.to_string())]),
+        ResolvedAbility::from_raw(
+            "Mill",
+            HashMap::from([("NumCards".to_string(), num_cards.to_string())]),
             targets,
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

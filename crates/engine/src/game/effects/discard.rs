@@ -176,6 +176,10 @@ mod tests {
             Zone::Hand,
         );
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "DiscardCard".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "DiscardCard".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
             targets: vec![],
@@ -210,6 +214,10 @@ mod tests {
             Zone::Hand,
         );
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "DiscardCard".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "DiscardCard".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(c2)],
@@ -237,6 +245,10 @@ mod tests {
             Zone::Hand,
         );
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "DiscardCard".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "DiscardCard".to_string(),
             params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
             targets: vec![],

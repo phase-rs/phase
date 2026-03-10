@@ -114,15 +114,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_ability(api_type: &str, target: ObjectId) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: api_type.to_string(),
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(target)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw(
+            api_type,
+            HashMap::new(),
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::database::CardDatabase;
-use crate::game::effects::build_registry as build_effect_registry;
+use crate::game::effects::is_known_effect;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::build_static_registry;
 use crate::game::triggers::build_trigger_registry;
@@ -44,11 +44,10 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
         return true;
     }
 
-    // 2. Check abilities against effect registry
-    let effect_registry = build_effect_registry();
+    // 2. Check abilities against known effect types
     for def in &obj.abilities {
         let api = def.api_type();
-        if !api.is_empty() && !effect_registry.contains_key(api) {
+        if !api.is_empty() && !is_known_effect(api) {
             return true;
         }
     }
@@ -78,7 +77,6 @@ pub fn has_unimplemented_mechanics(obj: &GameObject) -> bool {
 /// all their abilities, triggers, keywords, and static abilities
 /// supported by the engine's registries.
 pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
-    let effect_registry = build_effect_registry();
     let trigger_registry = build_trigger_registry();
     let static_registry = build_static_registry();
 
@@ -94,7 +92,7 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
             let mut missing = Vec::new();
 
             // Check abilities (SP$, AB$, DB$ lines)
-            check_abilities(&face.abilities, &effect_registry, &mut missing);
+            check_abilities(&face.abilities, &mut missing);
 
             // Check triggers
             check_triggers(&face.triggers, &trigger_registry, &mut missing);
@@ -110,7 +108,7 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 if svar_val.contains("$ ") {
                     if let Ok(def) = parse_ability(svar_val) {
                         let api = def.api_type();
-                        if !api.is_empty() && !effect_registry.contains_key(api) {
+                        if !api.is_empty() && !is_known_effect(api) {
                             let label = format!("Effect:{api}");
                             if !missing.contains(&label) {
                                 missing.push(label);
@@ -155,14 +153,10 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
     }
 }
 
-fn check_abilities(
-    abilities: &[AbilityDefinition],
-    effect_registry: &HashMap<String, crate::game::effects::EffectHandler>,
-    missing: &mut Vec<String>,
-) {
+fn check_abilities(abilities: &[AbilityDefinition], missing: &mut Vec<String>) {
     for def in abilities {
         let api = def.api_type();
-        if !api.is_empty() && !effect_registry.contains_key(api) {
+        if !api.is_empty() && !is_known_effect(api) {
             let label = format!("Effect:{api}");
             if !missing.contains(&label) {
                 missing.push(label);
@@ -177,8 +171,7 @@ fn check_triggers(
     missing: &mut Vec<String>,
 ) {
     for def in triggers {
-        if matches!(&def.mode, TriggerMode::Unknown(_))
-            || !trigger_registry.contains_key(&def.mode)
+        if matches!(&def.mode, TriggerMode::Unknown(_)) || !trigger_registry.contains_key(&def.mode)
         {
             let label = format!("Trigger:{}", def.mode);
             if !missing.contains(&label) {

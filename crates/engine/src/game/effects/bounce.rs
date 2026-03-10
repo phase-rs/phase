@@ -75,6 +75,10 @@ mod tests {
         );
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Bounce".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Bounce".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],
@@ -103,6 +107,10 @@ mod tests {
         );
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Bounce".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Bounce".to_string(),
             params: HashMap::from([("Defined".to_string(), "Self".to_string())]),
             targets: vec![],
@@ -131,6 +139,10 @@ mod tests {
         );
 
         let ability = ResolvedAbility {
+            effect: crate::types::ability::Effect::Other {
+                api_type: "Bounce".to_string(),
+                params: std::collections::HashMap::new(),
+            },
             api_type: "Bounce".to_string(),
             params: HashMap::new(),
             targets: vec![TargetRef::Object(obj_id)],

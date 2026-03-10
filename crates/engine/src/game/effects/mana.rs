@@ -122,15 +122,7 @@ mod tests {
         if let Some(amt) = amount {
             params.insert("Amount".to_string(), amt.to_string());
         }
-        ResolvedAbility {
-            api_type: "Mana".to_string(),
-            params,
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw("Mana", params, vec![], ObjectId(100), PlayerId(0))
     }
 
     #[test]
@@ -238,15 +230,8 @@ mod tests {
     #[test]
     fn missing_produced_param_errors() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            api_type: "Mana".to_string(),
-            params: HashMap::new(),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability =
+            ResolvedAbility::from_raw("Mana", HashMap::new(), vec![], ObjectId(100), PlayerId(0));
         let mut events = Vec::new();
 
         let result = resolve(&mut state, &ability, &mut events);

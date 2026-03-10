@@ -89,15 +89,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_ability(num_cards: u32) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "Draw".to_string(),
-            params: HashMap::from([("NumCards".to_string(), num_cards.to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw(
+            "Draw",
+            HashMap::from([("NumCards".to_string(), num_cards.to_string())]),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

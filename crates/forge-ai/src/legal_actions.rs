@@ -941,15 +941,13 @@ mod tests {
         let pending = engine::types::game_state::PendingCast {
             object_id: ObjectId(99),
             card_id: CardId(99),
-            ability: engine::types::ability::ResolvedAbility {
-                api_type: String::new(),
-                params: std::collections::HashMap::new(),
-                targets: Vec::new(),
-                source_id: ObjectId(99),
-                controller: PlayerId(0),
-                sub_ability: None,
-                svars: std::collections::HashMap::new(),
-            },
+            ability: engine::types::ability::ResolvedAbility::from_raw(
+                "",
+                std::collections::HashMap::new(),
+                Vec::new(),
+                ObjectId(99),
+                PlayerId(0),
+            ),
             cost: ManaCost::zero(),
         };
         state.waiting_for = WaitingFor::TargetSelection {

@@ -37,15 +37,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_gain_control_ability(target: ObjectId) -> ResolvedAbility {
-        ResolvedAbility {
-            api_type: "GainControl".to_string(),
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(target)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+        ResolvedAbility::from_raw(
+            "GainControl",
+            HashMap::new(),
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     #[test]

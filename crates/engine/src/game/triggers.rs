@@ -89,12 +89,16 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         .unwrap_or(false);
 
                     if is_noncreature {
+                        use crate::types::ability::{Effect, TargetSpec};
+                        let prowess_effect = Effect::Pump {
+                            power: 1,
+                            toughness: 1,
+                            target: TargetSpec::None,
+                        };
                         let prowess_ability = ResolvedAbility {
-                            api_type: "Pump".to_string(),
-                            params: HashMap::from([
-                                ("NumAtt".to_string(), "+1".to_string()),
-                                ("NumDef".to_string(), "+1".to_string()),
-                            ]),
+                            effect: prowess_effect.clone(),
+                            api_type: prowess_effect.api_type().to_string(),
+                            params: prowess_effect.to_params(),
                             targets: Vec::new(),
                             source_id: obj_id,
                             controller,
@@ -165,25 +169,37 @@ fn build_triggered_ability(
     controller: PlayerId,
     svars: &HashMap<String, String>,
 ) -> ResolvedAbility {
-    // Check for "Execute" param pointing to an SVar
-    let (api_type, params) = if let Some(execute_svar) = trig_def.params.get("Execute") {
-        if let Some(svar_value) = svars.get(execute_svar) {
-            // Parse the SVar as an ability string
-            if let Ok(ability_def) = crate::parser::ability::parse_ability(svar_value) {
-                (ability_def.api_type().to_string(), ability_def.params())
-            } else {
-                (String::new(), HashMap::new())
-            }
-        } else {
-            (String::new(), HashMap::new())
-        }
-    } else {
-        // No Execute param -- check for inline api_type in trigger params
-        let api_type = trig_def.params.get("ApiType").cloned().unwrap_or_default();
-        (api_type, trig_def.params.clone())
-    };
+    use crate::types::ability::Effect;
 
+    // Check for "Execute" param pointing to an SVar
+    if let Some(execute_svar) = trig_def.params.get("Execute") {
+        if let Some(svar_value) = svars.get(execute_svar) {
+            if let Ok(ability_def) = crate::parser::ability::parse_ability(svar_value) {
+                return ResolvedAbility {
+                    effect: ability_def.effect.clone(),
+                    api_type: ability_def.api_type().to_string(),
+                    params: ability_def.params(),
+                    targets: Vec::new(),
+                    source_id,
+                    controller,
+                    sub_ability: None,
+                    svars: svars.clone(),
+                };
+            }
+        }
+        // SVar not found or parse failed -- empty effect
+        return ResolvedAbility::from_raw("", HashMap::new(), Vec::new(), source_id, controller);
+    }
+
+    // No Execute param -- check for inline api_type in trigger params
+    let api_type = trig_def.params.get("ApiType").cloned().unwrap_or_default();
+    let params = trig_def.params.clone();
+    let effect = Effect::Other {
+        api_type: api_type.clone(),
+        params: params.clone(),
+    };
     ResolvedAbility {
+        effect,
         api_type,
         params,
         targets: Vec::new(),
