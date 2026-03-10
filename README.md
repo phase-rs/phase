@@ -1,8 +1,8 @@
-# Forge.rs
+# phase.rs
 
-A Magic: The Gathering game engine written in Rust with a React frontend.
+An open-source Magic: The Gathering rules engine and game client.
 
-The Rust engine compiles to both native and WASM, supporting a Tauri desktop app, browser PWA, and WebSocket multiplayer. It parses Forge's 32,300+ card definitions and implements MTG comprehensive rules using functional architecture -- pure reducers, discriminated unions, and immutable state with structural sharing.
+The Rust engine compiles to both native and WASM, supporting a Tauri desktop app, browser PWA, and WebSocket multiplayer. It implements MTG comprehensive rules using functional architecture — pure reducers, discriminated unions, and immutable state with structural sharing — with an Arena-quality React/TypeScript UI.
 
 ## Features
 
@@ -29,7 +29,7 @@ The Rust engine compiles to both native and WASM, supporting a Tauri desktop app
 ### Setup
 
 ```bash
-git clone https://github.com/mattw-nern/forge.rs && cd forge.rs
+git clone https://github.com/phase-rs/phase && cd phase
 ./scripts/setup.sh     # Downloads card data, builds WASM, installs deps
 cd client && pnpm dev  # Start dev server at localhost:5173
 ```
@@ -49,12 +49,12 @@ cd client && pnpm install && pnpm dev # Start frontend
 | Crate | Description |
 |-------|-------------|
 | `engine` | Core rules engine: types, game logic, parser, card database |
-| `forge-ai` | AI opponent: evaluation, legal actions, search |
+| `phase-ai` | AI opponent: evaluation, legal actions, search |
 | `engine-wasm` | WASM bindings via wasm-bindgen + tsify |
 | `server-core` | Server-side game session management |
-| `forge-server` | Axum WebSocket server for multiplayer |
+| `phase-server` | Axum WebSocket server for multiplayer |
 
-Dependency flow: `engine` <- `forge-ai` <- `engine-wasm` / `server-core` <- `forge-server`
+Dependency flow: `engine` <- `phase-ai` <- `engine-wasm` / `server-core` <- `phase-server`
 
 ### Frontend (`client/`)
 
@@ -112,9 +112,9 @@ cargo serve             # Run multiplayer server
 crates/
   engine/             Core rules engine
   engine-wasm/        WASM bindings
-  forge-ai/           AI opponent
+  phase-ai/           AI opponent
   server-core/        Server session management
-  forge-server/       Axum WebSocket server
+  phase-server/       Axum WebSocket server
 client/               React frontend
 scripts/              Build and setup scripts
 data/                 Downloaded Forge card files (gitignored)

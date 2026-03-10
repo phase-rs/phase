@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Forge.rs is a Magic: The Gathering game engine written in Rust (compiling to native + WASM) with a React/TypeScript frontend. It ports the open-source MTG Forge project's card definitions and game rules using functional architecture (discriminated unions, pure reducers, immutable state) instead of Forge's Java class hierarchy.
+phase.rs is a Magic: The Gathering game engine written in Rust (compiling to native + WASM) with a React/TypeScript frontend. Originally derived from the open-source MTG Forge project's card definitions, it implements MTG game rules using functional architecture (discriminated unions, pure reducers, immutable state) with an Arena-quality browser UI.
 
 ## Build & Development Commands
 
@@ -46,12 +46,12 @@ pnpm test -- --run                  # Vitest (single run, used in CI)
 ```
 engine          — Core rules engine: types, game logic, parser, database
 engine-wasm     — WASM bindings (wasm-bindgen + tsify) exposing engine to JS
-forge-ai        — AI opponent: evaluation, legal actions, card hints, search
+phase-ai        — AI opponent: evaluation, legal actions, card hints, search
 server-core     — Server-side game session management (tokio)
-forge-server    — Axum WebSocket server for multiplayer
+phase-server    — Axum WebSocket server for multiplayer
 ```
 
-**Crate dependency flow**: `engine` ← `forge-ai` ← `engine-wasm` / `server-core` ← `forge-server`
+**Crate dependency flow**: `engine` ← `phase-ai` ← `engine-wasm` / `server-core` ← `phase-server`
 
 ### Engine Internals (`crates/engine/src/`)
 
