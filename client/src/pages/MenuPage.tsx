@@ -6,6 +6,7 @@ import { CardCoverageDashboard } from "../components/controls/CardCoverageDashbo
 import { DeckGallery } from "../components/menu/DeckGallery";
 import { MenuLogo } from "../components/menu/MenuLogo";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { menuButtonClass } from "../components/menu/buttonStyles";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import type { ParsedDeck } from "../services/deckParser";
@@ -131,7 +132,7 @@ export function MenuPage() {
             {hasSavedGame && (
               <button
                 onClick={handleResumeGame}
-                className="rounded-lg bg-amber-600 px-12 py-4 text-xl font-semibold transition-colors hover:bg-amber-500"
+                className={menuButtonClass({ tone: "amber", size: "lg" })}
               >
                 Resume Game
               </button>
@@ -139,21 +140,21 @@ export function MenuPage() {
 
             <button
               onClick={() => setMenuView("deck-gallery-ai")}
-              className="rounded-lg bg-indigo-600 px-12 py-4 text-xl font-semibold transition-colors hover:bg-indigo-500"
+              className={menuButtonClass({ tone: "indigo", size: "lg" })}
             >
               {hasSavedGame ? "New Game vs AI" : "Play vs AI"}
             </button>
 
             <button
               onClick={() => setMenuView("deck-gallery-online")}
-              className="rounded-lg bg-emerald-600 px-12 py-4 text-xl font-semibold transition-colors hover:bg-emerald-500"
+              className={menuButtonClass({ tone: "emerald", size: "lg" })}
             >
               Play Online
             </button>
 
             <button
               onClick={() => navigate("/deck-builder")}
-              className="rounded-lg border border-gray-600 px-12 py-4 text-xl font-semibold transition-colors hover:border-gray-400"
+              className={menuButtonClass({ tone: "neutral", size: "lg" })}
             >
               Deck Builder
             </button>
@@ -202,21 +203,21 @@ export function MenuPage() {
 
           <button
             onClick={handleHostOnlineGame}
-            className="rounded-lg bg-emerald-600 px-8 py-3 text-base font-semibold transition-colors hover:bg-emerald-500"
+            className={menuButtonClass({ tone: "emerald", size: "md" })}
           >
             Host Game
           </button>
 
           <button
             onClick={() => setMenuView("join-code")}
-            className="rounded-lg bg-cyan-600 px-8 py-3 text-base font-semibold transition-colors hover:bg-cyan-500"
+            className={menuButtonClass({ tone: "cyan", size: "md" })}
           >
             Join Game
           </button>
 
           <button
             onClick={() => setMenuView("deck-gallery-online")}
-            className="mt-1 text-sm text-gray-400 hover:text-gray-200"
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
           >
             Back
           </button>
@@ -241,18 +242,14 @@ export function MenuPage() {
           <button
             onClick={handleJoinSubmit}
             disabled={!joinCode.trim()}
-            className={`rounded-lg px-8 py-2 text-base font-semibold transition-colors ${
-              joinCode.trim()
-                ? "bg-cyan-600 text-white hover:bg-cyan-500"
-                : "cursor-not-allowed bg-gray-700 text-gray-500"
-            }`}
+            className={menuButtonClass({ tone: "cyan", size: "md", disabled: !joinCode.trim() })}
           >
             Join
           </button>
 
           <button
             onClick={() => setMenuView("online-host-join")}
-            className="mt-1 text-sm text-gray-400 hover:text-gray-200"
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
           >
             Back
           </button>

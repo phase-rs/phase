@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { STARTER_DECKS } from "../../data/starterDecks";
 import { useCardImage } from "../../hooks/useCardImage";
+import { menuButtonClass } from "./buttonStyles";
 import type { ParsedDeck } from "../../services/deckParser";
 
 const DIFFICULTIES = [
@@ -176,7 +177,7 @@ export function DeckGallery({
       <div className="flex items-center gap-4">
         <button
           onClick={onBack}
-          className="rounded-lg border border-gray-600 px-6 py-2.5 text-sm font-semibold transition-colors hover:border-gray-400"
+          className={menuButtonClass({ tone: "neutral", size: "sm" })}
         >
           Back
         </button>
@@ -184,11 +185,7 @@ export function DeckGallery({
         <button
           onClick={onStartGame}
           disabled={noDeckSelected}
-          className={`rounded-lg px-8 py-2.5 text-sm font-semibold transition-colors ${
-            noDeckSelected
-              ? "cursor-not-allowed bg-indigo-600 opacity-50"
-              : "bg-indigo-600 hover:bg-indigo-500"
-          }`}
+          className={menuButtonClass({ tone: "indigo", size: "sm", disabled: noDeckSelected })}
         >
           {mode === "ai" ? "Start Game" : "Host Game"}
         </button>
