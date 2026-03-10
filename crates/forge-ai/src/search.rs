@@ -309,22 +309,14 @@ fn evaluate_card_value(state: &GameState, obj_id: engine::types::identifiers::Ob
     let mut value = 0.0;
 
     // Creatures: value based on power + toughness
-    if obj
-        .card_types
-        .core_types
-        .contains(&CoreType::Creature)
-    {
+    if obj.card_types.core_types.contains(&CoreType::Creature) {
         let power = obj.power.unwrap_or(0) as f64;
         let toughness = obj.toughness.unwrap_or(0) as f64;
         value += power * 1.5 + toughness;
     }
 
     // Lands: moderate value (mana development)
-    if obj
-        .card_types
-        .core_types
-        .contains(&CoreType::Land)
-    {
+    if obj.card_types.core_types.contains(&CoreType::Land) {
         value += 3.0;
     }
 

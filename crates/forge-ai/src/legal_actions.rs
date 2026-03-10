@@ -46,9 +46,7 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
             // Individual cards on top (for scry 2+)
             if cards.len() > 1 {
                 for card in cards {
-                    actions.push(GameAction::SelectCards {
-                        cards: vec![*card],
-                    });
+                    actions.push(GameAction::SelectCards { cards: vec![*card] });
                 }
             }
             actions
@@ -75,9 +73,7 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
             // Individual cards to graveyard
             if cards.len() > 1 {
                 for card in cards {
-                    actions.push(GameAction::SelectCards {
-                        cards: vec![*card],
-                    });
+                    actions.push(GameAction::SelectCards { cards: vec![*card] });
                 }
             }
             actions
@@ -279,32 +275,40 @@ fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
 /// this is a conservative approximation for UI highlighting.
 fn shard_to_mana_type(shard: &ManaCostShard) -> ManaType {
     match shard {
-        ManaCostShard::White
-        | ManaCostShard::PhyrexianWhite
-        | ManaCostShard::TwoWhite => ManaType::White,
-        ManaCostShard::Blue
-        | ManaCostShard::PhyrexianBlue
-        | ManaCostShard::TwoBlue => ManaType::Blue,
-        ManaCostShard::Black
-        | ManaCostShard::PhyrexianBlack
-        | ManaCostShard::TwoBlack => ManaType::Black,
-        ManaCostShard::Red
-        | ManaCostShard::PhyrexianRed
-        | ManaCostShard::TwoRed => ManaType::Red,
-        ManaCostShard::Green
-        | ManaCostShard::PhyrexianGreen
-        | ManaCostShard::TwoGreen => ManaType::Green,
+        ManaCostShard::White | ManaCostShard::PhyrexianWhite | ManaCostShard::TwoWhite => {
+            ManaType::White
+        }
+        ManaCostShard::Blue | ManaCostShard::PhyrexianBlue | ManaCostShard::TwoBlue => {
+            ManaType::Blue
+        }
+        ManaCostShard::Black | ManaCostShard::PhyrexianBlack | ManaCostShard::TwoBlack => {
+            ManaType::Black
+        }
+        ManaCostShard::Red | ManaCostShard::PhyrexianRed | ManaCostShard::TwoRed => ManaType::Red,
+        ManaCostShard::Green | ManaCostShard::PhyrexianGreen | ManaCostShard::TwoGreen => {
+            ManaType::Green
+        }
         ManaCostShard::Colorless => ManaType::Colorless,
         // Hybrid: use first color (conservative — may miss some castable spells)
-        ManaCostShard::WhiteBlue | ManaCostShard::PhyrexianWhiteBlue | ManaCostShard::ColorlessWhite => ManaType::White,
+        ManaCostShard::WhiteBlue
+        | ManaCostShard::PhyrexianWhiteBlue
+        | ManaCostShard::ColorlessWhite => ManaType::White,
         ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => ManaType::White,
-        ManaCostShard::BlueBlack | ManaCostShard::PhyrexianBlueBlack | ManaCostShard::ColorlessBlue => ManaType::Blue,
+        ManaCostShard::BlueBlack
+        | ManaCostShard::PhyrexianBlueBlack
+        | ManaCostShard::ColorlessBlue => ManaType::Blue,
         ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => ManaType::Blue,
-        ManaCostShard::BlackRed | ManaCostShard::PhyrexianBlackRed | ManaCostShard::ColorlessBlack => ManaType::Black,
+        ManaCostShard::BlackRed
+        | ManaCostShard::PhyrexianBlackRed
+        | ManaCostShard::ColorlessBlack => ManaType::Black,
         ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => ManaType::Black,
-        ManaCostShard::RedWhite | ManaCostShard::PhyrexianRedWhite | ManaCostShard::ColorlessRed => ManaType::Red,
+        ManaCostShard::RedWhite
+        | ManaCostShard::PhyrexianRedWhite
+        | ManaCostShard::ColorlessRed => ManaType::Red,
         ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => ManaType::Red,
-        ManaCostShard::GreenWhite | ManaCostShard::PhyrexianGreenWhite | ManaCostShard::ColorlessGreen => ManaType::Green,
+        ManaCostShard::GreenWhite
+        | ManaCostShard::PhyrexianGreenWhite
+        | ManaCostShard::ColorlessGreen => ManaType::Green,
         ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => ManaType::Green,
         // X costs and Snow cost nothing for affordability check
         ManaCostShard::X | ManaCostShard::Snow => ManaType::Colorless,
@@ -829,13 +833,7 @@ mod tests {
             shards: vec![ManaCostShard::Blue],
             generic: 0,
         };
-        add_card_to_hand(
-            &mut state,
-            PlayerId(0),
-            "Opt",
-            CoreType::Instant,
-            cost,
-        );
+        add_card_to_hand(&mut state, PlayerId(0), "Opt", CoreType::Instant, cost);
         // Only have a Forest, need Blue
         add_land_to_battlefield(&mut state, PlayerId(0), "Forest", "Forest");
         let actions = get_legal_actions(&state);

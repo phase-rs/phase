@@ -196,10 +196,10 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCostShard;
+    use std::collections::HashMap;
 
     fn make_creature_face() -> CardFace {
         CardFace {

@@ -129,10 +129,12 @@ pub fn turn_face_up(
         .ok_or_else(|| EngineError::InvalidAction("No stored face data".to_string()))?;
 
     // Check that the card actually has a morph or disguise cost
-    let has_morph_cost = back_face
-        .keywords
-        .iter()
-        .any(|k| matches!(k, Keyword::Morph(_) | Keyword::Megamorph(_) | Keyword::Disguise(_)));
+    let has_morph_cost = back_face.keywords.iter().any(|k| {
+        matches!(
+            k,
+            Keyword::Morph(_) | Keyword::Megamorph(_) | Keyword::Disguise(_)
+        )
+    });
 
     // For manifest: creature cards can be turned face up by paying mana cost
     // (handled separately -- here we just need morph/disguise keywords OR
@@ -198,11 +200,14 @@ pub fn manifest(
         .objects
         .iter()
         .find(|(_, obj)| {
-            obj.owner == player && obj.zone == Zone::Library && state.players
-                .iter()
-                .find(|p| p.id == player)
-                .map(|p| p.library.first() == Some(&obj.id))
-                .unwrap_or(false)
+            obj.owner == player
+                && obj.zone == Zone::Library
+                && state
+                    .players
+                    .iter()
+                    .find(|p| p.id == player)
+                    .map(|p| p.library.first() == Some(&obj.id))
+                    .unwrap_or(false)
         })
         .map(|(id, _)| *id)
         .ok_or_else(|| EngineError::InvalidAction("Top card object not found".to_string()))?;
@@ -292,10 +297,7 @@ mod tests {
         assert_eq!(obj.name, "");
         assert_eq!(obj.power, Some(2));
         assert_eq!(obj.toughness, Some(2));
-        assert_eq!(
-            obj.card_types.core_types,
-            vec![CoreType::Creature]
-        );
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
         assert!(obj.card_types.subtypes.is_empty());
         assert!(obj.keywords.is_empty());
         assert!(obj.abilities.is_empty());

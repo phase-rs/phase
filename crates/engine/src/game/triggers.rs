@@ -908,7 +908,9 @@ fn match_attacker_blocked(
 ) -> bool {
     if let GameEvent::BlockersDeclared { assignments } = event {
         // Check if source is among the attackers that got blocked
-        assignments.iter().any(|(_, attacker)| *attacker == source_id)
+        assignments
+            .iter()
+            .any(|(_, attacker)| *attacker == source_id)
     } else {
         false
     }
@@ -932,7 +934,9 @@ fn match_attacker_unblocked(
             return false;
         }
         // Source must not be among the blocked attackers
-        !assignments.iter().any(|(_, attacker)| *attacker == source_id)
+        !assignments
+            .iter()
+            .any(|(_, attacker)| *attacker == source_id)
     } else {
         false
     }
@@ -946,7 +950,10 @@ fn match_milled(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ZoneChanged {
-        object_id, from, to, ..
+        object_id,
+        from,
+        to,
+        ..
     } = event
     {
         if *from != Zone::Library || *to != Zone::Graveyard {
@@ -970,10 +977,7 @@ fn match_exiled(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ZoneChanged {
-        object_id, to, ..
-    } = event
-    {
+    if let GameEvent::ZoneChanged { object_id, to, .. } = event {
         if *to != Zone::Exile {
             return false;
         }
@@ -1213,8 +1217,6 @@ fn zone_matches(param: &str, zone: &Zone) -> bool {
         _ => false,
     }
 }
-
-
 
 #[cfg(test)]
 pub mod tests {
@@ -2006,9 +2008,7 @@ pub mod tests {
             assignments: vec![],
         };
         let params = HashMap::new();
-        assert!(match_attacker_unblocked(
-            &event, &params, attacker, &state
-        ));
+        assert!(match_attacker_unblocked(&event, &params, attacker, &state));
     }
 
     #[test]

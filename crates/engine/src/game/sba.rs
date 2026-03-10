@@ -260,9 +260,7 @@ fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
                 .objects
                 .get(id)
                 .map(|obj| {
-                    obj.card_types
-                        .subtypes
-                        .contains(&"Equipment".to_string())
+                    obj.card_types.subtypes.contains(&"Equipment".to_string())
                         && obj.attached_to.is_some()
                         && !is_valid_attachment_target(state, obj.attached_to.unwrap())
                 })

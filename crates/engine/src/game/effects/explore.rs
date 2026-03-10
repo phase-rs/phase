@@ -10,11 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 
 /// Add a +1/+1 counter to the exploring creature via the replacement pipeline.
-fn add_explore_counter(
-    state: &mut GameState,
-    explorer_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-) {
+fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mut Vec<GameEvent>) {
     let proposed = ProposedEvent::AddCounter {
         object_id: explorer_id,
         counter_type: "P1P1".to_string(),

@@ -257,7 +257,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 if has_attackers {
                     let defending = PlayerId(1 - state.active_player.0);
                     let valid_blocker_ids = super::combat::get_valid_blocker_ids(state);
-                    return WaitingFor::DeclareBlockers { player: defending, valid_blocker_ids };
+                    return WaitingFor::DeclareBlockers {
+                        player: defending,
+                        valid_blocker_ids,
+                    };
                 } else {
                     // No attackers, skip to EndCombat
                     state.phase = Phase::EndCombat;

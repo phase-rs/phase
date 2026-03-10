@@ -71,9 +71,10 @@ pub fn handle_activate_loyalty(
         ));
     }
 
-    let obj = state.objects.get(&pw_id).ok_or_else(|| {
-        EngineError::InvalidAction("Planeswalker not found".to_string())
-    })?;
+    let obj = state
+        .objects
+        .get(&pw_id)
+        .ok_or_else(|| EngineError::InvalidAction("Planeswalker not found".to_string()))?;
 
     if ability_index >= obj.abilities.len() {
         return Err(EngineError::InvalidAction(
@@ -160,7 +161,11 @@ fn parse_loyalty_cost(ability_text: &str) -> i32 {
 }
 
 /// Parse a planeswalker ability text into a ResolvedAbility.
-fn parse_pw_ability(ability_text: &str, source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+fn parse_pw_ability(
+    ability_text: &str,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> ResolvedAbility {
     // Try to parse via the standard parser; fall back to a minimal ability
     match crate::parser::ability::parse_ability(ability_text) {
         Ok(def) => ResolvedAbility {
@@ -380,8 +385,14 @@ mod tests {
 
     #[test]
     fn parse_loyalty_cost_extracts_values() {
-        assert_eq!(parse_loyalty_cost("AB$ Draw | PW_Cost$ +1 | NumCards$ 1"), 1);
-        assert_eq!(parse_loyalty_cost("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature"), -3);
+        assert_eq!(
+            parse_loyalty_cost("AB$ Draw | PW_Cost$ +1 | NumCards$ 1"),
+            1
+        );
+        assert_eq!(
+            parse_loyalty_cost("AB$ Destroy | PW_Cost$ -3 | ValidTgts$ Creature"),
+            -3
+        );
         assert_eq!(parse_loyalty_cost("AB$ Mill | PW_Cost$ 0 | NumCards$ 3"), 0);
         assert_eq!(parse_loyalty_cost("AB$ Draw | NumCards$ 1"), 0); // no PW_Cost
     }

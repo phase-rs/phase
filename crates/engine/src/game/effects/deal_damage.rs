@@ -43,13 +43,14 @@ pub fn resolve(
                                 .objects
                                 .get_mut(obj_id)
                                 .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-                            if obj.card_types.core_types.contains(
-                                &crate::types::card_type::CoreType::Planeswalker,
-                            ) {
+                            if obj
+                                .card_types
+                                .core_types
+                                .contains(&crate::types::card_type::CoreType::Planeswalker)
+                            {
                                 // Damage to planeswalker removes loyalty counters
                                 let current = obj.loyalty.unwrap_or(0);
-                                obj.loyalty =
-                                    Some(current.saturating_sub(amount));
+                                obj.loyalty = Some(current.saturating_sub(amount));
                             } else {
                                 obj.damage_marked += amount;
                             }

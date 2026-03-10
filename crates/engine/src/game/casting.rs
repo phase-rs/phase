@@ -720,12 +720,18 @@ mod tests {
         }
 
         // Cast the spell → should enter TargetSelection
-        let result = apply(&mut state, GameAction::CastSpell {
-            card_id: CardId(10),
-            targets: vec![],
-        })
+        let result = apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
         .unwrap();
-        assert!(matches!(result.waiting_for, WaitingFor::TargetSelection { .. }));
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
         // Card should still be in hand
         assert!(!state.players[0].hand.is_empty());
 

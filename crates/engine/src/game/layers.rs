@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
+use std::collections::HashMap;
 
 use crate::game::filter::object_matches_filter;
 use crate::game::game_object::CounterType;
@@ -335,7 +335,6 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

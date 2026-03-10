@@ -31,9 +31,7 @@ pub fn resolve(
 
     state.stack.push(copy_entry);
 
-    events.push(GameEvent::StackPushed {
-        object_id: copy_id,
-    });
+    events.push(GameEvent::StackPushed { object_id: copy_id });
 
     events.push(GameEvent::EffectResolved {
         api_type: ability.api_type.clone(),

@@ -662,7 +662,9 @@ mod tests {
             "Lifelink",
             "Shroud",
         ] {
-            let handler = registry.get(*mode).unwrap_or_else(|| panic!("{} should be in registry", mode));
+            let handler = registry
+                .get(*mode)
+                .unwrap_or_else(|| panic!("{} should be in registry", mode));
             let effects = handler(&state, &params, ObjectId(1));
             assert!(
                 !effects.is_empty(),

@@ -270,8 +270,18 @@ mod tests {
         let mine = add_creature(&mut state, PlayerId(0), "Mine");
         let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
 
-        assert!(object_matches_filter(&state, mine, "Creature.YouCtrl", mine));
-        assert!(!object_matches_filter(&state, theirs, "Creature.YouCtrl", mine));
+        assert!(object_matches_filter(
+            &state,
+            mine,
+            "Creature.YouCtrl",
+            mine
+        ));
+        assert!(!object_matches_filter(
+            &state,
+            theirs,
+            "Creature.YouCtrl",
+            mine
+        ));
     }
 
     #[test]
@@ -280,8 +290,18 @@ mod tests {
         let mine = add_creature(&mut state, PlayerId(0), "Mine");
         let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
 
-        assert!(!object_matches_filter(&state, mine, "Creature.OppCtrl", mine));
-        assert!(object_matches_filter(&state, theirs, "Creature.OppCtrl", mine));
+        assert!(!object_matches_filter(
+            &state,
+            mine,
+            "Creature.OppCtrl",
+            mine
+        ));
+        assert!(object_matches_filter(
+            &state,
+            theirs,
+            "Creature.OppCtrl",
+            mine
+        ));
     }
 
     #[test]
@@ -292,9 +312,24 @@ mod tests {
         let enemy = add_creature(&mut state, PlayerId(1), "Enemy");
 
         // "Creature.Other+YouCtrl" — other creatures I control
-        assert!(!object_matches_filter(&state, source, "Creature.Other+YouCtrl", source));
-        assert!(object_matches_filter(&state, ally, "Creature.Other+YouCtrl", source));
-        assert!(!object_matches_filter(&state, enemy, "Creature.Other+YouCtrl", source));
+        assert!(!object_matches_filter(
+            &state,
+            source,
+            "Creature.Other+YouCtrl",
+            source
+        ));
+        assert!(object_matches_filter(
+            &state,
+            ally,
+            "Creature.Other+YouCtrl",
+            source
+        ));
+        assert!(!object_matches_filter(
+            &state,
+            enemy,
+            "Creature.Other+YouCtrl",
+            source
+        ));
     }
 
     #[test]
@@ -306,11 +341,7 @@ mod tests {
 
     #[test]
     fn player_filter_you() {
-        assert!(player_matches_filter(
-            PlayerId(0),
-            "You",
-            Some(PlayerId(0))
-        ));
+        assert!(player_matches_filter(PlayerId(0), "You", Some(PlayerId(0))));
         assert!(!player_matches_filter(
             PlayerId(1),
             "You",
@@ -325,10 +356,6 @@ mod tests {
             "Opp",
             Some(PlayerId(0))
         ));
-        assert!(player_matches_filter(
-            PlayerId(1),
-            "Opp",
-            Some(PlayerId(0))
-        ));
+        assert!(player_matches_filter(PlayerId(1), "Opp", Some(PlayerId(0))));
     }
 }

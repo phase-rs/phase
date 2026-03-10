@@ -732,7 +732,10 @@ fn dealt_damage_matcher(
     source: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let ProposedEvent::Damage { target, is_combat, .. } = event {
+    if let ProposedEvent::Damage {
+        target, is_combat, ..
+    } = event
+    {
         // Match if the source object of this replacement is the target of the damage
         let is_target = match target {
             crate::types::ability::TargetRef::Object(oid) => *oid == source,

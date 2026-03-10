@@ -114,7 +114,14 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             casting::handle_select_targets(state, *player, targets, &mut events)?
         }
-        (WaitingFor::TargetSelection { player, pending_cast, .. }, GameAction::CancelCast) => {
+        (
+            WaitingFor::TargetSelection {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
             casting::handle_cancel_cast(state, pending_cast, &mut events);
             WaitingFor::Priority { player: *player }
         }
@@ -201,7 +208,10 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                 turns::auto_advance(state, &mut events)
             }
         }
-        (WaitingFor::DeclareBlockers { player, .. }, GameAction::DeclareBlockers { assignments }) => {
+        (
+            WaitingFor::DeclareBlockers { player, .. },
+            GameAction::DeclareBlockers { assignments },
+        ) => {
             let defending = PlayerId(1 - state.active_player.0);
             if defending != *player {
                 return Err(EngineError::WrongPlayer);
@@ -2413,11 +2423,7 @@ mod tests {
             id
         }
 
-        fn create_creature_on_bf(
-            state: &mut GameState,
-            player: PlayerId,
-            name: &str,
-        ) -> ObjectId {
+        fn create_creature_on_bf(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
             let id = zones::create_object(
                 state,
                 CardId(state.next_object_id),

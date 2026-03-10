@@ -332,17 +332,31 @@ fn apply_combat_damage(
     events: &mut Vec<GameEvent>,
 ) {
     for (source_id, assignment) in assignments {
-        let (source_has_deathtouch, source_has_lifelink, source_has_wither, source_has_infect, source_controller) = state
+        let (
+            source_has_deathtouch,
+            source_has_lifelink,
+            source_has_wither,
+            source_has_infect,
+            source_controller,
+        ) = state
             .objects
             .get(source_id)
-            .map(|o| (
-                o.has_keyword(&Keyword::Deathtouch),
-                o.has_keyword(&Keyword::Lifelink),
-                o.has_keyword(&Keyword::Wither),
-                o.has_keyword(&Keyword::Infect),
-                o.controller,
-            ))
-            .unwrap_or((false, false, false, false, crate::types::player::PlayerId(0)));
+            .map(|o| {
+                (
+                    o.has_keyword(&Keyword::Deathtouch),
+                    o.has_keyword(&Keyword::Lifelink),
+                    o.has_keyword(&Keyword::Wither),
+                    o.has_keyword(&Keyword::Infect),
+                    o.controller,
+                )
+            })
+            .unwrap_or((
+                false,
+                false,
+                false,
+                false,
+                crate::types::player::PlayerId(0),
+            ));
 
         let target_ref = match &assignment.target {
             DamageTarget::Object(id) => TargetRef::Object(*id),
@@ -370,7 +384,8 @@ fn apply_combat_damage(
                             if source_has_wither || source_has_infect {
                                 // Wither/Infect: apply -1/-1 counters instead of damage
                                 if let Some(target_obj) = state.objects.get_mut(target_id) {
-                                    let counter = crate::game::game_object::CounterType::Minus1Minus1;
+                                    let counter =
+                                        crate::game::game_object::CounterType::Minus1Minus1;
                                     let entry = target_obj.counters.entry(counter).or_insert(0);
                                     *entry += amount;
                                     if source_has_deathtouch {
@@ -379,13 +394,14 @@ fn apply_combat_damage(
                                 }
                                 state.layers_dirty = true;
                             } else if let Some(target_obj) = state.objects.get_mut(target_id) {
-                                if target_obj.card_types.core_types.contains(
-                                    &crate::types::card_type::CoreType::Planeswalker,
-                                ) {
+                                if target_obj
+                                    .card_types
+                                    .core_types
+                                    .contains(&crate::types::card_type::CoreType::Planeswalker)
+                                {
                                     // Damage to planeswalker removes loyalty
                                     let current = target_obj.loyalty.unwrap_or(0);
-                                    target_obj.loyalty =
-                                        Some(current.saturating_sub(amount));
+                                    target_obj.loyalty = Some(current.saturating_sub(amount));
                                 } else {
                                     target_obj.damage_marked += amount;
                                     if source_has_deathtouch {

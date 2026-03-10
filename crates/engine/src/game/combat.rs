@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::game_object::GameObject;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
-use super::game_object::GameObject;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
@@ -346,7 +346,8 @@ pub fn has_summoning_sickness(obj: &GameObject, turn_number: u32) -> bool {
     if obj.has_keyword(&Keyword::Haste) {
         return false;
     }
-    obj.entered_battlefield_turn.is_some_and(|etb| etb >= turn_number)
+    obj.entered_battlefield_turn
+        .is_some_and(|etb| etb >= turn_number)
 }
 
 /// Return the IDs of all creatures the active player could legally declare as attackers.

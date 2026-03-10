@@ -143,28 +143,39 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
             "AlternateMode" => state.alt_mode = Some(value.to_string()),
             _ => {} // skip unknown
         },
-        Some(b'C') => if key == "Colors" {
-            let colors: Vec<ManaColor> =
-                value.split(',').filter_map(parse_color).collect();
-            if !colors.is_empty() {
-                face.color_override = Some(colors);
+        Some(b'C') => {
+            if key == "Colors" {
+                let colors: Vec<ManaColor> = value.split(',').filter_map(parse_color).collect();
+                if !colors.is_empty() {
+                    face.color_override = Some(colors);
+                }
             }
-        },
+        }
         Some(b'D') => match key {
             "Defense" => face.defense = Some(value.to_string()),
             "DeckHints" | "DeckNeeds" | "DeckHas" => {} // deferred
             _ => {}
         },
-        Some(b'F') => if key == "FlavorName" { face.flavor_name = Some(value.to_string()) },
-        Some(b'K') => if key == "K" {
-            for kw in value.split(',') {
-                let kw = kw.trim();
-                if !kw.is_empty() {
-                    face.keywords.push(kw.to_string());
+        Some(b'F') => {
+            if key == "FlavorName" {
+                face.flavor_name = Some(value.to_string())
+            }
+        }
+        Some(b'K') => {
+            if key == "K" {
+                for kw in value.split(',') {
+                    let kw = kw.trim();
+                    if !kw.is_empty() {
+                        face.keywords.push(kw.to_string());
+                    }
                 }
             }
-        },
-        Some(b'L') => if key == "Loyalty" { face.loyalty = Some(value.to_string()) },
+        }
+        Some(b'L') => {
+            if key == "Loyalty" {
+                face.loyalty = Some(value.to_string())
+            }
+        }
         Some(b'M') => match key {
             "ManaCost" => {
                 if let Ok(cost) = mana_cost::parse(value) {
@@ -174,8 +185,16 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
             "MeldPair" => state.meld_with = Some(value.to_string()),
             _ => {}
         },
-        Some(b'N') => if key == "Name" { face.name = Some(value.to_string()) },
-        Some(b'O') => if key == "Oracle" { face.oracle_text = Some(value.to_string()) },
+        Some(b'N') => {
+            if key == "Name" {
+                face.name = Some(value.to_string())
+            }
+        }
+        Some(b'O') => {
+            if key == "Oracle" {
+                face.oracle_text = Some(value.to_string())
+            }
+        }
         Some(b'P') => match key {
             "PT" => {
                 if let Some((p, t)) = value.split_once('/') {
@@ -186,7 +205,11 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
             "PartnerWith" => state.partner_with = Some(value.to_string()),
             _ => {}
         },
-        Some(b'R') => if key == "R" { face.replacements.push(value.to_string()) },
+        Some(b'R') => {
+            if key == "R" {
+                face.replacements.push(value.to_string())
+            }
+        }
         Some(b'S') => match key {
             "S" => face.static_abilities.push(value.to_string()),
             "SVar" => {
