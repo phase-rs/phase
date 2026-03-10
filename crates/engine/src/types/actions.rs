@@ -40,6 +40,10 @@ pub enum GameAction {
         index: usize,
     },
     CancelCast,
+    Equip {
+        equipment_id: ObjectId,
+        target_id: ObjectId,
+    },
 }
 
 #[cfg(test)]
