@@ -9,6 +9,7 @@ import { fetchCardImageUrl } from "../../services/scryfall.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { hexToRgb } from "./particleEffects.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
 import { CastArcAnimation } from "./CastArcAnimation.tsx";
 import { DamageVignette } from "./DamageVignette.tsx";
@@ -108,8 +109,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           if (target && "Object" in target) {
             const objPos = getObjectPosition(target.Object);
             if (objPos) pos = objPos;
-            // Emit particle burst at target
-            particleRef.current?.emitBurst(pos.x, pos.y, "#ef4444", 12);
+            if (vfxQuality !== "minimal") {
+              particleRef.current?.damageFlash(pos.x, pos.y, amount);
+            }
           } else if (target && "Player" in target) {
             isPlayerTarget = true;
             const playerId = target.Player;
@@ -117,6 +119,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               x: window.innerWidth - 140,
               y: playerId === 0 ? window.innerHeight - 120 : 80,
             };
+            if (vfxQuality !== "minimal") {
+              particleRef.current?.playerDamage(pos.x, pos.y, amount);
+            }
           }
 
           // Floating number
@@ -160,6 +165,11 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               color: amount > 0 ? "#22c55e" : "#ef4444",
             },
           ]);
+
+          // Heal particle effect for life gain
+          if (amount > 0 && vfxQuality !== "minimal") {
+            particleRef.current?.healEffect(x, y, amount);
+          }
           break;
         }
 
@@ -167,10 +177,13 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         case "PermanentSacrificed": {
           const objectId = data.object_id as number | undefined;
           if (objectId != null) {
-            // Particle burst
+            // Explosion particle effect
             const pos = getObjectPosition(objectId);
-            if (pos) {
-              particleRef.current?.emitBurst(pos.x, pos.y, "#ef4444", 16);
+            if (pos && vfxQuality !== "minimal") {
+              const gameState = useGameStore.getState().gameState;
+              const colors = gameState?.objects[objectId]?.color ?? [];
+              const explosionColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
+              particleRef.current?.explosion(pos.x, pos.y, explosionColor);
             }
 
             // Death shatter (full/reduced quality) or death clone (minimal)
@@ -218,11 +231,13 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           if (cardId != null) {
             const pos = getObjectPosition(cardId);
             if (pos) {
-              // Use card colors for WUBRG burst
+              // Spell impact with WUBRG color
               const gameState = useGameStore.getState().gameState;
               const colors = gameState?.objects[cardId]?.color ?? [];
               const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
-              particleRef.current?.emitBurst(pos.x, pos.y, burstColor, 12);
+              if (vfxQuality !== "minimal") {
+                particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
+              }
 
               // Cast arc animation (hand -> stack)
               if (vfxQuality !== "minimal") {
@@ -241,11 +256,13 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         }
 
         case "AttackersDeclared": {
-          const attackerIds = (data.attacker_ids as number[]) ?? [];
-          for (const attackerId of attackerIds) {
-            const pos = getObjectPosition(attackerId);
-            if (pos) {
-              particleRef.current?.emitBurst(pos.x, pos.y, "#ffffff", 8);
+          if (vfxQuality !== "minimal") {
+            const attackerIds = (data.attacker_ids as number[]) ?? [];
+            for (const attackerId of attackerIds) {
+              const pos = getObjectPosition(attackerId);
+              if (pos) {
+                particleRef.current?.attackBurst(pos.x, pos.y);
+              }
             }
           }
           break;
@@ -270,6 +287,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   ...prev,
                   { id, position: pos, colors: getCardColors(colors) },
                 ]);
+
+                // Summon burst particle effect
+                if (vfxQuality !== "minimal") {
+                  const summonColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
+                  particleRef.current?.summonBurst(pos.x, pos.y, summonColor);
+                }
 
                 // Resolve-permanent arc (stack -> battlefield)
                 if (fromZone === "Stack" && vfxQuality !== "minimal") {
@@ -314,6 +337,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 ...prev,
                 { id, position: pos, colors: getCardColors(colors) },
               ]);
+
+              // Summon burst for tokens
+              if (vfxQuality !== "minimal") {
+                const tokenColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
+                particleRef.current?.summonBurst(pos.x, pos.y, tokenColor);
+              }
             }
           }
           break;
@@ -450,7 +479,6 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             colors={reveal.colors}
             speedMultiplier={speedMultiplier}
             onComplete={() => handleRevealComplete(reveal.id)}
-            particleRef={particleRef}
           />
         ))}
       </AnimatePresence>
