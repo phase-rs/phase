@@ -1,0 +1,49 @@
+---
+source: crates/engine/tests/rules/layers.rs
+expression: runner.snapshot()
+---
+{
+  "players": [
+    {
+      "life": 20,
+      "hand": [],
+      "graveyard": []
+    },
+    {
+      "life": 20,
+      "hand": [],
+      "graveyard": []
+    }
+  ],
+  "battlefield": [
+    {
+      "name": "Bear",
+      "owner": 0,
+      "power": 2,
+      "toughness": 2,
+      "tapped": false,
+      "damage": 0,
+      "keywords": []
+    },
+    {
+      "name": "Lord",
+      "owner": 0,
+      "power": 2,
+      "toughness": 2,
+      "tapped": false,
+      "damage": 0,
+      "keywords": []
+    },
+    {
+      "name": "Setter",
+      "owner": 0,
+      "power": 2,
+      "toughness": 2,
+      "tapped": false,
+      "damage": 0,
+      "keywords": []
+    }
+  ],
+  "stack": [],
+  "events": []
+}

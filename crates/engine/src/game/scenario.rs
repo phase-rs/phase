@@ -364,6 +364,15 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// Attach a continuous static with explicit params (for lord/pump effects).
+    pub fn with_continuous_static(&mut self, params: HashMap<String, String>) -> &mut Self {
+        self.obj().static_definitions.push(StaticDefinition {
+            mode: StaticMode::Continuous,
+            params,
+        });
+        self
+    }
+
     /// Attach a trigger definition.
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
         self.obj().trigger_definitions.push(TriggerDefinition {
@@ -423,6 +432,20 @@ impl<'a> CardBuilder<'a> {
     /// Set the mana cost of this card.
     pub fn with_mana_cost(&mut self, cost: crate::types::mana::ManaCost) -> &mut Self {
         self.obj().mana_cost = cost;
+        self
+    }
+
+    /// Add +1/+1 counters to this creature.
+    pub fn with_plus_counters(&mut self, count: u32) -> &mut Self {
+        let counter = crate::game::game_object::CounterType::Plus1Plus1;
+        *self.obj().counters.entry(counter).or_insert(0) += count;
+        self
+    }
+
+    /// Add -1/-1 counters to this creature.
+    pub fn with_minus_counters(&mut self, count: u32) -> &mut Self {
+        let counter = crate::game::game_object::CounterType::Minus1Minus1;
+        *self.obj().counters.entry(counter).or_insert(0) += count;
         self
     }
 }
