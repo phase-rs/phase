@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: completed
-stopped_at: Phase 22 context gathered
-last_updated: "2026-03-10T18:37:59.431Z"
-last_activity: 2026-03-10 — Completed Plan 21-04 (Typed Effect Dispatch)
+status: in-progress
+stopped_at: Completed 22-01-PLAN.md
+last_updated: "2026-03-10T19:13:14Z"
+last_activity: 2026-03-10 — Completed Plan 22-01 (GameScenario Test Harness)
 progress:
   total_phases: 5
   completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
-  percent: 20
+  total_plans: 8
+  completed_plans: 6
+  percent: 30
 ---
 
 # Project State
@@ -21,29 +21,30 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 21 — Schema & MTGJSON Foundation
+**Current focus:** Phase 22 — Test Infrastructure
 
 ## Current Position
 
-Phase: 21 (first of 5 in v1.2) — Schema & MTGJSON Foundation -- COMPLETE
-Plan: 5/5 complete (all plans done, including gap closure plans 03+04)
-Status: Phase 21 complete — ready for Phase 22
-Last activity: 2026-03-10 — Completed Plan 21-04 (Typed Effect Dispatch)
+Phase: 22 (second of 5 in v1.2) — Test Infrastructure
+Plan: 1/3 complete
+Status: Plan 22-01 complete — ready for Plan 22-02
+Last activity: 2026-03-10 — Completed Plan 22-01 (GameScenario Test Harness)
 
-Progress: [██░░░░░░░░] 20%
+Progress: [███░░░░░░░] 30%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5 (v1.2)
-- Average duration: 14min
-- Total execution time: 1.1 hours
+- Total plans completed: 6 (v1.2)
+- Average duration: 13min
+- Total execution time: 1.2 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 21 | 5/5 | 68min | 14min |
+| 22 | 1/3 | 8min | 8min |
 
 ## Accumulated Context
 
@@ -67,6 +68,9 @@ Recent decisions affecting current work:
 - [Phase 21-02]: parse_test_ability() helpers in test modules for readable typed test data construction
 - [21-04]: Kept api_type/params on ResolvedAbility for backward compat; typed dispatch via match on effect field
 - [21-04]: from_raw() wraps in Effect::Other for test compat; new() builds from typed Effect for production code
+- [22-01]: CardBuilder borrows &mut GameState (not &mut GameScenario) to avoid borrow checker conflicts
+- [22-01]: scenario.rs not #[cfg(test)] gated -- integration tests compile crate as dependency, can't access cfg(test) modules
+- [22-01]: #[path] attributes for integration test module resolution in Cargo test binaries
 
 ### Pending Todos
 
@@ -78,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T18:37:59.428Z
-Stopped at: Phase 22 context gathered
-Resume file: .planning/phases/22-test-infrastructure/22-CONTEXT.md
+Last session: 2026-03-10T19:13:14Z
+Stopped at: Completed 22-01-PLAN.md
+Resume file: .planning/phases/22-test-infrastructure/22-01-SUMMARY.md
