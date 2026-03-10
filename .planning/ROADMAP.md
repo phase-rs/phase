@@ -44,7 +44,7 @@
 
 **Milestone Goal:** Replace Forge's GPL card data with MTGJSON (MIT) + custom ability JSON format, add comprehensive test coverage, and relicense the project as MIT/Apache-2.0.
 
-- [x] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on (completed 2026-03-10)
+- [ ] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on
 - [ ] **Phase 22: Test Infrastructure** - Build the GameScenario test harness and rules correctness test suite before any cards are migrated
 - [ ] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards
 - [ ] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation
@@ -61,12 +61,13 @@
   2. A hand-authored ability JSON file for a test card deserializes into the engine's AbilityDefinition/TriggerDefinition/StaticDefinition/ReplacementDefinition types without error
   3. Running `cargo test` produces (or validates against) a JSON Schema file that documents every field in the ability format, usable for editor autocompletion
   4. Round-trip test: an ability JSON file serialized from Rust types and deserialized back produces identical typed structures
-**Plans**: 3 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 21-01-PLAN.md — Define typed enums (Effect, StaticMode, ReplacementEvent) and add schemars/insta deps — completed 2026-03-10
-- [ ] 21-02-PLAN.md — Refactor all ~13 consumer files to use typed ability structs
-- [ ] 21-03-PLAN.md — MTGJSON loader, ability JSON file, schema generation, and snapshot tests
+- [x] 21-02-PLAN.md — Refactor all ~13 consumer files to use typed ability structs — completed 2026-03-10
+- [x] 21-03-PLAN.md — MTGJSON loader, ability JSON file, schema generation, and snapshot tests — completed 2026-03-10
+- [ ] 21-04-PLAN.md — Gap closure: thread typed Effect through ResolvedAbility and replace string dispatch
 
 ### Phase 22: Test Infrastructure
 **Goal**: Developers can write self-contained rules correctness tests that run in CI with no filesystem dependencies
@@ -139,7 +140,7 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
-| 21. Schema & MTGJSON Foundation | 3/3 | Complete   | 2026-03-10 | - |
+| 21. Schema & MTGJSON Foundation | v1.2 | 3/4 | Gap closure | - |
 | 22. Test Infrastructure | v1.2 | 0/? | Not started | - |
 | 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |
