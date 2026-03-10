@@ -27,7 +27,7 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 - [x] **TEST-01**: A self-contained GameScenario test harness provides add_card(), set_phase(), act(), and assertion helpers with no external filesystem dependencies
 - [x] **TEST-02**: Scenario-based rules correctness tests cover core mechanics: ETB triggers, combat, stack resolution, state-based actions, layer system, keyword interactions
 - [x] **TEST-03**: insta snapshot tests capture GameState after action sequences to detect unintended engine changes across commits
-- [ ] **TEST-04**: Per-card behavioral parity tests confirm migrated cards produce identical game outcomes as the original Forge format (sampled across mechanics, not exhaustive per-card)
+- [x] **TEST-04**: Per-card behavioral parity tests confirm migrated cards produce identical game outcomes as the original Forge format (sampled across mechanics, not exhaustive per-card)
 
 ### Licensing & Cleanup
 
@@ -75,7 +75,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-01 | Phase 22 | Complete |
 | TEST-02 | Phase 22 | Complete |
 | TEST-03 | Phase 22 | Complete |
-| TEST-04 | Phase 24 | Pending |
+| TEST-04 | Phase 24 | Complete |
 | LICN-01 | Phase 25 | Pending |
 | LICN-02 | Phase 25 | Pending |
 | LICN-03 | Phase 25 | Pending |

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: in-progress
-stopped_at: Completed 24-01-PLAN.md
-last_updated: "2026-03-10T22:30:00.000Z"
-last_activity: 2026-03-10 — Completed Plan 24-01 (Migration Tool & Cost Parser)
+stopped_at: Completed 24-02-PLAN.md
+last_updated: "2026-03-10T22:57:00.000Z"
+last_activity: 2026-03-10 — Completed Plan 24-02 (Parity Tests & Standard Card Manifest)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 12
-  completed_plans: 10
-  percent: 83
+  completed_plans: 11
+  percent: 92
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 24 Card Migration — Plan 01 complete, Plans 02-03 pending
+**Current focus:** Phase 24 Card Migration — Plans 01-02 complete, Plan 03 pending
 
 ## Current Position
 
 Phase: 24 (fourth of 5 in v1.2) — Card Migration
-Plan: 1/3 complete
-Status: Plan 24-01 complete, Plan 24-02 pending
-Last activity: 2026-03-10 — Completed Plan 24-01 (Migration Tool & Cost Parser)
+Plan: 2/3 complete
+Status: Plan 24-02 complete, Plan 24-03 pending
+Last activity: 2026-03-10 — Completed Plan 24-02 (Parity Tests & Standard Card Manifest)
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 11 (v1.2)
-- Average duration: 12min
-- Total execution time: 2.2 hours
+- Total plans completed: 12 (v1.2)
+- Average duration: 13min
+- Total execution time: 2.6 hours
 
 **By Phase:**
 
@@ -46,7 +46,7 @@ Progress: [████████░░] 83%
 | 21 | 5/5 | 68min | 14min |
 | 22 | 3/3 | 35min | 12min |
 | 23 | 2/2 | 18min | 9min |
-| 24 | 1/3 | 12min | 12min |
+| 24 | 2/3 | 34min | 17min |
 
 ## Accumulated Context
 
@@ -91,6 +91,10 @@ Recent decisions affecting current work:
 - [24-01]: Migration overwrites 8 hand-authored JSON files from Phase 23 for consistency across all 32,274 cards
 - [24-01]: json_smoke_test adapted: error-type checking (not zero errors) and fixture-centric cross-validation
 - [24-01]: 26 Forge files with missing Name field skipped as errors (Specialize variants with alternate format)
+- [24-02]: Keyword parity compares base names (before colon) -- Forge "Ward:1" matches MTGJSON "Ward"
+- [24-02]: NoCost and Cost{0,[]} treated as equivalent for basic land mana cost comparison
+- [24-02]: Extra MTGJSON-only keywords (Scry, Mill) allowed -- action keywords Forge doesn't track
+- [24-02]: normalize_for_match strips all non-alphanumeric chars (fixes apostrophe card matching)
 
 ### Pending Todos
 
@@ -102,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T22:30:00.000Z
-Stopped at: Completed 24-01-PLAN.md
-Resume file: .planning/phases/24-card-migration/24-01-SUMMARY.md
+Last session: 2026-03-10T22:57:00.000Z
+Stopped at: Completed 24-02-PLAN.md
+Resume file: .planning/phases/24-card-migration/24-02-SUMMARY.md
