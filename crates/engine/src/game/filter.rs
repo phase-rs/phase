@@ -64,6 +64,12 @@ fn filter_inner(
         None => return false,
     };
 
+    // Pre-extract source properties needed by matches_property
+    let source_attached_to = state
+        .objects
+        .get(&source_id)
+        .and_then(|src| src.attached_to);
+
     // Split on `.` first: left side is type, right side is `+`-separated properties.
     // If there's no `.`, the whole string could be either a type or a property.
     let (type_part, props_part) = match filter.split_once('.') {
@@ -88,7 +94,14 @@ fn filter_inner(
     // --- Property restrictions (+ or . separated, per Forge convention) ---
     if let Some(props) = props_part {
         for prop in props.split(['+', '.']) {
-            if !matches_property(prop, obj, object_id, source_id, source_controller) {
+            if !matches_property(
+                prop,
+                obj,
+                object_id,
+                source_id,
+                source_controller,
+                source_attached_to,
+            ) {
                 return false;
             }
         }
@@ -137,12 +150,16 @@ fn matches_type(type_str: &str, obj: &crate::game::game_object::GameObject) -> b
 }
 
 /// Check if an object satisfies a single property restriction.
+///
+/// `source_attached_to` is the pre-extracted `attached_to` field from the source
+/// object, used for `EnchantedBy` matching (aura static abilities).
 fn matches_property(
     prop: &str,
     obj: &crate::game::game_object::GameObject,
     object_id: ObjectId,
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
+    source_attached_to: Option<ObjectId>,
 ) -> bool {
     match prop {
         // Identity
@@ -162,6 +179,9 @@ fn matches_property(
         // State
         "tapped" => obj.tapped,
         "untapped" => !obj.tapped,
+
+        // Aura attachment: source is attached to this object
+        "EnchantedBy" => source_attached_to == Some(object_id),
 
         // Permissive fallback for unrecognized properties
         _ => true,
@@ -337,6 +357,71 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(object_matches_filter(&state, id, "Permanent", id));
+    }
+
+    #[test]
+    fn enchanted_by_only_matches_attached_creature() {
+        let mut state = setup();
+        let creature_a = add_creature(&mut state, PlayerId(0), "Bear A");
+        let creature_b = add_creature(&mut state, PlayerId(0), "Bear B");
+
+        // Create an aura (source) attached to creature_a
+        let next_id = state.next_object_id;
+        let aura = create_object(
+            &mut state,
+            CardId(next_id),
+            PlayerId(0),
+            "Rancor".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature_a);
+
+        // EnchantedBy should match only the creature the aura is attached to
+        assert!(object_matches_filter(
+            &state,
+            creature_a,
+            "Creature.EnchantedBy",
+            aura
+        ));
+        assert!(
+            !object_matches_filter(&state, creature_b, "Creature.EnchantedBy", aura),
+            "EnchantedBy must not match creatures the aura is NOT attached to"
+        );
+    }
+
+    #[test]
+    fn enchanted_by_no_attachment_matches_nothing() {
+        let mut state = setup();
+        let creature = add_creature(&mut state, PlayerId(0), "Bear");
+
+        // Aura not attached to anything
+        let next_id = state.next_object_id;
+        let aura = create_object(
+            &mut state,
+            CardId(next_id),
+            PlayerId(0),
+            "Floating Aura".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+
+        assert!(
+            !object_matches_filter(&state, creature, "Creature.EnchantedBy", aura),
+            "Unattached aura should not match any creature"
+        );
     }
 
     #[test]

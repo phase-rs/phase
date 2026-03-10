@@ -237,6 +237,9 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
 }
 
 /// Apply a single continuous effect to all affected objects.
+///
+/// Only applies the params relevant to `effect.layer` to avoid double-application
+/// when a single static definition spans multiple layers.
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     // Find affected objects
     let bf_ids: Vec<ObjectId> = state.battlefield.clone();
@@ -252,86 +255,103 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             None => continue,
         };
 
-        // Apply modifications based on params
-        if let Some(val) = effect.params.get("AddPower") {
-            if let Ok(n) = val.parse::<i32>() {
-                if let Some(ref mut p) = obj.power {
-                    *p += n;
+        match effect.layer {
+            Layer::ModifyPT => {
+                if let Some(val) = effect.params.get("AddPower") {
+                    if let Ok(n) = val.parse::<i32>() {
+                        if let Some(ref mut p) = obj.power {
+                            *p += n;
+                        }
+                    }
+                }
+                if let Some(val) = effect.params.get("AddToughness") {
+                    if let Ok(n) = val.parse::<i32>() {
+                        if let Some(ref mut t) = obj.toughness {
+                            *t += n;
+                        }
+                    }
                 }
             }
-        }
-        if let Some(val) = effect.params.get("AddToughness") {
-            if let Ok(n) = val.parse::<i32>() {
-                if let Some(ref mut t) = obj.toughness {
-                    *t += n;
+            Layer::SetPT => {
+                if let Some(val) = effect.params.get("SetPower") {
+                    if let Ok(n) = val.parse::<i32>() {
+                        obj.power = Some(n);
+                    }
+                }
+                if let Some(val) = effect.params.get("SetToughness") {
+                    if let Ok(n) = val.parse::<i32>() {
+                        obj.toughness = Some(n);
+                    }
                 }
             }
-        }
-        if let Some(val) = effect.params.get("SetPower") {
-            if let Ok(n) = val.parse::<i32>() {
-                obj.power = Some(n);
-            }
-        }
-        if let Some(val) = effect.params.get("SetToughness") {
-            if let Ok(n) = val.parse::<i32>() {
-                obj.toughness = Some(n);
-            }
-        }
-        if let Some(val) = effect.params.get("AddKeyword") {
-            let kw: Keyword = val.parse().unwrap();
-            if !obj.has_keyword(&kw) {
-                obj.keywords.push(kw);
-            }
-        }
-        if let Some(val) = effect.params.get("RemoveKeyword") {
-            let kw: Keyword = val.parse().unwrap();
-            obj.keywords
-                .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&kw));
-        }
-        if let Some(val) = effect.params.get("AddType") {
-            if let Ok(ct) = val.parse::<CoreType>() {
-                if !obj.card_types.core_types.contains(&ct) {
-                    obj.card_types.core_types.push(ct);
+            Layer::Ability => {
+                if let Some(val) = effect.params.get("AddKeyword") {
+                    let kw: Keyword = val.parse().unwrap();
+                    if !obj.has_keyword(&kw) {
+                        obj.keywords.push(kw);
+                    }
+                }
+                if let Some(val) = effect.params.get("RemoveKeyword") {
+                    let kw: Keyword = val.parse().unwrap();
+                    obj.keywords
+                        .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&kw));
+                }
+                if effect.params.contains_key("RemoveAllAbilities") {
+                    obj.abilities.clear();
+                    obj.keywords.clear();
                 }
             }
-        }
-        if let Some(val) = effect.params.get("RemoveType") {
-            if let Ok(ct) = val.parse::<CoreType>() {
-                obj.card_types.core_types.retain(|t| t != &ct);
-            }
-        }
-        if let Some(val) = effect.params.get("SetColor") {
-            let colors: Vec<ManaColor> = val
-                .split(',')
-                .filter_map(|s| match s.trim() {
-                    "White" => Some(ManaColor::White),
-                    "Blue" => Some(ManaColor::Blue),
-                    "Black" => Some(ManaColor::Black),
-                    "Red" => Some(ManaColor::Red),
-                    "Green" => Some(ManaColor::Green),
-                    _ => None,
-                })
-                .collect();
-            obj.color = colors;
-        }
-        if let Some(val) = effect.params.get("AddColor") {
-            let color = match val.as_str() {
-                "White" => Some(ManaColor::White),
-                "Blue" => Some(ManaColor::Blue),
-                "Black" => Some(ManaColor::Black),
-                "Red" => Some(ManaColor::Red),
-                "Green" => Some(ManaColor::Green),
-                _ => None,
-            };
-            if let Some(c) = color {
-                if !obj.color.contains(&c) {
-                    obj.color.push(c);
+            Layer::Type => {
+                if let Some(val) = effect.params.get("AddType") {
+                    if let Ok(ct) = val.parse::<CoreType>() {
+                        if !obj.card_types.core_types.contains(&ct) {
+                            obj.card_types.core_types.push(ct);
+                        }
+                    }
+                }
+                if let Some(val) = effect.params.get("RemoveType") {
+                    if let Ok(ct) = val.parse::<CoreType>() {
+                        obj.card_types.core_types.retain(|t| t != &ct);
+                    }
                 }
             }
-        }
-        if effect.params.contains_key("RemoveAllAbilities") {
-            obj.abilities.clear();
-            obj.keywords.clear();
+            Layer::Color => {
+                if let Some(val) = effect.params.get("SetColor") {
+                    let colors: Vec<ManaColor> = val
+                        .split(',')
+                        .filter_map(|s| match s.trim() {
+                            "White" => Some(ManaColor::White),
+                            "Blue" => Some(ManaColor::Blue),
+                            "Black" => Some(ManaColor::Black),
+                            "Red" => Some(ManaColor::Red),
+                            "Green" => Some(ManaColor::Green),
+                            _ => None,
+                        })
+                        .collect();
+                    obj.color = colors;
+                }
+                if let Some(val) = effect.params.get("AddColor") {
+                    let color = match val.as_str() {
+                        "White" => Some(ManaColor::White),
+                        "Blue" => Some(ManaColor::Blue),
+                        "Black" => Some(ManaColor::Black),
+                        "Red" => Some(ManaColor::Red),
+                        "Green" => Some(ManaColor::Green),
+                        _ => None,
+                    };
+                    if let Some(c) = color {
+                        if !obj.color.contains(&c) {
+                            obj.color.push(c);
+                        }
+                    }
+                }
+            }
+            Layer::CounterPT // Handled separately in evaluate_layers
+            | Layer::Copy
+            | Layer::Control
+            | Layer::Text
+            | Layer::CharDef
+            | Layer::SwitchPT => {}
         }
     }
 }
@@ -591,6 +611,99 @@ mod tests {
         evaluate_layers(&mut state);
 
         assert!(!state.layers_dirty);
+    }
+
+    #[test]
+    fn test_aura_static_only_affects_enchanted_creature() {
+        let mut state = setup();
+        let bear_a = make_creature(&mut state, "Bear A", 2, 2, PlayerId(0));
+        let bear_b = make_creature(&mut state, "Bear B", 2, 2, PlayerId(0));
+
+        // Create an aura with Rancor-like static: +2/+0 and trample to EnchantedBy
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Rancor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.attached_to = Some(bear_a);
+            obj.timestamp = ts;
+            let mut params = HashMap::new();
+            params.insert("Affected".to_string(), "Creature.EnchantedBy".to_string());
+            params.insert("AddPower".to_string(), "2".to_string());
+            params.insert("AddKeyword".to_string(), "Trample".to_string());
+            obj.static_definitions.push(StaticDefinition {
+                mode: "Continuous".to_string(),
+                params,
+            });
+        }
+        state
+            .objects
+            .get_mut(&bear_a)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        evaluate_layers(&mut state);
+
+        let a = state.objects.get(&bear_a).unwrap();
+        assert_eq!(a.power, Some(4), "Enchanted bear: 2 base + 2 from aura");
+        assert_eq!(a.toughness, Some(2), "Aura adds no toughness");
+        assert!(
+            a.has_keyword(&Keyword::Trample),
+            "Enchanted bear gets trample"
+        );
+
+        let b = state.objects.get(&bear_b).unwrap();
+        assert_eq!(b.power, Some(2), "Non-enchanted bear unchanged");
+        assert_eq!(b.toughness, Some(2), "Non-enchanted bear unchanged");
+        assert!(
+            !b.has_keyword(&Keyword::Trample),
+            "Non-enchanted bear has no trample"
+        );
+    }
+
+    #[test]
+    fn test_multi_layer_effect_does_not_double_apply() {
+        // Regression: an effect with AddPower + AddKeyword spans two layers
+        // (ModifyPT and Ability). AddPower must only be applied once.
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 3, 3, PlayerId(0));
+
+        // Create a static with both AddPower and AddKeyword
+        let source = make_creature(&mut state, "Source", 1, 1, PlayerId(0));
+        {
+            let mut params = HashMap::new();
+            params.insert("Affected".to_string(), "Creature.YouCtrl".to_string());
+            params.insert("AddPower".to_string(), "2".to_string());
+            params.insert("AddKeyword".to_string(), "Trample".to_string());
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition {
+                    mode: "Continuous".to_string(),
+                    params,
+                });
+        }
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            obj.power,
+            Some(5),
+            "3 base + 2 from effect = 5, NOT 7 (double-applied)"
+        );
+        assert!(obj.has_keyword(&Keyword::Trample));
     }
 
     #[test]
