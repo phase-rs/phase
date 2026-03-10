@@ -1,4 +1,5 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { getBevelBorderStyle } from "./cardFrame.ts";
 
 interface CardImageProps {
   cardName: string;
@@ -7,6 +8,7 @@ interface CardImageProps {
   className?: string;
   tapped?: boolean;
   hasUnimplementedMechanics?: boolean;
+  colors?: string[];
 }
 
 export function CardImage({
@@ -16,16 +18,22 @@ export function CardImage({
   className = "",
   tapped = false,
   hasUnimplementedMechanics = false,
+  colors,
 }: CardImageProps) {
   const { src, isLoading } = useCardImage(cardName, { size, faceIndex });
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
   const baseClasses = `w-[var(--card-w)] h-[var(--card-h)] rounded-lg transition-transform duration-200 ${tappedStyle} ${className}`;
 
+  const borderStyle = colors
+    ? getBevelBorderStyle(colors)
+    : undefined;
+
   if (isLoading || !src) {
     return (
       <div
-        className={`${baseClasses} bg-gray-700 border border-gray-600 shadow-md animate-pulse`}
+        className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
+        style={borderStyle ?? { border: "1px solid #4b5563" }}
         aria-label={`Loading ${cardName}`}
       />
     );
@@ -36,7 +44,8 @@ export function CardImage({
       <img
         src={src}
         alt={cardName}
-        className={`${baseClasses} border border-gray-600 shadow-md object-cover`}
+        className={`${baseClasses} shadow-lg object-cover`}
+        style={borderStyle ?? { border: "1px solid #4b5563" }}
         draggable={false}
       />
       {hasUnimplementedMechanics && (

@@ -42,7 +42,7 @@ const initialState: GameStoreState = {
   stateHistory: [],
 };
 
-function saveGame(gameId: string, state: GameState): void {
+export function saveGame(gameId: string, state: GameState): void {
   if (state.waiting_for.type === "GameOver") {
     clearGame(gameId);
     return;

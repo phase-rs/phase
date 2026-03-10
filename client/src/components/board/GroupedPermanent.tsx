@@ -66,8 +66,8 @@ export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
       </div>
 
       {/* Count badge */}
-      <div className="absolute left-1 top-1 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-black/80 text-[10px] font-bold text-white ring-1 ring-gray-500">
-        {group.count}
+      <div className="absolute -left-3 -top-4 z-30 flex items-center justify-center rounded-full bg-black/85 px-2.5 py-1 text-sm font-bold text-white ring-2 ring-gray-400 shadow-lg">
+        {group.count}x
       </div>
     </div>
   );

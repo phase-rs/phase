@@ -65,8 +65,16 @@ export function MenuPage() {
       seedStarterDecks();
     }
     setActiveDeckName(localStorage.getItem(ACTIVE_DECK_KEY));
-    setActiveGame(loadActiveGame());
-  }, []);
+
+    // Auto-resume: if there's an active game, navigate straight into it
+    const saved = loadActiveGame();
+    if (saved) {
+      useGameStore.setState({ gameId: saved.id });
+      navigate(`/game/${saved.id}?mode=${saved.mode}&difficulty=${saved.difficulty}`, { replace: true });
+      return;
+    }
+    setActiveGame(saved);
+  }, [navigate]);
 
   const handleSelectDeck = (name: string) => {
     setActiveDeckName(name);

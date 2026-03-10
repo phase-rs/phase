@@ -5,7 +5,7 @@ import { SPEED_MULTIPLIERS } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { useAnimationStore } from "../stores/animationStore";
-import { useGameStore } from "../stores/gameStore";
+import { useGameStore, saveGame } from "../stores/gameStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 
 /** Schedule SFX for each animation step, offset to sync with visual timing. */
@@ -99,6 +99,10 @@ async function processAction(action: GameAction): Promise<void> {
       stateHistory: newHistory,
     };
   });
+
+  // Persist to localStorage for resume-on-refresh
+  const { gameId } = useGameStore.getState();
+  if (gameId) saveGame(gameId, newState);
 
   // Fade out music on GameOver
   if (events.some((e) => e.type === "GameOver")) {

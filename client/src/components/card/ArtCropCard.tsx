@@ -3,30 +3,17 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { computePTDisplay } from "../../viewmodel/cardProps.ts";
 import { PTBox } from "../board/PTBox.tsx";
+import { getBevelBorderStyle } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
   objectId: number;
 }
-
-const BORDER_COLORS: Record<string, string> = {
-  W: "#F5E6C8",
-  U: "#0E68AB",
-  B: "#2B2B2B",
-  R: "#D32029",
-  G: "#00733E",
-};
 
 const COUNTER_COLORS: Record<string, string> = {
   Plus1Plus1: "bg-green-600",
   Minus1Minus1: "bg-red-600",
   Loyalty: "bg-amber-600",
 };
-
-function getBorderColor(colors: string[]): string {
-  if (colors.length === 0) return "#8E8E8E";
-  if (colors.length >= 2) return "#C9B037";
-  return BORDER_COLORS[colors[0]] ?? "#8E8E8E";
-}
 
 export function ArtCropCard({ objectId }: ArtCropCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -38,9 +25,9 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
   if (!obj) return null;
 
   const hasDfc = obj.back_face != null;
-  const borderColor = getBorderColor(obj.color);
   const isToken = obj.card_id === 0;
   const borderWidth = isToken ? 2 : 3;
+  const bevelBorder = getBevelBorderStyle(obj.color, borderWidth);
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters);
 
@@ -58,7 +45,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
           style={{
             width: "var(--art-crop-w)",
             height: "var(--art-crop-h)",
-            border: `${borderWidth}px solid ${borderColor}`,
+            ...bevelBorder,
           }}
           aria-label={`Loading ${cardName}`}
         />
@@ -81,7 +68,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
         style={{
           width: "var(--art-crop-w)",
           height: "var(--art-crop-h)",
-          border: `${borderWidth}px solid ${borderColor}`,
+          ...bevelBorder,
         }}
       >
         {/* Art crop image — unobscured */}
