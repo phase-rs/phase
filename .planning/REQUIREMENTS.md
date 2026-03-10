@@ -16,9 +16,9 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 
 ### Card Migration
 
-- [ ] **MIGR-01**: All engine-supported cards (thousands — every card whose mechanics have registered handlers) are converted from Forge .txt to MTGJSON metadata + ability JSON via automated migration
+- [x] **MIGR-01**: All engine-supported cards (thousands — every card whose mechanics have registered handlers) are converted from Forge .txt to MTGJSON metadata + ability JSON via automated migration
 - [ ] **MIGR-02**: data/cardsfolder/ and data/standard-cards/ are removed from the repository; Forge parser is feature-gated behind forge-compat
-- [ ] **MIGR-03**: Automated Forge-to-JSON migration tool converts all 32,300+ Forge .txt card definitions to the new ability JSON format, producing ability files for every engine-supported card
+- [x] **MIGR-03**: Automated Forge-to-JSON migration tool converts all 32,300+ Forge .txt card definitions to the new ability JSON format, producing ability files for every engine-supported card
 - [x] **MIGR-04**: Card data includes MTGJSON scryfallOracleId for reliable frontend image lookups via Scryfall API
 - [ ] **MIGR-05**: CI coverage gate updated to validate against JSON card data; all previously supported cards remain supported after migration
 
@@ -67,9 +67,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DATA-02 | Phase 21 | **Complete** (21-01) |
 | DATA-03 | Phase 23 | Complete |
 | DATA-04 | Phase 21 | Complete |
-| MIGR-01 | Phase 24 | Pending |
+| MIGR-01 | Phase 24 | Complete |
 | MIGR-02 | Phase 25 | Pending |
-| MIGR-03 | Phase 24 | Pending |
+| MIGR-03 | Phase 24 | Complete |
 | MIGR-04 | Phase 23 | Complete |
 | MIGR-05 | Phase 24 | Pending |
 | TEST-01 | Phase 22 | Complete |

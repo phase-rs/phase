@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: completed
-stopped_at: Phase 24 context gathered
-last_updated: "2026-03-10T21:49:37.791Z"
-last_activity: 2026-03-10 — Completed Plan 23-02 (Smoke Test Cards & Integration Tests)
+status: in-progress
+stopped_at: Completed 24-01-PLAN.md
+last_updated: "2026-03-10T22:30:00.000Z"
+last_activity: 2026-03-10 — Completed Plan 24-01 (Migration Tool & Cost Parser)
 progress:
   total_phases: 5
   completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
-  percent: 80
+  total_plans: 12
+  completed_plans: 10
+  percent: 83
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 23 complete — ready for Phase 24
+**Current focus:** Phase 24 Card Migration — Plan 01 complete, Plans 02-03 pending
 
 ## Current Position
 
-Phase: 23 (third of 5 in v1.2) — Unified Card Loader (COMPLETE)
-Plan: 2/2 complete
-Status: Phase 23 complete, Phase 24 pending
-Last activity: 2026-03-10 — Completed Plan 23-02 (Smoke Test Cards & Integration Tests)
+Phase: 24 (fourth of 5 in v1.2) — Card Migration
+Plan: 1/3 complete
+Status: Plan 24-01 complete, Plan 24-02 pending
+Last activity: 2026-03-10 — Completed Plan 24-01 (Migration Tool & Cost Parser)
 
-Progress: [████████░░] 80%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10 (v1.2)
+- Total plans completed: 11 (v1.2)
 - Average duration: 12min
-- Total execution time: 2.0 hours
+- Total execution time: 2.2 hours
 
 **By Phase:**
 
@@ -46,6 +46,7 @@ Progress: [████████░░] 80%
 | 21 | 5/5 | 68min | 14min |
 | 22 | 3/3 | 35min | 12min |
 | 23 | 2/2 | 18min | 9min |
+| 24 | 1/3 | 12min | 12min |
 
 ## Accumulated Context
 
@@ -86,6 +87,10 @@ Recent decisions affecting current work:
 - [23-02]: normalize_for_match() strips punctuation for card name matching (handles comma in "Jace, the Mind Sculptor")
 - [23-02]: Smoke game tests use direct mana pool injection for spell casting, PassPriority loop for combat phases
 - [23-02]: Ability JSON files use Effect::Other for complex card-specific effects not yet covered by typed variants
+- [24-01]: Unknown cost components (PayLife, Discard, tapXType, exert) preserved as AbilityCost::Mana fallback (matches Effect::Other pattern)
+- [24-01]: Migration overwrites 8 hand-authored JSON files from Phase 23 for consistency across all 32,274 cards
+- [24-01]: json_smoke_test adapted: error-type checking (not zero errors) and fixture-centric cross-validation
+- [24-01]: 26 Forge files with missing Name field skipped as errors (Specialize variants with alternate format)
 
 ### Pending Todos
 
@@ -97,6 +102,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T21:49:37.789Z
-Stopped at: Phase 24 context gathered
-Resume file: .planning/phases/24-card-migration/24-CONTEXT.md
+Last session: 2026-03-10T22:30:00.000Z
+Stopped at: Completed 24-01-PLAN.md
+Resume file: .planning/phases/24-card-migration/24-01-SUMMARY.md
