@@ -10,8 +10,8 @@ progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 43
-  completed_plans: 40
-  percent: 97
+  completed_plans: 41
+  percent: 98
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 20 of 20 (Implement all remaining effects)
-Plan: 8 of 10 in current phase
+Plan: 9 of 10 in current phase
 Status: In Progress
-Last activity: 2026-03-10 — Completed 20-07 Effect Handlers & Replacement Effects
+Last activity: 2026-03-10 — Completed 20-09 Morph/Manifest/Disguise Face-Down Mechanics
 
-Progress: [██████████] 97%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -83,6 +83,7 @@ Progress: [██████████] 97%
 | Phase 20 P05 | 10min | 2 tasks | 10 files |
 | Phase 20 P07 | 10min | 2 tasks | 8 files |
 | Phase 20 P06 | 11min | 2 tasks | 7 files |
+| Phase 20 P09 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -203,6 +204,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 20-05]: Zone-change reset in move_to_zone enforces Rule 711.8 automatically
 - [Phase 20-05]: inspectedFaceIndex in uiStore drives face-aware CardPreview without modifying CardPreview
 - [Phase 20]: [Phase 20-06]: Static keyword handlers return RuleModification for layer-system integration; CantBeCountered checked both via static ability and direct object definition
+- [Phase 20-09]: BackFaceData reused for storing original face-down characteristics (same pattern as DFC transform)
+- [Phase 20-09]: Manifested creature cards can turn face up; noncreature manifested cards cannot
+- [Phase 20-09]: TurnFaceUp trigger matcher supports ValidCard filter for conditional triggering
 
 ### Roadmap Evolution
 
@@ -223,6 +227,6 @@ None.
 
 ## Session Continuity
 
-Last activity: 2026-03-10 - Completed 20-07 Effect Handlers & Replacement Effects
-Stopped at: Completed 20-06-PLAN.md
+Last activity: 2026-03-10 - Completed 20-09 Morph/Manifest/Disguise Face-Down Mechanics
+Stopped at: Completed 20-09-PLAN.md
 Resume file: None
