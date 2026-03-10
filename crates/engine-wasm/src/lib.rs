@@ -23,7 +23,7 @@ thread_local! {
 /// Verify WASM integration works.
 #[wasm_bindgen]
 pub fn ping() -> String {
-    "forge-rs engine ready".to_string()
+    "phase-rs engine ready".to_string()
 }
 
 /// Create a default 2-player game state.

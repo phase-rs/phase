@@ -6,7 +6,7 @@ import { AdapterError, AdapterErrorCode } from "../types";
 // Mock the WASM module
 vi.mock("../../wasm/engine_wasm", () => {
   const mockInit = vi.fn().mockResolvedValue(undefined);
-  const mockPing = vi.fn().mockReturnValue("forge-rs engine ready");
+  const mockPing = vi.fn().mockReturnValue("phase-rs engine ready");
   const mockCreateInitialState = vi.fn().mockReturnValue({
     turn_number: 1,
     active_player: 0,

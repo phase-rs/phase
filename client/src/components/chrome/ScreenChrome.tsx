@@ -75,7 +75,7 @@ export function ScreenChrome({ onBack, showLogo = false }: ScreenChromeProps) {
         <div className="fixed top-[calc(env(safe-area-inset-top)+0.75rem)] left-1/2 -translate-x-1/2 z-20 pointer-events-none">
           <img
             src="/logo.webp"
-            alt="Forge.rs"
+            alt="phase.rs"
             className="w-48 max-w-[40vw]"
             style={{
               filter:

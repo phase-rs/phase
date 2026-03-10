@@ -1,6 +1,6 @@
 {
-  "name": "Forge.rs",
-  "short_name": "Forge.rs",
+  "name": "phase.rs",
+  "short_name": "phase.rs",
   "description": "Magic: The Gathering Engine",
   "start_url": "/",
   "display": "standalone",

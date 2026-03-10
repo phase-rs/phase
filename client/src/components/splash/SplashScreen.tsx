@@ -28,14 +28,14 @@ export function SplashScreen({ progress, onComplete }: SplashScreenProps) {
         >
           <motion.img
             src="/logo.webp"
-            alt="Forge.rs"
+            alt="phase.rs"
             className="mb-4 w-[200px]"
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.6, ease: "easeOut" }}
           />
 
-          <p className="mb-6 text-sm tracking-wider text-gray-500">Forge.rs</p>
+          <p className="mb-6 text-sm tracking-wider text-gray-500">phase.rs</p>
 
           <div className="h-1 w-[200px] overflow-hidden rounded-full bg-gray-800">
             <motion.div
