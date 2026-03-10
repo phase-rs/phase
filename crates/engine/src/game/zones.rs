@@ -41,6 +41,35 @@ pub fn move_to_zone(
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
     obj_mut.zone = to;
 
+    // DFC Rule 711.8: transformed permanents revert to front face on zone change
+    if obj_mut.transformed {
+        if let Some(back_face) = obj_mut.back_face.clone() {
+            // Restore front face characteristics from stored back_face (which holds the front face)
+            let current_back = super::game_object::BackFaceData {
+                name: obj_mut.name.clone(),
+                power: obj_mut.power,
+                toughness: obj_mut.toughness,
+                card_types: obj_mut.card_types.clone(),
+                keywords: obj_mut.keywords.clone(),
+                abilities: obj_mut.abilities.clone(),
+                color: obj_mut.color.clone(),
+            };
+            obj_mut.name = back_face.name;
+            obj_mut.power = back_face.power;
+            obj_mut.toughness = back_face.toughness;
+            obj_mut.base_power = back_face.power;
+            obj_mut.base_toughness = back_face.toughness;
+            obj_mut.card_types = back_face.card_types;
+            obj_mut.keywords = back_face.keywords.clone();
+            obj_mut.base_keywords = back_face.keywords;
+            obj_mut.abilities = back_face.abilities;
+            obj_mut.color = back_face.color.clone();
+            obj_mut.base_color = back_face.color;
+            obj_mut.back_face = Some(current_back);
+            obj_mut.transformed = false;
+        }
+    }
+
     // Track when objects enter the battlefield (for summoning sickness)
     if to == Zone::Battlefield {
         obj_mut.entered_battlefield_turn = Some(state.turn_number);

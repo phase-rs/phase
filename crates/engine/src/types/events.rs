@@ -129,6 +129,9 @@ pub enum GameEvent {
         source_id: ObjectId,
         event_type: String,
     },
+    Transformed {
+        object_id: ObjectId,
+    },
 }
 
 #[cfg(test)]
