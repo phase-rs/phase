@@ -1,0 +1,1491 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AbilityFile",
+  "description": "Root structure for per-card ability JSON files.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema reference for editor autocompletion",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "abilities": {
+      "description": "Spell and activated ability definitions",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AbilityDefinition"
+      }
+    },
+    "replacements": {
+      "description": "Replacement effect definitions",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ReplacementDefinition"
+      }
+    },
+    "statics": {
+      "description": "Static ability definitions",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/StaticDefinition"
+      }
+    },
+    "triggers": {
+      "description": "Trigger definitions",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/TriggerDefinition"
+      }
+    }
+  },
+  "required": [
+    "abilities"
+  ],
+  "$defs": {
+    "AbilityCost": {
+      "description": "Cost to activate an ability.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "cost": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "Mana"
+            }
+          },
+          "required": [
+            "type",
+            "cost"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Tap"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "Loyalty"
+            }
+          },
+          "required": [
+            "type",
+            "amount"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec"
+            },
+            "type": {
+              "type": "string",
+              "const": "Sacrifice"
+            }
+          },
+          "required": [
+            "type",
+            "target"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "costs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AbilityCost"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Composite"
+            }
+          },
+          "required": [
+            "type",
+            "costs"
+          ]
+        }
+      ]
+    },
+    "AbilityDefinition": {
+      "description": "Parsed ability definition with typed effect.",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbilityCost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "kind": {
+          "$ref": "#/$defs/AbilityKind"
+        },
+        "remaining_params": {
+          "description": "Parameters not consumed by the typed Effect during parsing.\nContains metadata like SubAbility, Execute, SpellDescription, Defined,\nConditionCompare, etc. Used by the compat params() method.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "sub_ability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbilityDefinition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "kind",
+        "effect"
+      ]
+    },
+    "AbilityKind": {
+      "type": "string",
+      "enum": [
+        "Spell",
+        "Activated",
+        "Database"
+      ]
+    },
+    "DamageAmount": {
+      "description": "How to specify a damage amount -- either a fixed integer or a variable reference.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Fixed"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Variable"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "Effect": {
+      "description": "The typed effect enum replacing `api_type: String` + `params: HashMap`.\nEach variant corresponds to an entry in the effect handler registry.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/DamageAmount"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "DealDamage"
+            }
+          },
+          "required": [
+            "type",
+            "amount"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "Draw"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "power": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "toughness": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "Pump"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Destroy"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Counter"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "colors": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "keywords": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "name": {
+              "type": "string"
+            },
+            "power": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            },
+            "toughness": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "Token"
+            },
+            "types": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "GainLife"
+            }
+          },
+          "required": [
+            "type",
+            "amount"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "LoseLife"
+            }
+          },
+          "required": [
+            "type",
+            "amount"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Tap"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Untap"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1
+            },
+            "counter_type": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "AddCounter"
+            }
+          },
+          "required": [
+            "type",
+            "counter_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1
+            },
+            "counter_type": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "RemoveCounter"
+            }
+          },
+          "required": [
+            "type",
+            "counter_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Sacrifice"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "DiscardCard"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Mill"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "Scry"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "power": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "filter": "",
+                "type": "All"
+              }
+            },
+            "toughness": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "PumpAll"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/DamageAmount"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "filter": "",
+                "type": "All"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "DamageAll"
+            }
+          },
+          "required": [
+            "type",
+            "amount"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "filter": "",
+                "type": "All"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "DestroyAll"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "destination": {
+              "type": "string"
+            },
+            "origin": {
+              "type": "string",
+              "default": ""
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "ChangeZone"
+            }
+          },
+          "required": [
+            "type",
+            "destination"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "destination": {
+              "type": "string"
+            },
+            "origin": {
+              "type": "string",
+              "default": ""
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "filter": "",
+                "type": "All"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "ChangeZoneAll"
+            }
+          },
+          "required": [
+            "type",
+            "destination"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
+            "destination": {
+              "type": "string",
+              "default": ""
+            },
+            "type": {
+              "type": "string",
+              "const": "Dig"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "GainControl"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Attach"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "Surveil"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Fight"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "destination": {
+              "type": "string",
+              "default": ""
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Bounce"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Explore"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Proliferate"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "CopySpell"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "choices": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "ChooseCard"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1
+            },
+            "counter_type": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "PutCounter"
+            }
+          },
+          "required": [
+            "type",
+            "counter_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "counter_type": {
+              "type": "string"
+            },
+            "multiplier": {
+              "type": "integer",
+              "format": "int32",
+              "default": 2
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "MultiplyCounter"
+            }
+          },
+          "required": [
+            "type",
+            "counter_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "power": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "default": null
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "toughness": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "Animate"
+            },
+            "types": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Generic \"Effect\" handler (creates continuous effects at resolution).",
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "type": {
+              "type": "string",
+              "const": "GenericEffect"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "type": {
+              "type": "string",
+              "const": "Cleanup"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "produced": {
+              "type": "string",
+              "default": ""
+            },
+            "type": {
+              "type": "string",
+              "const": "Mana"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 1,
+              "minimum": 0
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec",
+              "default": {
+                "type": "Any"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Discard"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Fallback for unrecognized effect types during parsing.",
+          "type": "object",
+          "properties": {
+            "api_type": {
+              "type": "string"
+            },
+            "params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "type": {
+              "type": "string",
+              "const": "Other"
+            }
+          },
+          "required": [
+            "type",
+            "api_type"
+          ]
+        }
+      ]
+    },
+    "ReplacementDefinition": {
+      "description": "Replacement effect definition with typed event.",
+      "type": "object",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/ReplacementEvent"
+        },
+        "params": {
+          "description": "Parameters for the replacement effect (conditions, modifications, etc.)",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "event"
+      ]
+    },
+    "ReplacementEvent": {
+      "description": "All replacement event types from Forge's replacement effect registry.\nMatched case-sensitively against Forge event strings.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "DamageDone",
+            "Destroy",
+            "Discard",
+            "Draw",
+            "LoseLife",
+            "GainLife",
+            "TurnFaceUp",
+            "Counter",
+            "ChangeZone",
+            "Moved"
+          ]
+        },
+        {
+          "description": "Fallback for unrecognized replacement event strings.",
+          "type": "object",
+          "properties": {
+            "Other": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Other"
+          ]
+        }
+      ]
+    },
+    "StaticDefinition": {
+      "description": "Static ability definition with typed mode.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/StaticMode"
+        },
+        "params": {
+          "description": "Parameters for the static ability (Affected, AddPower, AddToughness, etc.)",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    },
+    "StaticMode": {
+      "description": "All static ability modes from Forge's static ability registry.\nMatched case-sensitively against Forge mode strings.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Continuous",
+            "CantAttack",
+            "CantBlock",
+            "CantBeTargeted",
+            "CantBeCast",
+            "CantBeActivated",
+            "CastWithFlash",
+            "ReduceCost",
+            "RaiseCost",
+            "CantGainLife",
+            "CantLoseLife",
+            "MustAttack",
+            "MustBlock",
+            "CantDraw",
+            "Panharmonicon",
+            "IgnoreHexproof"
+          ]
+        },
+        {
+          "description": "Fallback for unrecognized static mode strings.",
+          "type": "object",
+          "properties": {
+            "Other": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Other"
+          ]
+        }
+      ]
+    },
+    "TargetSpec": {
+      "description": "Targeting specification for an effect.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "None"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Any"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "filter": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "Filtered"
+            }
+          },
+          "required": [
+            "type",
+            "filter"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Player"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Controller"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "filter": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "All"
+            }
+          },
+          "required": [
+            "type",
+            "filter"
+          ]
+        }
+      ]
+    },
+    "TriggerDefinition": {
+      "description": "Trigger definition with typed mode and effect.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/TriggerMode"
+        },
+        "params": {
+          "description": "Remaining trigger-specific parameters (Origin, Destination, ValidCard, Execute, etc.)\nthat are not part of the effect itself.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    },
+    "TriggerMode": {
+      "description": "All trigger modes from Forge's TriggerType enum.\nMatched case-sensitively against Forge trigger mode strings.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "ChangesZone",
+            "ChangesZoneAll",
+            "ChangesController",
+            "DamageDone",
+            "DamageDoneOnce",
+            "DamageAll",
+            "DamageDealtOnce",
+            "DamageDoneOnceByController",
+            "DamagePreventedOnce",
+            "ExcessDamage",
+            "ExcessDamageAll",
+            "SpellCast",
+            "SpellCopy",
+            "SpellCastOrCopy",
+            "AbilityCast",
+            "AbilityResolves",
+            "AbilityTriggered",
+            "SpellAbilityCast",
+            "SpellAbilityCopy",
+            "Countered",
+            "Attacks",
+            "AttackersDeclared",
+            "AttackersDeclaredOneTarget",
+            "AttackerBlocked",
+            "AttackerBlockedOnce",
+            "AttackerBlockedByCreature",
+            "AttackerUnblocked",
+            "AttackerUnblockedOnce",
+            "Blocks",
+            "BlockersDeclared",
+            "CounterAdded",
+            "CounterAddedOnce",
+            "CounterAddedAll",
+            "CounterPlayerAddedAll",
+            "CounterTypeAddedAll",
+            "CounterRemoved",
+            "CounterRemovedOnce",
+            "Sacrificed",
+            "SacrificedOnce",
+            "Destroyed",
+            "Taps",
+            "TapsForMana",
+            "TapAll",
+            "Untaps",
+            "UntapAll",
+            "BecomesTarget",
+            "BecomesTargetOnce",
+            "Drawn",
+            "Discarded",
+            "DiscardedAll",
+            "Milled",
+            "MilledOnce",
+            "MilledAll",
+            "Exiled",
+            "Revealed",
+            "Shuffled",
+            "LifeGained",
+            "LifeLost",
+            "LifeLostAll",
+            "PayLife",
+            "PayCumulativeUpkeep",
+            "PayEcho",
+            "TokenCreated",
+            "TokenCreatedOnce",
+            "TurnFaceUp",
+            "Transformed",
+            "Phase",
+            "PhaseIn",
+            "PhaseOut",
+            "PhaseOutAll",
+            "TurnBegin",
+            "NewGame",
+            "BecomeMonarch",
+            "TakesInitiative",
+            "LosesGame",
+            "Championed",
+            "Exerted",
+            "Crewed",
+            "Saddled",
+            "Cycled",
+            "Evolved",
+            "Explored",
+            "Exploited",
+            "Enlisted",
+            "ManaAdded",
+            "ManaExpend",
+            "LandPlayed",
+            "Attached",
+            "Unattach",
+            "Adapt",
+            "Foretell",
+            "Investigated",
+            "DungeonCompleted",
+            "RoomEntered",
+            "PlanarDice",
+            "PlaneswalkedFrom",
+            "PlaneswalkedTo",
+            "ChaosEnsues",
+            "RolledDie",
+            "RolledDieOnce",
+            "FlippedCoin",
+            "Clashed",
+            "DayTimeChanges",
+            "ClassLevelGained",
+            "Copied",
+            "ConjureAll",
+            "Vote",
+            "BecomeRenowned",
+            "BecomeMonstrous",
+            "Proliferate",
+            "RingTemptsYou",
+            "Surveil",
+            "Scry",
+            "Fight",
+            "FightOnce",
+            "Abandoned",
+            "CaseSolved",
+            "ClaimPrize",
+            "CollectEvidence",
+            "CommitCrime",
+            "CrankContraption",
+            "Devoured",
+            "Discover",
+            "Forage",
+            "FullyUnlock",
+            "GiveGift",
+            "ManifestDread",
+            "Mentored",
+            "Mutates",
+            "SearchedLibrary",
+            "SeekAll",
+            "SetInMotion",
+            "Specializes",
+            "Stationed",
+            "Trains",
+            "UnlockDoor",
+            "VisitAttraction",
+            "BecomesCrewed",
+            "BecomesPlotted",
+            "BecomesSaddled",
+            "Immediate",
+            "Always",
+            "Airbend",
+            "Earthbend",
+            "Firebend",
+            "Waterbend",
+            "ElementalBend"
+          ]
+        },
+        {
+          "description": "Fallback for unrecognized trigger mode strings.",
+          "type": "object",
+          "properties": {
+            "Unknown": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Unknown"
+          ]
+        }
+      ]
+    }
+  }
+}

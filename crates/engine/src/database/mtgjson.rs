@@ -139,7 +139,10 @@ mod tests {
     #[test]
     fn deserializes_test_fixture() {
         let data = load_fixture();
-        assert!(data.data.len() >= 5, "Fixture should contain at least 5 cards");
+        assert!(
+            data.data.len() >= 5,
+            "Fixture should contain at least 5 cards"
+        );
     }
 
     #[test]

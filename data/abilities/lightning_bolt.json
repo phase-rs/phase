@@ -1,0 +1,21 @@
+{
+    "$schema": "schema.json",
+    "abilities": [
+        {
+            "kind": "Spell",
+            "effect": {
+                "type": "DealDamage",
+                "amount": {
+                    "type": "Fixed",
+                    "value": 3
+                },
+                "target": {
+                    "type": "Any"
+                }
+            }
+        }
+    ],
+    "triggers": [],
+    "statics": [],
+    "replacements": []
+}
