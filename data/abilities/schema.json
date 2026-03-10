@@ -14,8 +14,17 @@
     "abilities": {
       "description": "Spell and activated ability definitions",
       "type": "array",
+      "default": [],
       "items": {
         "$ref": "#/$defs/AbilityDefinition"
+      }
+    },
+    "faces": {
+      "description": "Per-face ability definitions for multi-face cards",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FaceAbilities"
       }
     },
     "replacements": {
@@ -43,9 +52,6 @@
       }
     }
   },
-  "required": [
-    "abilities"
-  ],
   "$defs": {
     "AbilityCost": {
       "description": "Cost to activate an ability.",
@@ -1099,6 +1105,44 @@
           ]
         }
       ]
+    },
+    "FaceAbilities": {
+      "description": "Per-face ability set for multi-face cards.",
+      "type": "object",
+      "properties": {
+        "abilities": {
+          "description": "Spell and activated ability definitions",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AbilityDefinition"
+          }
+        },
+        "replacements": {
+          "description": "Replacement effect definitions",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReplacementDefinition"
+          }
+        },
+        "statics": {
+          "description": "Static ability definitions",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StaticDefinition"
+          }
+        },
+        "triggers": {
+          "description": "Trigger definitions",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TriggerDefinition"
+          }
+        }
+      }
     },
     "ReplacementDefinition": {
       "description": "Replacement effect definition with typed event.",

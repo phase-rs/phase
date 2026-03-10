@@ -281,6 +281,7 @@ mod tests {
                 replacements: vec![],
                 svars: std::collections::HashMap::new(),
                 color_override: None,
+                scryfall_oracle_id: None,
             },
             count: 10,
         }]

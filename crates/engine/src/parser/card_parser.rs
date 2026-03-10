@@ -75,6 +75,7 @@ impl CardFaceBuilder {
             static_abilities: self.static_abilities,
             replacements: self.replacements,
             svars: self.svars,
+            scryfall_oracle_id: None,
         })
     }
 }

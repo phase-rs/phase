@@ -27,6 +27,8 @@ pub struct CardFace {
     pub replacements: Vec<ReplacementDefinition>,
     pub svars: HashMap<String, String>,
     pub color_override: Option<Vec<ManaColor>>,
+    #[serde(default)]
+    pub scryfall_oracle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
