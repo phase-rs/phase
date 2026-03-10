@@ -250,87 +250,94 @@ impl<'a> CardBuilder<'a> {
         self.state.objects.get_mut(&self.id).unwrap()
     }
 
+    /// Push a keyword to both `keywords` (computed) and `base_keywords` (survives layer evaluation).
+    fn push_keyword(&mut self, kw: Keyword) {
+        let obj = self.obj();
+        obj.keywords.push(kw.clone());
+        obj.base_keywords.push(kw);
+    }
+
     // --- Keyword convenience methods ---
 
     pub fn flying(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Flying);
+        self.push_keyword(Keyword::Flying);
         self
     }
 
     pub fn first_strike(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::FirstStrike);
+        self.push_keyword(Keyword::FirstStrike);
         self
     }
 
     pub fn double_strike(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::DoubleStrike);
+        self.push_keyword(Keyword::DoubleStrike);
         self
     }
 
     pub fn trample(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Trample);
+        self.push_keyword(Keyword::Trample);
         self
     }
 
     pub fn deathtouch(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Deathtouch);
+        self.push_keyword(Keyword::Deathtouch);
         self
     }
 
     pub fn lifelink(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Lifelink);
+        self.push_keyword(Keyword::Lifelink);
         self
     }
 
     pub fn vigilance(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Vigilance);
+        self.push_keyword(Keyword::Vigilance);
         self
     }
 
     pub fn haste(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Haste);
+        self.push_keyword(Keyword::Haste);
         self
     }
 
     pub fn reach(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Reach);
+        self.push_keyword(Keyword::Reach);
         self
     }
 
     pub fn defender(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Defender);
+        self.push_keyword(Keyword::Defender);
         self
     }
 
     pub fn menace(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Menace);
+        self.push_keyword(Keyword::Menace);
         self
     }
 
     pub fn indestructible(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Indestructible);
+        self.push_keyword(Keyword::Indestructible);
         self
     }
 
     pub fn hexproof(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Hexproof);
+        self.push_keyword(Keyword::Hexproof);
         self
     }
 
     pub fn flash(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Flash);
+        self.push_keyword(Keyword::Flash);
         self
     }
 
     pub fn wither(&mut self) -> &mut Self {
-        self.obj().keywords.push(Keyword::Wither);
+        self.push_keyword(Keyword::Wither);
         self
     }
 
     // --- Generic keyword fallback ---
 
     pub fn with_keyword(&mut self, kw: Keyword) -> &mut Self {
-        self.obj().keywords.push(kw);
+        self.push_keyword(kw);
         self
     }
 
@@ -459,6 +466,11 @@ impl GameRunner {
                 break;
             }
         }
+    }
+
+    /// Produce a `GameSnapshot` of the current state (no events).
+    pub fn snapshot(&self) -> GameSnapshot {
+        GameSnapshot::from_state(&self.state, &[])
     }
 
     /// Execute all actions sequentially, collecting all events.

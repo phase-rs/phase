@@ -1,0 +1,36 @@
+---
+source: crates/engine/tests/rules/keywords.rs
+expression: runner.snapshot()
+---
+{
+  "players": [
+    {
+      "life": 20,
+      "hand": [],
+      "graveyard": []
+    },
+    {
+      "life": 16,
+      "hand": [],
+      "graveyard": [
+        "Bear"
+      ]
+    }
+  ],
+  "battlefield": [
+    {
+      "name": "Nightfall Predator",
+      "owner": 0,
+      "power": 5,
+      "toughness": 5,
+      "tapped": true,
+      "damage": 2,
+      "keywords": [
+        "Deathtouch",
+        "Trample"
+      ]
+    }
+  ],
+  "stack": [],
+  "events": []
+}

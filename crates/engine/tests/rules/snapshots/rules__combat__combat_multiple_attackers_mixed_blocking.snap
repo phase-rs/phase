@@ -1,0 +1,42 @@
+---
+source: crates/engine/tests/rules/combat.rs
+expression: runner.snapshot()
+---
+{
+  "players": [
+    {
+      "life": 20,
+      "hand": [],
+      "graveyard": []
+    },
+    {
+      "life": 18,
+      "hand": [],
+      "graveyard": [
+        "Guard"
+      ]
+    }
+  ],
+  "battlefield": [
+    {
+      "name": "Bear",
+      "owner": 0,
+      "power": 2,
+      "toughness": 2,
+      "tapped": true,
+      "damage": 0,
+      "keywords": []
+    },
+    {
+      "name": "Centaur",
+      "owner": 0,
+      "power": 3,
+      "toughness": 3,
+      "tapped": true,
+      "damage": 2,
+      "keywords": []
+    }
+  ],
+  "stack": [],
+  "events": []
+}

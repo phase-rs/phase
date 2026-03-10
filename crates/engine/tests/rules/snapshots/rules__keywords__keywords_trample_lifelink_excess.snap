@@ -1,0 +1,36 @@
+---
+source: crates/engine/tests/rules/keywords.rs
+expression: runner.snapshot()
+---
+{
+  "players": [
+    {
+      "life": 25,
+      "hand": [],
+      "graveyard": []
+    },
+    {
+      "life": 17,
+      "hand": [],
+      "graveyard": [
+        "Bear"
+      ]
+    }
+  ],
+  "battlefield": [
+    {
+      "name": "Wurm",
+      "owner": 0,
+      "power": 5,
+      "toughness": 5,
+      "tapped": true,
+      "damage": 2,
+      "keywords": [
+        "Trample",
+        "Lifelink"
+      ]
+    }
+  ],
+  "stack": [],
+  "events": []
+}
