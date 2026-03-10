@@ -159,7 +159,7 @@ function TopCardArt({ cardName }: { cardName: string }) {
 
 2. Add a `canPeek` selector that reads `can_look_at_top_of_library` from the player state (only for the human player, playerId 0): `const canPeek = useGameStore((s) => playerId === 0 && (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false));`
 
-3. Add a `topCardName` selector (matching GraveyardPile's pattern) that resolves the name of the top card of the library when peek is active: `const topCardName = useGameStore((s) => { if (!canPeek) return null; const lib = s.gameState?.players[playerId]?.library; if (!lib || lib.length === 0) return null; return s.gameState?.objects[lib[lib.length - 1]]?.name ?? null; });`. Note: library top is the last element (same convention as graveyard).
+3. Add a `topCardName` selector (matching GraveyardPile's pattern) that resolves the name of the top card of the library when peek is active: `const topCardName = useGameStore((s) => { if (!canPeek) return null; const lib = s.gameState?.players[playerId]?.library; if (!lib || lib.length === 0) return null; return s.gameState?.objects[lib[0]]?.name ?? null; });`. Note: library top is index 0 (convention: library[0] = top, per zones.rs:91). This differs from graveyard where top = last element.
 
 4. Reuse the `TopCardArt` pattern from GraveyardPile — create a local `TopCardArt` component (or extract and share from GraveyardPile — but to keep it simple and avoid touching GraveyardPile, duplicate the small component locally).
 

@@ -22,6 +22,10 @@ pub struct Player {
     pub has_drawn_this_turn: bool,
     pub lands_played_this_turn: u8,
     pub poison_counters: u32,
+
+    // Derived fields (computed in WASM bridge, not persisted)
+    #[serde(skip_deserializing, default)]
+    pub can_look_at_top_of_library: bool,
 }
 
 impl Default for Player {
@@ -36,6 +40,7 @@ impl Default for Player {
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,
+            can_look_at_top_of_library: false,
         }
     }
 }

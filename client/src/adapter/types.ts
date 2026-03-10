@@ -130,6 +130,7 @@ export interface Player {
   graveyard: ObjectId[];
   has_drawn_this_turn: boolean;
   lands_played_this_turn: number;
+  can_look_at_top_of_library?: boolean;
 }
 
 // ── Target Ref ───────────────────────────────────────────────────────────

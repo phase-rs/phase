@@ -274,17 +274,17 @@ function GamePageContent({
         />
       </div>
 
-      {/* Opponent zones — upper-right: graveyard pile, library pile, exile badge */}
+      {/* Opponent zones — upper-right: exile badge, library pile, graveyard pile */}
       <div className="fixed right-2 top-12 z-30 flex items-start gap-2">
-        <GraveyardPile
-          playerId={1}
-          onClick={() => setViewingZone({ zone: "graveyard", playerId: 1 })}
-        />
-        <LibraryPile playerId={1} />
         <ZoneIndicator
           zone="exile"
           playerId={1}
           onClick={() => setViewingZone({ zone: "exile", playerId: 1 })}
+        />
+        <LibraryPile playerId={1} />
+        <GraveyardPile
+          playerId={1}
+          onClick={() => setViewingZone({ zone: "graveyard", playerId: 1 })}
         />
       </div>
 

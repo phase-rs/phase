@@ -1,30 +1,36 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
+const EMPTY: readonly number[] = [];
+
 interface GraveyardPileProps {
   playerId: number;
   onClick: () => void;
 }
 
-function TopCardArt({ cardName }: { cardName: string }) {
-  const { src } = useCardImage(cardName, { size: "art_crop" });
+function TopCard({ cardName }: { cardName: string }) {
+  const { src } = useCardImage(cardName, { size: "normal" });
 
   if (!src) {
-    return <div className="h-full w-full rounded bg-gray-700" />;
+    return (
+      <div className="h-full w-full rounded-lg bg-gray-700 border border-gray-600" />
+    );
   }
 
   return (
     <img
       src={src}
       alt={cardName}
-      className="h-full w-full rounded object-cover"
+      className="h-full w-full rounded-lg object-cover"
       draggable={false}
     />
   );
 }
 
 export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
-  const graveyard = useGameStore((s) => s.gameState?.players[playerId]?.graveyard ?? []);
+  const graveyard = useGameStore(
+    (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
+  );
   const topCardName = useGameStore((s) => {
     const state = s.gameState;
     if (!state) return null;
@@ -36,7 +42,6 @@ export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
   const count = graveyard.length;
   if (count === 0) return null;
 
-  // Stacked card effect — offset layers beneath top card
   const stackDepth = Math.min(count - 1, 3);
 
   return (
@@ -44,30 +49,33 @@ export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
       onClick={onClick}
       className="group relative cursor-pointer"
       title={`Graveyard (${count})`}
-      style={{ width: 48, height: 36 }}
+      style={{
+        width: "var(--card-w)",
+        height: "var(--card-h)",
+      }}
     >
       {/* Shadow stack layers */}
       {Array.from({ length: stackDepth }).map((_, i) => (
         <div
           key={i}
-          className="absolute rounded border border-gray-600 bg-gray-800"
+          className="absolute rounded-lg border border-gray-600 bg-gray-800"
           style={{
-            width: 48,
-            height: 36,
-            bottom: (i + 1) * 2,
+            width: "var(--card-w)",
+            height: "var(--card-h)",
+            bottom: (i + 1) * 3,
             left: (i + 1) * -1,
           }}
         />
       ))}
 
-      {/* Top card */}
-      <div className="relative h-full w-full overflow-hidden rounded border-2 border-gray-500 group-hover:border-gray-300 transition-colors">
-        {topCardName && <TopCardArt cardName={topCardName} />}
-        <div className="absolute inset-0 bg-black/30 group-hover:bg-black/10 transition-colors" />
+      {/* Top card — full card image */}
+      <div className="relative h-full w-full overflow-hidden rounded-lg border border-gray-500 shadow-md group-hover:border-gray-300 transition-colors">
+        {topCardName && <TopCard cardName={topCardName} />}
+        <div className="absolute inset-0 bg-black/20 group-hover:bg-black/0 transition-colors" />
       </div>
 
       {/* Count badge */}
-      <div className="absolute -bottom-1 -right-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-gray-900 text-[8px] font-bold text-gray-300 ring-1 ring-gray-600">
+      <div className="absolute -bottom-1 -right-1 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-gray-900 text-[9px] font-bold text-gray-300 ring-1 ring-gray-600">
         {count}
       </div>
     </button>

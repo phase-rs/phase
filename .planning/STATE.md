@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 20-05-PLAN.md
+stopped_at: Completed 20-07-PLAN.md
 last_updated: "2026-03-10T00:15:49.000Z"
-last_activity: 2026-03-09 — Completed 20-05 Transform/DFC Mechanics
+last_activity: 2026-03-10 — Completed 20-07 Effect Handlers & Replacement Effects
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 43
-  completed_plans: 36
+  completed_plans: 37
   percent: 97
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 ## Current Position
 
 Phase: 20 of 20 (Implement all remaining effects)
-Plan: 6 of 10 in current phase
+Plan: 8 of 10 in current phase
 Status: In Progress
-Last activity: 2026-03-09 — Completed 20-05 Transform/DFC Mechanics
+Last activity: 2026-03-10 — Completed 20-07 Effect Handlers & Replacement Effects
 
 Progress: [██████████] 97%
 
@@ -211,9 +211,10 @@ None.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 1 | Add card-data generation, cargo script aliases, and README | 2026-03-08 | 1837030 | [1-add-card-data-generation-cargo-script-al](./quick/1-add-card-data-generation-cargo-script-al/) |
+| 2 | Add graveyard and library zone stacks with GY reveal, click modal, and library peek support | 2026-03-10 | pending | [2-add-graveyard-and-library-zone-stacks-wi](./quick/2-add-graveyard-and-library-zone-stacks-wi/) |
 
 ## Session Continuity
 
-Last activity: 2026-03-09 - Completed 20-05 Transform/DFC Mechanics
-Stopped at: Completed 20-05-PLAN.md
+Last activity: 2026-03-10 - Completed 20-07 Effect Handlers & Replacement Effects
+Stopped at: Completed 20-07-PLAN.md
 Resume file: None

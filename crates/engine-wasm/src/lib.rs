@@ -7,6 +7,7 @@ use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
 use engine::game::engine::apply;
+use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::game::{load_deck_into_state, start_game, DeckPayload};
 use engine::types::player::PlayerId;
 use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
@@ -94,6 +95,23 @@ pub fn get_game_state() -> JsValue {
                     obj.has_summoning_sickness =
                         engine::game::combat::has_summoning_sickness(obj, turn);
                 }
+
+                // Compute per-player derived fields (separate pass to avoid borrow conflict)
+                let peek_flags: Vec<bool> = state
+                    .players
+                    .iter()
+                    .map(|p| {
+                        let ctx = StaticCheckContext {
+                            player_id: Some(p.id),
+                            ..Default::default()
+                        };
+                        check_static_ability(state, "MayLookAtTopOfLibrary", &ctx)
+                    })
+                    .collect();
+                for (i, flag) in peek_flags.into_iter().enumerate() {
+                    state.players[i].can_look_at_top_of_library = flag;
+                }
+
                 serde_wasm_bindgen::to_value(state).unwrap()
             }
             None => JsValue::NULL,
