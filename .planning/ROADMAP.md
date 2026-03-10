@@ -98,11 +98,11 @@ Plans:
   - Implicit abilities must be made explicit during loading: basic lands need synthesized mana abilities (e.g., Forest → `{T}: Add {G}`), equipment needs Equip activated ability from `K:Equip:N` keyword, planeswalkers need loyalty costs wired through `AbilityCost::Loyalty` instead of `remaining_params["PW_Cost"]`
   - Cross-validation needed: test that ability JSON files match MTGJSON card data for completeness (catch missing/incomplete card definitions at test time, not runtime)
   - Vanilla creatures with empty ability vectors are already handled (`casting.rs` synthesizes a Spell marker) — no action needed
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 23-01: TBD
-- [ ] 23-02: TBD
+- [ ] 23-01-PLAN.md — JSON loader module with merge logic, implicit ability synthesis, type contracts, and load_json()
+- [ ] 23-02-PLAN.md — Ability JSON files for 8 smoke test cards, integration smoke test, and cross-validation
 
 ### Phase 24: Card Migration
 **Goal**: All engine-supported cards are converted to the new format with automated tooling, and behavioral parity is validated
@@ -150,6 +150,6 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
 | 21. Schema & MTGJSON Foundation | v1.2 | Complete    | 2026-03-10 | 2026-03-10 |
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
-| 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
+| 23. Unified Card Loader | v1.2 | 0/2 | Not started | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |
 | 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |
