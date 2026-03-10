@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this creature: Add {C}.\"",
+        "Origin": "Any",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

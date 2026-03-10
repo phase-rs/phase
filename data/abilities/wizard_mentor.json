@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Return CARDNAME and target creature you control to their owner's hand.",
+        "ThisDefinedAndTgts": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

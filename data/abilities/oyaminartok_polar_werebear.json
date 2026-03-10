@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Draft",
+        "params": {
+          "Spellbook": "Archipelagore,Junk Winder,Moat Piranhas,Mystic Skyfish,Nadir Kraken,Nezahal; Primal Tide,Pouncing Shoreshark,Pursued Whale,Riptide Turtle,Ruin Crab,Sea-Dasher Octopus,Sigiled Starfish,Spined Megalodon,Stinging Lionfish,Voracious Greatshark",
+          "SubAbility": "TrigImmediateTrig",
+          "SpellDescription": "Draft a card from CARDNAME's spellbook. When you do, add {U}{U}{U}. Spend this mana only to cast blue creature spells."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Spellbook": "Archipelagore,Junk Winder,Moat Piranhas,Mystic Skyfish,Nadir Kraken,Nezahal; Primal Tide,Pouncing Shoreshark,Pursued Whale,Riptide Turtle,Ruin Crab,Sea-Dasher Octopus,Sigiled Starfish,Spined Megalodon,Stinging Lionfish,Voracious Greatshark",
+        "SubAbility": "TrigImmediateTrig",
+        "SpellDescription": "Draft a card from CARDNAME's spellbook. When you do, add {U}{U}{U}. Spend this mana only to cast blue creature spells."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigToken",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, create a Food token.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+!dealtDamagetoAny",
+        "Description": "CARDNAME has hexproof if it hasn't dealt damage yet.",
+        "AddKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

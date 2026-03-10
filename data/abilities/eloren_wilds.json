@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Execute": "TrigMana",
+        "Static": "True",
+        "TriggerDescription": "Whenever a player taps a permanent for mana, that player adds one mana of any type that permanent produced.",
+        "ValidCard": "Permanent",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, target player can't cast spells until a player planeswalks.",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

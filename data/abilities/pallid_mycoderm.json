@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_1_1_saproling",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<3/SPORE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 green Saproling creature token.",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each creature you control that's a Fungus or a Saproling gets +1/+1 until end of turn.",
+        "ValidCards": "Fungus.Creature+YouCtrl,Saproling.Creature+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your upkeep, put a spore counter on CARDNAME.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

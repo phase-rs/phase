@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Other legendary creatures you control get +2/+2.",
+        "Affected": "Creature.Legendary+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

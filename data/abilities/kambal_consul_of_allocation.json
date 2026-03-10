@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigDrain",
+        "TriggerDescription": "Whenever an opponent casts a noncreature spell, that player loses 2 life and you gain 2 life.",
+        "ValidCard": "Card.nonCreature",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

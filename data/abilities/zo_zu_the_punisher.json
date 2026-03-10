@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a land enters, CARDNAME deals 2 damage to that land's controller.",
+        "Origin": "Any",
+        "ValidCard": "Land",
+        "Destination": "Battlefield",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

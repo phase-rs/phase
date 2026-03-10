@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target permanent gains indestructible until end of turn. Create a 1/1 colorless Servo artifact creature token. (Effects that say \"destroy\" don't destroy a permanent with indestructible, and if it's a creature, it can't be destroyed by damage.)",
+        "KW": "Indestructible",
+        "SubAbility": "DBToken"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

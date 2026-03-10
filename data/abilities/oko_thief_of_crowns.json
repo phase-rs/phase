@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_a_food_sac",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a Food token.",
+        "Planeswalker": "True",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 3,
+        "types": [
+          "Creature",
+          "Elk"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveAllAbilities": "True",
+        "Colors": "Green",
+        "OverwriteColors": "True",
+        "TgtPrompt": "Select target artifact or creature",
+        "Duration": "Permanent",
+        "RemoveCardTypes": "True",
+        "RemoveCreatureTypes": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "Target artifact or creature loses all abilities and becomes a green Elk creature with base power and toughness 3/3."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.YouCtrl,Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exchange control of target artifact or creature you control and target creature an opponent controls with power 3 or less.",
+        "TgtPrompt": "Choose target artifact or creature you control",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "AITgts": "Artifact.YouCtrl+cmcLE1",
+        "SubAbility": "OkoExchange"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

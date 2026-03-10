@@ -1,0 +1,99 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "b_2_2_vampire_flying",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create a 2/2 black Vampire creature token with flying.",
+            "TokenOwner": "You"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "IsPresent": "Card.Vampire+YouCtrl",
+              "PresentCompare": "GE5",
+              "Mode": "Transform",
+              "Defined": "Self",
+              "SpellDescription": "Transform CARDNAME. Activate only if you control five or more Vampires."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "IsPresent": "Card.Vampire+YouCtrl",
+            "PresentCompare": "GE5",
+            "Mode": "Transform",
+            "Defined": "Self",
+            "SpellDescription": "Transform CARDNAME. Activate only if you control five or more Vampires."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "b_2_2_vampire_flying",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TokenOwner": "You",
+            "SpellDescription": "Create a 2/2 black Vampire creature token with flying."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "2",
+            "Description": "Other Vampire creatures you control get +2/+2.",
+            "Affected": "Creature.Vampire+Other+YouCtrl",
+            "AddPower": "2"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

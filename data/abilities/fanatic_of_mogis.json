@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, it deals damage to each opponent equal to your devotion to red. (Each {R} in the mana costs of permanents you control counts towards your devotion to red.)",
+        "Execute": "TrigDamageAll",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

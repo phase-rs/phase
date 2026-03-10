@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "TriggerDescription": "Advanced Species — Whenever a red source you control deals damage to one or more permanents and/or players, put a +1/+1 counter on CARDNAME.",
+        "ValidTarget": "Player,Permanent",
+        "ValidSource": "Card.RedSource+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

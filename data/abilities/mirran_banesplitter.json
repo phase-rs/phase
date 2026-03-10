@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, attach it to target creature you control.",
+        "Execute": "TrigAttach"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+0.",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

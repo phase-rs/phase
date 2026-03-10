@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "ValidActivatingPlayer": "Player.NonActive",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player casts a spell, if it's not their turn, that player draws a card.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

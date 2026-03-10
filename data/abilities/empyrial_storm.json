@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "w_4_4_angel_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 4/4 white Angel creature token with flying."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cast this spell, copy it for each time you've cast your commander from the command zone this game.",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

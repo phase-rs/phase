@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Card.YouCtrl+Other",
+        "TriggerDescription": "Whenever you cycle or discard another card, scry 1.",
+        "Execute": "TrigScry",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

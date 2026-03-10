@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "At the beginning of your upkeep, if you have four or more creature cards in your graveyard, you may return target creature card from your graveyard to your hand.",
+        "Phase": "Upkeep",
+        "PresentCompare": "GE4",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature.YouCtrl",
+        "OptionalDecider": "You",
+        "PresentZone": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

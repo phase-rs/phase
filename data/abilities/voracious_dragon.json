@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "When CARDNAME enters, it deals damage to any target equal to twice the number of Goblins it devoured.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

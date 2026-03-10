@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "6",
+        "AddKeyword": "Trample",
+        "AddToughness": "6",
+        "Description": "Equipped creature gets +6/+6 and has trample.",
+        "Affected": "Card.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

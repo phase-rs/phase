@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When a creature you control dies, sacrifice CARDNAME. If you do, create four 1/1 colorless Spirit creature tokens.",
+        "ValidCard": "Creature.YouCtrl",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CommitCrime",
+      "params": {
+        "TriggerDescription": "Whenever you commit a crime during your turn, CARDNAME gains indestructible until end of turn. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime. Damage and effects that say \"destroy\" don't destroy a creature with indestructible.)",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you may discard a card. If you do, draw a card.",
+        "Execute": "TrigDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

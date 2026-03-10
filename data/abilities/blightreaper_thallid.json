@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "AILogic": "Always",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+              "SorcerySpeed": "True",
+              "Defined": "Self"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 GP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "AILogic": "Always",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+            "SorcerySpeed": "True",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigToken",
+            "TriggerDescription": "When this creature transforms into CARDNAME or dies, create a 1/1 green Phyrexian Saproling creature token."
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Secondary": "True",
+            "Execute": "TrigToken",
+            "TriggerDescription": "When this creature transforms into CARDNAME or dies, create a 1/1 green Phyrexian Saproling creature token.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever an opponent casts a spell, that player mills two cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

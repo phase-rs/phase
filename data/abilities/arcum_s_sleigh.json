@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Vigilance",
+        "IsPresent": "Land.Snow+DefenderCtrl",
+        "ActivationPhases": "BeginCombat->EndCombat",
+        "SpellDescription": "Target creature gains vigilance until end of turn. Activate only during combat and only if defending player controls a snow land."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

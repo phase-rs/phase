@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.Basic+YouCtrl",
+        "AddAbility": "Mana",
+        "Description": "Strategic Coordinator — Basic lands you control have \"{T}: Add {C}{C}. Spend this mana only on costs that contain {X}.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+tapped+YouCtrl",
+        "AddKeyword": "Indestructible",
+        "Description": "Other tapped creatures you control have indestructible."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

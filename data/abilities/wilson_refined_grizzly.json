@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

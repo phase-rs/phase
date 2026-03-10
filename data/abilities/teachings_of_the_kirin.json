@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME attacks, ABILITY",
+            "Execute": "TrigCharm",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

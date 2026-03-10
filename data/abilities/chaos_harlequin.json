@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SubAbility": "DBLand",
+        "ChangeValid": "Card",
+        "SpellDescription": "Exile the top card of your library. If that card is a land card, CARDNAME gets -4/-0 until end of turn. Otherwise, CARDNAME gets +2/+0 until end of turn.",
+        "StackDescription": "SpellDescription",
+        "ChangeNum": "All"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

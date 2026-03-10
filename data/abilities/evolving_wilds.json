@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeTypeDesc": "basic land",
+        "Tapped": "True",
+        "ChangeType": "Land.Basic",
+        "SpellDescription": "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

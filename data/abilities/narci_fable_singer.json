@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Enchantment.YouCtrl",
+        "TriggerDescription": "Whenever you sacrifice an enchantment, draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "AbilityResolves",
+      "params": {
+        "ValidSource": "Saga.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "ValidSpellAbility": "Triggered.LastChapter",
+        "Execute": "TrigDrain",
+        "TriggerDescription": "Whenever the final chapter ability of a Saga you control resolves, each opponent loses X life and you gain X life, where X is that Saga's mana value."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

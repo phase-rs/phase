@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.OppCtrl",
+        "Execute": "TrigToken",
+        "Attacked": "You,Planeswalker.YouCtrl,Battle.ProtectedBy You",
+        "TriggerDescription": "Whenever a creature an opponent controls attacks, if you're the defending player, create a 3/3 red Ogre creature token unless that creature's controller pays {3}.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

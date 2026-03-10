@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, you gain 1 life and draw a card.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife"
+      }
+    },
+    {
+      "mode": "Exiled",
+      "params": {
+        "TriggerDescription": "When CARDNAME is exiled from the battlefield while you're activating a craft ability, you gain 1 life and draw a card.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "WhileKeyword": "Ability.Craft",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

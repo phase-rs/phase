@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W B"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<6/P1P1>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target creature."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you gain life, put two +1/+1 counters on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

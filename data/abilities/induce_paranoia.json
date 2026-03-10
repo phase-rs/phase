@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBMill",
+        "RememberCounteredCMC": "True",
+        "TargetType": "Spell",
+        "SpellDescription": "Counter target spell. If {B} was spent to cast this spell, that spell's controller mills X cards, where X is the spell's mana value."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

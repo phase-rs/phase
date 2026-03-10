@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigEnergy",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E} (three energy counters)."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DBTrigger",
+        "TriggerDescription": "When CARDNAME dies, you may pay {E}{E}{E}. When you do, CARDNAME deals damage equal to its power to any target.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

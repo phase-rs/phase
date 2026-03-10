@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "DamageAmount": "GE5",
+        "ValidTarget": "Player",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a source you control deals 5 or more damage to a player, draw a card.",
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

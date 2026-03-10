@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 3/3 black Wraith creature token with menace. Then if you control nine or more Wraiths, Wraiths you control have base power and toughness 9/9 until end of turn.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Wraith+YouCtrl",
+        "Description": "Wraiths you control have protection from Ring-bearers.",
+        "AddKeyword": "Protection:Card.IsRingbearer:Ring-bearers"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

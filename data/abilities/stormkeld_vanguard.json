@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "ValidBlocker": "Creature.powerLE2",
+            "ValidAttacker": "Creature.Self",
+            "Description": "CARDNAME can't be blocked by creatures with power 2 or less."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Destroy",
+            "target": {
+              "type": "Filtered",
+              "filter": "Artifact,Enchantment"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Destroy target artifact or enchantment. (Then exile this card. You may cast the creature later from exile.)",
+            "TgtPrompt": "Select target artifact or enchantment"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

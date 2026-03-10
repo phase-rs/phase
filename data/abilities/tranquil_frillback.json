@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPay",
+        "TriggerDescription": "When CARDNAME enters, you may pay {G} up to three times. When you pay this cost one or more times, ABILITY",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

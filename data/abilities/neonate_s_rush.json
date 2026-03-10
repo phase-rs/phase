@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DamageMap": "True",
+        "SubAbility": "DBDealDamage",
+        "SpellDescription": "CARDNAME deals 1 damage to target creature and 1 damage to its controller. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast if you control a Vampire.",
+        "ValidCard": "Card.Self",
+        "Amount": "1",
+        "IsPresent": "Vampire.YouCtrl",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

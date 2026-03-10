@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpAll",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, creatures you control get +1/+1 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

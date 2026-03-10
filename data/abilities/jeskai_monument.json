@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_bird_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U R W"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SorcerySpeed": "True",
+        "SpellDescription": "Create two 1/1 white Bird creature tokens with flying. Activate only as a sorcery.",
+        "TokenAmount": "2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When this artifact enters, search your library for a basic Island, Mountain, or Plains card, reveal it, put it into your hand, then shuffle.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

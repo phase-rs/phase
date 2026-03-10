@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, it deals 3 damage to up to one target creature.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDealDamage"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidCards": "Creature",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever one or more creatures die, put a rev counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EquippedBy",
+        "AddPower": "X",
+        "Description": "Equipped creature gets +X/+0, where X is the number of rev counters on CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

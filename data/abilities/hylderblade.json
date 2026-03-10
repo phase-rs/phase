@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigAttach",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "TriggerDescription": "Void — At the beginning of your end step, if a nonland permanent left the battlefield this turn or a spell was warped this turn, attach this Equipment to target creature you control.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "AddPower": "3",
+        "Description": "Equipped creature gets +3/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

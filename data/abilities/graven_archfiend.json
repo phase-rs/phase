@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "CastSA>Count$OptionalGenericCostPaid.1.0",
+        "NoResolvingCheck": "True",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When CARDNAME enters, if its additional cost was paid, conjure a card named Demonic Pact onto the battlefield.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Self",
+        "Cost": "Sac<1/Creature.nonDemon/non-Demon creature>",
+        "Description": "As an additional cost to cast this spell, you may sacrifice a non-Demon creature.",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

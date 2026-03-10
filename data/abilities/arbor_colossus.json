@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Monstrosity": "3"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "BecomeMonstrous",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When CARDNAME becomes monstrous, destroy target creature with flying an opponent controls.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

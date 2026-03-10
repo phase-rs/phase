@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Static": "True",
+        "ValidCard": "Card.Self+nonAura"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player.EnchantedController",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, put a -0/-1 counter on that creature.",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.EnchantedBy",
+        "Origin": "Battlefield",
+        "Execute": "TrigChoose",
+        "TriggerDescription": "When enchanted creature dies, that creature's controller chooses a creature that CARDNAME could enchant. If the player does, return CARDNAME to the battlefield under your control attached to that creature. If they don't, return CARDNAME to the battlefield under your control as a non-Aura enchantment. It loses \"enchant creature\" and gains \"At the beginning of that player's upkeep, CARDNAME deals 1 damage to that player.\"",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

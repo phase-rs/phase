@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of combat on your turn, target creature you control gets +1/+0 and gains haste until end of turn.",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPump",
+            "Phase": "BeginCombat"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of combat on your turn, target creature you control gets +2/+0 and gains trample and haste until end of turn.",
+            "ValidPlayer": "You",
+            "Execute": "TrigPump",
+            "Phase": "BeginCombat",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

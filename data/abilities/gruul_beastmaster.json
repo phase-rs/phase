@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, another target creature you control gets +X/+0 until end of turn, where X is CARDNAME's power.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

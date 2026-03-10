@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpAll",
+        "TriggerDescription": "When CARDNAME enters, other creatures you control get +3/+3 and gain trample until end of turn.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Description": "This spell costs {1} less to cast for each land card in your graveyard.",
+        "Amount": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

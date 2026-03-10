@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSands",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player simultaneously untaps each tapped artifact, creature, and land they control and taps each untapped artifact, creature, and land they control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Skip": "True",
+        "Phase": "Untap",
+        "Description": "Each player skips their untap step."
+      }
+    }
+  ],
+  "faces": []
+}

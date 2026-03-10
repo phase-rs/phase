@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME is the chosen color. (It's still an artifact.)",
+        "Affected": "Card.Self",
+        "SetColor": "ChosenColor"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

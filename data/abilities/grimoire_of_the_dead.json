@@ -1,0 +1,78 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "STUDY",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "Put a study counter on CARDNAME."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<3/STUDY>"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "GainControl": "True",
+        "SpellDescription": "Put all creature cards in all graveyards onto the battlefield under your control. They are black Zombies in addition to their other colors and types.",
+        "StaticEffect": "Animate",
+        "ChangeType": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

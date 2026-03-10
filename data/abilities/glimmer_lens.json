@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature and at least one other creature attack, draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.EquippedBy",
+        "IsPresent": "Creature.attacking+!EquippedBy",
+        "Execute": "TrigDraw",
+        "NoResolvingCheck": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

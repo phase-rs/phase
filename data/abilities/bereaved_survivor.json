@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "Destination": "Graveyard",
+            "ValidCard": "Creature.Other+YouCtrl",
+            "TriggerDescription": "When another creature you control dies, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChangeZone",
+            "TriggerDescription": "Whenever CARDNAME attacks, return target creature card with mana value 2 or less from your graveyard to the battlefield tapped and attacking."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

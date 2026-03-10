@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPutCounterAll",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each other Human you control."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Human.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another Human you control enters, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

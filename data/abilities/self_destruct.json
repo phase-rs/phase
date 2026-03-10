@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature you control deals X damage to any other target and X damage to itself, where X is its power.",
+        "SubAbility": "DBDealDamage2",
+        "TgtPrompt": "Select target creature you control",
+        "AILogic": "PowerDmg",
+        "DamageSource": "ThisTargetedCard",
+        "DamageMap": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChangeText",
+        "params": {
+          "TgtPrompt": "Choose target spell or permanent",
+          "TgtZone": "Stack,Battlefield",
+          "ForbiddenNewTypes": "Wall",
+          "Duration": "Permanent",
+          "ChangeTypeWord": "ChooseCreatureType ChooseCreatureType",
+          "ValidTgts": "Card",
+          "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one creature type with another. The new creature type can't be Wall. (This effect lasts indefinitely.)"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target spell or permanent",
+        "TgtZone": "Stack,Battlefield",
+        "ForbiddenNewTypes": "Wall",
+        "Duration": "Permanent",
+        "ChangeTypeWord": "ChooseCreatureType ChooseCreatureType",
+        "ValidTgts": "Card",
+        "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one creature type with another. The new creature type can't be Wall. (This effect lasts indefinitely.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

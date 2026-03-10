@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.Self",
+        "Execute": "TrigCounters",
+        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on each attacking creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

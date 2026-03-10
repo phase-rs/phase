@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You may play an additional land on each of your turns.",
+        "AdjustLandPlays": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "Player",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "Description": "Play with the top card of your library revealed.",
+        "AffectedZone": "Library"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Description": "You may play lands from the top of your library.",
+        "Affected": "Land.TopLibrary+YouCtrl",
+        "AffectedZone": "Library"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetColor": "Blue",
+        "SetPower": "1",
+        "RemoveAllAbilities": "True",
+        "RemoveCreatureTypes": "True",
+        "Description": "Enchanted creature loses all abilities and is a blue Frog creature with base power and toughness 1/1.",
+        "RemoveCardTypes": "True",
+        "SetToughness": "1",
+        "AddType": "Creature & Frog",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

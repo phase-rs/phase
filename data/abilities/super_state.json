@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigDmg",
+        "ValidSource": "Creature.EnchantedBy",
+        "ValidTarget": "Opponent",
+        "TriggerDescription": "Whenever enchanted creature deals combat damage to an opponent, it deals that much damage to each other opponent."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "9",
+        "Description": "Enchanted creature has base power and toughness 9/9 and has flying, first strike, trample, and haste.",
+        "SetPower": "9",
+        "AddKeyword": "Flying & First Strike & Trample & Haste",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

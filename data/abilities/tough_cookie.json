@@ -1,0 +1,75 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.nonCreature+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "ValuableAttackerOrBlocker",
+        "TgtPrompt": "Select target noncreature artifact you control",
+        "SpellDescription": "Target noncreature artifact you control becomes a 4/4 artifact creature until end of turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 3
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 3 life."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigFood"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

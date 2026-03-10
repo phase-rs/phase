@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, CARDNAME deals 2 damage to any target.",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TargetsValid": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

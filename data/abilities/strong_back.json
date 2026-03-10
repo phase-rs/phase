@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidTarget": "Creature.EnchantedBy",
+        "Description": "Equip abilities you activate that target enchanted creature cost {3} less to activate.",
+        "ValidSpell": "Activated.Equip",
+        "Activator": "You",
+        "Amount": "3"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Aura",
+        "Type": "Spell",
+        "Amount": "3",
+        "Description": "Aura spells you cast that target enchanted creature cost {3} less to cast.",
+        "Activator": "You",
+        "ValidTarget": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2 for each Aura and Equipment attached to it.",
+        "AddToughness": "X",
+        "AddSVar": "EqMe & EnMe",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

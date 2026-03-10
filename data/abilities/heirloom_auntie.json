@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSurveil",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever another creature you control dies, surveil 1, then remove a -1/-1 counter from this creature. (To surveil 1, look at the top card of your library. You may put it into your graveyard.)",
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

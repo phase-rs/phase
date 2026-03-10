@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature",
+        "Execute": "TrigLoot",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you cast a creature spell, you may pay {1}. If you do, draw a card, then discard a card.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

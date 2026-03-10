@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLose",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When NICKNAME dies, you lose 2 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Graveyard",
+        "Affected": "Card.Self",
+        "AffectedZone": "Graveyard",
+        "MayPlay": "True"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card.Self",
+        "EffectZone": "Graveyard,Hand,Library,Command,Stack",
+        "Description": "You may cast CARDNAME from your graveyard, but not from anywhere else.",
+        "Origin": "Exile,Hand,Library,Command"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as NICKNAME is on the battlefield, you may cast Knight spells from your graveyard.",
+        "Affected": "Knight.YouCtrl",
+        "EffectZone": "Battlefield",
+        "AffectedZone": "Graveyard",
+        "ValidAfterStack": "Spell.Knight",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

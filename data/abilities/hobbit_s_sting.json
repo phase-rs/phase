@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals X damage to target creature, where X is the number of creatures you control plus the number of Foods you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

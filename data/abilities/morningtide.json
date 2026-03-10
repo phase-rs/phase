@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "ExileGraveyards",
+        "SpellDescription": "Exile all graveyards.",
+        "ChangeType": "Card"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

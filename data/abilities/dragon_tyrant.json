@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {R}{R}{R}{R}.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUpkeep",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

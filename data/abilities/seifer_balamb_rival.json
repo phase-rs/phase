@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "Execute": "TrigGoad",
+        "ValidAttackers": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "AttackedTarget": "Player",
+        "TriggerDescription": "Whenever you attack a player, goad target creature that player controls."
+      }
+    },
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature attacking one of your opponents becomes blocked by two or more creatures, that attacking creature gains deathtouch until end of turn.",
+        "ValidCard": "Creature.attacking Opponent",
+        "ValidBlocker": "Creature",
+        "ValidBlockerAmount": "GE2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

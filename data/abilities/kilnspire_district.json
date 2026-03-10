@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your precombat main phase, put a charge counter on CARDNAME, then add {R} for each charge counter on it.",
+        "Execute": "PutCounter"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your precombat main phase, put a charge counter on CARDNAME, then add {R} for each charge counter on it.",
+        "TriggerZones": "Command",
+        "ValidPlayer": "You",
+        "Secondary": "True",
+        "Phase": "Main1",
+        "Execute": "PutCounter"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, you may pay {X}. If you do, CARDNAME deals X damage to any target."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

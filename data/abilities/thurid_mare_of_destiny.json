@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Creature.Pegasus,Creature.Unicorn,Creature.Horse",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopySpell",
+        "TriggerDescription": "Whenever you cast a Pegasus, Unicorn, or Horse creature spell, copy it. (The copy becomes a token.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Pegasus.Other+YouCtrl,Unicorn.Other+YouCtrl,Horse.Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other Pegasi, Unicorns, and Horses you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

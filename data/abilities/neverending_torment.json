@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Exile",
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Search target player's library for X cards, where X is the number of cards in your hand, and exile it. Then that player shuffles their library.",
+        "IsCurse": "True",
+        "ChangeType": "Card",
+        "ChangeNum": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

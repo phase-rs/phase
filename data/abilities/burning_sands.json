@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigSac",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature dies, that creature's controller sacrifices a land."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

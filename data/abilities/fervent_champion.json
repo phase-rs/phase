@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, another target attacking Knight you control gets +1/+0 until end of turn.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "Description": "Equip abilities you activate that target CARDNAME cost {3} less to activate.",
+        "Activator": "You",
+        "Amount": "3",
+        "ValidSpell": "Activated.Equip"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

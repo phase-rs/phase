@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, create two 1/1 colorless Sliver creature tokens.",
+        "Execute": "TrigToken",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver.YouCtrl",
+        "Description": "Slivers you control have double strike and haste.",
+        "AddKeyword": "Double Strike & Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

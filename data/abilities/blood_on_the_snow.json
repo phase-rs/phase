@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "Choices": "DestroyCtrs,DestroyPWs",
+          "SubAbility": "NoopDesc"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "DestroyCtrs,DestroyPWs",
+        "SubAbility": "NoopDesc"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

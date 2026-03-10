@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Merfolk you control get +1/+0 and have flying.",
+        "AddKeyword": "Flying",
+        "Affected": "Merfolk.Other+YouCtrl",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

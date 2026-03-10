@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Any",
+        "Origin": "Graveyard",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "Whenever one or more cards leave your graveyard, CARDNAME deals 1 damage to each opponent.",
+        "ValidCards": "Card.YouOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

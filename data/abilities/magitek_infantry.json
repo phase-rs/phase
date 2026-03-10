@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Search your library for a card named Magitek Infantry, put it onto the battlefield tapped, then shuffle.",
+        "ChangeNum": "1",
+        "Tapped": "True",
+        "ChangeType": "Card.namedMagitek Infantry"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Artifact.Other+YouCtrl",
+        "AddPower": "1",
+        "Affected": "Card.Self",
+        "Description": "This creature gets +1/+0 as long as you control another artifact."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

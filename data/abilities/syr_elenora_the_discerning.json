@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power is equal to the number of cards in your hand.",
+        "SetPower": "X"
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "2",
+        "Description": "Spells your opponents cast that target NICKNAME cost {2} more to cast.",
+        "Activator": "Player.Opponent",
+        "Type": "Spell",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

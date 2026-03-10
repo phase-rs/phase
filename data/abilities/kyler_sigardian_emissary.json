@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another Human you control enters, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Human.Other+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "X",
+        "AddPower": "X",
+        "Affected": "Card.Human+Other+YouCtrl",
+        "Description": "Other Humans you control get +1/+1 for each counter on CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

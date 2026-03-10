@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME is put into your hand from your graveyard, you gain 2 life.",
+        "ValidCard": "Card.Self",
+        "Origin": "Graveyard",
+        "Destination": "Hand"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

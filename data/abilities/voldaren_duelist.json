@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigCanNotBlock",
+        "TriggerDescription": "When CARDNAME enters, target creature can't block this turn.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

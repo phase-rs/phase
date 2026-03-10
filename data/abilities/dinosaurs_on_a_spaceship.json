@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterRemoved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Exile",
+        "CounterType": "TIME",
+        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, create a 2/2 red and white Dinosaur creature token with flying and haste.",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Vigilance & Trample",
+        "Description": "Other Dinosaurs you control get +1/+1 and have vigilance and trample.",
+        "AddToughness": "1",
+        "Affected": "Creature.Dinosaur+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

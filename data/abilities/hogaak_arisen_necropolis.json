@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {
+          "ManaRestriction": "None"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 BG BG"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ManaRestriction": "None"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Graveyard",
+        "Affected": "Card.Self",
+        "MayPlay": "True",
+        "AffectedZone": "Graveyard",
+        "Description": "You may cast CARDNAME from your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

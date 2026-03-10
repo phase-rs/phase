@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Mode": "TgtChoose",
+        "Defined": "Player",
+        "SpellDescription": "Each player discards a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player sacrifices a creature.",
+        "Planeswalker": "True",
+        "SacValid": "Creature"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TwoPiles",
+        "params": {
+          "ValidTgts": "Player",
+          "ChosenPile": "DBSacAll",
+          "ValidCards": "Permanent",
+          "AILogic": "Worst",
+          "SpellDescription": "Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "Separator": "You",
+          "StackDescription": "REP target player_{p:Targeted}",
+          "Zone": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "ChosenPile": "DBSacAll",
+        "ValidCards": "Permanent",
+        "AILogic": "Worst",
+        "SpellDescription": "Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "Separator": "You",
+        "StackDescription": "REP target player_{p:Targeted}",
+        "Zone": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

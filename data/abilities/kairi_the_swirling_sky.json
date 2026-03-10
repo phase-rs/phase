@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigCharm",
+        "TriggerDescription": "When CARDNAME dies, ABILITY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonland permanent",
+        "SubAbility": "DBToken",
+        "SpellDescription": "Return one or two target nonland permanents to their owners' hands. Then if you control a Merfolk, create a 1/1 white and blue Merfolk creature token for each permanent returned to its owner's hand this way.",
+        "RememberChanged": "True",
+        "TargetMax": "2",
+        "TargetMin": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

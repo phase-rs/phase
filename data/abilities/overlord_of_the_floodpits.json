@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, draw two cards, then discard a card."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, draw two cards, then discard a card.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you gain 7 life.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME dies, draw a card.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

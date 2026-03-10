@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create a 3/3 colorless Phyrexian Golem artifact creature token.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "SVarCompare": "GE3",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your end step, if three or more artifacts entered the battlefield under your control this turn, create a 3/3 colorless Phyrexian Golem artifact creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

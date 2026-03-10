@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "IsPresent": "Creature.Blue+YouCtrl",
+        "Description": "CARDNAME has flying as long as you control a blue creature.",
+        "AddKeyword": "Flying"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has persist as long as you control a black creature.",
+        "Affected": "Card.Self",
+        "IsPresent": "Creature.Black+YouCtrl",
+        "AddKeyword": "Persist"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Creature.powerGE4+Other+YouCtrl",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME or another creature you control with power 4 or greater enters, you gain 3 life and draw a card.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+!token",
+        "TriggerDescription": "When CARDNAME dies, if it's not a token, create a token that's a copy of it, except it's an artifact in addition to its other types.",
+        "Execute": "DBCopy",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

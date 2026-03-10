@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCastOrCopy",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDrain",
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 1 life and you gain 1 life.",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

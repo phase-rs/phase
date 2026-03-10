@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, CARDNAME gets +2/+2 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

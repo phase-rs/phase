@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, put that creature on top of its owner's library.",
+        "ValidCard": "Card.Self",
+        "ValidBlocker": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

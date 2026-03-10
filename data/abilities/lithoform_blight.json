@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveAllAbilities": "True",
+        "AddAbility": "ABManaC & ABManaAny",
+        "Affected": "Land.EnchantedBy",
+        "RemoveLandTypes": "True",
+        "Description": "Enchanted land loses all land types and abilities and has \"{T}: Add {C}\" and \"{T}, Pay 1 life: Add one mana of any color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

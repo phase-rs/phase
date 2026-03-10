@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSubAbility": "ShuffleHand",
+          "RepeatPlayers": "Player",
+          "SpellDescription": "Each player shuffles the cards from their hand into their library, then draws that many cards. Metalcraft — If you control three or more artifacts, CARDNAME deals damage to each opponent equal to the number of cards that player has drawn this turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "ShuffleHand",
+        "RepeatPlayers": "Player",
+        "SpellDescription": "Each player shuffles the cards from their hand into their library, then draws that many cards. Metalcraft — If you control three or more artifacts, CARDNAME deals damage to each opponent equal to the number of cards that player has drawn this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

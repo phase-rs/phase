@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a Dragon you control attacks, it gains double strike until end of turn.",
+        "ValidCard": "Dragon.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

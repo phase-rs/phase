@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control with haste attacks, create a tapped Treasure token.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+withHaste",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

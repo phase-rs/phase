@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Amount": "X",
+        "EffectZone": "All",
+        "Description": "CARDNAME costs {X} less to cast, where X is your devotion to black."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

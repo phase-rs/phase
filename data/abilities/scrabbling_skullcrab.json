@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Enchantment.YouCtrl",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, target player mills two cards. (They put the top two cards of their library into their graveyard.)",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "ValidCard": "Card.Room",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, target player mills two cards. (They put the top two cards of their library into their graveyard.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

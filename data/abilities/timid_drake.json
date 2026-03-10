@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When another creature enters, return CARDNAME to its owner's hand.",
+        "ValidCard": "Creature.Other",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When CARDNAME enters, destroy target artifact or enchantment an opponent controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.MultiColor",
+        "TriggerDescription": "Whenever you cast a multicolored spell, draw a card.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

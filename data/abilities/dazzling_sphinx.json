@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDigUntil",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then that player puts the exiled cards that weren't cast this way on the bottom of their library in a random order.",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

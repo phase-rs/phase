@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C R",
+        "params": {
+          "SpellDescription": "Add {C}{R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}{R}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, sacrifice it unless you return an untapped Mountain you control to its owner's hand.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigSacUnless"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigNecromancy",
+        "TriggerDescription": "At the beginning of your end step, you may put target creature card from an opponent's graveyard onto the battlefield under your control.",
+        "TriggerZones": "Command",
+        "OptionalDecider": "You",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.IsRemembered",
+        "Destination": "Graveyard",
+        "TriggerZones": "Command",
+        "Execute": "TrigAbandon",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When a creature put onto the battlefield with this scheme dies, abandon this scheme."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

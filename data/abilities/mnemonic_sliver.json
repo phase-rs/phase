@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Draw",
+        "Description": "All Slivers have \"{2}, Sacrifice this permanent: Draw a card.\"",
+        "Affected": "Sliver"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

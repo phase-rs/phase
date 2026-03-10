@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap",
+        "TriggerDescription": "At the beginning of your upkeep, tap CARDNAME unless you pay 2 life.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

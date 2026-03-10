@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "CastWithFlash",
+          "params": {
+            "ValidSA": "Spell",
+            "Description": "You may cast sorcery spells and Dragon spells as though they had flash.",
+            "EffectZone": "Battlefield",
+            "Caster": "You",
+            "ValidCard": "Sorcery,Dragon"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 3,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Put three +1/+1 counters on target creature you control. (Then shuffle this card into its owner's library.)",
+            "TgtPrompt": "Select target creature you control"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

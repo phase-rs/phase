@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo Any",
+        "params": {
+          "Amount": "2",
+          "RestrictValid": "Spell.Dragon,Activated.Dragon+inZoneBattlefield",
+          "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast Dragon spells or activate abilities of Dragons."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "RestrictValid": "Spell.Dragon,Activated.Dragon+inZoneBattlefield",
+        "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast Dragon spells or activate abilities of Dragons."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 7,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestRandomOrder": "True",
+        "ChangeNum": "1",
+        "SpellDescription": "Look at the top seven cards of your library. You may reveal a Dragon card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "ChangeValid": "Dragon",
+        "Optional": "True",
+        "ForceRevealToController": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME enters, search your library for an Equipment card and reveal it. If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigTap",
+        "ValidCard": "Creature.YouCtrl+equipped",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever an equipped creature you control attacks, you may tap target creature defending player controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

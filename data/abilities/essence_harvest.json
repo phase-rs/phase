@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 0
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Target player loses X life and you gain X life, where X is the highest power amongst creatures you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

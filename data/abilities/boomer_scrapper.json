@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you lose 1 life and create a Junk token. (It's an artifact with \"{T}, Sacrifice this artifact: Exile the top card of your library. You may play that card this turn. Activate only as a sorcery.\")",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLoseLife",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you lose 1 life and create a Junk token. (It's an artifact with \"{T}, Sacrifice this artifact: Exile the top card of your library. You may play that card this turn. Activate only as a sorcery.\")"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a token you control leaves the battlefield, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Card.token+YouCtrl",
+        "Origin": "Battlefield",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

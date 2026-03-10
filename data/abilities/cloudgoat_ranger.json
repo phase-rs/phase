@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<3/Kithkin>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "KW": "Flying",
+        "SpellDescription": "CARDNAME gets +2/+0 and gains flying until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, create three 1/1 white Kithkin Soldier creature tokens.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

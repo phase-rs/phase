@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "Description": "Play with the top card of your library revealed. You may play lands and cast spells from the top of your library.",
+        "MayPlay": "True",
+        "MayLookAt": "Player",
+        "AffectedZone": "Library"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

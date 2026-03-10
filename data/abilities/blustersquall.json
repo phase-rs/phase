@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouDontCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Tap target creature you don't control.",
+        "TgtPrompt": "Select target creature you don't control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

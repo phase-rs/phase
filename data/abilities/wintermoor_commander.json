@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME attacks, another target Knight you control gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's toughness is equal to the number of Knights you control.",
+        "SetToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

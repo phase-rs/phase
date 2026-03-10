@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever CARDNAME attacks a player and isn't blocked, that player's life total becomes 1. CARDNAME assigns no combat damage this combat.",
+        "ValidDefender": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

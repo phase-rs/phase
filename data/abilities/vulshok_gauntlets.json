@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +4/+2 and doesn't untap during its controller's untap step.",
+        "AddPower": "4",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "Secondary": "True",
+        "ValidCard": "Creature.EquippedBy",
+        "Layer": "CantHappen",
+        "Description": "Equipped creature doesn't untap during its controller's untap step."
+      }
+    }
+  ],
+  "faces": []
+}

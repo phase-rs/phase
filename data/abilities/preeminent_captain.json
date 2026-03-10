@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, you may put a Soldier creature card from your hand onto the battlefield tapped and attacking.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

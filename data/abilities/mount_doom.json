@@ -1,0 +1,112 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo B R",
+        "params": {
+          "SpellDescription": "Add {B} or {R}."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<1>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B} or {R}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 1 damage to each opponent.",
+        "Defined": "Opponent"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "5 B R"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Duneblast",
+        "Defined": "You",
+        "SubAbility": "DBDestroyAll",
+        "SpellDescription": "Choose up to two creatures, then destroy the rest. Activate only as a sorcery.",
+        "Amount": "2",
+        "ChoiceTitle": "Choose up to two creatures",
+        "SorcerySpeed": "True",
+        "StackDescription": "{p:You} chooses up to two creatures. Destroy the rest."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

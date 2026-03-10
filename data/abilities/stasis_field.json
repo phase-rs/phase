@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "RemoveAllAbilities": "True",
+        "SetPower": "0",
+        "AddKeyword": "Defender",
+        "Description": "Enchanted creature has base power and toughness 0/2, has defender, and loses all other abilities.",
+        "SetToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

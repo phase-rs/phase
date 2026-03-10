@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidSource": "SpellAbility.YouCtrl",
+        "TriggerDescription": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, put a +1/+1 counter on it.",
+        "TriggerZones": "Battlefield",
+        "Valiant": "True",
+        "ValidTarget": "Card.Self",
+        "Execute": "TrigCounter"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigDamageDies",
+        "TriggerDescription": "When CARDNAME dies, it deals damage equal to its power to each opponent.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

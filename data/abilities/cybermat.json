@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, it gets +X/+0 until end of turn, where X is the number of attacking artifact creatures."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

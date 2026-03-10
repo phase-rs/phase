@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your combat on your turn, create a 1/1 red Pirate creature token with menace and haste. Exile it at the beginning of the next end step.",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

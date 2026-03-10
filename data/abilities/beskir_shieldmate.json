@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, create a 1/1 white Human Warrior creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

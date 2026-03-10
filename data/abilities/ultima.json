@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Artifact,Creature",
+        "SpellDescription": "Destroy all artifacts and creatures. End the turn.",
+        "SubAbility": "DBEndTurn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Artifact"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target artifact creature.",
+        "TgtPrompt": "Select target artifact creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "g_3_3_beast",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 3/3 green Beast creature token. Then if an opponent controls more creatures than you, return CARDNAME to its owner's hand.",
+        "SubAbility": "DBBounce"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

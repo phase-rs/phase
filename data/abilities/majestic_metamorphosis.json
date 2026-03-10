@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Angel",
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveCreatureTypes": "True",
+        "SubAbility": "DBDraw",
+        "Keywords": "Flying",
+        "SpellDescription": "Until end of turn, target artifact or creature becomes a 4/4 Angel artifact creature and gains flying. Draw a card.",
+        "TgtPrompt": "Select target artifact or creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

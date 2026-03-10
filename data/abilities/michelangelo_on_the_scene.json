@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "When NICKNAME dies, return this card to your hand.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

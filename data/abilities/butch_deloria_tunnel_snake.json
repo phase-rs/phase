@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "Menace",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAnimate",
+        "SpellDescription": "Put a menace counter on another target creature.",
+        "TgtPrompt": "Select another target creature"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Tunnel Snakes Rule! — Whenever CARDNAME attacks, it gets +1/+1 until end of turn for each other Rogue and/or Snake you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

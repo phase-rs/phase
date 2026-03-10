@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Mana",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have \"{T}: Add {G}.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

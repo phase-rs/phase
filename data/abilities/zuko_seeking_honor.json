@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a noncreature spell, NICKNAME gains first strike until end of turn.",
+        "Execute": "TrigPump",
+        "ValidActivatingPlayer": "You"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, put a +1/+1 counter on him.",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 5
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 5 damage to target creature or planeswalker. Roll a d20.",
+        "SubAbility": "DBRollDice"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

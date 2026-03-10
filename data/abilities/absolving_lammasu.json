@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAbsolve",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, all suspected creatures are no longer suspected."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, you gain 3 life and suspect up to one target creature an opponent controls. (A suspected creature has menace and can't block.)",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

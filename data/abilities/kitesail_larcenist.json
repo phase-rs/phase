@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "When CARDNAME enters, for each player, choose up to one other target artifact or creature that player controls. For as long as CARDNAME remains on the battlefield, the chosen permanents become Treasure artifacts with \"{T}, Sacrifice this artifact: Add one mana of any color\" and lose all other abilities."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

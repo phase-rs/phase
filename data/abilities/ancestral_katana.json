@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigImmediateTrig",
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl",
+        "Alone": "True",
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, you may pay {1}. When you do, attach CARDNAME to it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+1.",
+        "AddPower": "2",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

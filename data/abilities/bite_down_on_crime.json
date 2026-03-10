@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature you control",
+        "SubAbility": "DBFight",
+        "SpellDescription": "Target creature you control gets +2/+0 until end of turn. It deals damage equal to its power to target creature you don't control.",
+        "AILogic": "Fight"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Cost": "CollectEvidence<6>",
+        "ValidSA": "Spell",
+        "EffectZone": "All",
+        "Description": "As an additional cost to cast this spell, you may collect evidence 6."
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Z",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Relative": "True",
+        "Description": "This spell costs {2} less to cast if evidence was collected. (To collect evidence 6, exile cards with total mana value 6 or greater from your graveyard.)",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

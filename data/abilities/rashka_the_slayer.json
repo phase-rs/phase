@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks one or more black creatures, CARDNAME gets +1/+2 until end of turn.",
+        "ValidCard": "Card.Self",
+        "ValidBlocked": "Creature.Black",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.nonCreature",
+        "SetToughness": "AffectedX",
+        "Description": "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)",
+        "AddType": "Creature",
+        "SetPower": "AffectedX"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

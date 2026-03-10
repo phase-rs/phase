@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE3_CHARGE",
+        "Description": "STATION 3+ Whenever you cast an artifact spell, draw a card. Put a charge counter on this Spacecraft.",
+        "AddTrigger": "CastTrig"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "AddStaticAbility": "CraftStatic",
+        "Description": "STATION 12+ Flying,,,This Spacecraft gets +1/+0 for each artifact you control.",
+        "AddType": "Creature",
+        "Affected": "Card.Self+counters_GE12_CHARGE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

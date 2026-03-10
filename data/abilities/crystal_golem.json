@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, CARDNAME phases out.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPhase"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

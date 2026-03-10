@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME attacks, another target creature gets +X/+X until end of turn, where X is NICKNAME's power."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

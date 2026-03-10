@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.Snow"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveTypes": "Snow",
+        "Duration": "Permanent",
+        "TgtPrompt": "Select target snow land",
+        "SpellDescription": "Target snow land is no longer snow."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Snow"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.nonSnow+Basic"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target nonsnow basic land becomes snow.",
+        "TgtPrompt": "Select target nonsnow basic land",
+        "Duration": "Permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

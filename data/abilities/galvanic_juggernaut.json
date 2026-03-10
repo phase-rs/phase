@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.Other",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever another creature dies, untap this creature.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "This creature attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidStepTurnToController": "You",
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

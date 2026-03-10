@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+TopLibrary",
+        "AffectedZone": "Library",
+        "EffectZone": "All",
+        "MayPlay": "True",
+        "MayLookAt": "You",
+        "Description": "As long as CARDNAME is at the top of your library, you may look at it any time and you may cast it."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "AffectedZone": "Library",
+        "MayLookAt": "You",
+        "Description": "As long as the top card of your library is a creature card, you may look at it any time and you may cast it.",
+        "EffectZone": "Battlefield",
+        "Affected": "Creature.TopLibrary+YouCtrl+nonLand"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

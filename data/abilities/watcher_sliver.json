@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Description": "All Sliver creatures get +0/+2.",
+        "Affected": "Creature.Sliver"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

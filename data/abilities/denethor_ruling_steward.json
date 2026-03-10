@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Player.Opponent",
+        "SpellDescription": "Each opponent loses 1 life and you gain 1 life.",
+        "SubAbility": "DBGainLife"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if a creature died under your control this turn, create a 1/1 white Human Soldier creature token.",
+        "CheckSVar": "X",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

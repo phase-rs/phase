@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "NICKNAME deals 1 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or an instant or sorcery spell you control deals damage to a player, exile the top card of your library. You may play that card this turn.",
+        "ValidSource": "Spell.Instant+YouCtrl,Spell.Sorcery+YouCtrl,Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "CleanupAndRemember",
+        "Static": "True",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "Player"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "Static": "True",
+        "Execute": "JustCleanup",
+        "Phase": "EndCombat"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player,Planeswalker",
+        "CombatDamage": "True",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or planeswalker, return to your hand target creature or planeswalker card in your graveyard that wasn't put there this combat."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

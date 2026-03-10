@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, you and CARDNAME have hexproof.",
+        "Affected": "You,Card.Self",
+        "AddKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

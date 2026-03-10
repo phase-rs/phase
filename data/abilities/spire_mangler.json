@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, target creature you control with flying gets +2/+0 until end of turn.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

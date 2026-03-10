@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, add eight {C}. Until end of turn, you don't lose this mana as steps and phases end.",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigAddMana"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

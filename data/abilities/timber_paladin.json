@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "EQ1",
+        "SetToughness": "3",
+        "Description": "As long as CARDNAME is enchanted by exactly one Aura, it has base power and toughness 3/3.",
+        "Affected": "Card.Self",
+        "SetPower": "3"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "EQ2",
+        "Affected": "Card.Self",
+        "SetPower": "5",
+        "CheckSVar": "X",
+        "AddKeyword": "Vigilance",
+        "Description": "As long as CARDNAME is enchanted by exactly two Auras, it has base power and toughness 5/5 and vigilance.",
+        "SetToughness": "5"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "GE3",
+        "SetPower": "10",
+        "SetToughness": "10",
+        "Affected": "Card.Self",
+        "AddKeyword": "Vigilance & Trample",
+        "CheckSVar": "X",
+        "Description": "As long as CARDNAME is enchanted by three or more Auras, it has base power and toughness 10/10, vigilance, and trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

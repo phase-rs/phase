@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this creature enters, roll a six-sided die. Target opponent loses life equal to the result.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Host": "True",
+        "Origin": "Any",
+        "Execute": "TrigRoll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

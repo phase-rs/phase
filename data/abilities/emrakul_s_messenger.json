@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Number": "2",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you draw your second card each turn, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\""
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

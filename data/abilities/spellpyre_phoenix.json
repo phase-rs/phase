@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME enters, you may return target instant or sorcery card with a cycling ability from your graveyard to your hand.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "SVarCompare": "GE2",
+        "CheckSVar": "YouCycled",
+        "Execute": "TrigReturn",
+        "Phase": "End of Turn",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "At the beginning of each end step, if you cycled two or more cards this turn, return CARDNAME from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

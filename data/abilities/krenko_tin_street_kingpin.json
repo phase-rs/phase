@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPut",
+        "ValidCard": "Creature.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on it, then create a number of 1/1 red Goblin creature tokens equal to NICKNAME's power."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

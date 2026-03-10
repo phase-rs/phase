@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Deathtouch",
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gains deathtouch until end of turn. (Any amount of damage it deals to a creature is enough to destroy it.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

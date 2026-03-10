@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME enters, you gain 4 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

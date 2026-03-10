@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "3",
+        "Description": "Creatures you control get +3/+3.",
+        "AddPower": "3",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

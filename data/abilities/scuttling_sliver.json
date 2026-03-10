@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Sliver+YouCtrl",
+        "AddAbility": "SliverUntap",
+        "Description": "Sliver creatures you control have \"{2}: Untap this creature.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

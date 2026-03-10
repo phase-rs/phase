@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your first main phase, put a +1/+1 counter on NICKNAME. Then if it has an odd number of counters on it, draw two cards.",
+        "Phase": "Main1",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "SVarCompare": "EQ1",
+        "Description": "NICKNAME can't attack or block unless it has an even number of counters on it. (Zero is even.)",
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

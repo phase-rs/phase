@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Affected": "Card.OppOwn",
+        "Description": "Your opponents play with their hands revealed.",
+        "MayLookAt": "Player",
+        "AffectedZone": "Hand"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

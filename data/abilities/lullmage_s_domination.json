@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.cmcEQX"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Gain control of target creature with mana value X."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Description": "This spell costs {3} less to cast if it targets a creature whose controller has eight or more cards in their graveyard.",
+        "ValidCard": "Card.Self",
+        "Amount": "XGrave",
+        "Type": "Spell",
+        "Relative": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

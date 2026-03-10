@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigEffect",
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, the next spell you cast this turn costs {1} less to cast.",
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl",
+        "Alone": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

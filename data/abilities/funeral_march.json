@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted creature leaves the battlefield, its controller sacrifices a creature.",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

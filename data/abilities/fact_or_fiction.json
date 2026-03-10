@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "PeekAmount": "5",
+          "SpellDescription": "Reveal the top five cards of your library. An opponent separates those cards into two piles. Put one pile into your hand and the other into your graveyard.",
+          "NoPeek": "True",
+          "RememberRevealed": "True",
+          "SubAbility": "DBTwoPiles"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "PeekAmount": "5",
+        "SpellDescription": "Reveal the top five cards of your library. An opponent separates those cards into two piles. Put one pile into your hand and the other into your graveyard.",
+        "NoPeek": "True",
+        "RememberRevealed": "True",
+        "SubAbility": "DBTwoPiles"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

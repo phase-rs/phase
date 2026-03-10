@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "ActivationZone": "Graveyard",
+        "SpellDescription": "Put a +1/+1 counter on target creature. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSurveil",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

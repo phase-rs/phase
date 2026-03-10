@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 W W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "First Strike & Lifelink",
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Creatures you control get +2/+2 and gain first strike and lifelink until end of turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4 W W"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Graveyard",
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Creatures you control get +2/+2 and gain first strike and lifelink until end of turn.",
+        "KW": "First Strike & Lifelink"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

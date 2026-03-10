@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTutorEquip",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for an Equipment card, put it onto the battlefield, then shuffle."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "FirstAttack": "True",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever NICKNAME attacks for the first time each turn, untap it and all Samurai you control. After this phase, there is an additional combat phase.",
+        "ValidCard": "Creature.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

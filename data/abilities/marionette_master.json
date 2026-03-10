@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever an artifact you control is put into a graveyard from the battlefield, target opponent loses life equal to CARDNAME's power.",
+        "Origin": "Battlefield",
+        "ValidCard": "Artifact.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

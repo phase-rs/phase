@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Caves you control have \"{T}, Pay 1 life: Add one mana of any color.\"",
+        "Affected": "Cave.YouCtrl+Other",
+        "AddAbility": "AnyMana"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

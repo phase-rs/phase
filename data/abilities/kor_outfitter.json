@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may attach target Equipment you control to target creature you control.",
+        "Origin": "Any",
+        "Execute": "EquipmentSelection",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

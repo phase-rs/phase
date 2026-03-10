@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, it gets +X/+0 until end of turn, where X is the greatest mana value among artifacts you control."
+      }
+    },
+    {
+      "mode": "ManaExpend",
+      "params": {
+        "Player": "You",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "Whenever you expend 6, gain control of up to one target artifact for as long as you control CARDNAME. (You expend 6 as you spend your sixth total mana to cast spells during a turn.)",
+        "TriggerZones": "Battlefield",
+        "Amount": "6"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

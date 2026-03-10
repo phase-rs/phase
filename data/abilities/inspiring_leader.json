@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commander creatures you own have \"Creature tokens you control get +2/+2.\"",
+        "Affected": "Creature.IsCommander+YouOwn",
+        "AddStaticAbility": "BuffTokens"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

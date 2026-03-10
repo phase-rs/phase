@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDestroy",
+        "OptionalDecider": "You",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may destroy target nonbasic land.",
+        "ValidCard": "Spirit,Arcane",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

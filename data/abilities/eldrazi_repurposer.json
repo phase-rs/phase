@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "When you cast this spell and when CARDNAME dies, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cast this spell and when CARDNAME dies, create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this creature: Add {C}.\"",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

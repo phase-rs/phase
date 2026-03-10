@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, exile up to one target card from a graveyard. If an artifact card was exiled this way, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "ValidSA": "Spell.ManaFromTreasure",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card",
+        "TriggerDescription": "Whenever you cast a spell, if mana from a Treasure was spent to cast it, you draw a card and you lose 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

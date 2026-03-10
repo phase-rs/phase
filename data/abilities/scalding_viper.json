@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidCard": "Card.cmcLE3",
+            "TriggerZones": "Battlefield",
+            "ValidActivatingPlayer": "Opponent",
+            "Execute": "TrigDamage",
+            "TriggerDescription": "Whenever an opponent casts a spell with mana value 3 or less, CARDNAME deals 1 damage to that player."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Hand",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent.nonLand"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Return target nonland permanent to its owner's hand. (Then exile this card. You may cast the creature later from exile.)",
+            "TgtPrompt": "Select target nonland permanent"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

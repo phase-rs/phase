@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Landwalk:Forest",
+        "SubAbility": "DBDealDamage",
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gains forestwalk until end of turn and deals 2 damage to you. (It can't be blocked as long as defending player controls a Forest.)"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDealDamage",
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gains swampwalk until end of turn and deals 2 damage to you. (It can't be blocked as long as defending player controls a Swamp.)",
+        "KW": "Landwalk:Swamp"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

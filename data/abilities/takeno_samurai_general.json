@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each other Samurai creature you control gets +1/+1 for each point of bushido it has.",
+        "AddPower": "AffectedX",
+        "Affected": "Creature.Samurai+Other+YouCtrl",
+        "AffectedZone": "Battlefield",
+        "AddToughness": "AffectedX"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

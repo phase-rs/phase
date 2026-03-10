@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Battlefield"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "LibraryPosition2": "0",
+        "OptionalAbilityPrompt": "Would you like to put the land onto the battlefield tapped?",
+        "ForceRevealToController": "True",
+        "PromptToSkipOptionalAbility": "True",
+        "DestinationZone2": "Library",
+        "Optional": "True",
+        "ChangeNum": "All",
+        "ChangeValid": "Land",
+        "Tapped": "True",
+        "SpellDescription": "Look at the top card of your library. If it's a land card, you may put it onto the battlefield tapped. If you don't put the card onto the battlefield, you may put it on the bottom of your library.",
+        "SubAbility": "DBMoveToBottom",
+        "RememberChanged": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

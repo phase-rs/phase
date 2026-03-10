@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Unattach",
+      "params": {
+        "ValidObject": "Permanent",
+        "TriggerDescription": "Whenever CARDNAME becomes unattached from a permanent, destroy that permanent.",
+        "ValidAttachment": "Card.Self",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Pirate",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Menace",
+        "Description": "Equipped creature gets +2/+0, has menace, and is a Pirate in addition to its other creature types.",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Double Strike & Lifelink",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have double strike and lifelink."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

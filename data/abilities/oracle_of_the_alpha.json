@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigConjure",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, conjure the Power Nine into your library, then shuffle."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks, scry 1.",
+        "ValidCard": "Card.Self",
+        "Execute": "DBScry"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

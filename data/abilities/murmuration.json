@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your end step, for each spell you've cast this turn, create a 1/2 blue Bird creature token with flying named Storm Crow.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Birds you control get +1/+1 and have vigilance.",
+        "AddKeyword": "Vigilance",
+        "AddToughness": "1",
+        "Affected": "Bird.YouCtrl",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

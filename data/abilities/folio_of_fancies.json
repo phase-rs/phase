@@ -1,0 +1,72 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Player",
+        "SpellDescription": "Each player draws X cards."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SpellDescription": "Each opponent mills cards equal to the number of cards in their hand.",
+          "RepeatSubAbility": "DBMill",
+          "RepeatPlayers": "Player.Opponent"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each opponent mills cards equal to the number of cards in their hand.",
+        "RepeatSubAbility": "DBMill",
+        "RepeatPlayers": "Player.Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetMaxHandSize": "Unlimited",
+        "Affected": "Player",
+        "Description": "Players have no maximum hand size."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Enchantment"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 GW"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact or enchantment",
+        "SpellDescription": "Exile target artifact or enchantment. Activate only once.",
+        "GameActivationLimit": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

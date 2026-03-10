@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionPresent": "Swamp.YouCtrl",
+        "SpellDescription": "If you control a Swamp, destroy target nonblack creature.",
+        "TgtPrompt": "Select target nonblack creature",
+        "ConditionCompare": "GE1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

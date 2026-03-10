@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "6",
+        "Description": "LEVEL 6-11 6/6 Lifelink",
+        "Affected": "Card.Self",
+        "SetPower": "6",
+        "AddKeyword": "Lifelink",
+        "IsPresent": "Card.Self+counters_GE6_LEVEL+counters_LE11_LEVEL"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetToughness": "9",
+        "IsPresent": "Card.Self+counters_GE12_LEVEL",
+        "Description": "LEVEL 12+ 9/9 Lifelink, indestructible",
+        "SetPower": "9",
+        "AddKeyword": "Indestructible & Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

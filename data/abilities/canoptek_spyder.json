@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "ValidCard": "Creature.Artifact+YouCtrl+Other+!token,Vehicle.YouCtrl+Other+!token",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Fabricator Claw Array — Whenever another nontoken artifact creature or Vehicle you control enters, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

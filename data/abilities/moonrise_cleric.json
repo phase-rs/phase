@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

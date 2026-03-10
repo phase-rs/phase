@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigUnblockable",
+        "TriggerDescription": "When CARDNAME enters, target creature you control can't be blocked this turn. Whenever that creature deals combat damage this turn, you may exile it. If you do, return it to the battlefield under its owner's control.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Frogs you control have ward {1}.",
+        "Affected": "Frog.YouCtrl+Other",
+        "AddKeyword": "Ward:1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "SubAbility": "DBRepeatTypes",
+          "SpellDescription": "Reveal the top X cards of your library. For each card type, you may exile a card of that type from among them. Put the rest into your graveyard. You may cast a spell from among the exiled cards without paying its mana cost if you exiled four or more cards this way. Then put the rest of the exiled cards into your hand.",
+          "Reveal": "True",
+          "PeekAmount": "X",
+          "ImprintRevealed": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBRepeatTypes",
+        "SpellDescription": "Reveal the top X cards of your library. For each card type, you may exile a card of that type from among them. Put the rest into your graveyard. You may cast a spell from among the exiled cards without paying its mana cost if you exiled four or more cards this way. Then put the rest of the exiled cards into your hand.",
+        "Reveal": "True",
+        "PeekAmount": "X",
+        "ImprintRevealed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

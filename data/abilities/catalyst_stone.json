@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidSpell": "Spell.Flashback",
+        "Amount": "2",
+        "Description": "Flashback costs you pay cost up to {2} less.",
+        "Activator": "You",
+        "ValidCard": "Card",
+        "UpTo": "True"
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "2",
+        "ValidCard": "Card",
+        "Description": "Flashback costs your opponents pay cost {2} more.",
+        "ValidSpell": "Spell.Flashback",
+        "Activator": "Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

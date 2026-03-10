@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.nonCreature",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigDelayTrig",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may remove two oil counters from it. If you do, when you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked.",
+        "ValidAttacker": "Creature.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "MayChooseTarget": "True",
+          "TargetMin": "0",
+          "SpellDescription": "Copy any number of target instant and/or sorcery spells. You may choose new targets for the copies.",
+          "ValidTgts": "Instant,Sorcery",
+          "TargetType": "Spell",
+          "TgtPrompt": "Select any number of target instant and sorcery spells",
+          "TargetMax": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "MayChooseTarget": "True",
+        "TargetMin": "0",
+        "SpellDescription": "Copy any number of target instant and/or sorcery spells. You may choose new targets for the copies.",
+        "ValidTgts": "Instant,Sorcery",
+        "TargetType": "Spell",
+        "TgtPrompt": "Select any number of target instant and sorcery spells",
+        "TargetMax": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBeCopied"
+      },
+      "params": {
+        "EffectZone": "Stack",
+        "Description": "This spell can't be copied.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

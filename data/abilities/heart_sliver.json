@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All Sliver creatures have haste.",
+        "Affected": "Creature.Sliver",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

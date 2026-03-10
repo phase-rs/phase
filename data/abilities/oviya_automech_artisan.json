@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Creature,Vehicle",
+        "SubAbility": "DBPutCounter",
+        "ChangeNum": "1",
+        "RememberChanged": "True",
+        "SpellDescription": "You may put a creature or Vehicle card from your hand onto the battlefield. If you put an artifact onto the battlefield this way, put two +1/+1 counters on it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.attacking Opponent",
+        "Description": "Each creature that's attacking one of your opponents has trample.",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

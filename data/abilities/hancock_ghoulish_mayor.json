@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Battlefield",
+        "AddPower": "X",
+        "Affected": "Creature.Zombie+YouCtrl+Other,Creature.Mutant+YouCtrl+Other",
+        "AddToughness": "X",
+        "Description": "Each other creature you control that's a Zombie or Mutant gets +X/+X, where X is the number of counters on CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.YouCtrl,Enchantment.YouCtrl",
+        "Description": "Artifacts and enchantments you control have shroud.",
+        "AddKeyword": "Shroud"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

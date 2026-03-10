@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 B B"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<1/Vampire>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChangeText",
+        "SpellDescription": "Gain control of target creature. Change the text of that creature by replacing all instances of one creature type with Vampire."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Lifelink",
+        "Affected": "Creature.EnchantedBy+White",
+        "Description": "As long as enchanted creature is white, it gets +1/+1 and has lifelink.",
+        "AddToughness": "1",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.EnchantedBy+Blue",
+        "Description": "As long as enchanted creature is blue, it gets +1/+1 and can't be blocked.",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.EnchantedBy+Blue"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

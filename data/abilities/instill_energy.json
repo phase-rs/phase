@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationLimit": "1",
+        "Defined": "Enchanted",
+        "SpellDescription": "Untap enchanted creature. Activate only during your turn and only once each turn.",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackIfHaste"
+      },
+      "params": {
+        "Description": "Enchanted creature can attack as though it had haste.",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

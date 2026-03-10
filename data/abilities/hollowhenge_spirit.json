@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigRemove",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, remove target attacking or blocking creature from combat.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

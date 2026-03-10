@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "Player",
+        "Description": "Play with the top card of your library revealed.",
+        "AffectedZone": "Library"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "TopCardOfLibraryIs": "Creature,Artifact",
+        "GainsAbilitiesOfZones": "Library",
+        "Affected": "Card.Self",
+        "GainsAbilitiesOf": "Creature.TopLibrary+YouCtrl,Artifact.TopLibrary+YouCtrl",
+        "Description": "As long as the top card of your library is an artifact or creature card, CARDNAME has all activated abilities of that card. (If any of the abilities use that card's name, use this creature's name instead.)",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

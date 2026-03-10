@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBLoseLife",
+        "StackDescription": "REP You draw_{p:You} draws & lose_loses & create_creates",
+        "SpellDescription": "You draw two cards, lose 2 life, then create a Blood token. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

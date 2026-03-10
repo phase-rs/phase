@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": 0
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 2 life for each Mountain target opponent controls.",
+        "ValidTgts": "Opponent",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

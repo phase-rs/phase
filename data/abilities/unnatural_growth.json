@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "Execute": "TrigDouble",
+        "TriggerDescription": "At the beginning of each combat, double the power and toughness of each creature you control until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

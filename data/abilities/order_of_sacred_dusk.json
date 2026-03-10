@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Vampire.Other+YouCtrl",
+        "AddKeyword": "Exalted",
+        "Description": "Other Vampires you control have exalted."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

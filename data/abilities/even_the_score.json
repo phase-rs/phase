@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw X cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "Y",
+        "SVarCompare": "GE4",
+        "Color": "U U U",
+        "Description": "This spell costs {U}{U}{U} less to cast if an opponent has drawn four or more cards this turn.",
+        "EffectZone": "All",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

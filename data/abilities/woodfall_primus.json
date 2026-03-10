@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, destroy target noncreature permanent.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

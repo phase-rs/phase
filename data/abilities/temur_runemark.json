@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +2/+2.",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Permanent.Blue+YouCtrl,Permanent.Red+YouCtrl",
+        "AddKeyword": "Trample",
+        "Description": "Enchanted creature has trample as long as you control a blue or red permanent.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

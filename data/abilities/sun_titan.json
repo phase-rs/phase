@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may return target permanent card with mana value 3 or less from your graveyard to the battlefield."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may return target permanent card with mana value 3 or less from your graveyard to the battlefield.",
+        "Execute": "TrigChange",
+        "Secondary": "True",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

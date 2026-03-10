@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Ante"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "ActivationPhases": "Upkeep",
+        "ValidTgts": "Opponent",
+        "Optional": "True",
+        "ChangeNum": "All",
+        "SpellDescription": "Target opponent may ante the top card of their library. If they don't, you flip a coin. If you win the flip, that player loses the game. If you lose the flip, you lose the game. Activate only during your upkeep.",
+        "SubAbility": "DBFlip",
+        "PromptToSkipOptionalAbility": "True",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

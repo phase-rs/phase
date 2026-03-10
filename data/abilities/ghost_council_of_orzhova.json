@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SubAbility": "DelTrig",
+        "Defined": "Self",
+        "SpellDescription": "Exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDrain",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, target opponent loses 1 life and you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

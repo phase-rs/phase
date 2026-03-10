@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<1/Ally>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target opponent loses 2 life.",
+        "ValidTgts": "Opponent",
+        "PrecostDesc": "Cohort —"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

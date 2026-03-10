@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of your end step, draw a card for each card type among spells you've cast this turn.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

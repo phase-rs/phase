@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, Insects you control and Insect cards in your graveyard, hand, and library perpetually gain toxic 1.",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigPump",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

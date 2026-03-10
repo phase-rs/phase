@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Counter",
+            "target": {
+              "type": "Filtered",
+              "filter": "Card,Emblem"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TargetType": "Activated,Triggered",
+            "TgtPrompt": "Select target activated or triggered ability",
+            "SpellDescription": "Counter target activated or triggered ability."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "CopyPermanent",
+            "params": {
+              "ValidTgts": "Creature.YouCtrl",
+              "TgtPrompt": "Select target creature you control",
+              "SpellDescription": "Create a token that's a copy of target creature you control."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidTgts": "Creature.YouCtrl",
+            "TgtPrompt": "Select target creature you control",
+            "SpellDescription": "Create a token that's a copy of target creature you control."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Mutates",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPlay",
+        "TriggerDescription": "Whenever this creature mutates, you may cast target noncreature card with mana value 3 or less from your graveyard without paying its mana cost."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

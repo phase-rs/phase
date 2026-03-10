@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, search your library for a card, put it into your graveyard, then shuffle.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "Activator": "You",
+        "Description": "Spells you cast from your graveyard cost {1} less to cast.",
+        "ValidCard": "Card.wasCastFromYourGraveyard",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

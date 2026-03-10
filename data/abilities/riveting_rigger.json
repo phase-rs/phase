@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may sacrifice another artifact. If you do, put two +1/+1 counters on CARDNAME and it assembles a Contraption.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

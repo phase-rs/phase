@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMakeToken",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever another nontoken Elf enters, you may create a 1/1 green Insect creature token.",
+        "ValidCard": "Elf.!token+Other",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

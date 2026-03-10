@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an enchantment is put into a graveyard from the battlefield, draw a card.",
+        "ValidCard": "Enchantment",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

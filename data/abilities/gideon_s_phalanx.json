@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "w_2_2_knight_vigilance",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenAmount": "4",
+        "TokenOwner": "You",
+        "SpellDescription": "Create four 2/2 white Knight creature tokens with vigilance. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, creatures you control gain indestructible until end of turn.",
+        "SubAbility": "DBPumpAll"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

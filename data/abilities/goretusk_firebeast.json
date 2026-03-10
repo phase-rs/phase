@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, it deals 4 damage to target player or planeswalker.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

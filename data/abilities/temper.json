@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "ValidTgts": "Creature",
+          "Amount": "X",
+          "PreventionSubAbility": "EvenTemper",
+          "SpellDescription": "Prevent the next X damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+          "ShieldEffectTarget": "Targeted"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "Amount": "X",
+        "PreventionSubAbility": "EvenTemper",
+        "SpellDescription": "Prevent the next X damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+        "ShieldEffectTarget": "Targeted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

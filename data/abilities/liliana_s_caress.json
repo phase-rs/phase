@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever an opponent discards a card, that player loses 2 life.",
+        "ValidCard": "Card.OppOwn",
+        "Execute": "TrigLoseLife",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

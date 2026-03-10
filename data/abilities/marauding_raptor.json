@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever another creature you control enters, CARDNAME deals 2 damage to it. If a Dinosaur is dealt damage this way, CARDNAME gets +2/+0 until end of turn.",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "Description": "Creature spells you cast cost {1} less to cast.",
+        "Activator": "You",
+        "Type": "Spell",
+        "ValidCard": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

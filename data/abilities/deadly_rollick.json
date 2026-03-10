@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "ValidPlayer": "You",
+        "Description": "If you control a commander, you may cast this spell without paying its mana cost.",
+        "Cost": "0",
+        "IsPresent": "Card.IsCommander+YouCtrl",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

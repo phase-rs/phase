@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may tap any number of untapped Gates you control. Draw a card for each Gate tapped this way.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "GuestList"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a Gate you control enters, draw a card.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Gate.YouCtrl",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

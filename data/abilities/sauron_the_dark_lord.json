@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAmass",
+        "TriggerDescription": "Whenever an opponent casts a spell, amass Orcs 1."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigTempt",
+        "TriggerDescription": "Whenever an Army you control deals combat damage to a player, the Ring tempts you.",
+        "CombatDamage": "True",
+        "ValidSource": "Army.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "RingTemptsYou",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever the Ring tempts you, you may discard your hand. If you do, draw four cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

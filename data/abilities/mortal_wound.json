@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "When enchanted creature is dealt damage, destroy it.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroy",
+        "ValidTarget": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddSVar": "MortalDestroy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Debuff",
+        "params": {
+          "Keywords": "Shadow",
+          "ValidTgts": "Creature",
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Target creature loses shadow until end of turn. Draw a card."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Shadow",
+        "ValidTgts": "Creature",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Target creature loses shadow until end of turn. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

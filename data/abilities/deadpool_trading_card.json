@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each other player draws a card.",
+        "Defined": "Player.Other"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "Lose3",
+        "TriggerDescription": "At the beginning of your upkeep, you lose 3 life.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

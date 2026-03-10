@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigChange",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, you may search your library for a Dragon card, reveal it, put it into your hand, then shuffle.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

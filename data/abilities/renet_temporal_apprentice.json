@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When NICKNAME enters, return each other nonland permanent that entered this turn to its owner's hand.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZoneAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

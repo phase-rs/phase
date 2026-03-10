@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2 and has \"{2}{R}: Target creature can't block this creature this turn.\"",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddAbility": "CantBlockFT"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

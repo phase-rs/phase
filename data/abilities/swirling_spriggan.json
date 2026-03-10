@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseColor",
+        "params": {
+          "Defined": "You",
+          "SpellDescription": "Target creature becomes the color or colors of your choice until end of turn.",
+          "OrColors": "True",
+          "SubAbility": "Animate"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "GU GU"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Target creature becomes the color or colors of your choice until end of turn.",
+        "OrColors": "True",
+        "SubAbility": "Animate"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

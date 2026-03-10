@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonland permanent",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Return target nonland permanent to its owner's hand. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "2",
+        "ValidSpell": "Spell.Bargain",
+        "ValidCard": "Card.Self",
+        "Description": "This spell costs {2} less to cast if it's bargained.",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "TriggerDescription": "When this creature enters, secretly choose land or nonland. Seek two cards of the chosen kind.",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChoose"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "GenericChoice",
+            "params": {
+              "Choices": "LandOne,NonlandOne",
+              "Defined": "You",
+              "Secretly": "True",
+              "SpellDescription": "Secretly choose land or nonland. Seek a card of the chosen kind."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "Choices": "LandOne,NonlandOne",
+            "Defined": "You",
+            "Secretly": "True",
+            "SpellDescription": "Secretly choose land or nonland. Seek a card of the chosen kind."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

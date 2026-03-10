@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "X",
+          "SpellDescription": "Add one mana of any color. If you control a Planet with twelve or more charge counters on it, add three mana of any one color instead."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "X",
+        "SpellDescription": "Add one mana of any color. If you control a Planet with twelve or more charge counters on it, add three mana of any one color instead."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraft",
+        "TriggerDescription": "When this creature enters, you may sacrifice a land. If you do, draft a card from the Planets spellbook and put it onto the battlefield tapped."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

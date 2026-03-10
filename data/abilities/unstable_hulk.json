@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, it gets +6/+6 and gains trample until end of turn. You skip your next turn.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

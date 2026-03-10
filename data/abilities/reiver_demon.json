@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDestroyAll",
+        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand, destroy all nonartifact, nonblack creatures. They can't be regenerated.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.wasCastFromYourHandByYou+Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

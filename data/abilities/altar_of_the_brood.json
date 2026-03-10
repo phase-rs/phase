@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever another permanent you control enters, each opponent mills a card.",
+        "ValidCard": "Permanent.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

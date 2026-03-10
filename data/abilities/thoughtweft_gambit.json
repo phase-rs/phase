@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapAll",
+        "params": {
+          "ValidCards": "Creature.OppCtrl",
+          "SpellDescription": "Tap all creatures your opponents control and untap all creatures you control.",
+          "SubAbility": "DBUnTap"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.OppCtrl",
+        "SpellDescription": "Tap all creatures your opponents control and untap all creatures you control.",
+        "SubAbility": "DBUnTap"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

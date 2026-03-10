@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "u_5_5_wall_defender",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AtEOT": "Sacrifice",
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 5/5 blue Wall creature token with defender. Sacrifice it at the beginning of the next end step."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

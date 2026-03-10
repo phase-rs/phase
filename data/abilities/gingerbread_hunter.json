@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigFood",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Pump",
+            "power": -2,
+            "toughness": -2,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Target creature gets -2/-2 until end of turn. (Then exile this card. You may cast the creature later from exile.)",
+            "IsCurse": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target spell",
+        "UnlessCost": "1 PayLife<1>",
+        "TargetType": "Spell",
+        "SpellDescription": "Counter target spell unless its controller pays {1} and 1 life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

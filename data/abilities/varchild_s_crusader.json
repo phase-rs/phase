@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AtEOT": "Sacrifice",
+          "SpellDescription": "CARDNAME can't be blocked this turn except by Walls. Sacrifice CARDNAME at the beginning of the next end step.",
+          "StaticAbilities": "KWPump"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AtEOT": "Sacrifice",
+        "SpellDescription": "CARDNAME can't be blocked this turn except by Walls. Sacrifice CARDNAME at the beginning of the next end step.",
+        "StaticAbilities": "KWPump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

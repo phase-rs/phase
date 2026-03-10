@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Description": "Creatures with power 1 or less don't untap during their controllers' untap steps.",
+        "ActiveZones": "Battlefield",
+        "Layer": "CantHappen",
+        "ValidCard": "Creature.powerLE1",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

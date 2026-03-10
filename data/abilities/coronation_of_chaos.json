@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "3",
+        "SubAbility": "DBGoad",
+        "IsCurse": "True",
+        "TgtPrompt": "Select up to three target creatures",
+        "SpellDescription": "Up to three target creatures can't block this turn. Goad them. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)",
+        "KW": "HIDDEN CARDNAME can't block.",
+        "TargetMin": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

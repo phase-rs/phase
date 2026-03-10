@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo U R",
+        "params": {
+          "SpellDescription": "Add {U} or {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {U} or {R}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, scry 1.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigScry"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

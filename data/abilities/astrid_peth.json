@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a Food token.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a Food token."
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Brand-new Sky — Whenever you sacrifice a Clue or Food, CARDNAME explores. (Reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on this creature, then put the card back or put it into your graveyard.)",
+        "ValidPlayer": "You",
+        "ValidCard": "Food.YouCtrl,Clue.YouCtrl",
+        "Execute": "TrigExplore"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

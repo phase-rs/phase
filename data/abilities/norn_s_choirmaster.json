@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "Execute": "TrigProliferate",
+        "TriggerDescription": "Whenever your commander enters or attacks, proliferate (Choose any number of permanents and/or players, then give each another counter kind of each kind they already have.)",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever your commander enters or attacks, proliferate (Choose any number of permanents and/or players, then give each another counter kind of each kind they already have.)",
+        "Execute": "TrigProliferate",
+        "Secondary": "True",
+        "ValidCard": "Card.IsCommander+YouOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

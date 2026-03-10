@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your end step, each player who controls the fewest creatures creates a 4/3 blue Salamander Warrior creature token.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection:Salamander",
+        "Affected": "You,Permanent.YouCtrl",
+        "Description": "You and permanents you control have protection from Salamanders."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

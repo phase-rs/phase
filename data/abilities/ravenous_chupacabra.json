@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDestroy",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, destroy target creature an opponent controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

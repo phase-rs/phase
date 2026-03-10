@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, create a 2/2 red Spirit creature token with menace."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddKeyword": "Menace",
+        "AddPower": "2",
+        "Description": "As long as enchanted permanent is a creature, it gets +2/+2 and has menace. (It can't be blocked except by two or more creatures.)",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

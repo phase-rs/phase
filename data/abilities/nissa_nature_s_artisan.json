@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 3
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 3 life.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 2,
+        "destination": "Battlefield"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeValid": "Land",
+        "SpellDescription": "Reveal the top two cards of your library. Put all land cards from among them onto the battlefield and the rest into your hand.",
+        "Planeswalker": "True",
+        "Reveal": "True",
+        "ChangeNum": "All",
+        "DestinationZone2": "Hand"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 5,
+        "toughness": 5,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -12
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.YouCtrl",
+        "KW": "Trample",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "SpellDescription": "Creatures you control get +5/+5 and gain trample until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another Goblin you control dies, exile the top card of your library.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self,Goblin.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "AffectedZone": "Battlefield",
+        "Affected": "Goblin.Other+YouCtrl",
+        "Description": "Other Goblins you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

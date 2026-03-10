@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Bewitching Whispers — When CARDNAME enters, target creature blocks this turn if able.",
+        "Execute": "TrigProvoke",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraw",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whispers of the Grave — At the beginning of your end step, if a creature died this turn, you may pay 2 life. If you do, draw a card.",
+        "ValidPlayer": "You",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

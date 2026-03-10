@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigAttach",
+        "TriggerDescription": "When CARDNAME enters, attach it to target non-Human creature you control.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+1.",
+        "AddPower": "2",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

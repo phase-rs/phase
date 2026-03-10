@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigTap",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, tap target creature defending player controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

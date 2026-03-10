@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Waterbend<6>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentDefined": "Self",
+        "IsPresent": "Card.tapped",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your end step, if NICKNAME is tapped, put a +1/+1 counter on her.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterNum": "1",
+          "StackDescription": "SpellDescription",
+          "ValidCards": "Creature.YouCtrl+withTrample",
+          "CounterType": "P1P1",
+          "SpellDescription": "Put a +1/+1 counter on each creature you control with trample."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterNum": "1",
+        "StackDescription": "SpellDescription",
+        "ValidCards": "Creature.YouCtrl+withTrample",
+        "CounterType": "P1P1",
+        "SpellDescription": "Put a +1/+1 counter on each creature you control with trample."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, put a trample counter on target non-Human creature you control.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPut"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

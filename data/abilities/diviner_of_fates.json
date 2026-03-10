@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigConnive",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, it connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)"
+      }
+    },
+    {
+      "mode": "DiscardedAll",
+      "params": {
+        "Execute": "TrigSeek",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "ActivationLimit": "1",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you discard one or more cards, seek a card that shares a card type with one of the discarded cards. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

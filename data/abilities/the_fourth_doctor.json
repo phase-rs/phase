@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Secondary": "True",
+        "Execute": "TrigFood",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "ValidSA": "Spell.MayPlaySource",
+        "TriggerDescription": "When you do, create a Food token."
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "ValidCard": "Land",
+        "ValidSA": "SpellAbility.MayPlaySource",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigFood",
+        "TriggerDescription": "When you do, create a Food token.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.YouOwn+TopLibrary",
+        "Description": "You may look at the top card of your library any time.",
+        "MayLookAt": "You",
+        "AffectedZone": "Library",
+        "EffectZone": "Battlefield"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Battlefield",
+        "AffectedZone": "Library",
+        "Description": "Would You Like A . . . ? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token. (Artifacts, legendaries, and Sagas are historic.)",
+        "Affected": "Card.TopLibrary+YouCtrl+Historic",
+        "MayPlay": "True",
+        "MayPlayLimit": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

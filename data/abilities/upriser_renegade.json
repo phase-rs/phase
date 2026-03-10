@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +2/+0 for each other modified creature you control. (Equipment, Auras you control, and counters are modifications.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

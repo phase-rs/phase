@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "TargetMax": "X",
+          "Amount": "X",
+          "ValidTgts": "Any",
+          "TargetMin": "0",
+          "DividedAsYouChoose": "X",
+          "SpellDescription": "Prevent the next 3 damage that would be dealt this turn to any number of targets, divided as you choose. If this spell was kicked, prevent the next 6 damage this way instead.",
+          "TgtPrompt": "Select any target to prevent damage to"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "X",
+        "Amount": "X",
+        "ValidTgts": "Any",
+        "TargetMin": "0",
+        "DividedAsYouChoose": "X",
+        "SpellDescription": "Prevent the next 3 damage that would be dealt this turn to any number of targets, divided as you choose. If this spell was kicked, prevent the next 6 damage this way instead.",
+        "TgtPrompt": "Select any target to prevent damage to"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

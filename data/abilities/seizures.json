@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever enchanted creature becomes tapped, CARDNAME deals 3 damage to that creature's controller unless that player pays {3}.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

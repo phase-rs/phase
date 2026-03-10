@@ -1,0 +1,114 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "TriggerDescription": "When CARDNAME enters, you may search your library for a basic Forest card, reveal it, put it into your hand, then shuffle.",
+            "Execute": "TrigChange",
+            "ValidCard": "Card.Self",
+            "OptionalDecider": "You",
+            "Destination": "Battlefield"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "PresentCompare": "GE7",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Land.YouCtrl",
+            "IsPresent": "Land.YouCtrl",
+            "Execute": "TrigExile",
+            "TriggerDescription": "Whenever a land you control enters, if you control seven or more lands, exile NICKNAME, then return her to the battlefield transformed under her owner's control.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 1,
+            "destination": "Battlefield"
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": 1
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "ChangeNum": "All",
+            "Reveal": "True",
+            "DestinationZone2": "Hand",
+            "ChangeValid": "Land",
+            "SpellDescription": "Reveal the top card of your library. If it's a land card, put it onto the battlefield. Otherwise, put it into your hand."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "ashaya_the_awoken_world",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -2
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create Ashaya, the Awoken World, a legendary 4/4 green Elemental creature token.",
+            "TokenOwner": "You",
+            "Planeswalker": "True"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Untap",
+            "target": {
+              "type": "Filtered",
+              "filter": "Land"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -7
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Untap up to six target lands. They become 6/6 Elemental creatures. They're still lands.",
+            "TgtPrompt": "Choose target land",
+            "TargetMin": "0",
+            "Planeswalker": "True",
+            "SubAbility": "DBAnimate",
+            "Ultimate": "True",
+            "TargetMax": "6"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

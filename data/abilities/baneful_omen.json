@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDig",
+        "TriggerDescription": "At the beginning of your end step, you may reveal the top card of your library. If you do, each opponent loses life equal to that card's mana value.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

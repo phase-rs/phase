@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "SkipPhase",
+        "params": {
+          "Step": "Draw",
+          "ValidTgts": "Player",
+          "SpellDescription": "Target player skips their next draw step."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Step": "Draw",
+        "ValidTgts": "Player",
+        "SpellDescription": "Target player skips their next draw step."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

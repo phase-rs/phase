@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Player",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player sacrifices a monocolored creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

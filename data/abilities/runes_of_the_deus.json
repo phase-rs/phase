@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy+Red",
+        "AddToughness": "1",
+        "Description": "As long as enchanted creature is red, it gets +1/+1 and has double strike. (It deals both first-strike and regular combat damage.)",
+        "AddKeyword": "Double Strike",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Description": "As long as enchanted creature is green, it gets +1/+1 and has trample.",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy+Green"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

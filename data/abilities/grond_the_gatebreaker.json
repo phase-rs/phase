@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "IsPresent": "Army.YouCtrl",
+        "Condition": "PlayerTurn",
+        "AddType": "Artifact & Creature",
+        "Description": "As long as it's your turn and you control an Army, CARDNAME is an artifact creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigRemoveCtr",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, remove an intervention counter from CARDNAME. When you remove the last intervention counter from CARDNAME, the game is a draw.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

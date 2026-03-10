@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.powerLE2",
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked by creatures with power 2 or less."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "Exile",
+        "Destination": "Graveyard",
+        "ValidLKI": "Creature.OppCtrl",
+        "Origin": "Battlefield",
+        "ActiveZones": "Battlefield",
+        "Description": "If a creature an opponent controls would die, instead exile it and put a number of +1/+1 counters equal to that creature's power on CARDNAME."
+      }
+    }
+  ],
+  "faces": []
+}

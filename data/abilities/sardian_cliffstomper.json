@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "PresentCompare": "GE4",
+        "Affected": "Card.Self",
+        "IsPresent": "Mountain.YouCtrl",
+        "Condition": "PlayerTurn",
+        "Description": "As long as it's your turn and you control four or more Mountains, CARDNAME gets +X/+0, where X is the number of Mountains you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

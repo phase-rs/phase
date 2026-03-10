@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.Self",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Rage — Whenever NICKNAME attacks, put a +1/+1 counter on it."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "TriggerDescription": "At the beginning of each end step, if a card left your graveyard this turn, NICKNAME deals damage equal to its power to each opponent.",
+        "Execute": "TrigDealDamage",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionDescription": "If you control four or fewer lands,",
+        "ConditionPresent": "Land.YouCtrl",
+        "ConditionCompare": "LE4",
+        "ChangeTypeDesc": "basic land",
+        "SpellDescription": "If you control four or fewer lands, search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        "Tapped": "True",
+        "ChangeNum": "1",
+        "ChangeType": "Land.Basic"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

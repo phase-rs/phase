@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSubAbility": "PumpOthers",
+          "RepeatCards": "Creature.attacking+withoutFlying",
+          "SpellDescription": "For each attacking creature without flying, its controller may pay {1}. If that player doesn't, creatures you control blocking that creature gain first strike until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "PumpOthers",
+        "RepeatCards": "Creature.attacking+withoutFlying",
+        "SpellDescription": "For each attacking creature without flying, its controller may pay {1}. If that player doesn't, creatures you control blocking that creature gain first strike until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Giant",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a player casts a Giant spell, you may put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

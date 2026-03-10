@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All Incubator tokens you control become Food, Blood, Clue, Treasure, and Powerstone in addition to their other types, and have the respective abilities of those tokens. (Once they transform, they're no longer Incubator tokens.)",
+        "Affected": "Incubator.token+YouCtrl",
+        "AddAbility": "FoodSac & BloodSac & ClueSac & TreasureSac & PowerstoneTap",
+        "AddType": "Food,Blood,Clue,Treasure,Powerstone"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

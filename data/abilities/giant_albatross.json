@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigEach",
+        "TriggerDescription": "When CARDNAME dies, you may pay {1}{U}. If you do, for each creature that dealt damage to CARDNAME this turn, destroy that creature unless its controller pays 2 life. A creature destroyed this way can't be regenerated.",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

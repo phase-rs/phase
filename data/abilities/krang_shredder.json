@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enter or attack, each opponent exiles cards from the top of their library until they exile a nonland card.",
+        "Execute": "TrigDigUntil",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "Execute": "TrigDigUntil",
+        "TriggerDescription": "Whenever CARDNAME enter or attack, each opponent exiles cards from the top of their library until they exile a nonland card."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Revolt": "True",
+        "ValidPlayer": "You",
+        "Execute": "TrigPlay",
+        "TriggerDescription": "Disappear — At the beginning of your end step, if a permanent left the battlefield under your control this turn, you may cast a card exiled with CARDNAME without paying its mana cost.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

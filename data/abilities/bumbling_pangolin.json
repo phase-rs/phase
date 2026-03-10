@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this creature enters, you may destroy target artifact.",
+        "OptionalDecider": "You",
+        "Execute": "TrigDestroy",
+        "Host": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

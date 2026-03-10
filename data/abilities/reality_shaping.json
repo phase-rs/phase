@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "Execute": "TrigPutFromHand",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you encounter CARDNAME, starting with you, each player may put a permanent card from their hand onto the battlefield. (Then planeswalk away from this phenomenon.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

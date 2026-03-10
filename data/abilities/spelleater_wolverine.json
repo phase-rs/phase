@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "PresentCompare": "GE3",
+        "PresentZone": "Graveyard",
+        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
+        "Description": "CARDNAME has double strike as long as there are three or more instant and/or sorcery cards in your graveyard.",
+        "AddKeyword": "Double Strike",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

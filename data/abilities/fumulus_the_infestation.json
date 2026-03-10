@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.!token",
+        "TriggerDescription": "Whenever a player sacrifices a nontoken creature, create a 1/1 black Insect creature token with flying.",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever an Insect, Leech, Slug, or Worm you control attacks, defending player loses 1 life and you gain 1 life.",
+        "Execute": "TrigLoseLife",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Insect.YouCtrl,Leech.YouCtrl,Slug.YouCtrl,Worm.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

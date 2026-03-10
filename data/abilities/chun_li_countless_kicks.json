@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME enters, exile up to X target instant cards from your graveyard, where X is the number of times NICKNAME was kicked. Put a kick counter on each of them.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Lightning Kick — Whenever NICKNAME attacks, copy each exiled card you own with a kick counter on it. You may cast the copies.",
+        "Execute": "TrigPlay",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "SpellDescription": "Reveal the top ten cards of your library. Starting with the next opponent in turn order, each opponent chooses a different nonland card from among them. Put the chosen cards into your hand and the rest on the bottom of your library in a random order.",
+          "RememberRevealed": "True",
+          "SubAbility": "ChooseNonLand",
+          "RevealValid": "Card",
+          "PeekAmount": "10"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Reveal the top ten cards of your library. Starting with the next opponent in turn order, each opponent chooses a different nonland card from among them. Put the chosen cards into your hand and the rest on the bottom of your library in a random order.",
+        "RememberRevealed": "True",
+        "SubAbility": "ChooseNonLand",
+        "RevealValid": "Card",
+        "PeekAmount": "10"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME dies, each opponent discards a card.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

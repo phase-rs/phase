@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 1 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever CARDNAME deals damage, create that many Blood tokens. (They're artifacts with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

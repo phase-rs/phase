@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target creature. Its controller draws two cards.",
+        "Planeswalker": "True",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.OppOwn",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever an opponent draws a card, CARDNAME deals 1 damage to that player."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

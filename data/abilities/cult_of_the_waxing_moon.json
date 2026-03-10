@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Transformed",
+      "params": {
+        "TriggerDescription": "Whenever a permanent you control transforms into a non-Human creature, create a 2/2 green Wolf creature token.",
+        "Execute": "Token",
+        "ValidCard": "Creature.YouCtrl+nonHuman+inZoneBattlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

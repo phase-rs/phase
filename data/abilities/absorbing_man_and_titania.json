@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "Permanent,Player",
+        "ValidSource": "Creature.YouCtrl",
+        "ReplaceWith": "DmgTwice",
+        "Description": "Double all damage that creature sources you control would deal.",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

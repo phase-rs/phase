@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "RemoveCounter",
+        "counter_type": "Any",
+        "count": 5,
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature,Planeswalker,Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Remove up to five counters from target artifact, creature, planeswalker, or opponent.",
+        "StackDescription": "SpellDescription",
+        "UpTo": "True",
+        "TgtPrompt": "Select target artifact, creature, planeswalker, or opponent."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

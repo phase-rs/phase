@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature",
+        "Description": "All creatures have protection from red.",
+        "AddKeyword": "Protection from red"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

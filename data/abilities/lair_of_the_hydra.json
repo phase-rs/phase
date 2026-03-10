@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "SpellDescription": "Add {G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Creature",
+          "Hydra"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X G XMin1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Colors": "Green",
+        "OverwriteColors": "True",
+        "Defined": "Self",
+        "SpellDescription": "Until end of turn, CARDNAME becomes an X/X green Hydra creature. It's still a land. X can't be 0."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "LandTapped",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "Description": "If you control two or more other lands, CARDNAME enters tapped."
+      }
+    }
+  ],
+  "faces": []
+}

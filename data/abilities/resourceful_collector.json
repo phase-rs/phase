@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, a random non-Food permanent card in your graveyard perpetually becomes a Food artifact in addition to its other types and gains \"{2}, Exile this artifact: You gain 3 life.\" You may play that card for as long as it's in your graveyard.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRandom"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ThisDoor": "True",
+            "TriggerDescription": "When you unlock this door, create a token that's a copy of target creature you control, except it's a Reflection in addition to its other creature types.",
+            "ValidPlayer": "You",
+            "Execute": "TrigCopy",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Panharmonicon",
+          "params": {
+            "ValidCard": "Permanent.YouCtrl",
+            "Description": "If a triggered ability of a permanent you control triggers, that ability triggers an additional time."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

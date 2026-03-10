@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "Execute": "TrigMill",
+        "TriggerDescription": "At the beginning of your upkeep, you may mill two cards. (You may put the top two cards of your library into your graveyard.)",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCards": "Creature.YouOwn+!token",
+        "TriggerDescription": "Whenever one or more creature cards are put into your graveyard from anywhere during your turn, create a 1/1 green Insect creature token. This ability triggers only once each turn.",
+        "Origin": "Any",
+        "PlayerTurn": "True",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

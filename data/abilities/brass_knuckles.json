@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCopy",
+        "TriggerDescription": "When you cast this spell, copy it. (The copy becomes a token.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Double Strike",
+        "Affected": "Creature.EquippedBy",
+        "IsPresent": "Equipment.AttachedTo Creature.EquippedBy",
+        "Description": "Equipped creature has double strike as long as two or more Equipment are attached to it.",
+        "PresentCompare": "GE2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "EqMe",
+        "Secondary": "True",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

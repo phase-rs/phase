@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Shuffle": "False",
+        "ChangeNum": "1",
+        "SpellDescription": "Search your library for a nonland card and reveal it. Each opponent who cast a spell this turn with the same name as that card loses 6 life. Then shuffle.",
+        "Imprint": "True",
+        "SubAbility": "DBRepeat",
+        "StackDescription": "SpellDescription",
+        "ChangeType": "Card.nonLand",
+        "Reveal": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Graveyard",
+        "ActivationPhases": "Upkeep",
+        "PlayerTurn": "True",
+        "SpellDescription": "Return CARDNAME from your graveyard to your hand. Activate only during your upkeep."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

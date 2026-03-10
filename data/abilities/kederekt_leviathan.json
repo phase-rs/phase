@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, return all other nonland permanents to their owners' hands."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has base power and toughness X/X, where X is your life total.",
+        "SetPower": "X",
+        "Affected": "Creature.EquippedBy",
+        "SetToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

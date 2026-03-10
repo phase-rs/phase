@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "RestrictValid": "Spell.Artifact,Activated.Artifact",
+          "SpellDescription": "Add {U}. Spend this mana only to cast an artifact spell or activate an ability of an artifact source."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.Artifact,Activated.Artifact",
+        "SpellDescription": "Add {U}. Spend this mana only to cast an artifact spell or activate an ability of an artifact source."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

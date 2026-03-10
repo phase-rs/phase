@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.Other+attackingAlone,Creature.Other+blockingAlone",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature dies, if it was attacking or blocking alone, exile it and investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

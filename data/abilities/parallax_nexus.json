@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/FADE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Mandatory": "True",
+        "Chooser": "Targeted",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Target opponent exiles a card from their hand. Activate only as a sorcery.",
+        "Imprint": "True",
+        "ChangeNum": "1",
+        "SorcerySpeed": "True",
+        "IsCurse": "True",
+        "ChangeType": "Card",
+        "Hidden": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, each player returns to their hand all cards they own exiled with CARDNAME.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

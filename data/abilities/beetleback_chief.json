@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 red Goblin creature tokens."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigCopy",
+        "ValidCard": "Creature.withFlying+nonLegendary",
+        "OptionalDecider": "You",
+        "ValidActivatingPlayer": "You",
+        "ResolvedLimit": "1",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a nonlegendary creature spell with flying, you may copy it, except the copy is a 1/1 Spirit in addition to its other types. Do this only once each turn. (The copy becomes a token.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

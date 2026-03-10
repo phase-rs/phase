@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack, NICKNAME deals 1 damage to each opponent."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddReplacementEffect": "DamageRep",
+        "Condition": "MaxSpeed",
+        "Description": "Max speed — If a source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 1 instead.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

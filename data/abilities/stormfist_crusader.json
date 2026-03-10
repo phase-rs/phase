@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, each player draws a card and loses 1 life.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

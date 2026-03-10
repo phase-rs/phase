@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your upkeep, put a wage counter on CARDNAME. You may pay {2} for each wage counter on it. If you don't, remove all wage counters from CARDNAME and an opponent gains control of it.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

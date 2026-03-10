@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player chooses target player who has more life than they do and is their opponent. The first player may have CARDNAME deal 1 damage to the second player.",
+        "Phase": "Upkeep",
+        "Execute": "TrigOathofMages",
+        "OptionalDecider": "TriggeredPlayer"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

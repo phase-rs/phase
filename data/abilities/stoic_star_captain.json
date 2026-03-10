@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "Type": "Spacecraft",
+          "Exhaust": "True",
+          "SpellDescription": "Seek a Spacecraft card."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Spacecraft",
+        "Exhaust": "True",
+        "SpellDescription": "Seek a Spacecraft card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "TapPowerValue"
+      },
+      "params": {
+        "Description": "Each creature you control crews Vehicles and stations permanents as though its power were 2 greater.",
+        "ValidSA": "Activated.Crew+Vehicle,Activated.Station",
+        "Value": "2",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

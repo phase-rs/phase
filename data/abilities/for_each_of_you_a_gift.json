@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerDescription": "When you set this scheme in motion, for each opponent, create a 3/3 black Horror creature token that attacks that player each combat if able.",
+        "TriggerZones": "Command",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigRepeat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

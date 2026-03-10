@@ -1,0 +1,108 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Untap CARDNAME."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MustBlock",
+        "params": {
+          "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
+        "ValidTgts": "Creature"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChangeTargets",
+        "params": {
+          "TgtPrompt": "Select target spell that targets only CARDNAME",
+          "TargetType": "Spell.numTargets EQ1+IsTargeting Self",
+          "ValidTgts": "Card",
+          "SpellDescription": "Change the target of target spell that targets only CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target spell that targets only CARDNAME",
+        "TargetType": "Spell.numTargets EQ1+IsTargeting Self",
+        "ValidTgts": "Card",
+        "SpellDescription": "Change the target of target spell that targets only CARDNAME."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": -1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME gets +1/-1 until end of turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": -1,
+        "toughness": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME gets -1/+1 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

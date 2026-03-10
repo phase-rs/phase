@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 4,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Creatures you control get +0/+4 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

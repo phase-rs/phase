@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, target creature you control gains intimidate until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

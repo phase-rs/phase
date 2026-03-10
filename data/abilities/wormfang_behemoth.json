@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile all cards from your hand.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, return the exiled cards to their owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

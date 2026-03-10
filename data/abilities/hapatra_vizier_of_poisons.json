@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may put a -1/-1 counter on target creature.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "ValidCard": "Creature",
+        "CounterType": "M1M1",
+        "ValidSource": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you put one or more -1/-1 counters on a creature, create a 1/1 green Snake creature token with deathtouch."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

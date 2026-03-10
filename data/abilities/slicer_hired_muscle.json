@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each opponent's upkeep, you may have that player gain control of NICKNAME until end of turn. If you do, untap NICKNAME, goad it, and it can't be sacrificed this turn. If you don't, convert it.",
+            "Phase": "Upkeep",
+            "Execute": "TrigGainControl",
+            "ValidPlayer": "Opponent"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidTarget": "Player",
+            "CombatDamage": "True",
+            "Execute": "TrigDelTrig",
+            "ValidSource": "Card.Self",
+            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, convert it at end of combat."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

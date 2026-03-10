@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtOppEOT",
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

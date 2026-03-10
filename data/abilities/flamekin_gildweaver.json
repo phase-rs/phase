@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBToken",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this creature enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this tokoen: Add one mana of any color.\")",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

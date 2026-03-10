@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Landfall — Whenever a land you control enters, create a Food token or a Treasure token. (Food is an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\" Treasure is an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigTokenChoice"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

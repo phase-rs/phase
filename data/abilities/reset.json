@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "UntapAll",
+        "params": {
+          "SpellDescription": "Cast CARDNAME only during an opponent's turn after their upkeep step. Untap all lands you control.",
+          "CheckSVar": "Count$FinishedUpkeepsThisTurn",
+          "ValidCards": "Land.YouCtrl",
+          "OpponentTurn": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Cast CARDNAME only during an opponent's turn after their upkeep step. Untap all lands you control.",
+        "CheckSVar": "Count$FinishedUpkeepsThisTurn",
+        "ValidCards": "Land.YouCtrl",
+        "OpponentTurn": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

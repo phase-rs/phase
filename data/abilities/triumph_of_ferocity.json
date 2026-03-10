@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigFerociousDraw",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, draw a card if you control the creature with the greatest power or tied for the greatest power.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

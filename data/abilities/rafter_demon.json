@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDiscard",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+spectacle",
+        "TriggerDescription": "When CARDNAME enters, if its spectacle cost was paid, each opponent discards a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

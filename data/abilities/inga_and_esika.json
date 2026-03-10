@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a creature spell, if three or more mana from creatures was spent to cast it, draw a card.",
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "ValidSA": "Spell.ManaFromCreature_3"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Mana",
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have vigilance and \"{T}: Add one mana of any color. Spend this mana only to cast a creature spell.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

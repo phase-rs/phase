@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.withFlying+Other+YouCtrl",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another creature you control with flying dies, put a +1/+1 counter on target creature you control.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

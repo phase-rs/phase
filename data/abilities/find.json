@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Hand",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouOwn"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TargetMax": "2",
+            "TargetMin": "0",
+            "TgtPrompt": "Choose target creature card in your graveyard",
+            "SpellDescription": "Return up to two target creature cards from your graveyard to your hand."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 2,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "Choices": "Creature.YouCtrl",
+            "ChoiceOptional": "True",
+            "SpellDescription": "You may put two +1/+1 counters on a creature you control. Then all creatures get -4/-4 until end of turn.",
+            "StackDescription": "SpellDescription",
+            "SubAbility": "DBPumpAll"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

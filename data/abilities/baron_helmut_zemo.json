@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "CopyCard": "True",
+          "ValidSA": "Spell",
+          "Optional": "True",
+          "Boast": "True",
+          "CostDesc": "Exile any number of black cards from your graveyard with fifteen or more black mana symbols among their mana costs:",
+          "Amount": "3",
+          "WithoutManaCost": "True",
+          "SpellDescription": "Copy those exiled cards. You may cast up to three of the copies without paying their mana costs. (Activate only if this creature attacked this turn and only once each turn.)",
+          "Defined": "ExiledWith"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromGrave<1+/Card.Black+withTotalManaSymbols_Black_GE15>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CopyCard": "True",
+        "ValidSA": "Spell",
+        "Optional": "True",
+        "Boast": "True",
+        "CostDesc": "Exile any number of black cards from your graveyard with fifteen or more black mana symbols among their mana costs:",
+        "Amount": "3",
+        "WithoutManaCost": "True",
+        "SpellDescription": "Copy those exiled cards. You may cast up to three of the copies without paying their mana costs. (Activate only if this creature attacked this turn and only once each turn.)",
+        "Defined": "ExiledWith"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Black+wasCastFromYourHand",
+        "Execute": "TrigConnive",
+        "TriggerDescription": "Whenever you cast a black spell from your hand, CARDNAME connives.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

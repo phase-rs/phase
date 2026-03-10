@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have vigilance."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "CanBlockAmount": "1",
+        "Description": "Each creature you control can block an additional creature each combat."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

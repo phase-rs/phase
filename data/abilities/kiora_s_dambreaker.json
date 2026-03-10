@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigProliferate",
+        "TriggerDescription": "When CARDNAME enters, proliferate. (Choose any number of permanents and/or players, then give each counter of each kind already there.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

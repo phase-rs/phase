@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouOwn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose three target creature cards in your graveyard. Return two of them at random to the battlefield and put the other on the bottom of your library.",
+        "RememberObjects": "Targeted",
+        "TgtPrompt": "Select three target creature cards in your graveyard",
+        "TargetMax": "3",
+        "TgtZone": "Graveyard",
+        "SubAbility": "ReturnTwo",
+        "TargetMin": "3",
+        "StackDescription": "{p:You} chooses {c:Targeted},"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

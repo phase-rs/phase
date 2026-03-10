@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Scry",
+      "params": {
+        "TriggerDescription": "Whenever you scry, if CARDNAME is tapped, you may untap it. Do this only once each turn.",
+        "ResolvedLimit": "1",
+        "Execute": "TrigUntap",
+        "ValidPlayer": "You",
+        "PresentDefined": "Self",
+        "OptionalDecider": "You",
+        "IsPresent": "Card.tapped",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature an opponent controls dies, put a +1/+1 counter on NICKNAME.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.kicked",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a spell, if that spell was kicked, CARDNAME gets +1/+1 and gains menace until end of turn. (It can't be blocked except by two or more creatures.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

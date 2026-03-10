@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddReplacementEffect": "This & Other",
+        "Affected": "Creature.IsCommander+YouOwn",
+        "Description": "Commander creatures you own have \"This creature enters with an additional +1/+1 counter on it\" and \"Other creatures you control enter with an additional +1/+1 counter on them.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

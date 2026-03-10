@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Fog",
+        "params": {
+          "SpellDescription": "Prevent all combat damage that would be dealt this turn."
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent all combat damage that would be dealt this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

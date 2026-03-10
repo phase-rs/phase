@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSearch",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a card named Alpine Watchdog and/or a card named Igneous Cur, reveal them, put them into your hand, then shuffle.",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME attacks, it gets +X/+0 until end of turn, where X is the number of other attacking creatures.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

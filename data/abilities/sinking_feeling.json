@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Untap",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has \"{1}, Put a -1/-1 counter on this creature: Untap this creature.\""
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DefinedPlayer": "Targeted",
+        "ChangeType": "Card.nonLand",
+        "ChangeNum": "1",
+        "RememberChanged": "True",
+        "IsCurse": "True",
+        "Mandatory": "True",
+        "SubAbility": "DBToken",
+        "SpellDescription": "Target opponent reveals their hand. You choose a nonland card from it. Exile that card.",
+        "Chooser": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

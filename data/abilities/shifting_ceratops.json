@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME gains your choice of reach, trample, or haste until end of turn.",
+        "KWChoice": "Reach,Trample,Haste",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

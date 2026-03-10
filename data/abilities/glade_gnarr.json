@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Blue",
+        "TriggerDescription": "Whenever a player casts a blue spell, CARDNAME gets +2/+2 until end of turn.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

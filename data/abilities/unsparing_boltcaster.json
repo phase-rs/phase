@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "When this creature enters, it deals 5 damage to target creature an opponent controls that was dealt damage this turn.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidCard": "Creature.White+YouCtrl",
+        "TriggerDescription": "Whenever a white creature you control attacks, you gain 1 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

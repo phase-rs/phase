@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Dinosaur.Other+YouCtrl",
+        "Description": "As long as you control another Dinosaur, CARDNAME gets +2/+0 and has trample.",
+        "Affected": "Card.Self",
+        "AddPower": "2",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

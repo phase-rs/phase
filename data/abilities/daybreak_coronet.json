@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +3/+3 and has first strike, vigilance, and lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)",
+        "AddPower": "3",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "First Strike & Vigilance & Lifelink",
+        "AddToughness": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

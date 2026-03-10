@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SubAbility": "TrigGorgonEffect",
+          "ValidTgts": "Creature",
+          "SpellDescription": "Regenerate target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by that creature this turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "TrigGorgonEffect",
+        "ValidTgts": "Creature",
+        "SpellDescription": "Regenerate target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by that creature this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

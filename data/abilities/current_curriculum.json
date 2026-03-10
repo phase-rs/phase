@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if you control two or more tapped creatures, conjure a card named Stonybrook Schoolmaster onto the battlefield tapped.",
+        "IsPresent": "Creature.YouCtrl+tapped",
+        "PresentCompare": "GE2",
+        "Phase": "End of Turn",
+        "Execute": "TrigConjure",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "EQ0",
+        "AddKeyword": "Convoke",
+        "Affected": "Merfolk.YouCtrl",
+        "Description": "The first Merfolk spell you cast each turn has convoke.",
+        "AffectedZone": "Stack",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

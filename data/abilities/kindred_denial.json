@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberCounteredCMC": "True",
+        "TargetType": "Spell",
+        "SpellDescription": "Counter target spell.",
+        "SubAbility": "DBSeek",
+        "TgtPrompt": "Select target spell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

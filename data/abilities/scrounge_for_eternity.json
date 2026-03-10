@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouOwn+cmcLE5,Spacecraft.YouOwn+cmcLE5"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBToken",
+        "TgtPrompt": "Choose target creature or Spacecraft card with mana value 5 or less in your graveyard",
+        "SpellDescription": "Return target creature or Spacecraft card with mana value 5 or less from your graveyard to the battlefield. Then create a Lander token. (It's an artifact with \"{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\")"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

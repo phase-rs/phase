@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME or another artifact you control enters, target creature you control gets +1/+1 and gains vigilance until end of turn.",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self,Artifact.YouCtrl+Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

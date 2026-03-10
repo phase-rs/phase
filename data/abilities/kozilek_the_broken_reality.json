@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigManifest",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cast this spell, up to two target players each manifest two cards from their hands. For each card manifested this way, you draw a card. (To manifest a card, put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "AddToughness": "2",
+        "Description": "Other colorless creatures you control get +3/+2.",
+        "Affected": "Creature.Colorless+YouCtrl+Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control exploits a non-Human creature, draw a card. If the exploited creature had power 3 or greater, create a Treasure token.",
+        "ValidCard": "Creature.nonHuman",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME and other Human creatures you control have exploit. (When a creature with exploit enters, you may sacrifice a creature.)",
+        "Affected": "Card.Self,Human.YouCtrl",
+        "AddKeyword": "Exploit"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

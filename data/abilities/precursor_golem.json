@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, create two 3/3 colorless Golem artifact creature tokens.",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TargetsValid": "Golem.inZoneBattlefield",
+        "ValidCard": "Instant,Sorcery",
+        "IsSingleTarget": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player casts an instant or sorcery spell that targets only a single Golem, that player copies that spell for each other Golem that spell could target. Each copy targets a different one of those Golems.",
+        "ValidActivatingPlayer": "Player",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

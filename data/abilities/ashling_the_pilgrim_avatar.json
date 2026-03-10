@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Command",
+        "ValidPlayers": "Player",
+        "SpellDescription": "CARDNAME deals 1 damage to each creature and each player.",
+        "ValidDescription": "each creature and each player.",
+        "ValidCards": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

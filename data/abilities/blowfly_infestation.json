@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature dies, if it had a -1/-1 counter on it, put a -1/-1 counter on target creature.",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.counters_GE1_M1M1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

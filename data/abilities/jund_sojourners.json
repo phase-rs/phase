@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may have it deal 1 damage to any target.",
+        "OptionalDecider": "You",
+        "Execute": "TrigDamage",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigDamage",
+        "Secondary": "True",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may have it deal 1 damage to any target."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "SpellDescription": "Up to X target Beebles can't be blocked this turn, where X is the number of cards in your hand.",
+          "ValidTgts": "Beeble",
+          "TgtPrompt": "Select up to X target Beebles",
+          "StaticAbilities": "Unblockable",
+          "StackDescription": "SpellDescription",
+          "RememberObjects": "Targeted",
+          "TargetMax": "NHand",
+          "ExileOnMoved": "Battlefield",
+          "TargetMin": "0"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Up to X target Beebles can't be blocked this turn, where X is the number of cards in your hand.",
+        "ValidTgts": "Beeble",
+        "TgtPrompt": "Select up to X target Beebles",
+        "StaticAbilities": "Unblockable",
+        "StackDescription": "SpellDescription",
+        "RememberObjects": "Targeted",
+        "TargetMax": "NHand",
+        "ExileOnMoved": "Battlefield",
+        "TargetMin": "0"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "CounterRemovedOnce",
+      "params": {
+        "TriggerDescription": "The number of loyalty counters on B.O.B. is equal to the number of Beebles you control. (Create or sacrifice Beebles whenever B.O.B. gains or loses loyalty.)",
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "Beeb",
+        "CounterType": "LOYALTY",
+        "SVarCompare": "GTLoy",
+        "Execute": "TrigSac"
+      }
+    },
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "CounterType": "LOYALTY",
+        "ValidCard": "Card.Self",
+        "Static": "True",
+        "Execute": "TrigCreate",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "SVarCompare": "GTBeeb",
+        "CheckSVar": "Loy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

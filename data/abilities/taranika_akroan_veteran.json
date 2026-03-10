@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever CARDNAME attacks, untap another target creature you control. Until end of turn, that creature has base power and toughness 4/4 and gains indestructible."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "IsPresent": "Creature.attacking+Other",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME and at least three other creatures attack, you choose which creatures block this combat and how those creatures block.",
+        "NoResolvingCheck": "True",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE3",
+        "Execute": "TrigOdricEffect"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

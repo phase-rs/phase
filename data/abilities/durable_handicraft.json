@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterType": "P1P1",
+          "ValidCards": "Creature.YouCtrl",
+          "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+          "CounterNum": "1"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "5 G"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterType": "P1P1",
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+        "CounterNum": "1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control enters, you may pay {1}. If you do, put a +1/+1 counter on that creature.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

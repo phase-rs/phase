@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "3",
+        "SetColor": "Green",
+        "RemoveCardTypes": "True",
+        "SetPower": "3",
+        "RemoveCreatureTypes": "True",
+        "AddType": "Creature & Elk",
+        "Description": "Enchanted creature loses all abilities and is a green Elk creature with base power and toughness 3/3. (It loses all other card types and creature types.)",
+        "Affected": "Creature.EnchantedBy",
+        "RemoveAllAbilities": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDig",
+            "TriggerDescription": "When CARDNAME enters, look at the top five cards of your library. You may reveal a permanent card from among them and put it into your hand. Put the rest on the bottom of your library in a random order."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigPump",
+            "ValidCard": "Card",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever you cast a spell, CARDNAME gains indestructible until end of turn.",
+            "ValidActivatingPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

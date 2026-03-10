@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.nonCreature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn. (It retains its abilities.)",
+        "TgtPrompt": "Select target noncreature artifact"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBUntap",
+        "TgtPrompt": "Select target permanent to tap",
+        "Planeswalker": "True",
+        "SpellDescription": "Tap target permanent, then untap another target permanent."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "CARDNAME deals 3 damage to any target."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "FlipACoin",
+        "params": {
+          "HeadsSubAbility": "DBAddTurn",
+          "SpellDescription": "Flip 5 coins. Take an extra turn after this one for each coin that comes up heads.",
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "Amount": "5",
+          "NoCall": "True",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "HeadsSubAbility": "DBAddTurn",
+        "SpellDescription": "Flip 5 coins. Take an extra turn after this one for each coin that comes up heads.",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "Amount": "5",
+        "NoCall": "True",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may pay {4}{R}{R}. If you do, return CARDNAME from your graveyard to the battlefield.",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Card.Self",
+        "Description": "CARDNAME attacks each combat if able."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

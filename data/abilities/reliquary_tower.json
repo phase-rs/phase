@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You have no maximum hand size.",
+        "SetMaxHandSize": "Unlimited"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

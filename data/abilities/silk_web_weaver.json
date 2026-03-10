@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures you control get +2/+2 and gain vigilance until end of turn.",
+        "KW": "Vigilance",
+        "ValidCards": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a creature spell, create a 1/1 green and white Human Citizen creature token.",
+        "ValidCard": "Creature",
+        "Execute": "TrigToken",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

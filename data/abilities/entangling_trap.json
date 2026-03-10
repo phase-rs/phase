@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Clashed",
+      "params": {
+        "TriggerDescription": "Whenever you clash, tap target creature an opponent controls. If you won, that creature doesn't untap during its controller's next untap step. (This ability triggers after the clash ends.)",
+        "ValidPlayer": "You",
+        "Execute": "TrigTapW",
+        "TriggerZones": "Battlefield",
+        "Won": "True"
+      }
+    },
+    {
+      "mode": "Clashed",
+      "params": {
+        "Won": "False",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTapL",
+        "TriggerDescription": "Whenever you clash, tap target creature an opponent controls. If you won, that creature doesn't untap during its controller's next untap step. (This ability triggers after the clash ends.)",
+        "Secondary": "True",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {
+          "AILogic": "SacToReduceCost",
+          "AdditionalDesc": "This spell costs {2} less to cast for each permanent sacrificed this way and {2} less to cast for each other artifact or creature you've sacrificed this turn."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "6 R"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "SacToReduceCost",
+        "AdditionalDesc": "This spell costs {2} less to cast for each permanent sacrificed this way and {2} less to cast for each other artifact or creature you've sacrificed this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Relative": "True",
+        "ValidCard": "Card.Self",
+        "Amount": "Y",
+        "Type": "Spell",
+        "EffectZone": "All"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Z",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

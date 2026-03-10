@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBTap",
+        "KW": "Hexproof",
+        "SpellDescription": "CARDNAME gains hexproof until end of turn. Tap it.",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you draw a card, CARDNAME gets +1/+0 until end of turn.",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Mutates",
+      "params": {
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "Whenever this creature mutates, gain control of target noncreature artifact.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

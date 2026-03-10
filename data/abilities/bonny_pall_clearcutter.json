@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create Beau, a legendary blue Ox creature token with \"This creature's power and toughness are each equal to the number of lands you control.\"",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack, draw a card, then you may put a land card from your hand or graveyard onto the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

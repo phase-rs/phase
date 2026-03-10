@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 2 life."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 4
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 4 life.",
+        "ActivationZone": "Hand",
+        "PrecostDesc": "Channel —"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Mandatory": "True",
+        "ChangeNum": "1",
+        "SpellDescription": "Search your library for a card, put that card into your hand, discard a card at random, then shuffle.",
+        "NoShuffle": "True",
+        "SubAbility": "DBDiscard",
+        "ChangeType": "Card"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

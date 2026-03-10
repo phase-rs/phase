@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on CARDNAME, then scry 1.",
+        "TargetsValid": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

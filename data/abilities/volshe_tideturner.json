@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "Amount": "1",
+          "RestrictValid": "Spell.Kicked,Spell.Instant,Spell.Sorcery",
+          "SpellDescription": "Add {U}. Spend this mana only to cast an instant or sorcery spell or a kicked spell."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "RestrictValid": "Spell.Kicked,Spell.Instant,Spell.Sorcery",
+        "SpellDescription": "Add {U}. Spend this mana only to cast an instant or sorcery spell or a kicked spell."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

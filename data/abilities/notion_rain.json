@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Surveil",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Surveil 2, then draw two cards. CARDNAME deals 2 damage to you.",
+        "Amount": "2",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

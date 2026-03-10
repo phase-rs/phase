@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, gain control of enchanted land until end of turn. At the beginning of your upkeep, untap enchanted land. You gain control of that land until end of turn.",
+        "Execute": "TrigGainControl",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "At the beginning of your upkeep, untap enchanted land. You gain control of that land until end of turn.",
+        "ValidPlayer": "You",
+        "Execute": "TrigGainControl2",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

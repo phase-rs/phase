@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl",
+          "Amount": "4",
+          "TgtPrompt": "Select target creature you control",
+          "SubAbility": "DBTap",
+          "SpellDescription": "Prevent the next 4 damage that would be dealt this turn to target creature you control. Tap that creature. It doesn't untap during your next untap step."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl",
+        "Amount": "4",
+        "TgtPrompt": "Select target creature you control",
+        "SubAbility": "DBTap",
+        "SpellDescription": "Prevent the next 4 damage that would be dealt this turn to target creature you control. Tap that creature. It doesn't untap during your next untap step."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

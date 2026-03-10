@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Aura+hasKeywordEnchant:Creature",
+        "Caster": "You",
+        "Description": "You may cast Aura spells with enchant creature as though they had flash."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

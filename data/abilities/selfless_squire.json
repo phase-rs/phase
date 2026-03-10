@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "DBEffect",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, prevent all damage that would be dealt to you this turn.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamagePreventedOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "You",
+        "TriggerDescription": "Whenever damage that would be dealt to you is prevented, put that many +1/+1 counters on CARDNAME.",
+        "Execute": "TrigPut"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

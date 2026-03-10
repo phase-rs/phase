@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Permanent",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you sacrifice another permanent, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

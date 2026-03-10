@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {
+          "AdditionalDesc": "This spell costs {2} less to cast for each card exiled this way."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "6 B B"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<X/Creature/creature cards>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AdditionalDesc": "This spell costs {2} less to cast for each card exiled this way."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigChoose",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or dies, choose a card at random exiled with NICKNAME and put that card into its owner's hand."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChoose",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Secondary": "True",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever CARDNAME attacks or dies, choose a card at random exiled with NICKNAME and put that card into its owner's hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Y",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "Relative": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

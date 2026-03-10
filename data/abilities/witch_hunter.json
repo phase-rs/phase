@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Player,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target player or planeswalker",
+        "SpellDescription": "CARDNAME deals 1 damage to target player."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature an opponent controls",
+        "SpellDescription": "Return target creature an opponent controls to its owner's hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

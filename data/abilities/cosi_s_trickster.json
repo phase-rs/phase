@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Shuffled",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent shuffles their library, you may put a +1/+1 counter on CARDNAME.",
+        "ValidPlayer": "Opponent",
+        "OptionalDecider": "You",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

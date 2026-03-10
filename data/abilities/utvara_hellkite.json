@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidCard": "Dragon.YouCtrl",
+        "TriggerDescription": "Whenever a Dragon you control attacks, create a 6/6 red Dragon creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

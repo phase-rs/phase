@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a creature you control with power 2 or less attacks, it gains skulk until end of turn. (It can't be blocked by creatures with greater power.)",
+        "ValidCard": "Creature.powerLE2+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.powerGE4",
+        "Attacked": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a creature with power 4 or greater attacks you, its controller loses 2 life and you gain 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

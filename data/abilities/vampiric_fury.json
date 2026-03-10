@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Vampire creatures you control get +2/+0 and gain first strike until end of turn.",
+        "ValidCards": "Creature.Vampire+YouCtrl",
+        "KW": "First Strike"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

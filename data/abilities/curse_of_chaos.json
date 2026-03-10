@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "AttackedTarget": "Player.EnchantedBy",
+        "OptionalDecider": "TriggeredAttackingPlayer",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever a player attacks enchanted player with one or more creatures, that attacking player may discard a card. If the player does, they draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

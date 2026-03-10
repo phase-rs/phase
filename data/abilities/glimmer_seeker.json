@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PhaseCount": "2",
+        "PresentDefined": "Self",
+        "TriggerZones": "Battlefield",
+        "Phase": "Main",
+        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, draw a card if you control a Glimmer creature. If you don't control a Glimmer creature, create a 1/1 white Glimmer enchantment creature token.",
+        "IsPresent": "Card.tapped",
+        "ValidPlayer": "You",
+        "Execute": "TrigBranch"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

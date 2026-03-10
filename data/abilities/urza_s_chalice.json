@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever a player casts an artifact spell, you may pay {1}. If you do, you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Artifact",
+        "OptionalDecider": "You",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X 1 B"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<X/Card/card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at target opponent's hand and choose X cards from it. That player discards those cards.",
+        "Mode": "LookYouChoose"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

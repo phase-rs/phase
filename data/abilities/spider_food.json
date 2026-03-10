@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Enchantment,Creature.withFlying"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBFood",
+        "TgtPrompt": "Select up to one target artifact, enchantment, or creature with flying.",
+        "SpellDescription": "Destroy up to one target artifact, enchantment, or creature with flying.",
+        "TargetMin": "0",
+        "TargetMax": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

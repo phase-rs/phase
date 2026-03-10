@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "MinCharmNum": "1",
+          "CharmNum": "2",
+          "Choices": "Human,NonHuman"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "MinCharmNum": "1",
+        "CharmNum": "2",
+        "Choices": "Human,NonHuman"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

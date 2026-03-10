@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creature tokens you control have flying and vigilance.",
+        "Affected": "Creature.token+YouCtrl",
+        "AddKeyword": "Flying & Vigilance"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigFlipCoins",
+        "TriggerDescription": "Whenever CARDNAME attacks, flip three coins. For each flip you win, create a 1/1 red Goblin creature token that's tapped and attacking.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

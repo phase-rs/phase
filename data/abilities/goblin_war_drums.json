@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Menace",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have menace."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

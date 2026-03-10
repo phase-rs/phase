@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "RestrictValid": "Activated",
+          "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities.",
+          "Amount": "2"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/P1P1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Activated",
+        "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities.",
+        "Amount": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cycle CARDNAME, put a flying counter on target creature you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "AddType": "Artificer",
+        "Description": "Equipped creature gets +2/+2 for each artifact you control and is an Artificer in addition to its other types.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

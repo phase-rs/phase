@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSurveil",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
+        "ValidCard": "Enchantment.YouCtrl"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "Execute": "TrigSurveil",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, surveil 1. (Look at the top card of your library. You may put it into your graveyard.).",
+        "ValidCard": "Card.Room",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

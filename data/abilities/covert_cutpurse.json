@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDestroy",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, destroy target creature you don't control that was dealt damage this turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Graveyard",
+            "ReplaceWith": "Exile",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

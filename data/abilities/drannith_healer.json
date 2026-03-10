@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.Other+YouOwn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever you cycle another card, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

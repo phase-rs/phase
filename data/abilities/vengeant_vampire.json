@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, destroy target creature an opponent controls and you gain 4 life.",
+        "Execute": "TrigDestroy",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

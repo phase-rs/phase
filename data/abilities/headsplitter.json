@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 black Assassin creature token with menace, then attach CARDNAME to it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "1",
+        "Description": "Equipped creature gets +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

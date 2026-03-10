@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBCounter",
+        "TargetMin": "0",
+        "TgtPrompt": "Select up to two target creatures",
+        "SpellDescription": "Tap up to two target creatures. Put a stun counter on either of them. Then put a stun counter on either of them. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+        "StackDescription": "Tap {c:Targeted}. {p:You} puts a stun counter on a creature targeted by this spell. Then {p:You} puts a stun counter on a creature targeted by this spell.",
+        "TargetMax": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

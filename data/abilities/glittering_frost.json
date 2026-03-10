@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMana",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "Whenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Snow",
+        "Affected": "Land.EnchantedBy",
+        "Description": "Enchanted land is snow."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

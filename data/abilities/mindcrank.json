@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeLost",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever an opponent loses life, that player mills that many cards. (Damage dealt by sources without infect causes loss of life.)",
+        "ValidPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

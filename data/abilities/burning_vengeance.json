@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.wasCastFromYourGraveyard",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell from your graveyard, CARDNAME deals 2 damage to any target.",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

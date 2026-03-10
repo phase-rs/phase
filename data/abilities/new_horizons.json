@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on target creature you control.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "NewHorizonsTap",
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted land has \"{T}: Add two mana of any one color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

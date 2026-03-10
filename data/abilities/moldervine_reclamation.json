@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control dies, you gain 1 life and draw a card.",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

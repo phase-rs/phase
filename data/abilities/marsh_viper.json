@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals damage to a player, that player gets two poison counters. (A player with ten or more poison counters loses the game.)",
+        "Execute": "TrigPoison",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

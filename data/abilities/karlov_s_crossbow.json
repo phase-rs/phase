@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Duration": "Permanent",
+          "Forecast": "True",
+          "SpellDescription": "For the remainder of the game, spells you cast named Karlov's Crossbow cost {1} less to cast. (Activate only during your upkeep and only once each turn.)",
+          "StaticAbilities": "ReduceCost",
+          "Name": "Emblem — Karlov's Crossbow",
+          "AILogic": "Always"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "0"
+          },
+          {
+            "type": "Mana",
+            "cost": "Reveal<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "Forecast": "True",
+        "SpellDescription": "For the remainder of the game, spells you cast named Karlov's Crossbow cost {1} less to cast. (Activate only during your upkeep and only once each turn.)",
+        "StaticAbilities": "ReduceCost",
+        "Name": "Emblem — Karlov's Crossbow",
+        "AILogic": "Always"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature attacks, sacrifice CARDNAME and destroy target creature an opponent controls.",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

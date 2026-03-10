@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this creature enters, each opponent loses 2 life and you gain 2 life.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLoseLife",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

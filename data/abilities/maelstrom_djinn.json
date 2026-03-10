@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigDjinnVanishing",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, put two time counters on it and it gains vanishing.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

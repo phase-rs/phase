@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "AddTurn",
+            "params": {
+              "SpellDescription": "Take an extra turn after this one.",
+              "NumTurns": "1",
+              "Exhaust": "True"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "Waterbend<20>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Take an extra turn after this one.",
+            "NumTurns": "1",
+            "Exhaust": "True"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Card",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigToken",
+            "TriggerDescription": "Whenever you cast a spell, create a 1/1 colorless Spirit creature token with \"This token can't block or be blocked by non-Spirit creatures.\""
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

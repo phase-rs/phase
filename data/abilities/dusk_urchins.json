@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, put a -1/-1 counter on it.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Secondary": "True",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, put a -1/-1 counter on it."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, draw a card for each -1/-1 counter on it.",
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

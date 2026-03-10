@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When CARDNAME enters, you may sacrifice another creature. When you do, destroy target nonland permanent.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "OptionalDecider": "TriggeredCardController",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME dies, you may gain 1 life for each creature card in your graveyard. If you do, exile CARDNAME from your graveyard.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

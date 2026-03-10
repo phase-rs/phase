@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Hexproof",
+        "SpellDescription": "Target creature you control gets +0/+1 and gains hexproof until end of turn.",
+        "TgtPrompt": "Select target creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

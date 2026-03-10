@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Adapt": "2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, exile up to one target card from a graveyard.",
+        "Execute": "TrigExile",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat"
+      }
+    },
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "CounterType": "P1P1",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, put a creature card exiled with CARDNAME onto the battlefield under your control with a finality counter on it. It gains haste. Sacrifice it at the beginning of the next end step."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

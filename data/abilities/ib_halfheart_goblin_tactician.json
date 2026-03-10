@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "r_1_1_goblin",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "TokenAmount": "2",
+        "SpellDescription": "Create two 1/1 red Goblin creature tokens."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidCard": "Goblin.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "HalfHeartTrigSacrifice",
+        "TriggerDescription": "Whenever another Goblin you control becomes blocked, sacrifice it. If you do, it deals 4 damage to each creature blocking it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Goblin creatures you control get +1/+1 and have haste.",
+        "Affected": "Creature.Goblin+Other+YouCtrl",
+        "AddKeyword": "Haste",
+        "AddToughness": "1",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

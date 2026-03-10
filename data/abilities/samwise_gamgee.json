@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.Historic+YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target historic card from your graveyard to your hand. (Artifacts, legendaries, and Sagas are historic.)",
+        "TgtPrompt": "Select target historic permanent in your graveyard"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.!token+YouCtrl+Other",
+        "Execute": "TrigFood",
+        "TriggerDescription": "Whenever another nontoken creature you control enters, create a Food token. (It's an artifact with \"{2}, Sacrifice this artifact: You gain 3 life.\")",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 RW RW"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "RememberChanged": "True",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Exile NICKNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
+            "SorcerySpeed": "True",
+            "SubAbility": "DBReturn"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "Execute": "TrigChange",
+            "TriggerDescription": "When CARDNAME enters, search your library for a basic land card, reveal it, put it into your hand, then shuffle."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

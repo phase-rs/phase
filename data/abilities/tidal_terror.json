@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may tap two other untapped creatures you control. If you do, CARDNAME can't be blocked this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigUnblockable"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

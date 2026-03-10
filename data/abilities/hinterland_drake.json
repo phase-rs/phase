@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't block artifact creatures.",
+        "ValidAttacker": "Creature.Artifact",
+        "ValidBlocker": "Creature.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 2,
+        "toughness": 1,
+        "types": [
+          "Creature",
+          "Artifact",
+          "Construct"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Until end of turn, CARDNAME becomes a 2/1 Construct artifact creature with flying.",
+        "Defined": "Self",
+        "RemoveCreatureTypes": "True",
+        "Keywords": "Flying"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 2,
+        "types": [
+          "Creature",
+          "Artifact",
+          "Construct"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "Until end of turn, CARDNAME becomes a 3/2 Construct artifact creature and loses flying.",
+        "RemoveKeywords": "Flying",
+        "RemoveCreatureTypes": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

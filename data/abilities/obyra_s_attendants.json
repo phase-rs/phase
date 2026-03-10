@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Pump",
+            "power": -4,
+            "toughness": 0,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Target creature gets -4/-0 until end of turn. (Then exile this card. You may cast the creature later from exile.)",
+            "IsCurse": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

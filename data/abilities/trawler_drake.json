@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a noncreature spell, put an oil counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +1/+1 for each oil counter on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

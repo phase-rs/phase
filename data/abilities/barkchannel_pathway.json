@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "G",
+            "params": {
+              "SpellDescription": "Add {G}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {G}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "U",
+            "params": {
+              "SpellDescription": "Add {U}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {U}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

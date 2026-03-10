@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "EnMe",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Enchanted creature gets +2/+2 for each Aura attached to it and has vigilance.",
+        "AddKeyword": "Vigilance"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

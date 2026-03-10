@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a noncreature spell, ABILITY",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.nonCreature",
+        "Execute": "TrigCharm"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

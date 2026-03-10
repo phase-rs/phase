@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerDescription": "At the beginning of combat on your turn, if you control an artifact, CARDNAME gets +2/+1 until end of turn. If you control three or more artifacts, it also gains first strike until end of turn.",
+        "IsPresent": "Artifact.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

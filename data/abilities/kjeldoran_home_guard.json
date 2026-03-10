@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player",
+        "Execute": "TrigPutCounter",
+        "Phase": "EndCombat",
+        "TriggerDescription": "At end of combat, if CARDNAME attacked or blocked this combat, put a -0/-1 counter on CARDNAME and create a 0/1 white Deserter creature token.",
+        "IsPresent": "Card.Self+attackedThisCombat,Card.Self+blockedThisCombat",
+        "NoResolvingCheck": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

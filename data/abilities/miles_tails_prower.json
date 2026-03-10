@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Vehicle.YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBranch",
+        "TriggerDescription": "Whenever a Vehicle you control enters, draw a card if it has flying. Otherwise, put a flying counter on it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

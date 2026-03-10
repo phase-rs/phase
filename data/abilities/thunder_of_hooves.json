@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidPlayers": "Player",
+        "ValidCards": "Creature.withoutFlying",
+        "ValidDescription": "each creature without flying and each player.",
+        "SpellDescription": "CARDNAME deals X damage to each creature without flying and each player, where X is the number of Beasts on the battlefield."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

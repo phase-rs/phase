@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, flip two coins. If both come up heads, CARDNAME gains double strike until end of turn. If both come up tails, CARDNAME gains menace until end of turn.",
+        "Execute": "DBFlip",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

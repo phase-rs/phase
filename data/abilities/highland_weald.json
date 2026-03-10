@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo R G",
+        "params": {
+          "SpellDescription": "Add {R} or {G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R} or {G}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME enters tapped.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

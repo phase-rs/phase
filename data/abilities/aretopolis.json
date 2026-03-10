@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "Execute": "AcquireScrolls",
+        "ValidCard": "Plane.Self",
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, put a scroll counter on CARDNAME, then you gain life equal to the number of scroll counters on it."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "AcquireScrolls",
+        "TriggerZones": "Command",
+        "Secondary": "True",
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, put a scroll counter on CARDNAME, then you gain life equal to the number of scroll counters on it."
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "Execute": "RolledWalk",
+        "TriggerDescription": "When CARDNAME has ten or more scroll counters on it, planeswalk.",
+        "TriggerZones": "Command",
+        "CheckSVar": "NumScrolls",
+        "SVarCompare": "GE10"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, put a scroll counter on CARDNAME, then draw cards equal to the number of scroll counters on it.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "TwoPiles",
+        "params": {
+          "UnchosenPile": "DBReturn",
+          "SpellDescription": "Separate all creature cards in your graveyard into two piles. Exile the pile of an opponent's choice and return the other to the battlefield.",
+          "Chooser": "Opponent",
+          "Defined": "You",
+          "AILogic": "Worst",
+          "Zone": "Graveyard",
+          "Separator": "You",
+          "ChosenPile": "DBExile",
+          "ValidCards": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "UnchosenPile": "DBReturn",
+        "SpellDescription": "Separate all creature cards in your graveyard into two piles. Exile the pile of an opponent's choice and return the other to the battlefield.",
+        "Chooser": "Opponent",
+        "Defined": "You",
+        "AILogic": "Worst",
+        "Zone": "Graveyard",
+        "Separator": "You",
+        "ChosenPile": "DBExile",
+        "ValidCards": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

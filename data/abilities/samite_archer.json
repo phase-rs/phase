@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "Amount": "1",
+          "ValidTgts": "Any",
+          "SpellDescription": "Prevent the next 1 damage that would be dealt to any target this turn."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "ValidTgts": "Any",
+        "SpellDescription": "Prevent the next 1 damage that would be dealt to any target this turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 1 damage to any target."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

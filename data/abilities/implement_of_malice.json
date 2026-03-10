@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "B"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "Mode": "TgtChoose",
+        "SpellDescription": "Target player discards a card. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, draw a card.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

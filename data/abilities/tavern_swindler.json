@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "FlipACoin",
+        "params": {
+          "WinSubAbility": "TSGainLife",
+          "AILogic": "Never",
+          "SpellDescription": "Flip a coin. If you win the flip, you gain 6 life."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<3>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "WinSubAbility": "TSGainLife",
+        "AILogic": "Never",
+        "SpellDescription": "Flip a coin. If you win the flip, you gain 6 life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

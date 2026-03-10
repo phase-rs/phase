@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Mana",
+            "cost": "Return<2/Land>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Discard all the cards in your hand, then draw that many cards.",
+        "Defined": "You",
+        "RememberDiscarded": "True",
+        "Mode": "Hand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, draw a card for each creature you control.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the number of cards in your hand.",
+        "SetToughness": "X",
+        "CharacteristicDefining": "True",
+        "SetPower": "X"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You have no maximum hand size.",
+        "SetMaxHandSize": "Unlimited"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

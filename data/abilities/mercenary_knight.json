@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBSacSelf",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, sacrifice it unless you discard a creature card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

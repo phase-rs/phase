@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounters",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each of up to two other target creatures.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

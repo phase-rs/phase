@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters or attacks, exile a card from a graveyard. Put a +1/+1 counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile a card from a graveyard.",
+        "Execute": "TrigExile",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SharedKeywordsZone": "Exile",
+        "SharedRestrictions": "Card.ExiledWithSource",
+        "Affected": "Card.Self",
+        "AddKeyword": "Flying & First Strike & Double Strike & Deathtouch & Haste & Hexproof & Indestructible & Lifelink & Menace & Reach & Trample & Vigilance",
+        "EffectZone": "Battlefield",
+        "Description": "CARDNAME has flying as long as a card exiled with it has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a basic land card, reveal it, then shuffle and put that card on top.",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

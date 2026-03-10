@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+          "ValidTgts": "Card.Legendary+Other+!IsCommander+YouCtrl",
+          "MayChooseTarget": "True",
+          "TgtPrompt": "Choose target triggered ability you control",
+          "SpellDescription": "Copy target activated or triggered ability you control from another legendary source that's not a commander. You may choose new targets for the copy."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+        "ValidTgts": "Card.Legendary+Other+!IsCommander+YouCtrl",
+        "MayChooseTarget": "True",
+        "TgtPrompt": "Choose target triggered ability you control",
+        "SpellDescription": "Copy target activated or triggered ability you control from another legendary source that's not a commander. You may choose new targets for the copy."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

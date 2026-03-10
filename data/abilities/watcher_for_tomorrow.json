@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "DBReturn",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, put the exiled card into its owner's hand.",
+        "Origin": "Battlefield",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME enters tapped.",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

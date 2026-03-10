@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "Animate",
+        "TriggerDescription": "When CARDNAME blocks, it becomes a Bird Giant, and it loses defender."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes the target of an Aura spell, you draw a card.",
+        "ValidTarget": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidSource": "Spell.Aura"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

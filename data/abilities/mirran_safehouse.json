@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "GainsAbilitiesOfZones": "Graveyard",
+        "EffectZone": "Battlefield",
+        "GainsAbilitiesOf": "Land",
+        "Description": "As long as CARDNAME is on the battlefield, it has all activated abilities of all land cards in all graveyards."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

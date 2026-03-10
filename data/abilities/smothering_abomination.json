@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice a creature.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigDrawCard",
+        "TriggerDescription": "Whenever you sacrifice a creature, draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.Cleric",
+        "Description": "Cleric creatures have vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

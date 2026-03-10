@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature,Land"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact, creature, or land",
+        "StackDescription": "SpellDescription",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Tap target artifact, creature, or land. That permanent doesn't untap during its controller's untap step for as long as CARDNAME remains tapped."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

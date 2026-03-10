@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPopulate",
+            "Phase": "End of Turn",
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of your end step, you may sacrifice a non-Demon creature. If you do, populate. (Create a token that's a copy of a creature token you control.)"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "You",
+            "SpellDescription": "Sacrifice a non-Demon creature. If you do, create a 4/3 white and black Vampire Demon creature token with flying.",
+            "SacValid": "Creature.nonDemon",
+            "RememberSacrificed": "True",
+            "SubAbility": "DBToken"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

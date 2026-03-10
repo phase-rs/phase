@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of each end step, create X 1/1 black Rat creature tokens with \"This creature gets +1/+1 for each other Rat you control,\" where X is the number of creatures your opponents controlled that were exiled this turn.",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Graveyard",
+        "ReplaceWith": "DBExile",
+        "Description": "If a creature an opponent controls would die, exile it instead.",
+        "Origin": "Battlefield",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

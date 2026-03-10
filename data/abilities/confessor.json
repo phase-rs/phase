@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever a player discards a card, you may gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

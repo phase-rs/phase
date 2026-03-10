@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You draw a card and you lose 1 life.",
+        "Planeswalker": "True",
+        "SubAbility": "DBLoseLife1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Destroy target creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "EffectOwner": "Targeted",
+          "Ultimate": "True",
+          "ValidTgts": "Opponent",
+          "Planeswalker": "True",
+          "Name": "Emblem — Ob Nixilis Reignited",
+          "Image": "emblem_ob_nixilis_reignited",
+          "Duration": "Permanent",
+          "AILogic": "Always",
+          "SpellDescription": "Target opponent gets an emblem with \"Whenever a player draws a card, you lose 2 life.\"",
+          "Triggers": "TrigDraw"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "EffectOwner": "Targeted",
+        "Ultimate": "True",
+        "ValidTgts": "Opponent",
+        "Planeswalker": "True",
+        "Name": "Emblem — Ob Nixilis Reignited",
+        "Image": "emblem_ob_nixilis_reignited",
+        "Duration": "Permanent",
+        "AILogic": "Always",
+        "SpellDescription": "Target opponent gets an emblem with \"Whenever a player draws a card, you lose 2 life.\"",
+        "Triggers": "TrigDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

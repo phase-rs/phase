@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever your commander attacks, put two +1/+1 counters on it.",
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "When your commander leaves the battlefield, abandon this scheme.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "Origin": "Battlefield",
+        "Execute": "TrigAbandon"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.IsCommander+YouOwn",
+        "EffectZone": "Command",
+        "AddKeyword": "Ward:2",
+        "Description": "Your commander has ward {2}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

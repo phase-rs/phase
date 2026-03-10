@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "GE2",
+        "Description": "CARDNAME can't be blocked as long as you've drawn two or more cards this turn.",
+        "ValidAttacker": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

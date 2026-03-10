@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "If an opponent controls an Island and you control a Forest, you may cast this spell without paying its mana cost.",
+        "CheckSVar": "X",
+        "Cost": "0",
+        "CheckSecondSVar": "Y",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "ValidPlayer": "You",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

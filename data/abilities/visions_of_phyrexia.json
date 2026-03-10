@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library. You may play it this turn.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "EQ0",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if you didn't play a card from exile this turn, create a tapped Powerstone token. (It's an artifact with \"{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.\")",
+        "Execute": "TrigToken",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Exile",
+        "Static": "True",
+        "Execute": "StoreVar"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Static": "True",
+        "Execute": "TrigReset",
+        "Phase": "Cleanup"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

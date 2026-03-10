@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "CheckSVar": "RaidTest",
+        "Execute": "TrigSacPerm",
+        "TriggerDescription": "Raid — When CARDNAME enters, if you attacked this turn, target opponent sacrifices a permanent.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

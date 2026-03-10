@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create a 4/4 white Angel creature token with flying and vigilance.",
+        "Origin": "Any",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Angel.YouCtrl",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever an Angel you control dies, each opponent sacrifices a creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

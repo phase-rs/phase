@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CanBlockAny": "True",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME can block any number of creatures."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

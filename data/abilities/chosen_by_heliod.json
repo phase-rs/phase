@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +0/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

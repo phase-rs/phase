@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ManaExpend",
+      "params": {
+        "Amount": "4",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you expend 4, CARDNAME gains indestructible until end of turn. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
+        "Player": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

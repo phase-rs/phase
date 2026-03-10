@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted creature dies, its controller draws a card.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME gets +1/+1 until end of turn.",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Cost": "B",
+        "Description": "Black spells you cast cost {B} more to cast.",
+        "ValidCard": "Card.Black",
+        "Activator": "You",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

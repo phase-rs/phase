@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {
+          "SpellDescription": "As an additional cost to cast this spell, tap two untapped artifacts, creatures, and/or lands you control."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 W"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<2/Artifact;Creature;Land/artifacts, creatures, and/or lands>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "As an additional cost to cast this spell, tap two untapped artifacts, creatures, and/or lands you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

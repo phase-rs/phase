@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCastOrCopy",
+          "params": {
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Instant,Sorcery",
+            "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, return target nonlegendary creature card from your graveyard to your hand.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigReturn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "6 B R"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "AILogic": "SacToReduceCost",
+            "Defined": "Player.Opponent",
+            "SubAbility": "DBToken",
+            "SacValid": "Creature",
+            "SpellDescription": "Each opponent sacrifices a creature."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Type": "Spell",
+            "EffectZone": "All",
+            "Relative": "True",
+            "Description": "This spell costs {2} less to cast for each creature sacrificed this way.",
+            "Amount": "Y",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

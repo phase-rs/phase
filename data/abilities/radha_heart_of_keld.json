@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 R G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "NICKNAME gets +X/+X until end of turn, where X is the number of lands you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "During your turn, CARDNAME has first strike.",
+        "AddKeyword": "First Strike",
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "You",
+        "Description": "You may look at the top card of your library any time, and you may play lands from the top of your library."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Affected": "Land.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "Secondary": "True",
+        "Description": "You may look at the top card of your library any time, and you may play lands from the top of your library."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

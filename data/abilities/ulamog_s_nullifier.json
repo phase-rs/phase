@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may put two cards your opponents own from exile into their owners' graveyards. If you do, counter target spell.",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Execute": "TrigProcess"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

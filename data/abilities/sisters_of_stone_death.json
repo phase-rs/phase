@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MustBlock",
+        "params": {
+          "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
+        "ValidTgts": "Creature"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.blockingSource,Creature.blockedBySource"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target creature blocking or blocked by CARDNAME.",
+        "TgtPrompt": "Select target creature blocking CARDNAME"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Exile",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Hidden": "True",
+        "GainControl": "True",
+        "ChangeType": "Creature.ExiledWithSource",
+        "ChangeNum": "1",
+        "Mandatory": "True",
+        "SpellDescription": "Put a creature card exiled with CARDNAME onto the battlefield under your control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

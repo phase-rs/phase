@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, you may search your library for a card named Welkin Hawk, reveal that card, put it into your hand, then shuffle.",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

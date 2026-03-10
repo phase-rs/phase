@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, exile up to two target cards from that player's graveyard.",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

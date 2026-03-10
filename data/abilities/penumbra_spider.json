@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME dies, create a 2/4 black Spider creature token with reach.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another artifact you control enters, put a +1/+1 counter on CARDNAME. If that artifact is a Contraption, CARDNAME gains lifelink until end of turn.",
+        "ValidCard": "Artifact.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigCounters"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

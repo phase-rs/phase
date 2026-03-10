@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPrivateResearchPutCounter",
+        "OptionalDecider": "You",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a page counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigPrivateResearchDraw",
+        "TriggerDescription": "When enchanted creature dies, draw a card for each page counter on CARDNAME.",
+        "ValidCard": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

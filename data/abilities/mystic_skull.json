@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Any",
+            "params": {
+              "SpellDescription": "Add one mana of any color."
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add one mana of any color."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME."
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "5"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddAbility": "AnyMana",
+            "Description": "Lands you control have \"{T}: Add one mana of any color.\"",
+            "Affected": "Land.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

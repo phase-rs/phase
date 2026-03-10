@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create two 0/2 blue Illusion creature tokens with \"Whenever this creature blocks a creature, that creature doesn't untap during its controller's next untap step.\""
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has hexproof as long as you control an Illusion.",
+        "IsPresent": "Illusion.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

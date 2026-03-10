@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDaw",
+        "TriggerDescription": "Whenever you cast your second spell each turn, draw a card, then create a 0/3 white Wall creature token with defender.",
+        "ActivatorThisTurnCast": "EQ2",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.YouCtrl"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of combat on your turn, creatures you control with defender gain exalted until end of turn. (Whenever a creature you control attacks alone, it gets +1/+1 until end of turn for each instance of exalted among permanents you control.)",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

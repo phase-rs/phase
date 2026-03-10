@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": 5
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "You gain 5 life."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidCause": "SpellAbility.OppCtrl",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When a spell or ability an opponent controls causes you to discard CARDNAME, you gain 2 life, and you return CARDNAME from your graveyard to your hand at the beginning of the next end step."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

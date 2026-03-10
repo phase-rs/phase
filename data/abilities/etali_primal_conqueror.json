@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "AILogic": "Always",
+              "Defined": "Self",
+              "SorcerySpeed": "True",
+              "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "9 GP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "AILogic": "Always",
+            "Defined": "Self",
+            "SorcerySpeed": "True",
+            "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDig",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When NICKNAME enters, each player exiles cards from the top of their library until they exile a nonland card. You may cast any number of spells from among the nonland cards exiled this way without paying their mana costs."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "CombatDamage": "True",
+            "ValidTarget": "Player",
+            "ValidSource": "Card.Self",
+            "Execute": "TrigPoison",
+            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, they get that many poison counters. (A player with ten or more poison counters loses the game.)"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

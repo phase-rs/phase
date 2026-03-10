@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+attacking",
+        "AddPower": "2",
+        "Description": "CARDNAME gets +2/+0 as long as it's attacking."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

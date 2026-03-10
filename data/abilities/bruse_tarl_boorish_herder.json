@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, target creature you control gains double strike and lifelink until end of turn.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, target creature you control gains double strike and lifelink until end of turn.",
+        "ValidCard": "Creature.Self",
+        "Secondary": "True",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

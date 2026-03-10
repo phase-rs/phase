@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonland permanent",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Exile target nonland permanent."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "3",
+        "EffectZone": "All",
+        "Description": "This spell costs {3} more to cast if it targets a creature.",
+        "ValidTarget": "Creature",
+        "Type": "Spell",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

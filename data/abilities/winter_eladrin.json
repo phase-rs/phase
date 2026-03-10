@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Gust of Wind — When CARDNAME enters, return up to one other target creature to its owner's hand.",
+        "Execute": "TrigReturn",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

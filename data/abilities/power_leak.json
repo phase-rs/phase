@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "Execute": "DBPay",
+        "ValidPlayer": "Player.EnchantedController",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of the upkeep of enchanted enchantment's controller, that player may pay any amount of mana. CARDNAME deals 2 damage to that player. Prevent X of that damage, where X is the amount of mana that player paid this way."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Secondary": "True",
+        "ActiveZones": "Battlefield",
+        "PreventionEffect": "True",
+        "ReplaceWith": "DBReplace"
+      }
+    }
+  ],
+  "faces": []
+}

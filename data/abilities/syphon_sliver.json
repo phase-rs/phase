@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Lifelink",
+        "Description": "Sliver creatures you control have lifelink.",
+        "Affected": "Creature.Sliver+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

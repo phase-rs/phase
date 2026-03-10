@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainControl": "You",
+        "Affected": "Card.EnchantedBy",
+        "Description": "You control enchanted creature."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddKeyword": "Flying",
+        "Description": "Enchanted creature gets +1/+1 and has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

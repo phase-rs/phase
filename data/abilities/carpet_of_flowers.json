@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Main1,Main2",
+        "TriggerDescription": "At the beginning of each of your main phases, if you haven't added mana with this ability this turn, you may add X mana of any one color, where X is the number of Islands target opponent controls.",
+        "ValidPlayer": "You",
+        "CheckSVar": "CarpetX",
+        "OptionalDecider": "You",
+        "Execute": "TrigMana",
+        "SVarCompare": "EQ0"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Cleanup",
+        "Static": "True",
+        "Execute": "TrigReset"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReset",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

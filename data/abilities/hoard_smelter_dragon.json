@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target artifact. CARDNAME gets +X/+0 until end of turn, where X is that artifact's mana value.",
+        "SubAbility": "DBPump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

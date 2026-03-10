@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo U B R",
+        "params": {
+          "Amount": "2",
+          "SpellDescription": "Add two mana in any combination of {U}, {B} and/or {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "SpellDescription": "Add two mana in any combination of {U}, {B} and/or {R}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "Draw two cards, then discard a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

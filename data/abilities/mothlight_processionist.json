@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Enchantment.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, conjure a card named Mothlight Processionist into your hand. Discard that card at the beginning of the next end step.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "ValidCard": "Card.Room",
+        "Execute": "TrigConjure",
+        "ValidPlayer": "You",
+        "Secondary": "True",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, conjure a card named Mothlight Processionist into your hand. Discard that card at the beginning of the next end step.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Enchantment+YouCtrl",
+        "AddKeyword": "Convoke",
+        "AffectedZone": "Stack",
+        "Description": "Enchantment spells you cast have convoke."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

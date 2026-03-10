@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Bad Wolf — Whenever CARDNAME attacks, put a time counter on it for each suspended card you own and each other permanent you control with a time counter on it.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "X",
+        "AddPower": "X",
+        "Description": "CARDNAME gets +1/+1 for each time counter on it.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

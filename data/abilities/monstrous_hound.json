@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "UnlessDefender": "hasFewerLandsInPlayThanYou",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't attack unless you control more lands than defending player."
+      }
+    },
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "CARDNAME can't block unless you control more lands than attacking player.",
+        "Condition": "NotPlayerTurn",
+        "CheckSVar": "Y",
+        "SVarCompare": "GEX",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

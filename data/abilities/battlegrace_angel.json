@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control attacks alone, it gains lifelink until end of turn.",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.YouCtrl",
+        "Alone": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

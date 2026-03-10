@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever a creature you control with deathtouch deals combat damage to a player, put that many +1/+1 counters on that creature.",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl+withDeathtouch",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

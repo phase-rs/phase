@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "Mode": "Transform",
+              "SorcerySpeed": "True",
+              "AILogic": "Always",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 UP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "Mode": "Transform",
+            "SorcerySpeed": "True",
+            "AILogic": "Always",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

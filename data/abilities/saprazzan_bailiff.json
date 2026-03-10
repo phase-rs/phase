@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile all artifact and enchantment cards from all graveyards.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, return all artifact and enchantment cards from all graveyards to their owners' hands.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

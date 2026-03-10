@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "TrigUpkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {1}{U}.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainControl": "You",
+        "Affected": "Card.EnchantedBy",
+        "Description": "You control enchanted creature."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +0/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

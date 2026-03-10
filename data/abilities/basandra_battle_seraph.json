@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature",
+          "StaticAbilities": "MustAttack",
+          "RememberObjects": "Targeted",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "Target creature attacks this turn if able."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "StaticAbilities": "MustAttack",
+        "RememberObjects": "Targeted",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "Target creature attacks this turn if able."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Phases": "BeginCombat->EndCombat",
+        "Description": "Players can't cast spells during combat.",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

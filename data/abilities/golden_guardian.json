@@ -1,0 +1,92 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Fight",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouCtrl+Other"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME fights another target creature you control.",
+            "TgtPrompt": "Select another target creature you control",
+            "Defined": "Self",
+            "SubAbility": "DBDelayedTrigger",
+            "StackDescription": "CARDNAME fights {c:Targeted}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Any",
+            "params": {
+              "Amount": "2",
+              "SpellDescription": "Add two mana of any one color."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "2",
+            "SpellDescription": "Add two mana of any one color."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "c_4_4_a_golem",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "4"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create a 4/4 colorless Golem artifact creature token."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidBlocker": "Creature",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, that creature's controller sacrifices it at end of combat. If the player does, they create a 0/2 colorless Wall artifact creature token with defender.",
+        "Execute": "TrigEndCombat"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by artifact creatures.",
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Artifact.Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

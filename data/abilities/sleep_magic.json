@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigTap",
+        "TriggerDescription": "When this Aura enters, tap enchanted creature.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "When enchanted creature is dealt damage, sacrifice this Aura.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

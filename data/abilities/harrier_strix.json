@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "Draw a card, then discard a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigTap",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, tap target permanent.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

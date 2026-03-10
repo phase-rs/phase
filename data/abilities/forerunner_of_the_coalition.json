@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a Pirate card, reveal it, then shuffle and put that card on top.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Execute": "TrigChange"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidCard": "Pirate.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Pirate you control enters, each opponent loses 1 life.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

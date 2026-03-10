@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "When you cast this spell, gain control of target creature until end of turn. Untap it. It gains menace and haste until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainControl"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a creature deals combat damage to its owner, untap NICKNAME and draw a card.",
+        "CombatDamage": "True",
+        "Execute": "TrigUntap",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature",
+        "ValidTarget": "Player",
+        "TargetRelativeToSource": "Player.CardOwner"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "NICKNAME enters tapped with six stun counters on it. (If it would become untapped, remove a stun counter from it instead.)",
+        "ReplaceWith": "ETBTapped",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

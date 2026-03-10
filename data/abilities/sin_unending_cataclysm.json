@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME dies, put its counters on target creature you control, then shuffle this card into its owner's library.",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

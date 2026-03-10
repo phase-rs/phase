@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "IsPresent": "Wizard.Other+YouCtrl",
+        "Execute": "TrigDamage",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, if you control another Wizard, CARDNAME deals 2 damage to each opponent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

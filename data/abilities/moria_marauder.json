@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever a Goblin or Orc you control deals combat damage to a player, exile the top card of your library. You may play that card this turn.",
+        "ValidSource": "Goblin.YouCtrl,Orc.YouCtrl",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

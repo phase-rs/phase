@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You draw a card and you lose 1 life. Proliferate.",
+        "Planeswalker": "True",
+        "SubAbility": "DBLoseLife"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact",
+          "Treasure"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveAllAbilities": "True",
+        "Abilities": "TreasureSac",
+        "RemoveCardTypes": "True",
+        "Planeswalker": "True",
+        "Duration": "Permanent",
+        "StackDescription": "{c:Targeted} becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color\" and loses all other card types and abilities.",
+        "SpellDescription": "Target creature becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color\" and loses all other card types and abilities."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Poison",
+        "params": {
+          "SpellDescription": "If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
+          "Planeswalker": "True",
+          "ConditionCheckSVar": "X",
+          "ValidTgts": "Player",
+          "ConditionSVarCompare": "LT9",
+          "Ultimate": "True",
+          "StackDescription": "If {p:Targeted} has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
+          "Num": "Difference"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
+        "Planeswalker": "True",
+        "ConditionCheckSVar": "X",
+        "ValidTgts": "Player",
+        "ConditionSVarCompare": "LT9",
+        "Ultimate": "True",
+        "StackDescription": "If {p:Targeted} has fewer than nine poison counters, they get a number of poison counters equal to the difference.",
+        "Num": "Difference"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

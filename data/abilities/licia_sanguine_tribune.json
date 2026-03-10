@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 3,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayLife<5>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PlayerTurn": "True",
+        "ActivationLimit": "1",
+        "SpellDescription": "Put 3 +1/+1 counters on CARDNAME. Activate only during your turn, and only once each turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Amount": "X",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME costs {1} less to cast for each life you gained this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

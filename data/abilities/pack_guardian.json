@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may discard a land card. If you do, create a 2/2 green Wolf creature token.",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

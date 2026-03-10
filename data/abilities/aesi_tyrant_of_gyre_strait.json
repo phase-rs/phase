@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may draw a card.",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AdjustLandPlays": "1",
+        "Description": "You may play an additional land on each of your turns.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

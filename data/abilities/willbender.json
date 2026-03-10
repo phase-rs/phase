@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, change the target of target spell or ability with a single target.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, the Ring tempts you.",
+        "Execute": "TrigTempt"
+      }
+    },
+    {
+      "mode": "RingTemptsYou",
+      "params": {
+        "Execute": "TrigCounters",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever the Ring tempts you, put a +1/+1 counter on each Wraith you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

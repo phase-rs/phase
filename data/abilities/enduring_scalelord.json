@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on another creature you control, you may put a +1/+1 counter on CARDNAME.",
+        "CounterType": "P1P1",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Other+YouCtrl",
+        "OptionalDecider": "You",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

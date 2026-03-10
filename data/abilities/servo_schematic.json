@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or is put into a graveyard from the battlefield, create a 1/1 colorless Servo artifact creature token.",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters or is put into a graveyard from the battlefield, create a 1/1 colorless Servo artifact creature token.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

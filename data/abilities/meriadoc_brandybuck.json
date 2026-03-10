@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more Halflings you control attack a player, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+        "AttackedTarget": "Opponent",
+        "Execute": "TrigFood",
+        "ValidAttackers": "Halfling.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

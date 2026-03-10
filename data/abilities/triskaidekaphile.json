@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.YouCtrl",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if you have exactly 13 cards in your hand, you win the game.",
+        "ValidPlayer": "You",
+        "PresentZone": "Hand",
+        "PresentCompare": "EQ13",
+        "Execute": "TrigWin",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You have no maximum hand size.",
+        "Affected": "You",
+        "SetMaxHandSize": "Unlimited"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

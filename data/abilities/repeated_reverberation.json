@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "ValidActivatingPlayer": "You",
+          "ThisTurn": "True",
+          "Execute": "EffTrigCopy",
+          "AILogic": "SpellCopy",
+          "SpellDescription": "When you next cast an instant spell, cast a sorcery spell, or activate a loyalty ability this turn, copy that spell or ability twice. You may choose new targets for the copies.",
+          "Mode": "SpellAbilityCast",
+          "ValidSA": "Spell.Instant,Spell.Sorcery,Activated.Loyalty"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidActivatingPlayer": "You",
+        "ThisTurn": "True",
+        "Execute": "EffTrigCopy",
+        "AILogic": "SpellCopy",
+        "SpellDescription": "When you next cast an instant spell, cast a sorcery spell, or activate a loyalty ability this turn, copy that spell or ability twice. You may choose new targets for the copies.",
+        "Mode": "SpellAbilityCast",
+        "ValidSA": "Spell.Instant,Spell.Sorcery,Activated.Loyalty"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

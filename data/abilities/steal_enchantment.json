@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You control enchanted enchantment.",
+        "GainControl": "You",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

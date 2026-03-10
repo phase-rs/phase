@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTap",
+        "TriggerDescription": "When CARDNAME enters, you may pay {3}. If you do, tap enchanted permanent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Permanent.AttachedBy",
+        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

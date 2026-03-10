@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "TriggerDescription": "Whenever you gain life, put a charge counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "X",
+        "Description": "Equipped creature gets +1/+1 for each charge counter on CARDNAME.",
+        "AddPower": "X",
+        "Affected": "Card.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

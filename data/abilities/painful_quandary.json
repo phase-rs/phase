@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever an opponent casts a spell, that player loses 5 life unless they discard a card.",
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

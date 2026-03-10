@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one other target creature until CARDNAME leaves the battlefield. If a creature is put into exile this way, return each other card exiled with CARDNAME to the battlefield under its owner's control.",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one other target creature until CARDNAME leaves the battlefield. If a creature is put into exile this way, return each other card exiled with CARDNAME to the battlefield under its owner's control.",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

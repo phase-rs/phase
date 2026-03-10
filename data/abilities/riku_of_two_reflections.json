@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigCopySpell",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, you may pay {U}{R}. If you do, copy that spell. You may choose new targets for the copy.",
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopy",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.!token+Other+YouCtrl",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever another nontoken creature you control enters, you may pay {G}{U}. If you do, create a token that's a copy of that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

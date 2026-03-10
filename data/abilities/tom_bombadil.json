@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityResolves",
+      "params": {
+        "ActivationLimit": "1",
+        "ValidSource": "Saga.YouCtrl",
+        "TriggerDescription": "Whenever the final chapter ability of a Saga you control resolves, reveal cards from the top of your library until you reveal a Saga card. Put that onto the battlefield and the rest on the bottom of your library in a random order. This ability triggers only once each turn.",
+        "Execute": "TrigDigUntil",
+        "TriggerZones": "Battlefield",
+        "ValidSpellAbility": "Ability.LastChapter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "GE4",
+        "Affected": "Card.Self",
+        "Description": "As long as there are four or more lore counters among Sagas you control, CARDNAME has hexproof and indestructible.",
+        "AddKeyword": "Hexproof & Indestructible",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

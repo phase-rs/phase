@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "Phase": "End of Turn",
+        "TriggerDescription": "Revolt — At the beginning of your end step, if a permanent you controlled left the battlefield this turn, put a unity counter on CARDNAME.",
+        "Revolt": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Creatures you control get +1/+1 for each unity counter on CARDNAME.",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

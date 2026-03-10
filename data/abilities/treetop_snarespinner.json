@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Put a +1/+1 counter on target creature you control. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBTwoPiles",
+        "TargetMin": "0",
+        "SpellDescription": "Exile up to five target creature cards from graveyards. An opponent separates those cards into two piles. Put all cards from the pile of your choice onto the battlefield under your control and the rest into their owners' graveyards.",
+        "AIMinTgts": "3",
+        "AITgtOwnCards": "True",
+        "TargetMax": "5",
+        "TgtPrompt": "Select up to five target cards in graveyards"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

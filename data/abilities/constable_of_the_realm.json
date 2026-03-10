@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "CounterType": "P1P1",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, exile up to one other target nonland permanent until CARDNAME leaves the battlefield.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<1/CHARGE>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "SpellDescription": "Target player loses 2 life.",
+        "TgtPrompt": "Select a player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

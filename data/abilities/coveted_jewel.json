@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "3",
+          "SpellDescription": "Add three mana of any one color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "3",
+        "SpellDescription": "Add three mana of any one color."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw three cards.",
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "AttackerUnblockedOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw2",
+        "ValidDefenders": "You",
+        "TriggerDescription": "Whenever one or more creatures an opponent controls attack you and aren't blocked, that player draws three cards and gains control of CARDNAME. Untap it.",
+        "ValidAttackingPlayer": "Player.Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

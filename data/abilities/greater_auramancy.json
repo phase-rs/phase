@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Shroud",
+        "Description": "Other enchantments you control have shroud.",
+        "Affected": "Enchantment.Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Shroud",
+        "Description": "Enchanted creatures you control have shroud.",
+        "Affected": "Creature.enchanted+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

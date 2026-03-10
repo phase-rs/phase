@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "TgtPrompt": "Target creature without first strike, double strike, or vigilance",
+          "ForgetOnMoved": "Battlefield",
+          "SpellDescription": "Target creature without first strike, double strike, or vigilance can't attack or block until your next turn.",
+          "Planeswalker": "True",
+          "StaticAbilities": "DBCantAttack,DBCantBlockBy",
+          "RememberObjects": "Targeted",
+          "Duration": "UntilYourNextTurn",
+          "IsCurse": "True",
+          "ValidTgts": "Creature.withoutFirst Strike+withoutDouble Strike+withoutVigilance"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Target creature without first strike, double strike, or vigilance",
+        "ForgetOnMoved": "Battlefield",
+        "SpellDescription": "Target creature without first strike, double strike, or vigilance can't attack or block until your next turn.",
+        "Planeswalker": "True",
+        "StaticAbilities": "DBCantAttack,DBCantBlockBy",
+        "RememberObjects": "Targeted",
+        "Duration": "UntilYourNextTurn",
+        "IsCurse": "True",
+        "ValidTgts": "Creature.withoutFirst Strike+withoutDouble Strike+withoutVigilance"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Optional": "True",
+        "SpellDescription": "Search your library and/or graveyard for a card named Monk of the Open Hand, reveal it, and put it into your hand. If you search your library this way, shuffle.",
+        "ShuffleNonMandatory": "True",
+        "OriginAlternative": "Graveyard",
+        "ChangeNum": "1",
+        "ChangeType": "Card.YouOwn+namedMonk of the Open Hand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveCardTypes": "True",
+        "AddKeyword": "Flying & Indestructible",
+        "AddType": "Creature & Dragon & God",
+        "Description": "As long as CARDNAME has seven or more loyalty counters on him, he's a 7/7 Dragon God creature with flying and indestructible.",
+        "IsPresent": "Card.Self+counters_GE7_LOYALTY",
+        "CharacteristicDefining": "True",
+        "Affected": "Card.Self",
+        "SetPower": "7",
+        "SetToughness": "7"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

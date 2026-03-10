@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "RDCopy",
+        "TriggerDescription": "Whenever another creature you control enters, you may have CARDNAME become a copy of that creature until end of turn. (If it does, it loses this ability for the rest of the turn.)",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "ValidCard": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.withTrample,Creature.withHaste"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "TgtPrompt": "Select target creature with trample or haste",
+        "SpellDescription": "Put three +1/+1 counters on up to one target creature with trample or haste."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "AILogic": "Lethal",
+        "SubAbility": "DBImmediateTrigger",
+        "SacValid": "Creature",
+        "SpellDescription": "Sacrifice a creature.",
+        "RememberSacrificed": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
+        "Phase": "Upkeep",
+        "Secondary": "True",
+        "OptionalDecider": "You",
+        "ValidPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

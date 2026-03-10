@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 3,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "GU"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Flying",
+        "Defined": "Self",
+        "ActivationLimit": "1",
+        "IsPresent": "Creature.withFlying+OppCtrl",
+        "SpellDescription": "CARDNAME gets +1/+3 and gains flying until end of turn. Activate only once each turn and only if an opponent controls a creature with flying."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

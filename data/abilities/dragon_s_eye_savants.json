@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME is turned face up, look at target opponent's hand.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLook"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

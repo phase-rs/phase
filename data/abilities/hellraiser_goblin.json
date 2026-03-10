@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Description": "Creatures you control have haste and attack each combat if able.",
+        "Affected": "Creature.YouCtrl"
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Creature.YouCtrl",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

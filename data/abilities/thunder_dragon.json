@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDamageAllNonFlyers",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, it deals 3 damage to each creature without flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

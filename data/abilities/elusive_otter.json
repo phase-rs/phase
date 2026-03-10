@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "Description": "Creatures with power less than CARDNAME's power can't block it.",
+            "ValidAttacker": "Creature.Self",
+            "ValidBlocker": "Creature.powerLTY"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 1,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "DividedAsYouChoose": "X",
+            "TgtPrompt": "Select any number of target creatures you control",
+            "TargetMax": "X",
+            "SpellDescription": "Distribute X +1/+1 counters among any number of target creatures you control. (Then exile this card. You may cast the creature later from exile.)",
+            "TargetMin": "0"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

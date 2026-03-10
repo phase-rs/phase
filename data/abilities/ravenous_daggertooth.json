@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, you gain 2 life.",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

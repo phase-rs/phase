@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "SakuraManaSingle",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, add {G}. Until end of turn, you don't lose this mana as steps and phases end."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigCharm",
+        "ValidCard": "Card.YouCtrl",
+        "ActivatorThisTurnCast": "EQ2",
+        "TriggerDescription": "Whenever you cast your second spell each turn, ABILITY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

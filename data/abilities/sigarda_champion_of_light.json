@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Coven — Whenever NICKNAME attacks, if you control three or more creatures with different powers, look at the top five cards of your library. You may reveal a Human creature card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "SVarCompare": "GE3",
+        "CheckSVar": "X",
+        "Execute": "TrigDig",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.Human+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Humans you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

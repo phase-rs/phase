@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate CARDNAME."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 2,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PlayerTurn": "True",
+        "Mode": "TgtChoose",
+        "ActivationPhases": "Upkeep",
+        "SpellDescription": "Target player discards two cards. Activate only during your upkeep."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

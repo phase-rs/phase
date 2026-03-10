@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerDescription": "Whenever this creature becomes tapped, another target Merfolk you control gets +2/+0 until end of turn.",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

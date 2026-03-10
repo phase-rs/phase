@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "DamageDone",
+          "params": {
+            "Description": "During your turn, prevent all damage that would be dealt to CARDNAME.",
+            "PlayerTurn": "True",
+            "Prevent": "True",
+            "ValidTarget": "Card.Self"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Artifact,Enchantment"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Exile target artifact or enchantment.",
+            "TgtPrompt": "Choose target artifact or enchantment"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

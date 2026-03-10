@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "ValidSource": "Card.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, destroy all permanents other than CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroyAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

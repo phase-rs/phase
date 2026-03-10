@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DividedAsYouChoose": "4",
+        "TargetMin": "0",
+        "TgtPrompt": "Select any targets to distribute damage to",
+        "SpellDescription": "CARDNAME deals 4 damage divided as you choose among any number of targets. Tap two target permanents. Create a 4/4 blue and red Elemental creature token. Draw two cards.",
+        "TargetMax": "4",
+        "SubAbility": "DBTap"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_a_treasure_sac",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "UR UR"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Hand",
+        "SpellDescription": "Create a Treasure token.",
+        "AILogic": "AlwaysOnDiscard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

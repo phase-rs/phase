@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "TriggerDescription": "When CARDNAME enters or dies, mill three cards.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or dies, mill three cards.",
+        "Secondary": "True",
+        "Execute": "TrigMill",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

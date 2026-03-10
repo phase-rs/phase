@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Colors": "Red",
+        "TargetMin": "1",
+        "TargetMax": "MaxTgts",
+        "OverwriteColors": "True",
+        "TgtPrompt": "Select target creatures",
+        "SpellDescription": "One or more target creatures become red until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

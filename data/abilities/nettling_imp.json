@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonWall+ActivePlayerCtrl+!firstTurnControlled"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationFirstCombat": "True",
+        "TgtPrompt": "Select target non-Wall creature the active player has controlled continuously since the beginning of the turn",
+        "OpponentTurn": "True",
+        "staticAbilities": "MustAttack",
+        "ActivationPhases": "Upkeep->BeginCombat",
+        "SubAbility": "DestroyPacifist",
+        "SpellDescription": "Choose target non-Wall creature the active player has controlled continuously since the beginning of the turn. That creature attacks this turn if able. Destroy it at the beginning of the next end step if it didn't attack this turn. Activate only during an opponent's turn, before attackers are declared."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

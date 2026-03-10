@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<2/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "PrecostDesc": "Threshold —",
+        "SpellDescription": "Target player discards a card. Activate only as a sorcery and only if there are seven or more cards in your graveyard.",
+        "Mode": "TgtChoose",
+        "Activation": "Threshold"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

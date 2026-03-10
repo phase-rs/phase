@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCastOrCopy",
+      "params": {
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, CARDNAME gets +1/+0 until end of turn.",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

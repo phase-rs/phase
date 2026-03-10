@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 W W"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<2/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NoRegen": "True",
+        "ValidCards": "Creature.StrictlyOther",
+        "SpellDescription": "Destroy all creatures except for CARDNAME. Those creatures can't be regenerated."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

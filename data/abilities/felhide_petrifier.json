@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Minotaur+Other+YouCtrl",
+        "Description": "Other Minotaur creatures you control have deathtouch.",
+        "AddKeyword": "Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

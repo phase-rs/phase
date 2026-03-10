@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Creature spells with flying you cast cost {1} less to cast.",
+        "Type": "Spell",
+        "ValidCard": "Creature.withFlying",
+        "Amount": "1",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

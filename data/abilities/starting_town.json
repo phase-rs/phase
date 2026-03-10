@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "1",
+          "SpellDescription": "Add one mana of any color."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<1>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "SpellDescription": "Add one mana of any color."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplaceWith": "LandTapped",
+        "ReplacementResult": "Updated",
+        "Description": "This land enters tapped unless it's your first, second, or third turn of the game.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

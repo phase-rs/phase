@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddType": "Artifact",
+        "Affected": "Card.EquippedBy",
+        "Description": "Equipped creature gets +1/+1 and is an artifact in addition to its other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, mill four cards. If at least one Angel card was milled this way, you gain 4 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

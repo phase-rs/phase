@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigAttach",
+        "TriggerDescription": "When CARDNAME enters, attach it to target creature you control. That creature gains first strike until end of turn.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Equipped creature gets +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

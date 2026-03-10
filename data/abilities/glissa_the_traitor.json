@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerDescription": "Whenever a creature an opponent controls dies, you may return target artifact card from your graveyard to your hand.",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

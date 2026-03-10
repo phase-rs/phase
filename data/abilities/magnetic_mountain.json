@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player may choose any number of tapped blue creatures they control and pay {4} for each creature chosen this way. If the player does, untap those creatures.",
+        "Execute": "TrigChoose"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "Description": "Blue creatures don't untap during their controllers' untap steps.",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Creature.Blue"
+      }
+    }
+  ],
+  "faces": []
+}

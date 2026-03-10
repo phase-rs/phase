@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Hexproof",
+        "SpellDescription": "Equipped creature gains hexproof until end of turn.",
+        "Defined": "Equipped"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "EvosCounter",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on equipped creature if it's blue."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

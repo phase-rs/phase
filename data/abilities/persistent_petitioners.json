@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player mills a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 12,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<4/Advisor>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player mills twelve cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

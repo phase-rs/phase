@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Destroy",
+        "TgtPrompt": "Select target nonblack creature",
+        "IsCurse": "True",
+        "StackDescription": "None",
+        "SubAbility": "DBLand",
+        "SpellDescription": "Destroy target nonblack creature and target land. They can't be regenerated."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

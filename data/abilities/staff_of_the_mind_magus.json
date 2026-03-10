@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever you cast a blue spell or an Island you control enters, you gain 1 life.",
+        "ValidCard": "Card.Blue",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Island.YouCtrl",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever you cast a blue spell or an Island you control enters, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

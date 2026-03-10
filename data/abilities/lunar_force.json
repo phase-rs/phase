@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "When an opponent casts a spell, sacrifice CARDNAME and counter that spell.",
+        "ValidCard": "Card",
+        "Execute": "TrigCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

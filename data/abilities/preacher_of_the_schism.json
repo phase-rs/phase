@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Attacked": "Player.withMostLife",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks the player with the most life or tied for most life, create a 1/1 white Vampire creature token with lifelink.",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "CheckDefinedPlayer": "You.withMostLife",
+        "Execute": "TrigDraw",
+        "NoResolvingCheck": "True",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks while you have the most life or are tied for most life, you draw a card and you lose 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

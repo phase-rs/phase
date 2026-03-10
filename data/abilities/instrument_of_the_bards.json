@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SpellDescription": "Search your library for a creature card with mana value equal to the number of harmony counters on CARDNAME, reveal it, and put it into your hand. If that card is legendary, create a Treasure token. Then shuffle.",
+        "ChangeType": "Creature.cmcEQX",
+        "StackDescription": "SpellDescription",
+        "ChangeNum": "1",
+        "SubAbility": "DBToken"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a charge counter on CARDNAME.",
+        "OptionalDecider": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

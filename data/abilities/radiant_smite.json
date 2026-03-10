@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.powerGE4"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature with power 4 or greater",
+        "SpellDescription": "Destroy target creature with power 4 or greater. If you weren't the starting player, you gain 4 life.",
+        "SubAbility": "DBGainLife"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "DBGainLifeBis",
+        "TriggerDescription": "When you cycle CARDNAME, if you weren't the starting player, you gain 2 life.",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "SVarCompare": "EQ0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

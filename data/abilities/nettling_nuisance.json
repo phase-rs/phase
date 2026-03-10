@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever one or more Faeries you control deal combat damage to a player, that player creates a 4/2 red Pirate creature token with \"This creature can't block.\" The token is goaded for the rest of the game. (It attacks each combat if able and attacks a player other than you if able.)",
+        "ValidSource": "Creature.Faerie+YouCtrl",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<1>"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

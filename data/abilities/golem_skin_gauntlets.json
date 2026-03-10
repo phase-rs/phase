@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "EqMe",
+        "Description": "Equipped creature gets +1/+0 for each Equipment attached to it.",
+        "Affected": "Card.EquippedBy",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "7 G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Monstrosity 5. This ability costs {1} less to activate for each creature card in your graveyard.",
+        "ReduceCost": "X",
+        "Monstrosity": "5"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "X",
+        "Description": "This spell costs {1} less to cast for each creature card in your graveyard.",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self,Creature.Legendary+YouCtrl",
+        "TriggerDescription": "Whenever this enchantment or a legendary creature you control enters, create a Food token.",
+        "Execute": "TrigFood"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "TrigImmediateTrig",
+        "TriggerDescription": "Whenever you attack, you may sacrifice X Foods. When you do, up to X target attacking creatures each get +3/+3 and gain trample and indestructible until end of turn.",
+        "AttackingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigLoseLife",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "TriggerDescription": "Whenever this creature or another creature you control dies, target opponent loses 1 life and you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

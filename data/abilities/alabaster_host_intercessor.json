@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, exile target creature an opponent controls until CARDNAME leaves the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

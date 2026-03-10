@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "FalseSubAbility": "GainLife",
+          "TrueSubAbility": "WinGame",
+          "SpellDescription": "If this spell was cast from your hand and you've cast another spell named Approach of the Second Sun this game, you win the game. Otherwise, put CARDNAME into its owner's library seventh from the top and you gain 7 life.",
+          "BranchConditionSVar": "X",
+          "BranchConditionSVarCompare": "EQ3"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "FalseSubAbility": "GainLife",
+        "TrueSubAbility": "WinGame",
+        "SpellDescription": "If this spell was cast from your hand and you've cast another spell named Approach of the Second Sun this game, you win the game. Otherwise, put CARDNAME into its owner's library seventh from the top and you gain 7 life.",
+        "BranchConditionSVar": "X",
+        "BranchConditionSVarCompare": "EQ3"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "ApproachingSuns",
+        "Static": "True",
+        "ValidCard": "Card.Self+namedApproach of the Second Sun"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ValidPlayer": "You",
+            "Execute": "DBDealDamage",
+            "ValidCard": "Card.Self",
+            "ThisDoor": "True",
+            "TriggerDescription": "When you unlock this door, this Room deals 2 damage to target creature."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "TriggerDescription": "Whenever a source you control deals noncombat damage to a creature, choose a creature card in your hand. It perpetually gets +2/+0 and gains haste.",
+            "CombatDamage": "False",
+            "Execute": "TrigChooseCard",
+            "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
+            "ValidTarget": "Creature",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

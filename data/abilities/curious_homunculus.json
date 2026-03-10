@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "C",
+            "params": {
+              "SpellDescription": "Add {C}. Spend this mana only to cast an instant or sorcery spell.",
+              "RestrictValid": "Spell.Instant,Spell.Sorcery"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {C}. Spend this mana only to cast an instant or sorcery spell.",
+            "RestrictValid": "Spell.Instant,Spell.Sorcery"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
+            "ValidPlayer": "You",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of your upkeep, if there are three or more instant and/or sorcery cards in your graveyard, transform CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "PresentZone": "Graveyard",
+            "PresentCompare": "GE3",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Activator": "You",
+            "Amount": "1",
+            "Type": "Spell",
+            "Description": "Instant and sorcery spells you cast cost {1} less to cast.",
+            "ValidCard": "Instant,Sorcery"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

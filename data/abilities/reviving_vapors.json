@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": ""
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Reveal the top three cards of your library and put one of them into your hand. You gain life equal to that card's mana value. Put all other cards revealed this way into your graveyard.",
+        "SubAbility": "DBGainLife",
+        "LibraryPosition2": "0",
+        "RememberRevealed": "True",
+        "StackDescription": "SpellDescription",
+        "ChangeValid": "Card",
+        "Reveal": "True",
+        "ChangeNum": "1",
+        "Imprint": "True",
+        "SkipReorder": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

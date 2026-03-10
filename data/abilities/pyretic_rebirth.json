@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl,Artifact.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberTargets": "True",
+        "SubAbility": "DBDamage",
+        "TgtPrompt": "Select target artifact or creature card in your graveyard",
+        "SpellDescription": "Return target artifact or creature card from your graveyard to your hand. CARDNAME deals damage equal to that card's mana value to up to one target creature or planeswalker."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

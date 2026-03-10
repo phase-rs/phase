@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, ABILITY",
+        "Origin": "Any",
+        "Execute": "TrigCharm",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCharm",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, ABILITY",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

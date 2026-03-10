@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a noncreature spell, counter that spell unless you sacrifice a creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Noncreature spells you cast cost {2} less to cast.",
+        "ValidCard": "Card.nonCreature",
+        "Type": "Spell",
+        "Amount": "2",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigCharm",
+        "TriggerDescription": "At the beginning of combat on your turn, ABILITY",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

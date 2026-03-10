@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Card"
+        ],
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetControls": "True",
+        "SubAbility": "DBDiscard",
+        "AILogic": "AtLeast2",
+        "StackDescription": "SpellDescription",
+        "ChoiceZone": "Hand",
+        "SpellDescription": "Target player chooses a card in their hand and discards the rest.",
+        "Mandatory": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

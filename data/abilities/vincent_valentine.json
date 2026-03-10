@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Origin": "Battlefield",
+            "ValidCard": "Creature.OppCtrl",
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "Whenever a creature an opponent controls dies, put a number of +1/+1 counters on CARDNAME equal to that creature's power.",
+            "Destination": "Graveyard"
+          }
+        },
+        {
+          "mode": "Attacks",
+          "params": {
+            "OptionalDecider": "You",
+            "TriggerDescription": "Whenever CARDNAME attacks, you may transform it.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChangeZone",
+            "Destination": "Graveyard",
+            "TriggerDescription": "When CARDNAME dies, return it to the battlefield tapped (front face up)."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

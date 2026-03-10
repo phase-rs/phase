@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "ResolvedLimit": "1",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you sacrifice a creature, you may return target creature card with lesser mana value from your graveyard to the battlefield tapped. Do this only once each turn.",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

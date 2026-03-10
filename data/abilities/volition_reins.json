@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "IsPresent": "Permanent.EnchantedBy+tapped",
+        "Origin": "Any",
+        "Execute": "TrigUntap",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, if enchanted permanent is tapped, untap it.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent.EnchantedBy",
+        "Description": "You control enchanted permanent.",
+        "GainControl": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

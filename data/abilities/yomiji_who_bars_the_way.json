@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Whenever a legendary permanent other than CARDNAME is put into a graveyard from the battlefield, return that card to its owner's hand.",
+        "ValidCard": "Permanent.Legendary+Other",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

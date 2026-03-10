@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At end of combat, destroy each creature that blocked or was blocked this turn.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroy",
+        "Phase": "EndCombat",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

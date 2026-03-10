@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.nonBasic",
+        "RemoveLandTypes": "True",
+        "AddType": "Mountain",
+        "Description": "Nonbasic lands are Mountains."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

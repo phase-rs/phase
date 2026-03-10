@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<2/Food>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever an opponent casts a noncreature spell, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")",
+        "Execute": "DBToken",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.nonCreature"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature deals combat damage to you, sacrifice a Food token.",
+        "ValidSource": "Creature",
+        "ValidTarget": "You",
+        "CombatDamage": "True",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

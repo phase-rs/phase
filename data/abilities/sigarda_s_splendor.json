@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, draw a card if your life total is greater than or equal to the last noted life total for CARDNAME. Then note your life total.",
+        "Phase": "Upkeep",
+        "Execute": "TrigDraw",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.White",
+        "TriggerDescription": "Whenever you cast a white spell, you gain 1 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

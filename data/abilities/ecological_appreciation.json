@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library,Graveyard",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Creature.cmcLEX",
+        "RememberChanged": "True",
+        "StackDescription": "SpellDescription",
+        "Reveal": "True",
+        "SubAbility": "DBChangeZone1",
+        "SpellDescription": "Search your library and graveyard for up to four creature cards with different names that each have mana value X or less and reveal them.",
+        "Shuffle": "False",
+        "ChangeNum": "4",
+        "DifferentNames": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

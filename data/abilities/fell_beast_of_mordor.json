@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, target opponent loses X life and you gain X life, where X is the number of +1/+1 counters on it.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigLoseLife"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, target opponent loses X life and you gain X life, where X is the number of +1/+1 counters on it.",
+        "Execute": "TrigLoseLife",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

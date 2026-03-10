@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetState",
+        "params": {
+          "SubAbility": "DBDouble",
+          "SpellDescription": "Transform target Incubator token you control.",
+          "TgtPrompt": "Select target Incubator token you control",
+          "Mode": "Transform",
+          "ValidTgts": "Incubator.token+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDouble",
+        "SpellDescription": "Transform target Incubator token you control.",
+        "TgtPrompt": "Select target Incubator token you control",
+        "Mode": "Transform",
+        "ValidTgts": "Incubator.token+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigIncubate",
+        "TriggerDescription": "When CARDNAME enters, incubate 2. (Create an Incubator token with two +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

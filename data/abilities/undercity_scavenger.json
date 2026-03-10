@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "When CARDNAME enters, you may sacrifice another creature. If you do, put two +1/+1 counters on CARDNAME, then scry 2."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

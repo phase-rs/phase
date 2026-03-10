@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color. Put an unlock counter on CARDNAME. (To collect evidence 3, exile cards with total mana value 3 or greater from your graveyard.)",
+          "SubAbility": "DBPutCounter"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "CollectEvidence<3>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color. Put an unlock counter on CARDNAME. (To collect evidence 3, exile cards with total mana value 3 or greater from your graveyard.)",
+        "SubAbility": "DBPutCounter"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Surveil",
+        "count": 1
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsPresent": "Card.Self+counters_GE5_UNLOCK",
+        "Amount": "3",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Surveil 3, then draw three cards. Activate only if CARDNAME has five or more unlock counters on it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

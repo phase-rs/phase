@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "DBDig",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, reveal that many cards from the top of your library. Put any number of Dinosaur creature cards from among them onto the battlefield and the rest on the bottom of your library in a random order.",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

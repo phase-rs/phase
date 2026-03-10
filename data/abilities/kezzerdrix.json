@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, if your opponents control no creatures, CARDNAME deals 4 damage to you.",
+        "Phase": "Upkeep",
+        "IsPresent": "Creature.OppCtrl",
+        "PresentCompare": "EQ0",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

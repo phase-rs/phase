@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "IsPresent": "Artifact.YouCtrl",
+        "Description": "As long as you control an artifact, CARDNAME +1/+0 and has deathtouch. (Any amount of damage it deals to a creature is enough to destroy it.)",
+        "Affected": "Card.Self",
+        "AddKeyword": "Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

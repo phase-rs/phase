@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeLife",
+        "params": {
+          "PlayerTurn": "True",
+          "SpellDescription": "Exchange life totals with target opponent. Activate only during your upkeep.",
+          "ValidTgts": "Opponent",
+          "ActivationPhases": "Upkeep"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PlayerTurn": "True",
+        "SpellDescription": "Exchange life totals with target opponent. Activate only during your upkeep.",
+        "ValidTgts": "Opponent",
+        "ActivationPhases": "Upkeep"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

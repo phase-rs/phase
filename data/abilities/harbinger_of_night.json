@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounterAll",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, put a -1/-1 counter on each creature.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Prevent all damage that would be dealt to creatures this turn.",
+          "ReplacementEffects": "RPrevent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent all damage that would be dealt to creatures this turn.",
+        "ReplacementEffects": "RPrevent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

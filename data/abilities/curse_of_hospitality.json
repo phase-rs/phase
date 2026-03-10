@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player.EnchantedBy",
+        "CombatDamage": "True",
+        "ValidSource": "Creature",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever a creature deals combat damage to enchanted player, that player exiles the top card of their library. Until end of turn, that creature's controller may play that card and they may spend mana as though it were mana of any color to cast that spell.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Description": "Creatures attacking enchanted player have trample.",
+        "Affected": "Creature.attacking EnchantedPlayer"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, learn. (You may reveal a Lesson card you own from outside the game and put it into your hand, or discard a card to draw a card.)",
+        "Destination": "Battlefield",
+        "Execute": "TrigLearn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Lifelink",
+        "Description": "Equipped creature gets +1/+1 and has lifelink.",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

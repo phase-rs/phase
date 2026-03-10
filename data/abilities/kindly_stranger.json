@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Activation": "Delirium",
+              "Mode": "Transform",
+              "PrecostDesc": "Delirium —",
+              "Defined": "Self",
+              "SpellDescription": "Transform CARDNAME. Activate only if there are four or more card types among cards in your graveyard."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Activation": "Delirium",
+            "Mode": "Transform",
+            "PrecostDesc": "Delirium —",
+            "Defined": "Self",
+            "SpellDescription": "Transform CARDNAME. Activate only if there are four or more card types among cards in your graveyard."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDestroy",
+            "TriggerDescription": "When this creature transforms into CARDNAME, you may destroy target creature.",
+            "OptionalDecider": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

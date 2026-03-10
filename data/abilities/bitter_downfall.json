@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberLKI": "True",
+        "SpellDescription": "Destroy target creature. Its controller loses 2 life.",
+        "AlwaysRemember": "True",
+        "SubAbility": "DBLoseLife"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "ValidTarget": "Creature.wasDealtDamageThisTurn",
+        "Description": "This spell costs {3} less to cast if it targets a creature that was dealt damage this turn.",
+        "Type": "Spell",
+        "Amount": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

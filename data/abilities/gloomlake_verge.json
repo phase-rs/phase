@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "SpellDescription": "Add {U}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {U}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "B",
+        "params": {
+          "IsPresent": "Island.YouCtrl,Swamp.YouCtrl",
+          "SpellDescription": "Add {B}. Activate only if you control an Island or a Swamp."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsPresent": "Island.YouCtrl,Swamp.YouCtrl",
+        "SpellDescription": "Add {B}. Activate only if you control an Island or a Swamp."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

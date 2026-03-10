@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +1/+1 as long as you control another green creature.",
+        "Affected": "Card.Self",
+        "IsPresent": "Creature.Green+Other+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

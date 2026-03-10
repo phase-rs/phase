@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you gain 3 life.",
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Description": "This spell costs {2} less to cast if it's bargained.",
+        "Type": "Spell",
+        "Amount": "2",
+        "ValidCard": "Card.Self",
+        "ValidSpell": "Spell.Bargain"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

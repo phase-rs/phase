@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "B",
+        "params": {
+          "Amount": "2",
+          "SpellDescription": "Add {B}{B}."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromHand<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "SpellDescription": "Add {B}{B}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "Amount": "2",
+          "SpellDescription": "Add {G}{G}."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromHand<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "SpellDescription": "Add {G}{G}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

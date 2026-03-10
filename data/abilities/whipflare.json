@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.nonArtifact",
+        "ValidDescription": "each nonartifact creature.",
+        "SpellDescription": "CARDNAME deals 2 damage to each nonartifact creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

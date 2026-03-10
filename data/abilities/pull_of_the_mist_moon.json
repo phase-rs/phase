@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile target nonland permanent an opponent controls until CARDNAME leaves the battlefield.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+kicked",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, choose a nonland permanent in your hand. It perpetually gains \"When this permanent enters, exile target nonland permanent an opponent controls until this permanent leaves the battlefield.\"",
+        "Origin": "Any",
+        "Execute": "TrigChoose",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by non-Wall creatures.",
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.nonWall"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

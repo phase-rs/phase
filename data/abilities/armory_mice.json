@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Celebration — CARDNAME gets +0/+2 as long as two or more nonland permanents entered the battlefield under your control this turn.",
+        "Affected": "Card.Self",
+        "CheckSVar": "Celebration",
+        "SVarCompare": "GE2",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

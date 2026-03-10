@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "WithoutManaCost": "True",
+          "ValidSA": "Spell.cmcEQX",
+          "Optional": "True",
+          "Controller": "You",
+          "SpellDescription": "You may cast a spell with mana value X exiled with NICKNAME without paying its mana cost.",
+          "Amount": "1",
+          "ValidZone": "Exile",
+          "Valid": "Card.ExiledWithSource"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "WithoutManaCost": "True",
+        "ValidSA": "Spell.cmcEQX",
+        "Optional": "True",
+        "Controller": "You",
+        "SpellDescription": "You may cast a spell with mana value X exiled with NICKNAME without paying its mana cost.",
+        "Amount": "1",
+        "ValidZone": "Exile",
+        "Valid": "Card.ExiledWithSource"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "Catalogue",
+        "TriggerDescription": "When CARDNAME enters, search your library for up to three instant cards, exile them, then shuffle."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

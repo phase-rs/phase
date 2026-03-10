@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may sacrifice it. If you do, CARDNAME deals 3 damage to that player.",
+        "Execute": "TrigDamage",
+        "ValidTarget": "Player",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

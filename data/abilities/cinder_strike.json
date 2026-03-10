@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 2 damage to target creature. It deals 4 damage to that creature instead if this spell's additional cost was paid."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "ValidSA": "Spell",
+        "Description": "As an additional cost to cast this spell, you may blight 1. (You may put a -1/-1 counter on a creature you control.)",
+        "ValidCard": "Card.Self",
+        "Cost": "Blight<1>",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Samurai",
+        "AddKeyword": "Trample & Haste",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +2/+2, has trample and haste, and is a Samurai in addition to its other types.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature.Vampire",
+        "TriggerZones": "Battlefield",
+        "Execute": "BloodPump",
+        "TriggerDescription": "Whenever you cast a Vampire creature spell, it gains bloodthirst 3.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

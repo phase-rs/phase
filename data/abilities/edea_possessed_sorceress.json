@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of combat on your turn, gain control of target creature an opponent controls until end of turn. Untap that creature. It gains haste until end of turn.",
+        "Execute": "TrigGainControl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control but don't own dies, return it to the battlefield under it's owner's control and you draw a card.",
+        "ValidCard": "Creature.YouDontOwn+YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME dies, target creature an opponent controls gets -1/-1 until end of turn.",
+        "Origin": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

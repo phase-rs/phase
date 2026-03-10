@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "CheckSVar": "PackTactics",
+        "Execute": "TrigChange",
+        "SVarCompare": "GE6",
+        "NoResolvingCheck": "True",
+        "TriggerDescription": "Pack tactics — Whenever CARDNAME attacks, if you attacked with creatures with total power 6 or greater this combat, you may put a Dragon creature card from your hand onto the battlefield tapped and attacking.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

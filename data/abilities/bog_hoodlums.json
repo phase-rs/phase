@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigClash",
+        "TriggerDescription": "When CARDNAME enters, clash with an opponent. If you win, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "CARDNAME can't block.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

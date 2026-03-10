@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W W U U B B R R G G",
+        "params": {
+          "ActivationLimit": "1",
+          "SpellDescription": "Add {W}{W}{U}{U}{B}{B}{R}{R}{G}{G}. Activate only once each turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<5/P1P1/NICKNAME>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationLimit": "1",
+        "SpellDescription": "Add {W}{W}{U}{U}{B}{B}{R}{R}{G}{G}. Activate only once each turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a spell, put a +1/+1 counter on CARDNAME for each of that spell's colors."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

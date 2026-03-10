@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.blockedValidThisTurn Creature.Legendary,Creature.blockedByValidThisTurn Creature.Legendary"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature that blocked or was blocked by a legendary creature this turn",
+        "SpellDescription": "Destroy target creature that blocked or was blocked by a legendary creature this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "Origin": "Any",
+        "TriggerDescription": "When this creature enters, mill three cards. (Put the top three cards of your library into your graveyard.)",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When this creature dies, you may exile it. When you do, put target creature card from your graveyard on top of your library.",
+        "Execute": "TrigImmediateTrig"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

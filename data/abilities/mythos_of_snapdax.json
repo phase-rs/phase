@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "ConditionManaSpent": "B R",
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "YouChoose",
+          "SpellDescription": "Each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest. If {B}{R} was spent to cast this spell, you choose the permanents for each player instead.",
+          "SubAbility": "AllChoose"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionManaSpent": "B R",
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "YouChoose",
+        "SpellDescription": "Each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest. If {B}{R} was spent to cast this spell, you choose the permanents for each player instead.",
+        "SubAbility": "AllChoose"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

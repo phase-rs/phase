@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerDescription": "Whenever a creature an opponent controls dies, create a Treasure token.",
+        "Execute": "DBTreasure",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigWinsGame",
+        "PresentCompare": "GE10",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if you control ten or more Treasures, you win the game.",
+        "IsPresent": "Treasure.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

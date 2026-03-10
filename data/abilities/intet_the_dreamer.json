@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may pay {2}{U}. If you do, exile the top card of your library face down. You may look at that card for as long as it remains exiled. You may play that card without paying its mana cost for as long as NICKNAME remains on the battlefield.",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "OptionalDecider": "You",
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

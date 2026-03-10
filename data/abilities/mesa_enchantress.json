@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Enchantment",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you cast an enchantment spell, you may draw a card.",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

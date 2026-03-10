@@ -1,0 +1,78 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "ValidCard": "Creature.YouCtrl",
+            "Alone": "True",
+            "Execute": "TrigPump",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever a creature you control attacks alone, it gains deathtouch and lifelink until end of turn. Put a dread counter on CARDNAME. Then if there are three or more dread counters on it, transform it."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "B"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Mana",
+                "cost": "SubCounter<1/Dread>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "You draw a card and you lose 1 life.",
+            "SubAbility": "DBLoseLife"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

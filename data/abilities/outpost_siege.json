@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "• Khans — At the beginning of your upkeep, exile the top card of your library. Until end of turn, you may play that card.",
+        "AddTrigger": "KhansTrigger",
+        "Affected": "Card.Self+ChosenModeKhans"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeDragons",
+        "Description": "• Dragons — Whenever a creature you control leaves the battlefield, CARDNAME deals 1 damage to any target.",
+        "AddTrigger": "DragonsTrigger"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

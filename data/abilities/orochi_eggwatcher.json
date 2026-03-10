@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "g_1_1_snake",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 G"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create a 1/1 green Snake creature token. If you control ten or more creatures, flip CARDNAME.",
+            "TokenOwner": "You",
+            "SubAbility": "DBFlip"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 3,
+            "toughness": 3,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "G"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Target creature gets +3/+3 until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

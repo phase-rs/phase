@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a land enters under an opponent's control, you may gain 3 life.",
+        "Destination": "Battlefield",
+        "Execute": "TrigGain",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.OppCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

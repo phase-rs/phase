@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Activator": "You",
+        "TriggerDescription": "Whenever you tap a land for mana, add one mana of any type that land produced.",
+        "Execute": "TrigMana",
+        "Static": "True",
+        "ValidCard": "Land",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control get +1/+1.",
+        "Affected": "Creature.YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

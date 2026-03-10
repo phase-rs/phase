@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a Faerie card, reveal it, then shuffle and put that card on top.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

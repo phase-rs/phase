@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Alone": "True",
+        "Execute": "TrigEffect",
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, you may cast target enchantment card from your graveyard this turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

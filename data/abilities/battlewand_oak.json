@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a Forest you control enters, CARDNAME gets +2/+2 until end of turn.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Forest.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Treefolk",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a Treefolk spell, CARDNAME gets +2/+2 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

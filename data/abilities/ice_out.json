@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "SpellDescription": "Counter target spell."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {1} less to cast if it's bargained.",
+        "ValidSpell": "Spell.Bargain",
+        "Amount": "1",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

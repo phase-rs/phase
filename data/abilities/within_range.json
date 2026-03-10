@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When this enchantment enters, create two 1/1 red Warrior creature tokens.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRepeatEach",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack, each opponent loses life equal to the number of creatures attacking them."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

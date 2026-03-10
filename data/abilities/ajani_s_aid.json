@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Mandatory": "True",
+        "AILogic": "NeedsPrevention",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Prevent all combat damage a creature of your choice would deal this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you may search your library and/or graveyard for a card named Ajani, Valiant Protector, reveal it, and put it into your hand. If you search your library this way, shuffle.",
+        "Origin": "Any",
+        "Execute": "TrigSearch",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

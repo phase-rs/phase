@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, starting with you, each player chooses up to five permanents they control. All permanents other than CARDNAME that weren't chosen this way phase out.",
+        "Destination": "Battlefield",
+        "Execute": "TrigRepeatEach"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPhaseIn"
+      },
+      "params": {
+        "ValidCard": "Card.phasedOutPermanent",
+        "Description": "Permanents can't phase in."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

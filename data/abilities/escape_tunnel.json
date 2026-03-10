@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeTypeDesc": "basic land",
+        "Tapped": "True",
+        "ChangeType": "Land.Basic",
+        "SpellDescription": "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Target creature with power 2 or less can't be blocked this turn.",
+          "StaticAbilities": "Unblockable",
+          "ValidTgts": "Creature.powerLE2",
+          "TgtPrompt": "Select target creature with power 2 or less",
+          "ExileOnMoved": "Battlefield",
+          "AILogic": "Pump",
+          "RememberObjects": "Targeted",
+          "StackDescription": "{c:Targeted} can't be blocked this turn."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature with power 2 or less can't be blocked this turn.",
+        "StaticAbilities": "Unblockable",
+        "ValidTgts": "Creature.powerLE2",
+        "TgtPrompt": "Select target creature with power 2 or less",
+        "ExileOnMoved": "Battlefield",
+        "AILogic": "Pump",
+        "RememberObjects": "Targeted",
+        "StackDescription": "{c:Targeted} can't be blocked this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

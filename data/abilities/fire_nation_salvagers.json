@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this creature enters, put a +1/+1 counter on target creature or Vehicle you control.",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl+HasCounters",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "Whenever one or more creatures you control with counters on them deal combat damage to a player, put target creature or Vehicle card from that player's graveyard onto the battlefield under your control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

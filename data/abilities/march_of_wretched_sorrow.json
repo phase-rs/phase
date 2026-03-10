@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature or planeswalker",
+        "AnnounceTitle": "how many black cards to exile",
+        "SpellDescription": "CARDNAME deals X damage to target creature or planeswalker and you gain X life.",
+        "SubAbility": "DBGainLife",
+        "Announce": "Exiled"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Cost": "ExileFromHand<Y/Card.Black/black cards>",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Description": "As an additional cost to cast this spell, you may exile any number of black cards from your hand. This spell costs {2} less to cast for each card exiled this way."
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "This spell costs {2} less to cast for each card exiled this way.",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Secondary": "True",
+        "Amount": "Z",
+        "Relative": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

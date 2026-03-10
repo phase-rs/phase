@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigEffect",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, until your next turn, creatures your opponents control attack each combat if able and attack a player other than you if able.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDrain",
+        "ValidCard": "Creature.attacking",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever an attacking creature dies, each opponent loses 1 life and you gain 1 life.",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

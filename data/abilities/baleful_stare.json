@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Target opponent reveals their hand. You draw a card for each Mountain and red card in it.",
+          "ValidTgts": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Target opponent reveals their hand. You draw a card for each Mountain and red card in it.",
+        "ValidTgts": "Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

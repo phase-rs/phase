@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "Animate",
+        "SpellDescription": "Untap target land you control. You may have it become a 3/3 Elemental creature with haste and menace until end of turn. It's still a land.",
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target land you control"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand,Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Creature.YouOwn+cmcLEX",
+        "Ultimate": "True",
+        "StackDescription": "SpellDescription",
+        "ChangeNum": "1",
+        "Planeswalker": "True",
+        "WithCountersType": "P1P1",
+        "SpellDescription": "You may put a creature card with mana value less than or equal to the number of lands you control onto the battlefield from your hand or graveyard with two +1/+1 counters on it.",
+        "WithCountersAmount": "2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, put a loyalty counter on CARDNAME.",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

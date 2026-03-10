@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "AILogic": "AtEOTOrBlock",
+          "ValidCards": "Dog.YouCtrl",
+          "CounterType": "P1P1",
+          "CounterNum": "1",
+          "SpellDescription": "Put a +1/+1 counter on each Dog you control."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtEOTOrBlock",
+        "ValidCards": "Dog.YouCtrl",
+        "CounterType": "P1P1",
+        "CounterNum": "1",
+        "SpellDescription": "Put a +1/+1 counter on each Dog you control."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigTokenTiny",
+        "TriggerDescription": "When CARDNAME enters, create Tiny, a legendary 2/2 green Dog Detective creature token with trample.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a Dog you control deals combat damage to a player, create a Food token, then investigate.",
+        "ValidSource": "Dog.YouCtrl",
+        "CombatDamage": "True",
+        "Execute": "TrigTokenFoodClue",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

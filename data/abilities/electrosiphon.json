@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEnergy",
+        "TargetType": "Spell",
+        "RememberCounteredCMC": "True",
+        "TgtPrompt": "Select target spell",
+        "SpellDescription": "Counter target spell. You get an amount of {E} (energy counters) equal to its mana value."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

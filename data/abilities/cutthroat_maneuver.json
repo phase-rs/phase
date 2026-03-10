@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select up to two target creatures",
+        "SpellDescription": "Up to two target creatures each get +1/+1 and gain lifelink until end of turn.",
+        "TargetMin": "0",
+        "TargetMax": "2",
+        "KW": "Lifelink"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

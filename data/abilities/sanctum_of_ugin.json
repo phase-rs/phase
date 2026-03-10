@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a colorless spell with mana value 7 or greater, you may sacrifice CARDNAME. If you do, search your library for a colorless creature card, reveal it, put it into your hand, then shuffle.",
+        "ValidCard": "Card.Colorless+cmcGE7",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigSearch",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

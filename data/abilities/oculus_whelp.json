@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "IsPresent": "Permanent.Transformed+YouCtrl",
+        "AddTrigger": "DiesTrig",
+        "Description": "As long as you control a transformed permanent, CARDNAME has \"When CARDNAME dies, draw a card.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

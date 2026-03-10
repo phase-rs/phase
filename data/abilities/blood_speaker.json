@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSearch",
+        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice CARDNAME. If you do, search your library for a Demon card, reveal that card, put it into your hand, then shuffle."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "Whenever a Demon you control enters, you may return CARDNAME from your graveyard to your hand.",
+        "Origin": "Any",
+        "ValidCard": "Demon.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

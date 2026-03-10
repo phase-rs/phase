@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl+Other"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature you control other than CARDNAME has shroud for as long as CARDNAME remains tapped. (It can't be the target of spells or abilities.)",
+        "RememberTargets": "True",
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select target creature other than CARDNAME that you control"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "ClearRemembered",
+        "Static": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Shroud",
+        "Affected": "Creature.IsRemembered"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

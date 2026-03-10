@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "Raid — When CARDNAME enters, if you attacked this turn, create a 1/1 white Warrior creature token.",
+        "CheckSVar": "RaidTest",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

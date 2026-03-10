@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature",
+        "AddKeyword": "Landwalk:Forest",
+        "Description": "All creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

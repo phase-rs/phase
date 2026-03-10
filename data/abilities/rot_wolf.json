@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, you may draw a card.",
+        "ValidCard": "Creature.DamagedBy",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

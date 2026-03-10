@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_a_clue_draw",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PlayerTurn": "True",
+        "TokenOwner": "You",
+        "SpellDescription": "Create a Clue token. Activate only during your turn. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "CheckSVar": "X",
+        "ValidAttacker": "Card.Self+attacking",
+        "SVarCompare": "GE2",
+        "Description": "NICKNAME can't be blocked as long as you've drawn two or more cards this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

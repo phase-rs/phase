@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commander creatures you control get +2/+2.",
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Affected": "Creature.IsCommander+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commanders you control have hexproof.",
+        "AddKeyword": "Hexproof",
+        "Affected": "Card.IsCommander+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

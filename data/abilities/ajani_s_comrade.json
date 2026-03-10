@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, if you control an Ajani planeswalker, put a +1/+1 counter on CARDNAME.",
+        "Phase": "BeginCombat",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You",
+        "IsPresent": "Planeswalker.Ajani+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

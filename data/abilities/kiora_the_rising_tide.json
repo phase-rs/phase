@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "TriggerDescription": "When NICKNAME enters, draw two cards, then discard two cards.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Threshold": "True",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Threshold — Whenever NICKNAME attacks, if there are seven or more cards in your graveyard, you may create Scion of the Deep, a legendary 8/8 blue Octopus creature token.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

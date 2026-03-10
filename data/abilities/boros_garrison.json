@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R W",
+        "params": {
+          "SpellDescription": "Add {R}{W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}{W}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, return a land you control to its owner's hand.",
+        "Destination": "Battlefield",
+        "Execute": "TrigReturn",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

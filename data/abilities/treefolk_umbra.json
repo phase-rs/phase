@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CombatDamageToughness"
+      },
+      "params": {
+        "Secondary": "True",
+        "Description": "Enchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

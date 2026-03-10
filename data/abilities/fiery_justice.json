@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 5
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "DividedAsYouChoose": "5",
+        "TgtPrompt": "Select any target to distribute damage to",
+        "SubAbility": "Justice",
+        "SpellDescription": "CARDNAME deals 5 damage divided as you choose among any number of targets. Target opponent gains 5 life.",
+        "TargetMax": "5",
+        "AILogic": "OpponentGainLife"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

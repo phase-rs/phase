@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a modal spell, ABILITY",
+        "ValidActivatingPlayer": "You",
+        "ValidSA": "Spell.Modal",
+        "Execute": "TrigCharm"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

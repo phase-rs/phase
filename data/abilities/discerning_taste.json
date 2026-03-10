@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "NoReveal": "True",
+        "DestinationZone2": "Graveyard",
+        "SubAbility": "DBLifeGain",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Look at the top four cards of your library. Put one of them into your hand and the rest into your graveyard. You gain life equal to the greatest power among creature cards put into your graveyard this way.",
+        "RememberMovedToZone": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "AttackedThisTurn",
+        "Execute": "TrigPutCounter",
+        "SVarCompare": "EQ0",
+        "TriggerDescription": "At the beginning of each player's end step, if no creatures attacked this turn, put a fury counter on CARDNAME. Then CARDNAME deals damage equal to the number of fury counters on it to that player.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

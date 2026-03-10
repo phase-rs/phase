@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "SpellDescription": "Prevent the next 1 combat damage that would be dealt to you this turn.",
+          "Amount": "1",
+          "Defined": "You",
+          "CombatDamage": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent the next 1 combat damage that would be dealt to you this turn.",
+        "Amount": "1",
+        "Defined": "You",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

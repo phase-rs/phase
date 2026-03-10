@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, exile the top card of your library. Until end of turn, you may play that card.",
+        "ValidTarget": "Player",
+        "Execute": "TrigExile",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

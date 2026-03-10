@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "TargetMax": "2",
+        "SpellDescription": "Two target players each draw a card.",
+        "TargetMin": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

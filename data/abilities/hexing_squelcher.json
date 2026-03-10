@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "Description": "Other creatures you control have \"Ward—Pay 2 life.\"",
+        "AddKeyword": "Ward:PayLife<2>"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell.YouCtrl",
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield",
+        "Description": "Spells you control can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

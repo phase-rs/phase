@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 3 damage to target creature you control.",
+        "Execute": "TrigDamage",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

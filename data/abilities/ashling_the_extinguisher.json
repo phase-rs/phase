@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, choose target creature that player controls. The player sacrifices that creature.",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

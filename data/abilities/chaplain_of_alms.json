@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Ward:1",
+            "Description": "Each creature you control has ward {1}.",
+            "Affected": "Creature.YouCtrl"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "Exile",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

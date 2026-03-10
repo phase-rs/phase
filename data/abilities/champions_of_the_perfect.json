@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever you cast a creature spell, draw a card."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "EffectZone": "All",
+        "Cost": "BeholdExile<1/Elf>",
+        "Activator": "You",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Description": "As an additional cost to cast this spell, behold an Elf and exile it. (Exile an Elf you control or an Elf card from your hand.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

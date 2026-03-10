@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": 4
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "If an opponent has more life than you, you gain 4 life.",
+        "ConditionCheckSVar": "LifeThem",
+        "SubAbility": "DBToken",
+        "StackDescription": "SpellDescription",
+        "Defined": "You",
+        "ConditionSVarCompare": "GTLifeYou"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

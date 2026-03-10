@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "StackDescription": "SpellDescription",
+        "SubAbility": "SacAllOthers",
+        "Defined": "Player",
+        "SpellDescription": "Each player chooses a party from among creatures they control,",
+        "ChooseEach": "Party"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

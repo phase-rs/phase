@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME dies, you may exile it. If you do, search your library for a planeswalker card, put it onto the battlefield, then shuffle.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

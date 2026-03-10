@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack, for each opponent, create a 1/1 white Human creature token that's tapped and attacking that player or a planeswalker they control.",
+        "Execute": "DBRepeat"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "Description": "CARDNAME's power is equal to the number of creatures you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

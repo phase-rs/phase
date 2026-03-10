@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBUntap",
+        "TgtPrompt": "Select up to two target creatures",
+        "SpellDescription": "Untap up to two target creatures and up to two target lands.",
+        "TargetMax": "2",
+        "TargetMin": "0"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 5,
+        "toughness": 5,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature gets +5/+5 until end of turn.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 10,
+        "destination": "Battlefield"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "DestinationZone2": "Library",
+        "SpellDescription": "Look at the top ten cards of your library. You may put any number of creature and/or land cards from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+        "Ultimate": "True",
+        "ChangeValid": "Creature,Land",
+        "LibraryPosition": "-1",
+        "Planeswalker": "True",
+        "ChangeNum": "Any",
+        "RestRandomOrder": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

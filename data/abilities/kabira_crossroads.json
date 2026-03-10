@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W",
+        "params": {
+          "SpellDescription": "Add {W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {W}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you gain 2 life.",
+        "Origin": "Any",
+        "Execute": "TrigGainLife",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

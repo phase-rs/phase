@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+wasCastByYou",
+        "Destination": "Battlefield",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME enters, if you cast it, return any number of target permanent cards with cycling abilities from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

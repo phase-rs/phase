@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "Defined": "Enchanted",
+          "SpellDescription": "Regenerate enchanted creature."
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Enchanted",
+        "SpellDescription": "Regenerate enchanted creature."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, return CARDNAME to its owner's hand.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

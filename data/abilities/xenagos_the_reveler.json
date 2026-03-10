@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo R G",
+        "params": {
+          "SpellDescription": "Add X mana in any combination of {R} and/or {G}, where X is the number of creatures you control.",
+          "Amount": "X",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add X mana in any combination of {R} and/or {G}, where X is the number of creatures you control.",
+        "Amount": "X",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "rg_2_2_satyr_haste",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 2/2 red and green Satyr creature token with haste.",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 7,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile the top seven cards of your library. You may put any number of creature and/or land cards from among them onto the battlefield.",
+        "Planeswalker": "True",
+        "RememberChanged": "True",
+        "ChangeNum": "All",
+        "Ultimate": "True",
+        "SubAbility": "DBChangeZone"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

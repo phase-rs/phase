@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Number": "2",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you draw your second card each turn, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

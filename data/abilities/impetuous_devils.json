@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigProvoke",
+        "TriggerDescription": "When CARDNAME attacks, up to one target creature defending player controls blocks it this combat if able."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of the end step, sacrifice CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

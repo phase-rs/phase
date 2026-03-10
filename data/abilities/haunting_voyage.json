@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "SubAbility": "DBBranch",
+          "SpellDescription": "Choose a creature type. Return up to two creature cards of that type from your graveyard to the battlefield. If this spell was foretold, return all creature cards of that type from your graveyard to the battlefield instead.",
+          "Type": "Creature",
+          "Defined": "You",
+          "AILogic": "MostProminentInComputerGraveyard"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBBranch",
+        "SpellDescription": "Choose a creature type. Return up to two creature cards of that type from your graveyard to the battlefield. If this spell was foretold, return all creature cards of that type from your graveyard to the battlefield instead.",
+        "Type": "Creature",
+        "Defined": "You",
+        "AILogic": "MostProminentInComputerGraveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

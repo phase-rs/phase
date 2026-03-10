@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, search your library for an Aura, God, or Demigod card, reveal it, put it into your hand, then shuffle.",
+            "Execute": "TrigSearch"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Enchantment.Other+YouCtrl",
+            "TriggerDescription": "Whenever another enchantment you control enters, draw a card.",
+            "Execute": "TrigDraw",
+            "Destination": "Battlefield",
+            "Origin": "Any"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "IsPresent": "Enchantment.Other+YouCtrl",
+            "Affected": "Card.Self",
+            "PresentCompare": "GE3",
+            "Description": "CARDNAME has lifelink and indestructible as long as you control at least three other enchantments.",
+            "AddKeyword": "Lifelink & Indestructible"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, ABILITY",
+        "Execute": "TrigCharm"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "Description": "Domain — CARDNAME's power and toughness are each equal to the number of basic land types among lands you control.",
+        "SetToughness": "X",
+        "SetPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

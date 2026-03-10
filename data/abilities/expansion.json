@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "CopySpellAbility",
+            "params": {
+              "MayChooseTarget": "True",
+              "TargetType": "Spell",
+              "ValidTgts": "Card.Instant+cmcLE4,Card.Sorcery+cmcLE4",
+              "SpellDescription": "Copy target instant or sorcery spell with mana value 4 or less. You may choose new targets for the copy."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "MayChooseTarget": "True",
+            "TargetType": "Spell",
+            "ValidTgts": "Card.Instant+cmcLE4,Card.Sorcery+cmcLE4",
+            "SpellDescription": "Copy target instant or sorcery spell with mana value 4 or less. You may choose new targets for the copy."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Variable",
+              "value": "X"
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME deals X damage to any target. Target player draws X cards.",
+            "SubAbility": "DBDraw"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

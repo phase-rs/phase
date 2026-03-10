@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MoveCounter",
+        "params": {
+          "SorcerySpeed": "True",
+          "ValidTgts": "Creature",
+          "CounterNum": "1",
+          "SpellDescription": "Move a +1/+1 counter from CARDNAME onto target creature. Activate only as a sorcery.",
+          "Source": "Self",
+          "CounterType": "P1P1"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "ValidTgts": "Creature",
+        "CounterNum": "1",
+        "SpellDescription": "Move a +1/+1 counter from CARDNAME onto target creature. Activate only as a sorcery.",
+        "Source": "Self",
+        "CounterType": "P1P1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control with a +1/+1 counter on it dies, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Creature.YouCtrl+counters_GE1_P1P1",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

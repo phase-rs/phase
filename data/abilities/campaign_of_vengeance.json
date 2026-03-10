@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control attacks, defending player loses 1 life and you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

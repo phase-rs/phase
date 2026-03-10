@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.Self+!ThisTurnEntered",
+        "Execute": "TrigReturn",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if this creature didn't enter the battlefield this turn, return it to its owner's hand.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

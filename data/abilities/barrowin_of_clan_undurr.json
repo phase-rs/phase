@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, venture into the dungeon. (Enter the first room or advance to the next room.)",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "DBVenture"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DBChangeZone",
+        "TriggerDescription": "Whenever CARDNAME attacks, return up to one creature card with mana value 3 or less from your graveyard to the battlefield if you've completed a dungeon.",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

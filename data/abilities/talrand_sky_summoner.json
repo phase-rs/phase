@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 2/2 blue Drake creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

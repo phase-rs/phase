@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "4 W W"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBReturn",
+            "StackDescription": "SpellDescription",
+            "RememberChanged": "True",
+            "SpellDescription": "Exile NICKNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
+            "SorcerySpeed": "True"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigToken",
+            "TriggerDescription": "When NICKNAME enters, create a 2/2 white Knight creature token.",
+            "Destination": "Battlefield",
+            "Origin": "Any"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Card.Self,Knight.Other+YouCtrl",
+            "Condition": "PlayerTurn",
+            "Description": "Dragonfire Dive — During your turn, NICKNAME and other Knights you control have flying.",
+            "AddKeyword": "Flying"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

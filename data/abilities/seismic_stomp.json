@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Evasion",
+          "SpellDescription": "Creatures without flying can't block this turn.",
+          "StaticAbilities": "KWPump"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Evasion",
+        "SpellDescription": "Creatures without flying can't block this turn.",
+        "StaticAbilities": "KWPump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

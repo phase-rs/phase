@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {}
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 U U"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/Creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {}
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

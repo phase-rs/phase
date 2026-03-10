@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, any number of target players each discard a card.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDiscard",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+Legendary",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a legendary creature you control enters, any number of target players each mill a card and lose 1 life.",
+        "Execute": "TrigMill",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

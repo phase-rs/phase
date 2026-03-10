@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your opponents' end step, if they cast four or more spells this turn, abandon this scheme.",
+        "CheckSVar": "X",
+        "ValidPlayer": "Player.Opponent",
+        "Phase": "End Of Turn",
+        "Execute": "Abandon",
+        "TriggerZones": "Command",
+        "SVarCompare": "GE4"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "EffectZone": "Command",
+        "ValidCard": "Card",
+        "Description": "Spells you cast cost {1} less to cast.",
+        "Type": "Spell",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

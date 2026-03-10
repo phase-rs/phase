@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy all creatures that entered this turn.",
+        "ValidCards": "Creature.ThisTurnEntered"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Condition": "NotPlayerTurn",
+        "EffectZone": "All",
+        "Cost": "ExileFromHand<1/Card.Black+Other>",
+        "ValidSA": "Spell.Self",
+        "Description": "If it's not your turn, you may exile a black card from your hand rather than pay this spell's mana cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SubAbility": "DBDestroyAll",
+        "SpellDescription": "Choose a creature at random, then destroy the rest.",
+        "AtRandom": "True",
+        "Amount": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

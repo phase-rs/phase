@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigChangeZone",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever a nontoken creature you control deals combat damage to an opponent, choose a creature card at random from your library, reveal that card, put it into your hand, then shuffle.",
+        "ValidTarget": "Opponent",
+        "ValidSource": "Creature.!token+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

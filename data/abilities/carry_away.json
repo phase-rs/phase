@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigUnattach",
+        "TriggerDescription": "When CARDNAME enters, unattach enchanted Equipment."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "GainControl": "You",
+        "Description": "You control enchanted Equipment."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

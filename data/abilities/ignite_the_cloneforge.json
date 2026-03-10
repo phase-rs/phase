@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "DarkEffect",
+        "TriggerDescription": "When you set this scheme in motion, create a token that's a copy of target permanent an opponent controls.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

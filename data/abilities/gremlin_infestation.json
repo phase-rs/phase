@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, CARDNAME deals 2 damage to enchanted artifact's controller.",
+        "Phase": "End of Turn"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When enchanted artifact is put into a graveyard, create a 2/2 red Gremlin creature token.",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.AttachedBy",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo Any",
+        "params": {
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Add two mana in any combination of colors. Draw a card.",
+          "Amount": "2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Add two mana in any combination of colors. Draw a card.",
+        "Amount": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

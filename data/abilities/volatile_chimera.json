@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Card.YouOwn+NotedForVolatileChimera"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBClone",
+        "SpellDescription": "Choose a card at random you exiled with cards named CARDNAME. CARDNAME becomes a copy of that card, except it has this ability.",
+        "AtRandom": "True",
+        "ChoiceZone": "Exile"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

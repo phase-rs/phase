@@ -1,0 +1,72 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 1,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Put a +1/+1 counter on target creature."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 1,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Put a +1/+1 counter on target creature."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Trample",
+            "Affected": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
+            "Description": "Other Wolves and Werewolves you control have trample."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

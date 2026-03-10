@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Body Thief — When you cast this spell, you may exile a creature you control and put a takeover counter on it.",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

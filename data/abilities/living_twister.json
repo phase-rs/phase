@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Land>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 2 damage to any target."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "Hidden": "True",
+        "ChangeNum": "1",
+        "SpellDescription": "Return a tapped land you control to its owner's hand.",
+        "ChangeType": "Land.YouCtrl+tapped"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

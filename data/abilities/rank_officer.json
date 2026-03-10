@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/Creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each opponent loses 2 life.",
+        "Defined": "Player.Opponent"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "DBToken",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may discard a card. If you do, create a 2/2 black Zombie creature token.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

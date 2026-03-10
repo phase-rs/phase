@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Enchantment"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Shuffle": "True",
+        "SpellDescription": "Choose target artifact or enchantment. Its owner shuffles it into their library.",
+        "TgtPrompt": "Select target artifact or enchantment"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

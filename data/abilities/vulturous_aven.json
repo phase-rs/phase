@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "ValidCard": "Creature",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME exploits a creature, you draw two cards and you lose 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

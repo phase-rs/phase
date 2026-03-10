@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidActivatingPlayer": "You",
+        "TargetsValid": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, create a 0/1 red Kobold creature token named Kobolds of Kher Keep."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

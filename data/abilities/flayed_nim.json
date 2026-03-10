@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate CARDNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Creature",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, that creature's controller loses that much life.",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

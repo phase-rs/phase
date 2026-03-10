@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature an opponent controls dies, CARDNAME gets +2/+0 and gains first strike and haste until end of turn.",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.OppCtrl",
+        "Execute": "TrigPump",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

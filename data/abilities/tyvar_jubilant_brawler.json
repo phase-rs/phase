@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "1",
+        "TargetMin": "0",
+        "Planeswalker": "True",
+        "SpellDescription": "Untap up to one target creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 3,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBChange",
+        "Defined": "You",
+        "SpellDescription": "Mill three cards, then you may return a creature card with mana value 2 or less from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "ActivateAbilityAsIfHaste"
+      },
+      "params": {
+        "Description": "You may activate abilities of creatures you control as though those creatures had haste.",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

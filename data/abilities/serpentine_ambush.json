@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 5,
+        "toughness": 5,
+        "types": [
+          "Serpent"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "Until end of turn, {c:Targeted} becomes a blue Serpent with base power and toughness 5/5.",
+        "OverwriteColors": "True",
+        "Colors": "Blue",
+        "RemoveCreatureTypes": "True",
+        "SpellDescription": "Until end of turn, target creature becomes a blue Serpent with base power and toughness 5/5."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

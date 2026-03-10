@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.powerLE2",
+        "ValidBlocker": "Creature.Self",
+        "Description": "CARDNAME can't block creatures with power 2 or less."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

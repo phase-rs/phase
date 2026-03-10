@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<3/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gains first strike until end of turn.",
+        "KW": "First Strike"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SubAbility": "DelTrig",
+        "Defined": "Self",
+        "SpellDescription": "Exile CARDNAME. Return it to the battlefield under its owner's control at the beginning of the next end step."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

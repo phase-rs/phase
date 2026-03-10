@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Permanent.YouCtrl"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "5",
+        "ChoiceZone": "Battlefield",
+        "Mandatory": "True",
+        "Defined": "You",
+        "SpellDescription": "Choose five permanents you control. For each of those permanents, you may search your library for a card with the same name as that permanent. Put those cards onto the battlefield tapped, then shuffle.",
+        "ChoiceTitle": "Choose five permanents you control",
+        "SubAbility": "DBRepeat",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

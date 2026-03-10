@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Graveyard",
+        "CheckSVar": "X",
+        "Attacking": "True",
+        "SVarCompare": "GE2",
+        "ActivationPhases": "Declare Attackers",
+        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield tapped and attacking. Activate only during the declare attackers step and only if you're attacking two or more opponents.",
+        "Tapped": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

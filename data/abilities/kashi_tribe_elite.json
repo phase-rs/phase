@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Creature",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, tap that creature and it doesn't untap during its controller's next untap step.",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Legendary Snakes you control have shroud. (They can't be the targets of spells or abilities.)",
+        "AddKeyword": "Shroud",
+        "Affected": "Snake.Legendary+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

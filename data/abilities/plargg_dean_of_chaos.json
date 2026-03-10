@@ -1,0 +1,117 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Mana",
+                "cost": "Discard<1/Card>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "You",
+            "SpellDescription": "Draw a card."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "DigUntil",
+            "params": {
+              "Amount": "1",
+              "RememberFound": "True",
+              "SubAbility": "CascadeCast",
+              "SpellDescription": "Reveal cards from the top of your library until you reveal a nonlegendary, nonland card with mana value 3 or less. You may cast that card without paying its mana cost. Put all revealed cards not cast this way on the bottom of your library in a random order.",
+              "NoMoveRevealed": "True",
+              "Defined": "You",
+              "StackDescription": "SpellDescription",
+              "Valid": "Card.nonLand+nonLegendary+cmcLE3",
+              "RevealRandomOrder": "True",
+              "ImprintRevealed": "True"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "4 R"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "1",
+            "RememberFound": "True",
+            "SubAbility": "CascadeCast",
+            "SpellDescription": "Reveal cards from the top of your library until you reveal a nonlegendary, nonland card with mana value 3 or less. You may cast that card without paying its mana cost. Put all revealed cards not cast this way on the bottom of your library in a random order.",
+            "NoMoveRevealed": "True",
+            "Defined": "You",
+            "StackDescription": "SpellDescription",
+            "Valid": "Card.nonLand+nonLegendary+cmcLE3",
+            "RevealRandomOrder": "True",
+            "ImprintRevealed": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackersDeclared",
+          "params": {
+            "TriggerDescription": "Whenever you attack, untap each creature you control, then tap any number of creatures you control.",
+            "Execute": "DBUnTapAll",
+            "TriggerZones": "Battlefield",
+            "AttackingPlayer": "You"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.tapped+YouCtrl+Other",
+            "AddPower": "1",
+            "Description": "Other tapped creatures you control get +1/+0."
+          }
+        },
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Other untapped creatures you control get +0/+1.",
+            "AddToughness": "1",
+            "Affected": "Creature.untapped+YouCtrl+Other"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "STCantPlayLand",
+          "AILogic": "BeginningOfOppTurn",
+          "ConditionManaSpent": "R",
+          "ValidTgts": "Player",
+          "IsCurse": "True",
+          "EffectOwner": "Targeted",
+          "SpellDescription": "Target player can't play lands this turn if {R} was spent to cast this spell and can't cast creature spells this turn if {W} was spent to cast this spell. (Do both if {R}{W} was spent.)",
+          "Name": "Moonhold's Effect — No Lands",
+          "SubAbility": "WPaid"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "STCantPlayLand",
+        "AILogic": "BeginningOfOppTurn",
+        "ConditionManaSpent": "R",
+        "ValidTgts": "Player",
+        "IsCurse": "True",
+        "EffectOwner": "Targeted",
+        "SpellDescription": "Target player can't play lands this turn if {R} was spent to cast this spell and can't cast creature spells this turn if {W} was spent to cast this spell. (Do both if {R}{W} was spent.)",
+        "Name": "Moonhold's Effect — No Lands",
+        "SubAbility": "WPaid"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

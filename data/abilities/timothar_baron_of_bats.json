@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Vampire.Other+!token+YouCtrl",
+        "TriggerDescription": "Whenever another nontoken Vampire you control dies, you may pay {1} and exile it. If you do, create a 1/1 black Bat creature token with flying. It gains \"When this creature deals combat damage to a player, sacrifice it and return the exiled card to the battlefield tapped.\"",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

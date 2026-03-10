@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddTrigger": "AttackTrig",
+        "Description": "Enchanted creature has \"Whenever this creature attacks alone, it gets +X/+X until end of turn, where X is the number of nonland permanents you control.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

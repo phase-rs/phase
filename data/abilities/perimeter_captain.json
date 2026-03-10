@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+withDefender",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a creature you control with defender blocks, you may gain 2 life.",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigScry",
+        "TriggerDescription": "At the beginning of your upkeep, scry 1.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you discard a card, each opponent mills two cards. (They put the top two cards of their library into their graveyard.)",
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

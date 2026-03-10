@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate CARDNAME.",
+          "CostDesc": "Exile the top creature card of your graveyard:"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromGrave<1/Card.TopGraveyardCreature>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate CARDNAME.",
+        "CostDesc": "Exile the top creature card of your graveyard:"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

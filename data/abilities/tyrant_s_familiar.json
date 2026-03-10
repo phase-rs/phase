@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TrigAttacks",
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
+        "Affected": "Card.Self",
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Description": "Lieutenant — As long as you control your commander, CARDNAME gets +2/+2 and has \"Whenever CARDNAME attacks, it deals 7 damage to target creature defending player controls.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

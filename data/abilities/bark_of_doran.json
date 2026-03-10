@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +0/+1.",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CombatDamageToughness"
+      },
+      "params": {
+        "ValidCard": "Creature.EquippedBy+powerLTtoughness",
+        "Description": "As long as equipped creature's toughness is greater than its power, it assigns combat damage equal to its toughness rather than its power."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigRemoveFromCombat",
+        "TriggerDescription": "When this Aura enters, remove enchanted creature from combat. Then draw a card for each tapped creature its controller controls.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature loses all abilities and can't attack or block.",
+        "RemoveAllAbilities": "True",
+        "Affected": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "Enchanted creature loses all abilities and can't attack or block.",
+        "ValidCard": "Creature.EnchantedBy",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

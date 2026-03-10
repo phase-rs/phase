@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, it deals X damage to each of up to X target creatures."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Delirium": "True",
+        "ValidTarget": "Permanent,Player",
+        "Description": "Delirium — If a source you control would deal noncombat damage to a permanent or player while there are four or more card types among cards in your graveyard, it deals double that damage instead.",
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
+        "ReplaceWith": "DamageReplace",
+        "IsCombat": "False"
+      }
+    }
+  ],
+  "faces": []
+}

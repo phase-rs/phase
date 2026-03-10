@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Description": "Each creature you control with a +1/+1 counter on it has trample.",
+        "Affected": "Creature.YouCtrl+counters_GE1_P1P1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

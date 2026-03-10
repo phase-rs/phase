@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

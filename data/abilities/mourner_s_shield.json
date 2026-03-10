@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "AILogic": "NeedsPrevention",
+          "Choices": "Card.SharesColorWith Imprinted",
+          "ChoiceTitle": "Choose a source that shares a color with the exiled card",
+          "RememberChosen": "True",
+          "SpellDescription": "Prevent all damage that would be dealt this turn by a source of your choice that shares a color with the exiled card.",
+          "SubAbility": "DBEffect"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "NeedsPrevention",
+        "Choices": "Card.SharesColorWith Imprinted",
+        "ChoiceTitle": "Choose a source that shares a color with the exiled card",
+        "RememberChosen": "True",
+        "SpellDescription": "Prevent all damage that would be dealt this turn by a source of your choice that shares a color with the exiled card.",
+        "SubAbility": "DBEffect"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile target card from a graveyard.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "DBCleanImprinted",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

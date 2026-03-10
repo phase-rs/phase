@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "SubAbility": "DBDamage",
+        "SpellDescription": "Target player draws two cards, then CARDNAME deals damage to that player equal to the number of cards they've drawn this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

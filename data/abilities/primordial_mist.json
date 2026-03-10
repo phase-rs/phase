@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "You may play that card this turn. (You still pay its costs. Timing rules still apply.)",
+          "CostDesc": "Exile a face-down permanent you control face up:",
+          "RememberObjects": "ExiledCards",
+          "StaticAbilities": "Play",
+          "ExileOnMoved": "Exile"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Exile<1/Permanent.faceDown>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may play that card this turn. (You still pay its costs. Timing rules still apply.)",
+        "CostDesc": "Exile a face-down permanent you control face up:",
+        "RememberObjects": "ExiledCards",
+        "StaticAbilities": "Play",
+        "ExileOnMoved": "Exile"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigManifest",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your end step, you may manifest the top card of your library."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

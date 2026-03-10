@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChangeTargets",
+        "params": {
+          "TargetType": "Spell,Activated,Triggered",
+          "Optional": "True",
+          "ValidTgts": "Card,Emblem",
+          "SpellDescription": "You may choose new targets for target spell or ability.",
+          "TgtPrompt": "Select target spell or ability"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell,Activated,Triggered",
+        "Optional": "True",
+        "ValidTgts": "Card,Emblem",
+        "SpellDescription": "You may choose new targets for target spell or ability.",
+        "TgtPrompt": "Select target spell or ability"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "0",
+        "EffectZone": "All",
+        "ValidSA": "Spell",
+        "ValidPlayer": "You",
+        "Description": "If you control a commander, you may cast this spell without paying its mana cost.",
+        "IsPresent": "Card.IsCommander+YouCtrl",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put that many +1/+1 counters on it.",
+        "ValidTarget": "Player",
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

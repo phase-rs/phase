@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Whenever CARDNAME or another legendary creature you control enters, return target artifact card from your graveyard to your hand.",
+        "ValidCard": "Card.Self,Creature.Other+Legendary+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

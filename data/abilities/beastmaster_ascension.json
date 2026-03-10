@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control attacks, you may put a quest counter on CARDNAME.",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPut",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "IsPresent": "Card.Self+counters_GE7_QUEST",
+        "AddToughness": "5",
+        "AddPower": "5",
+        "Description": "As long as CARDNAME has seven or more quest counters on it, creatures you control get +5/+5."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

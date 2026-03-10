@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile all creatures. Delirium — Create a 4/4 white Angel creature token with flying if there are four or more card types among cards in your graveyard.",
+        "SubAbility": "DBToken",
+        "ChangeType": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

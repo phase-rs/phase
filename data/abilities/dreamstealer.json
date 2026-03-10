@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDiscard",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player discards that many cards.",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

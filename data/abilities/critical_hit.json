@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature gains double strike until end of turn.",
+        "KW": "Double Strike"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "RolledDie",
+      "params": {
+        "ValidResult": "20",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Graveyard",
+        "ValidPlayer": "You",
+        "TriggerDescription": "When you roll a natural 20, return CARDNAME from your graveyard to your hand. (A natural 20 is a roll that displays 20 on the die.)",
+        "Natural": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "B"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and can't block.",
+        "AddPower": "2",
+        "Affected": "Card.Self",
+        "AddToughness": "2",
+        "Condition": "Threshold"
+      }
+    },
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Condition": "Threshold",
+        "Description": "Enchanted Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and can't block.",
+        "ValidCard": "Card.Self",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

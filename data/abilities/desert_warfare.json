@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Desert.YouCtrl",
+        "TriggerDescription": "Whenever you sacrifice a Desert and whenever a Desert card is put into your graveyard from your hand or library, put that card onto the battlefield under your control at the beginning of your next end step.",
+        "Execute": "TrigDelay",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Desert.YouOwn",
+        "Destination": "Graveyard",
+        "Execute": "TrigDelay",
+        "TriggerDescription": "Whenever you sacrifice a Desert and whenever a Desert card is put into your graveyard from your hand or library, put that card onto the battlefield under your control at the beginning of your next end step.",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "Origin": "Hand,Library"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, if you control five or more Deserts, create that many 1/1 red, green, and white Sand Warrior creature tokens. They gain haste.",
+        "ValidPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Desert.YouCtrl",
+        "Phase": "BeginCombat",
+        "PresentCompare": "GE5"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

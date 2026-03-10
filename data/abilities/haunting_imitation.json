@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "SpellDescription": "Each player reveals the top card of their library. For each creature card revealed this way, create a token that's a copy of that card, except it's 1/1, it's a Spirit in addition to its other types, and it has flying. If no creature cards were revealed this way, return CARDNAME to its owner's hand.",
+          "StackDescription": "SpellDescription",
+          "RememberRevealed": "True",
+          "Defined": "Player",
+          "SubAbility": "DBRepeatEach"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player reveals the top card of their library. For each creature card revealed this way, create a token that's a copy of that card, except it's 1/1, it's a Spirit in addition to its other types, and it has flying. If no creature cards were revealed this way, return CARDNAME to its owner's hand.",
+        "StackDescription": "SpellDescription",
+        "RememberRevealed": "True",
+        "Defined": "Player",
+        "SubAbility": "DBRepeatEach"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, surveil 1.",
+        "Execute": "TrigSurveil"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "IsPresent2": "Card.Self+!IsSolved",
+        "PresentZone": "Graveyard",
+        "Execute": "Solved",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE15",
+        "TriggerDescription": "To solve — There are fifteen or more cards in your graveyard. (If unsolved, solve at the beginning of your end step.)",
+        "IsPresent": "Card.YouOwn"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Solved — Whenever you cast a nonlegendary creature spell, copy that spell. (The copy becomes a token.)",
+        "ValidCard": "Creature.nonLegendary",
+        "IsPresent": "Card.Self+IsSolved",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigCopySpell"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

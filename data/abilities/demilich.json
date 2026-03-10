@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks, exile up to one target instant or sorcery card from your graveyard. Copy it. You may cast the copy."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Color": "U",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Amount": "X",
+        "Description": "This spell costs {U} less to cast for each instant and sorcery spell you've cast this turn.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Description": "You may cast CARDNAME from your graveyard by exiling four instant and/or sorcery cards from your graveyard in addition to paying its other costs.",
+        "AffectedZone": "Graveyard",
+        "EffectZone": "Graveyard",
+        "RaiseCost": "ExileFromGrave<4/Instant;Sorcery/instant or sorcery cards>",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddAbility": "WeirdingWoodTap",
+        "Description": "Enchanted land has \"{T}: Add two mana of any one color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

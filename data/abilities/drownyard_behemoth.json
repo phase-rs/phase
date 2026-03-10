@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Description": "CARDNAME has hexproof as long as it entered this turn.",
+        "Affected": "Card.Self+ThisTurnEntered"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

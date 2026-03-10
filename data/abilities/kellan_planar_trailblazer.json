@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Human",
+          "Faerie",
+          "Detective"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "If NICKNAME is a Scout, it becomes a Human Faerie Detective and gains \"Whenever NICKNAME deals combat damage to a player, exile the top card of your library. You may play that card this turn.\"",
+        "Duration": "Permanent",
+        "Triggers": "KellanCombat",
+        "RemoveCreatureTypes": "True",
+        "ConditionPresent": "Card.Self+Scout"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 2,
+        "types": [
+          "Human",
+          "Faerie",
+          "Rogue"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Double Strike",
+        "RemoveCreatureTypes": "True",
+        "ConditionPresent": "Card.Self+Detective",
+        "SpellDescription": "If NICKNAME is a Detective, it becomes a 3/2 Human Faerie Rogue and gains double strike.",
+        "Duration": "Permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

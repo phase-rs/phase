@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever a player casts a spell, CARDNAME deals X damage to that player, where X is twice the number of cards in all graveyards with the same name as that spell."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

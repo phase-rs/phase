@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, put a lore counter on CARDNAME, then draw a card for each lore counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you control a Cleric, CARDNAME has \"Whenever a creature you control dies, each opponent loses 1 life and you gain 1 life.\"",
+        "IsPresent": "Cleric.YouCtrl",
+        "AddTrigger": "TrigDrain",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "1",
+        "Affected": "Forest,Saproling",
+        "SetColor": "Green",
+        "AddType": "Land & Creature & Forest & Saproling",
+        "Description": "All Forests and all Saprolings are 1/1 green Saproling creatures and Forest lands in addition to their other types. (They're affected by summoning sickness.)",
+        "SetPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

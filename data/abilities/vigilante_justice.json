@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "AndJusticeForAll",
+        "ValidCard": "Human.YouCtrl",
+        "TriggerDescription": "Whenever a Human you control enters, CARDNAME deals 1 damage to any target.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

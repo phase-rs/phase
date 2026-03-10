@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "The Will of the Hive Mind — Other creatures you control with counters on them have flying and haste.",
+        "AddKeyword": "Flying & Haste",
+        "Affected": "Creature.YouCtrl+HasCounters+Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, it deals 1 damage to each creature your opponents control.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "X",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Description": "This spell costs {1} less to cast for each permanent you control with oil counters on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create a 2/2 black Zombie creature token.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentCompare": "EQ0",
+        "Execute": "TrigNoZombies",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if there are no Zombies on the battlefield, CARDNAME deals 1 damage to you.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Zombie"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

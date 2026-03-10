@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "TriggerZones": "Graveyard",
+        "ValidCard": "Card",
+        "TriggerDescription": "When you cast a spell for its warp cost, return this card from your graveyard to the battlefield under its owner's control. It perpetually gets +1/+0.",
+        "ValidSA": "Spell.Warp",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "This creature can't block.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.YouOwn",
+        "SetPower": "8",
+        "Description": "As long as there are eight or more cards in your graveyard, NICKNAME has base power and toughness 8/8.",
+        "PresentZone": "Graveyard",
+        "PresentCompare": "GE8",
+        "SetToughness": "8",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Villain.YouCtrl+Other",
+        "Description": "As long as you control another Villain, NICKNAME has hexproof. (He can't be the target of spells or abilities your opponents control.)",
+        "AddKeyword": "Hexproof",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

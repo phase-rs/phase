@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddTrigger": "TrigAttack",
+        "AddPower": "1",
+        "Affected": "Card.EquippedBy",
+        "Description": "Equipped creature gets +1/+1 and has \"Whenever this creature attacks, draw a card, then discard a card.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

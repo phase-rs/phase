@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "Z",
+        "Description": "CARDNAME gets +2/+2 as long as you control a permanent named Guan Yu, Sainted Warrior or a permanent named Zhang Fei, Fierce Warrior.",
+        "AddToughness": "2",
+        "Affected": "Card.Self",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

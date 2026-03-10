@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Archer.YouCtrl+inZoneBattlefield",
+        "ValidTarget": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an Archer you control deals damage to a creature, that Archer deals that much damage to that creature's controller.",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Other Archer creatures you control get +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Creature.Archer+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

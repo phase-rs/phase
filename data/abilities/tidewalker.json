@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Battlefield",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power and toughness are each equal to the number of time counters on it.",
+        "SetToughness": "Y",
+        "SetPower": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you set this scheme in motion, choose an opponent with the highest life total among your opponents. That player loses 7 life.",
+        "ValidCard": "Card.Self",
+        "Execute": "DBChoosePlayer"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

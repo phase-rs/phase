@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if mana from a Treasure was spent to cast it, create a Treasure token for each mana from a Treasure spent to cast it.",
+        "CheckSVar": "X",
+        "Origin": "Any",
+        "Execute": "TrigTreasure"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

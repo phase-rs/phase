@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "PreventionEffect": "True",
+        "Description": "If damage would be dealt to CARDNAME, prevent that damage. Put a -1/-1 counter on CARDNAME for each 1 damage prevented this way.",
+        "ReplaceWith": "Counters",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

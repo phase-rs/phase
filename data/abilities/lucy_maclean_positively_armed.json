@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Golden Rule — Whenever a token enters, you may have target player other than its controller create a token that's a copy of it, then you draw a card if an opponent created a token this way. Do this only once each turn.",
+        "Execute": "TrigCopy",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.token",
+        "TriggerZones": "Battlefield",
+        "ResolvedLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

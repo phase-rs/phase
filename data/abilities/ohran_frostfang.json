@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, draw a card.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Attacking creatures you control have deathtouch.",
+        "Affected": "Creature.attacking+YouCtrl",
+        "AddKeyword": "Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

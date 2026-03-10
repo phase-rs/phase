@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may sacrifice an artifact. When you do, CARDNAME deals 3 damage to any target.",
+        "Execute": "TrigImmediateTrig",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

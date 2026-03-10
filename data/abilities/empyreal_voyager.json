@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigEnergy",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you get that many {E} (energy counters)."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

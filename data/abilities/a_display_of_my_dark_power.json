@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you set this scheme in motion, until your next turn, whenever a player taps a land for mana, that player adds one mana of any type that land produced.",
+        "Execute": "DarkEffect"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

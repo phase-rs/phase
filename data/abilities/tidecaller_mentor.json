@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Threshold — When CARDNAME enters, if there are seven or more cards in your graveyard, return up to one target nonland permanent to its owner's hand.",
+        "Threshold": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

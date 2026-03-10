@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever you cast a spell during your turn, untap target creature.",
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

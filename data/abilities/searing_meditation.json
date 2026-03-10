@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you gain life, you may pay {2}. If you do, CARDNAME deals 2 damage to any target.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

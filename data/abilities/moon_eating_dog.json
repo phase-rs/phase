@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Flying",
+        "IsPresent": "Planeswalker.Yanling+YouCtrl",
+        "Description": "As long as you control a Yanling planeswalker, CARDNAME has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

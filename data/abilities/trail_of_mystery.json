@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "TriggerDescription": "Whenever a face-down creature you control enters, you may search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.faceDown+YouCtrl"
+      }
+    },
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerDescription": "Whenever a permanent you control is turned face up, if it's a creature, it gets +2/+2 until end of turn.",
+        "ValidCard": "Permanent.Creature+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

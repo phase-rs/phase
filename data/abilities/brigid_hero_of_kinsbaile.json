@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "All",
+          "filter": "Player"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.attacking,Creature.blocking",
+        "ValidDescription": "each attacking or blocking creature target player controls.",
+        "SpellDescription": "CARDNAME deals 2 damage to each attacking or blocking creature target player controls."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

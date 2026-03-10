@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo G U",
+        "params": {
+          "SpellDescription": "Add {G} or {U}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G} or {U}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "This land enters tapped.",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

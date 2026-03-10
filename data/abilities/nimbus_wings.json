@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +1/+2 and has flying.",
+        "AddPower": "1",
+        "AddToughness": "2",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

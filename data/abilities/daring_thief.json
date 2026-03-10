@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExchangeControl",
+        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, you may exchange control of target nonland permanent you control and target permanent an opponent controls that shares a card type with it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

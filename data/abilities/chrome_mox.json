@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ManaReflected",
+        "params": {
+          "Valid": "Defined.Imprinted",
+          "ReflectProperty": "Is",
+          "ColorOrType": "Color",
+          "SpellDescription": "Add one mana of any of the exiled card's colors."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Defined.Imprinted",
+        "ReflectProperty": "Is",
+        "ColorOrType": "Color",
+        "SpellDescription": "Add one mana of any of the exiled card's colors."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile a nonartifact, nonland card from your hand."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
+        "Static": "True",
+        "Execute": "DBForget",
+        "Origin": "Exile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

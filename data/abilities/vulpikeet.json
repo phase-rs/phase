@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Mutates",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever this creature mutates, put a +1/+1 counter on it.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

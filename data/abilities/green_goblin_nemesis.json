@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you discard a nonland card, put a +1/+1 counter on target Goblin you control.",
+        "ValidCard": "Card.nonLand+YouCtrl"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "TrigTreasure",
+        "TriggerDescription": "When you discard a land card, create a tapped Treasure token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

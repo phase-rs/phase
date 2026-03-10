@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes blocked, untap it.",
+        "Execute": "TrigUntap",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

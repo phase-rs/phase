@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "IsPresent": "Card.Self+Enchantment",
+        "TriggerDescription": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 3/3 Knight creature with first strike.",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAnimate"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

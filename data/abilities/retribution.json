@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose two target creatures an opponent controls. That player chooses and sacrifices one of those creatures. Put a -1/-1 counter on the other.",
+        "TargetMin": "2",
+        "RememberTargets": "True",
+        "IsCurse": "True",
+        "SubAbility": "DBChoose",
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select two target creatures an opponent controls",
+        "TargetMax": "2",
+        "TargetsWithSameController": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

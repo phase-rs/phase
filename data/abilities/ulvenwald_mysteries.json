@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a nontoken creature you control dies, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
+        "ValidCard": "Creature.YouCtrl+!token",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you sacrifice a Clue, create a 1/1 white Human Soldier creature token.",
+        "ValidCard": "Clue.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

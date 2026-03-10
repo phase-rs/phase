@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals damage to an opponent, tap target creature. That creature doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap",
+        "ValidTarget": "Opponent",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Library",
+            "destination": "Hand",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ChangeTypeDesc": "basic Forest or Plains",
+            "ChangeType": "Forest.Basic,Plains.Basic",
+            "SpellDescription": "Search your library for a basic Forest or Plains card, reveal it, put it into your hand, then shuffle."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PumpAll",
+            "power": 2,
+            "toughness": 2,
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Creatures you control get +2/+2 until end of turn.",
+            "ValidCards": "Creature.YouCtrl"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

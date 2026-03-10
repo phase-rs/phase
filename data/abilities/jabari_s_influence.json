@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack+nonArtifact+attackedYouThisTurn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Cast this spell only after combat. Gain control of target nonartifact, nonblack creature that attacked you this turn and put a -1/-0 counter on it.",
+        "SubAbility": "DBPutCounter",
+        "TgtPrompt": "Select target nonartifact, nonblack creature that attacked you this turn",
+        "ActivationPhases": "Main2->Cleanup"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

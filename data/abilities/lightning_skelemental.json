@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player discards two cards.",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of the end step, sacrifice CARDNAME.",
+        "Phase": "End of Turn",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, each opponent sacrifices a creature.",
+        "Execute": "TrigSac"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigToken",
+        "Phase": "End of Turn",
+        "CheckSVar": "X",
+        "TriggerDescription": "At the beginning of each end step, if a planeswalker entered the battlefield under your control this turn, create a 2/2 black Zombie creature token.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

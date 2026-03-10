@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Tap another target creature.",
+        "IsCurse": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, exile up to one other target creature you control, then return that card to the battlefield under your control."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "CheckSVar": "X",
+        "SVarCompare": "LT5",
+        "RemoveType": "Creature",
+        "Description": "As long as your devotion to blue is less than five, NICKNAME is not a creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

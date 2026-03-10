@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever another creature you control enters, CARDNAME deals damage equal to that creature's power to any target."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Activator": "Player.Opponent",
+        "ValidTarget": "Card.Self",
+        "Description": "Spells your opponents cast that target CARDNAME cost an additional 3 life to cast.",
+        "Cost": "PayLife<3>",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

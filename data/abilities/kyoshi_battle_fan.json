@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this Equipment enters, create a 1/1 white Ally creature token, then attach this Equipment to it.",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+0.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

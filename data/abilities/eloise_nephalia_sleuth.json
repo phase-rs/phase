@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+Other",
+        "Execute": "TrigInvestigate",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature you control dies, investigate (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerDescription": "Whenever you sacrifice a token, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+        "Execute": "DBSurveil",
+        "ValidCard": "Permanent.token+YouCtrl",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

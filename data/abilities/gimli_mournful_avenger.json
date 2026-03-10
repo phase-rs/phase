@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature you control dies, put a +1/+1 counter on NICKNAME. When this ability resolves for the third time this turn, NICKNAME fights up to one target creature you don't control.",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Affected": "Card.Self",
+        "CheckSVar": "X",
+        "SVarCompare": "GE2",
+        "Description": "CARDNAME has indestructible as long as two or more creatures died under your control this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

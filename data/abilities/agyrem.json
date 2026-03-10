@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a white creature dies, return it to the battlefield under its owner's control at the beginning of the next end step.",
+        "TriggerZones": "Command",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigDelay",
+        "ValidCard": "Creature.White"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.nonWhite",
+        "Execute": "TrigDelay2",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever a nonwhite creature dies, return it to its owner's hand at the beginning of the next end step.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, creatures can't attack you until a player planeswalks.",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever this creature enters or attacks, target creature card in your graveyard without unearth perpetually gains unearth. The unearth cost is equal to its mana cost."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever this creature enters or attacks, target creature card in your graveyard without unearth perpetually gains unearth. The unearth cost is equal to its mana cost.",
+        "Execute": "TrigPump",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "ReavingX",
+        "Description": "Max speed — You may pay {0} rather than pay the unearth cost of the first unearth ability you activate each turn.",
+        "Condition": "MaxSpeed",
+        "Affected": "Card.Self",
+        "AddStaticAbility": "FreebieReaving"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

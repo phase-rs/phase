@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSubmerge",
+        "ValidSource": "Card.Self",
+        "ValidCard": "Creature",
+        "TriggerDescription": "When CARDNAME exploits a creature, target creature's owner puts it on the top or bottom of their library."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

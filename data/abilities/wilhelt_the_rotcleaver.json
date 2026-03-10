@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever another Zombie you control dies, if it didn't have decayed, create a 2/2 black Zombie creature token with decayed. (It can't block. When it attacks, sacrifice it at end of combat.)",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "ValidCard": "Zombie.Other+YouCtrl+withoutDecayed",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraw",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, you may sacrifice a Zombie. If you do, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

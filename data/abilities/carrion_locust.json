@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, exile target card from an opponent's graveyard. If it was a creature card, that player loses 1 life.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

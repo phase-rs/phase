@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigFlipACoin",
+        "TriggerDescription": "At the beginning of your upkeep, flip a coin. If you lose the flip, return CARDNAME to its owner's hand.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

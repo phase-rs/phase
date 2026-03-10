@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature",
+        "SetToughness": "1",
+        "RemoveAllAbilities": "True",
+        "Description": "All creatures lose all abilities and have base power and toughness 1/1.",
+        "SetPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

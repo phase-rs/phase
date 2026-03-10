@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 B R"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<X>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "This spell costs 3 life more to cast for each target.",
+        "SpellDescription": "Destroy any number of target creatures.",
+        "TargetMin": "0",
+        "TargetMax": "MaxPayLifeLimit"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 0
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "SubAbility": "DBDestroyAll",
+        "SpellDescription": "Target opponent loses life equal to the number of creatures they control. Then destroy all creatures."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

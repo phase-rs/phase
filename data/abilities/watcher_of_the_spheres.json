@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl+withFlying",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature with flying you control enters, CARDNAME gets +1/+1 until end of turn.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Type": "Spell",
+        "ValidCard": "Creature.withFlying",
+        "Amount": "1",
+        "Description": "Creature spells with flying you cast cost {1} less to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

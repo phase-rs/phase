@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, you may draw X cards, where X is the number of counters on NICKNAME. If you do, you lose X life.",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

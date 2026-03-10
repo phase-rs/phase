@@ -1,0 +1,72 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Imprint": "True",
+        "ChangeType": "Instant.cmcEQX,Sorcery.cmcEQX",
+        "PrecostDesc": "Imprint —",
+        "SpellDescription": "You may exile an instant or sorcery card with mana value X from your hand.",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you may copy a card exiled with CARDNAME. If you do, you may cast the copy without paying its mana cost.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopy"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Exile",
+        "Destination": "Any",
+        "Static": "True",
+        "Execute": "DBForget",
+        "ValidCard": "Card.IsImprinted+ExiledWithSource"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup",
+        "Destination": "Any",
+        "Static": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

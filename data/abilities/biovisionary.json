@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "PresentCompare": "GE4",
+        "Execute": "TrigWinGame",
+        "TriggerDescription": "At the beginning of the end step, if you control four or more creatures named Biovisionary, you win the game.",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature.YouCtrl+namedBiovisionary"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you set this scheme in motion, destroy up to one target artifact, up to one target enchantment, and up to one target nonbasic land.",
+        "Execute": "Ignite",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddKeyword": "Vigilance & Trample",
+        "Description": "Other Centaur creatures you control get +1/+1 and have vigilance and trample.",
+        "Affected": "Creature.Centaur+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

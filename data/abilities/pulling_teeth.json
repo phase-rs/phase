@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clash",
+        "params": {
+          "OtherwiseSubAbility": "DBDiscardOne",
+          "ValidTgts": "Player",
+          "WinSubAbility": "DBDiscardTwo",
+          "SpellDescription": "Clash with an opponent. If you win, target player discards two cards. Otherwise, that player discards a card."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "OtherwiseSubAbility": "DBDiscardOne",
+        "ValidTgts": "Player",
+        "WinSubAbility": "DBDiscardTwo",
+        "SpellDescription": "Clash with an opponent. If you win, target player discards two cards. Otherwise, that player discards a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

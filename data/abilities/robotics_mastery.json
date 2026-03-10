@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this Aura enters, create two 1/1 colorless Robot artifact creature tokens with flying."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

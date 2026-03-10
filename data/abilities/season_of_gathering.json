@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "CanRepeatModes": "True",
+          "Pawprint": "5",
+          "Choices": "DBPutCounter,DBChoose,DBDraw",
+          "MinCharmNum": "0",
+          "CharmNum": "5"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "CanRepeatModes": "True",
+        "Pawprint": "5",
+        "Choices": "DBPutCounter,DBChoose,DBDraw",
+        "MinCharmNum": "0",
+        "CharmNum": "5"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

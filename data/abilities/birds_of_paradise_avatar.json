@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "AnyMana",
+        "Affected": "Land.YouCtrl",
+        "EffectZone": "Command",
+        "Description": "Lands you control have \"{T}: Add one mana of any color.\"",
+        "AffectedZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

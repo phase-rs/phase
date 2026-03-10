@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "-2",
+        "Affected": "Card.Self+MostProminentColor black",
+        "AddPower": "-2",
+        "Description": "CARDNAME gets -2/-2 as long as black is the most common color among all permanents or is tied for most common."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

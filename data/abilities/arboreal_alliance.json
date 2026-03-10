@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create an X/X green Treefolk creature token.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Creature.Elf+YouCtrl",
+        "TriggerDescription": "Whenever you attack with one or more Elves, populate. (Create a token that's a copy of a creature token you control.)",
+        "Execute": "TrigPopulate",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

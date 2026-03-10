@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRemoveCtr",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, remove an oil counter from CARDNAME. Then if it has no oil counters on it, you lose the game.",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a creature an opponent controls dies, its controller loses 2 life.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

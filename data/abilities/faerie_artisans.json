@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Creature.!token+OppCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a nontoken creature enters under an opponent's control, create a token that's a copy of that creature except it's an artifact in addition to its other types. Then exile all other tokens created with CARDNAME.",
+        "Execute": "TrigImprint",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Static": "True",
+        "Execute": "DBCleanup",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

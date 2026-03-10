@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Land.nonBasic",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "Description": "Nonbasic lands don't untap during their controllers' untap steps."
+      }
+    }
+  ],
+  "faces": []
+}

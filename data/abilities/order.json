@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.attacking"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target attacking creature",
+            "SpellDescription": "Exile target attacking creature."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "StaticAbilities": "KWPump",
+              "SpellDescription": "Creatures can't block this turn.",
+              "AILogic": "Evasion"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "StaticAbilities": "KWPump",
+            "SpellDescription": "Creatures can't block this turn.",
+            "AILogic": "Evasion"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

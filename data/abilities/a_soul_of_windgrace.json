@@ -1,0 +1,110 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 3
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Land>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 3 life."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Land>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "B"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Land>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "CARDNAME gains indestructible until end of turn.",
+        "KW": "Indestructible",
+        "SubAbility": "DBTap"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may put a land card from a graveyard onto the battlefield tapped under your control.",
+        "Origin": "Any",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigChangeZone",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may put a land card from a graveyard onto the battlefield tapped under your control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

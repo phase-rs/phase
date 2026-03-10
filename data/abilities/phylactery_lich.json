@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "IsPresent": "Permanent.counters_GE1_PHYLACTERY+YouCtrl",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When you control no permanents with phylactery counters on them, sacrifice CARDNAME.",
+        "PresentCompare": "EQ0",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

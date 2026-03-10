@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, search your library for up to X basic land cards, where X is CARDNAME's power, put them onto the battlefield, then shuffle.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigChange",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

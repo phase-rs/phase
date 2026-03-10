@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a nontoken creature you control dies, CARDNAME deals 1 damage to any target.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigDamage",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+!token"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "AddPower": "1",
+        "Description": "Other creatures you control get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

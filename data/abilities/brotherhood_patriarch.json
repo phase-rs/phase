@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLoseLife",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, each opponent loses 2 life and you gain 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

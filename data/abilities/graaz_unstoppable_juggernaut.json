@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Juggernaut.YouCtrl",
+        "Description": "Juggernauts you control attack each combat if able."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Juggernauts you control can't be blocked by Walls.",
+        "ValidAttacker": "Juggernaut.YouCtrl",
+        "ValidBlocker": "Creature.Wall"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "5",
+        "Description": "Other creatures you control have base power and toughness 5/3 and are Juggernauts in addition to their other creature types.",
+        "AffectedZone": "Battlefield",
+        "Affected": "Creature.Other+YouCtrl",
+        "SetToughness": "3",
+        "AddType": "Juggernaut"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

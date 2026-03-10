@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigGainLife",
+        "PresentCompare": "EQX",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if all nonland permanents you control are white, you gain 1 life.",
+        "IsPresent": "Permanent.nonLand+White+YouCtrl",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile target creature with mana value 3 or less an opponent controls until CARDNAME leaves the battlefield. (That creature returns under its owner's control.)",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

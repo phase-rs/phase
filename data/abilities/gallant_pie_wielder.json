@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Celebration — CARDNAME has double strike as long as two or more nonland permanents entered the battlefield under your control this turn.",
+        "CheckSVar": "Celebration",
+        "Affected": "Card.Self",
+        "SVarCompare": "GE2",
+        "AddKeyword": "Double Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

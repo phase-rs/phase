@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Min": "3",
+        "ValidCard": "Creature.Self",
+        "Description": "CARDNAME can't be blocked except by three or more creatures."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

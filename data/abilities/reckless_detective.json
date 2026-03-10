@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigChoice",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may sacrifice an artifact or discard a card. If you do, draw a card and CARDNAME gets +2/+0 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

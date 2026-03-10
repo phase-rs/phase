@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigToken",
+            "TriggerDescription": "When CARDNAME enters or becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "BecomesTarget",
+          "params": {
+            "Execute": "TrigToken",
+            "Secondary": "True",
+            "TriggerDescription": "When CARDNAME enters or becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
+            "ValidTarget": "Card.Self",
+            "TriggerZones": "Battlefield",
+            "ValidSource": "Spell.Aura"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Execute": "TrigToken",
+            "TriggerDescription": "When CARDNAME enters or enchanted creature becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield"
+          }
+        },
+        {
+          "mode": "BecomesTarget",
+          "params": {
+            "ValidSource": "Spell.Aura",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigToken",
+            "Secondary": "True",
+            "TriggerDescription": "When CARDNAME enters or enchanted creature becomes the target of an Aura spell, create a 1/1 white Spirit creature token with flying.",
+            "ValidTarget": "Creature.EnchantedBy"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Secondary": "True",
+            "Affected": "Creature.EnchantedBy",
+            "AddSVar": "EnMe"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Destination": "Graveyard",
+            "ReplaceWith": "Exile",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead."
+          }
+        }
+      ]
+    }
+  ]
+}

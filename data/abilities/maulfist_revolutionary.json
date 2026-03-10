@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or dies, for each kind of counter on target permanent or player, give that permanent or player another counter of that kind.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigIncrementCounters",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters or dies, for each kind of counter on target permanent or player, give that permanent or player another counter of that kind.",
+        "Secondary": "True",
+        "Execute": "TrigIncrementCounters"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

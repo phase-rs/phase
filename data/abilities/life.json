@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "AnimateAll",
+            "params": {
+              "Power": "1",
+              "Toughness": "1",
+              "Types": "Creature",
+              "ValidCards": "Land.YouCtrl",
+              "SpellDescription": "All lands you control become 1/1 creatures until end of turn. They're still lands."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "Power": "1",
+            "Toughness": "1",
+            "Types": "Creature",
+            "ValidCards": "Land.YouCtrl",
+            "SpellDescription": "All lands you control become 1/1 creatures until end of turn. They're still lands."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouOwn"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "GainControl": "True",
+            "TgtPrompt": "Choose target creature card in your graveyard",
+            "SpellDescription": "Return target creature card from your graveyard to the battlefield. You lose life equal to its mana value.",
+            "SubAbility": "DBLoseLifeYou"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

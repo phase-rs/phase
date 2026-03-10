@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

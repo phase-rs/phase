@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.AdventureCard+YouOwn",
+        "Affected": "Card.Self",
+        "AddKeyword": "Haste",
+        "PresentZone": "Exile",
+        "Description": "CARDNAME has haste as long as you own a card in exile that has an Adventure."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

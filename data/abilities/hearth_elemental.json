@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Amount": "X",
+            "EffectZone": "All",
+            "Type": "Spell",
+            "Description": "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Discard",
+            "count": 1,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "You",
+            "Mode": "Hand",
+            "SubAbility": "DBDraw",
+            "SpellDescription": "Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

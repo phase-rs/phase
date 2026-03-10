@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "10",
+        "Affected": "Creature.IsCommander+YouOwn",
+        "SetToughness": "10",
+        "AddType": "Giant",
+        "Description": "Commander creatures you own have base power and toughness 10/10 and are Giants in addition to their other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

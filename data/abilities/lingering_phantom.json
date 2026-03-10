@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "Whenever you cast a historic spell, you may pay {B}. If you do, return CARDNAME from your graveyard to your hand. (Artifacts, legendaries, and Sagas are historic.)",
+        "ValidCard": "Card.Historic",
+        "OptionalDecider": "You",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

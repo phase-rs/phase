@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commander creatures you own have \"Whenever an artifact or creature you control is put into a graveyard from the battlefield, each opponent loses 1 life.\"",
+        "Affected": "Creature.IsCommander+YouOwn",
+        "AddTrigger": "Dies"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

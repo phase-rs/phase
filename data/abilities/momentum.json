@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "OptionalDecider": "You",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a growth counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +1/+1 for each growth counter on CARDNAME.",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "X",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

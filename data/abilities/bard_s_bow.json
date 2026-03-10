@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddKeyword": "Reach",
+        "AddType": "Bard",
+        "Description": "Equipped creature gets +2/+2, has reach, and is a Bard in addition to its other types.",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

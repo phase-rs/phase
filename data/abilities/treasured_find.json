@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.YouOwn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target card in your graveyard",
+        "SubAbility": "DBChange",
+        "SpellDescription": "Return target card from your graveyard to your hand. Exile CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

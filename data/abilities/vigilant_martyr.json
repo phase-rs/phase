@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "ValidTgts": "Creature",
+          "SpellDescription": "Regenerate target creature."
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "SpellDescription": "Regenerate target creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W W"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "TgtPrompt": "Select target spell",
+        "TargetValidTargeting": "Enchantment.inRealZoneBattlefield",
+        "SpellDescription": "Counter target spell that targets an enchantment."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

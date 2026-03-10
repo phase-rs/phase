@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a plains card, put it onto the battlefield tapped, then shuffle.",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

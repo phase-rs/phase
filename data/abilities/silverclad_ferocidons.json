@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, each opponent sacrifices a permanent.",
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

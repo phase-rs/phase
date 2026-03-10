@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "BLAZE",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.counters_EQ0_BLAZE"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 R R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect",
+        "TgtPrompt": "Select target land without a blaze counter",
+        "IsCurse": "True",
+        "SpellDescription": "Put a blaze counter on target land without a blaze counter on it. For as long as that land has a blaze counter on it, it has \"At the beginning of your upkeep, this land deals 1 damage to you.\" (The land continues to burn after CARDNAME has left the battlefield.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

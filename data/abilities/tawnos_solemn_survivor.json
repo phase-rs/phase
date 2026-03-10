@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "TargetMin": "0",
+          "TargetMax": "1",
+          "TgtPrompt": "Select up to one target artifact token you control",
+          "ValidTgts": "Artifact.YouCtrl+token",
+          "SubAbility": "DBMill",
+          "SpellDescription": "Create a token that's a copy of up to one target artifact token you control. Mill two cards."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "TgtPrompt": "Select up to one target artifact token you control",
+        "ValidTgts": "Artifact.YouCtrl+token",
+        "SubAbility": "DBMill",
+        "SpellDescription": "Create a token that's a copy of up to one target artifact token you control. Mill two cards."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "Defined": "Exiled",
+          "AddTypes": "Artifact",
+          "SpellDescription": "Create a token that's a copy of the exiled card, except it's an artifact in addition to its other types. Activate only as a sorcery.",
+          "SorcerySpeed": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W U B"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/Artifact;Creature/artifact or creature card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Exiled",
+        "AddTypes": "Artifact",
+        "SpellDescription": "Create a token that's a copy of the exiled card, except it's an artifact in addition to its other types. Activate only as a sorcery.",
+        "SorcerySpeed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

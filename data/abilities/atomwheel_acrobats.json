@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "AILogic": "AtOppEOT",
+          "SpellDescription": "Roll a six-sided die."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtOppEOT",
+        "SpellDescription": "Roll a six-sided die."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "RolledDie",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you roll a 1 or 2, put that many +1/+1 counters on CARDNAME.",
+        "ValidResult": "1,2",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

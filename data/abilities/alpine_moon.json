@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Lands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"",
+        "Affected": "Land.NamedCard+OppCtrl",
+        "RemoveAllAbilities": "True",
+        "AddAbility": "ABMana",
+        "RemoveLandTypes": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

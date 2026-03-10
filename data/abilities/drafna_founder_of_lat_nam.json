@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target artifact you control to its owner's hand."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "ValidTgts": "Artifact.YouCtrl",
+          "SpellDescription": "Copy target artifact spell you control. (The copy becomes a token.)",
+          "TargetType": "Spell",
+          "TgtPrompt": "Select target artifact spell you control"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Artifact.YouCtrl",
+        "SpellDescription": "Copy target artifact spell you control. (The copy becomes a token.)",
+        "TargetType": "Spell",
+        "TgtPrompt": "Select target artifact spell you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

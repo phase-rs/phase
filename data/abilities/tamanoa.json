@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a noncreature source you control deals damage, you gain that much life.",
+        "ValidSource": "Card.nonCreature+YouCtrl",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

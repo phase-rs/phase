@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "RestrictValid": "Static.Foretelling,Spell.Instant,Spell.Sorcery",
+          "SpellDescription": "Add {U}. Spend this mana only to foretell a card from your hand or cast an instant or sorcery spell."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Static.Foretelling,Spell.Instant,Spell.Sorcery",
+        "SpellDescription": "Add {U}. Spend this mana only to foretell a card from your hand or cast an instant or sorcery spell."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

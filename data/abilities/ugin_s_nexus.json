@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginTurn"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ExtraTurn": "True",
+        "Skip": "True",
+        "Description": "If a player would begin an extra turn, that player skips that turn instead."
+      }
+    },
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "DBExile",
+        "ValidCard": "Card.Self",
+        "Description": "If CARDNAME would be put into a graveyard from the battlefield, instead exile it and take an extra turn after this one.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "faces": []
+}

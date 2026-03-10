@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigImmediate",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "PackTactics",
+        "NoResolvingCheck": "True",
+        "TriggerDescription": "Pack tactics — Whenever CARDNAME attacks, if you attacked with creatures with total power 6 or greater this combat, you may sacrifice another creature. When you do, CARDNAME deals damage equal to the sacrificed creature's power to target creature.",
+        "SVarCompare": "GE6",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

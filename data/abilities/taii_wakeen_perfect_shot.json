@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "If a source you control would deal noncombat damage to a permanent or player this turn, it deals that much damage plus X instead.",
+          "SetChosenNumber": "X",
+          "ReplacementEffects": "RepDamage"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "If a source you control would deal noncombat damage to a permanent or player this turn, it deals that much damage plus X instead.",
+        "SetChosenNumber": "X",
+        "ReplacementEffects": "RepDamage"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
+        "DamageAmount": "EQTargetToughness",
+        "TriggerDescription": "Whenever a source you control deals noncombat damage to a creature equal to that creature's toughness, draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Creature",
+        "CombatDamage": "False"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

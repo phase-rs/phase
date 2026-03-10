@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {1}{U}. When you do, tap target creature an opponent controls.",
+        "Execute": "TrigTrigger"
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.OppCtrl",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you tap an untapped creature an opponent controls, CARDNAME gets +2/+1 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

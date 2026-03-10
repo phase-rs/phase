@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Battlefield",
+        "EffectZone": "Command",
+        "AddPower": "1",
+        "Description": "Attacking creatures you control get +1/+0.",
+        "Affected": "Creature.attacking+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player creates that many 1/1 red Survivor creature tokens."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When NICKNAME leaves the battlefield, gain control of all Survivors.",
+        "Destination": "Any",
+        "Execute": "TrigGainControl",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "Survivors your opponents control can't block.",
+        "ValidCard": "Survivor.OppCtrl"
+      }
+    },
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Description": "Survivors your opponents control can't attack you or planeswalkers you control.",
+        "ValidCard": "Creature.Survivor+OppCtrl",
+        "Target": "You,Planeswalker.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

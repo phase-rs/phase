@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SpellDescription": "Exile up to two target cards from a single graveyard. You gain 2 life if at least one creature card was exiled this way.",
+        "TargetMax": "2",
+        "TargetMin": "0",
+        "TgtPrompt": "Select target card from a graveyard",
+        "Planeswalker": "True",
+        "SubAbility": "DBGainLife",
+        "TargetsWithSameController": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand+cmcLE1"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TgtPrompt": "Choose target nonland permanent with mana value 1 or less",
+        "SpellDescription": "Exile target nonland permanent with mana value 1 or less."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBYouGainLife",
+        "Ultimate": "True",
+        "RememberTargets": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "CARDNAME deals damage to target player equal to the number of cards that player owns in exile and you gain that much life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

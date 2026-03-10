@@ -1,0 +1,75 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 R"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME deals 1 damage to any target."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2 R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "RememberDamaged": "True",
+            "SpellDescription": "CARDNAME deals 1 damage to any target. A creature dealt damage this way can't block this turn.",
+            "SubAbility": "DBNoBlock"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

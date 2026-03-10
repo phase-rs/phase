@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's upkeep, that player chooses a permanent for each card in their graveyard, then untaps those permanents.",
+        "ValidPlayer": "Player",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChoose"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Permanent",
+        "ValidStepTurnToController": "You",
+        "ActiveZones": "Battlefield",
+        "Layer": "CantHappen",
+        "Description": "Permanents don't untap during their controllers' untap steps."
+      }
+    }
+  ],
+  "faces": []
+}

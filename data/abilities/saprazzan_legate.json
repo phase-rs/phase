@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "EffectZone": "All",
+        "ValidSA": "Spell",
+        "CheckSVar": "X",
+        "CheckSecondSVar": "Y",
+        "Description": "If an opponent controls a Mountain and you control an Island, you may cast this spell without paying its mana cost.",
+        "ValidCard": "Card.Self",
+        "Cost": "0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

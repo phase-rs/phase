@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have haste.",
+        "AffectedZone": "Battlefield",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

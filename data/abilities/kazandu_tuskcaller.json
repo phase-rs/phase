@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetPower": "1",
+        "AddAbility": "TokenLow",
+        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LE5_LEVEL",
+        "Description": "LEVEL 2-5 1/1 {T}: Create a 3/3 green Elephant creature token.",
+        "SetToughness": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "1",
+        "AddAbility": "TokenHigh",
+        "IsPresent": "Card.Self+counters_GE6_LEVEL",
+        "Description": "LEVEL 6+ 1/1 {T}: Create two 3/3 green Elephant creature tokens.",
+        "SetToughness": "1",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

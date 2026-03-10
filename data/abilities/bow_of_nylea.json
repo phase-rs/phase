@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "Choices": "DBPutCounter,DBDmg,DBGainLife,DBGrave"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "DBPutCounter,DBDmg,DBGainLife,DBGrave"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.attacking+YouCtrl",
+        "AddKeyword": "Deathtouch",
+        "Description": "Attacking creatures you control have deathtouch."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

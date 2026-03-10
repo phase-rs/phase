@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Monkey.Legendary+YouCtrl",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "Whenever NICKNAME attacks while you don't control a legendary Monkey, conjure a card named Ragavan, Nimble Pilferer onto the battlefield tapped and attacking. At the beginning of the next end step, if that card is on the battlefield, return it to its owner's hand.",
+        "NoResolvingCheck": "True",
+        "Execute": "TrigConjure"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

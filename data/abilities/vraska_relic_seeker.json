@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_2_2_pirate_menace",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 2/2 black Pirate creature token with menace."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature,Enchantment"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "AILogic": "MinLoyalty.4",
+        "TgtPrompt": "Select target artifact, creature, or enchantment",
+        "SpellDescription": "Destroy target artifact, creature, or enchantment. Create a Treasure token.",
+        "SubAbility": "DBTreasure"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetLife",
+        "params": {
+          "SpellDescription": "Target player's life total becomes 1.",
+          "ValidTgts": "Player",
+          "Ultimate": "True",
+          "LifeAmount": "1",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player's life total becomes 1.",
+        "ValidTgts": "Player",
+        "Ultimate": "True",
+        "LifeAmount": "1",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

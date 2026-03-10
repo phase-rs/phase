@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Produced": "ChosenColor",
+        "Execute": "TrigMana",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a basic land is tapped for mana of the chosen color, its controller adds an additional one mana of that color.",
+        "ValidCard": "Land.Basic",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Creatures of the chosen color get +1/+1.",
+        "AddPower": "1",
+        "Affected": "Creature.ChosenColor"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Permanent.nonLand",
+        "SpellDescription": "Destroy all nonland permanents."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "IsPresent": "Permanent.nonLand",
+        "Amount": "3",
+        "Description": "This spell costs {3} less to cast if there are ten or more nonland permanents on the battlefield.",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "PresentCompare": "GE10",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

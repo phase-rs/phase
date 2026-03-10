@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature",
+        "AddTrigger": "UpkeepCostTrigger",
+        "Description": "All creatures have \"At the beginning of your upkeep, sacrifice this creature unless you pay 1 life.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

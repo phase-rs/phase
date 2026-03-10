@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "Execute": "TrigTreasure",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you create a Treasure token for each artifact that player controls."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {X} less to cast, where X is the greatest number of artifacts an opponent controls.",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Amount": "X",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

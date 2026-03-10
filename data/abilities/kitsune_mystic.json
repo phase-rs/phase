@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of the end step, if CARDNAME is enchanted by two or more Auras, flip it.",
+            "Execute": "TrigFlip",
+            "Phase": "End of Turn",
+            "IsPresent": "Aura.Attached",
+            "PresentCompare": "GE2"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Attach",
+            "target": {
+              "type": "Filtered",
+              "filter": "Aura.AttachedTo Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Object": "Targeted",
+            "Choices": "Creature",
+            "SpellDescription": "Attach target Aura attached to a creature to another creature.",
+            "StackDescription": "SpellDescription",
+            "TgtPrompt": "Select target Aura attached to a creature",
+            "Move": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

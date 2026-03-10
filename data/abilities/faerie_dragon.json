@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "ShowChoice": "Description",
+          "AILogic": "AtOppEOT",
+          "AtRandom": "True",
+          "StackDescription": "SpellDescription",
+          "Choices": "Berserk,Twiddle,BloodLust,Green,White,Red,Damage3,Flying,P3P3,Banding,Black,Blue,NoRegen,LilSneak,M2M0,ToHand,Damage1,Nerf,Exile,Orcish",
+          "SpellDescription": "Perform a random action."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ShowChoice": "Description",
+        "AILogic": "AtOppEOT",
+        "AtRandom": "True",
+        "StackDescription": "SpellDescription",
+        "Choices": "Berserk,Twiddle,BloodLust,Green,White,Red,Damage3,Flying,P3P3,Banding,Black,Blue,NoRegen,LilSneak,M2M0,ToHand,Damage1,Nerf,Exile,Orcish",
+        "SpellDescription": "Perform a random action."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

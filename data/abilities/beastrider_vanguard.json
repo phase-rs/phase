@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ChangeValid": "Permanent",
+        "SpellDescription": "Look at the top three cards of your library. You may reveal a permanent card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

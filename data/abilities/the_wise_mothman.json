@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigRadiation",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, each player gets a rad counter.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters attacks, each player gets a rad counter.",
+        "Execute": "TrigRadiation",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "MilledAll",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.nonLand",
+        "ValidPlayer": "Player",
+        "TriggerDescription": "Whenever one or more nonland cards are milled, put a +1/+1 counter on each of up to X target creatures, where X is the number of nonland cards milled this way.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

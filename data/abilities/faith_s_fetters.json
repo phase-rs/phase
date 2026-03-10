@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you gain 4 life.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "ValidCard": "Card.EnchantedBy",
+        "Description": "Enchanted permanent can't attack or block, and its activated abilities can't be activated unless they're mana abilities.",
+        "ValidSA": "Activated.!ManaAbility"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

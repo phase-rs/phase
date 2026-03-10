@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeLost",
+      "params": {
+        "ValidPlayer": "Opponent.Active",
+        "Execute": "TrigPutCounter",
+        "FirstTime": "True",
+        "TriggerDescription": "Whenever an opponent loses life for the first time during each of their turns, put a +1/+1 counter on CARDNAME and draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

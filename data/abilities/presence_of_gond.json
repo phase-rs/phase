@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Token",
+        "Description": "Enchanted creature has \"{T}: Create a 1/1 green Elf Warrior creature token.\"",
+        "Affected": "Card.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

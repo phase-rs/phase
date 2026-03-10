@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Activator": "Player.Opponent",
+          "IsCurse": "True",
+          "ForgetOnMoved": "Battlefield",
+          "StaticAbilities": "NoRegen",
+          "SpellDescription": "CARDNAME can't be regenerated this turn. Only your opponents may activate this ability.",
+          "RememberObjects": "Self",
+          "AILogic": "CantRegenerate"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Activator": "Player.Opponent",
+        "IsCurse": "True",
+        "ForgetOnMoved": "Battlefield",
+        "StaticAbilities": "NoRegen",
+        "SpellDescription": "CARDNAME can't be regenerated this turn. Only your opponents may activate this ability.",
+        "RememberObjects": "Self",
+        "AILogic": "CantRegenerate"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Destroy",
+      "params": {
+        "Description": "If CARDNAME would be destroyed, regenerate it.",
+        "ValidCard": "Card.Self",
+        "Regeneration": "True",
+        "ReplaceWith": "DBRegeneration",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

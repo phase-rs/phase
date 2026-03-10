@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "Execute": "TrigDrain",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you gain life, each opponent loses 1 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

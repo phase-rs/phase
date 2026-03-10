@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 W W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures you control get +1/+1 and gain vigilance until end of turn.",
+        "ValidCards": "Creature.YouCtrl",
+        "KW": "Vigilance"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, you may tap two untapped creatures you control. If you do, draw a card.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDestroy",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cast this spell and whenever CARDNAME attacks, destroy up to one target nonland permanent. Its controller creates a tapped Powerstone token."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "When you cast this spell and whenever CARDNAME attacks, destroy up to one target nonland permanent. Its controller creates a tapped Powerstone token.",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

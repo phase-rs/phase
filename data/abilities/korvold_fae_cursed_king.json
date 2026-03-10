@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, sacrifice another permanent.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSac",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, sacrifice another permanent.",
+        "ValidCard": "Card.Self",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerDescription": "Whenever you sacrifice a permanent, put a +1/+1 counter on NICKNAME and draw a card.",
+        "ValidCard": "Permanent",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

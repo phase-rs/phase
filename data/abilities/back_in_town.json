@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouOwn+Outlaw"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "X",
+        "TgtPrompt": "Select X target outlaw creatures in your graveyard",
+        "SpellDescription": "Return X target outlaw creature cards from your graveyard to the battlefield.",
+        "TargetMax": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

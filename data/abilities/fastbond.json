@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerDescription": "Whenever you play a land, if it wasn't the first land you played this turn, CARDNAME deals 1 damage to you.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "NotFirstLand": "True",
+        "Execute": "DBPain"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You may play any number of lands on each of your turns.",
+        "AdjustLandPlays": "Unlimited"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

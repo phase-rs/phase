@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self+IsSaddled",
+        "TriggerDescription": "Whenever this creature attacks while saddled, untap it and put a +1/+1 counter on it.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

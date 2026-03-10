@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddToughness": "1",
+        "AddAbility": "PumpA",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+1 and has \"{S}: This creature can't be blocked this turn except by snow creatures.\" ({S} can be paid with one mana from a snow source.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each upkeep, put a plague counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "TriggerDescription": "When enchanted creature leaves the battlefield, that creature's controller returns CARDNAME from its owner's graveyard to the battlefield.",
+        "Origin": "Battlefield",
+        "Execute": "DBChangeZone",
+        "ValidCard": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "-X",
+        "AddPower": "-X",
+        "Description": "Enchanted creature gets -1/-1 for each plague counter on CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

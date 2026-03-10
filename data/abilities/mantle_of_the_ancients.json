@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigMove",
+        "TriggerDescription": "When CARDNAME enters, return any number of target Aura and/or Equipment cards that could be attached to enchanted creature from your graveyard to the battlefield attached to enchanted creature.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "Y",
+        "Description": "Enchanted creature gets +1/+1 for each Aura and Equipment attached to it.",
+        "Affected": "Creature.EnchantedBy",
+        "AddSVar": "EqMe & EnMe",
+        "AddToughness": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

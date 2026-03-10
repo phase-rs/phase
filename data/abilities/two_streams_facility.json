@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever you planeswalk to CARDNAME and at the beginning of the first upkeep of the game, each player chooses green anchor or red waterfall.",
+        "Execute": "TrigChoose"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you planeswalk to CARDNAME and at the beginning of the first upkeep of the game, each player chooses green anchor or red waterfall.",
+        "FirstUpkeepThisGame": "True",
+        "TriggerZones": "Command",
+        "Execute": "TrigChoose"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "TrigSwitch",
+        "TriggerDescription": "Whenever chaos ensues, each player who last chose green anchor chooses red waterfall, and vice versa.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Description": "Each player who last chose green anchor may play an additional land during each of their turns.",
+        "Affected": "Player.NotedForGreenAnchor",
+        "AdjustLandPlays": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "EffectZone": "Command",
+        "AddPower": "2",
+        "Affected": "Creature.ControlledBy Player.NotedForRedWaterfall",
+        "Description": "Creatures controlled by players who last chose red waterfall get +2/+0 and have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

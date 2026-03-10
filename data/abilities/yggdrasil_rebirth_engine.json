@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "ChangeNum": "All",
+        "SpellDescription": "Exile the top three cards of your library."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Exile",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "GainControl": "True",
+        "SpellDescription": "Put a creature card exiled with NICKNAME onto the battlefield under your control. It gains haste until end of turn. Activate only as a sorcery.",
+        "Hidden": "True",
+        "RememberChanged": "True",
+        "SubAbility": "DBPump",
+        "Mandatory": "True",
+        "ChangeType": "Creature.ExiledWithSource"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile all creature cards from your graveyard.",
+        "Execute": "TrigChangeZoneAll",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

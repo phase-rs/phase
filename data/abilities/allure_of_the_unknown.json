@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 6,
+        "destination": "Exile"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeValid": "Card.nonLand",
+        "AILogic": "BestCard",
+        "RememberChanged": "True",
+        "Reveal": "True",
+        "Choser": "Opponent",
+        "SpellDescription": "Reveal the top six cards of your library. An opponent exiles a nonland card from among them, then you put the rest into your hand. That opponent may cast the exiled card without paying its mana cost.",
+        "StackDescription": "SpellDescription",
+        "SubAbility": "DBPlay",
+        "DestinationZone2": "Hand",
+        "SetChosenPlayer": "True",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

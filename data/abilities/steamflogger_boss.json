@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Affected": "Creature.Other+Rigger+YouCtrl",
+        "AddPower": "1",
+        "Description": "Other Riggers you control get +1/+0 and have haste."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AssembleContraption"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "If a Rigger you control would assemble a Contraption, it assembles two Contraptions instead.",
+        "ReplaceWith": "AssembleTwo",
+        "ValidCause": "Rigger.YouCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

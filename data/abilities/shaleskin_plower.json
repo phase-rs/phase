@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerDescription": "When CARDNAME is turned face up, destroy target land.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

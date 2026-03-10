@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "2",
+        "AITgts": "Creature.OppCtrl+equipped",
+        "TargetMax": "2",
+        "SubAbility": "DBUnattach",
+        "SpellDescription": "Choose two target creatures. Tap those creatures, then unattach all Equipment from them."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

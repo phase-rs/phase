@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player exiles cards from the top of their library until they exile a nonland card. You may cast that card by paying life equal to that spell's mana value rather than paying its mana cost.",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "Execute": "TrigDigUntil"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

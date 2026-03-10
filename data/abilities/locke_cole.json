@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card, then discard a card.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

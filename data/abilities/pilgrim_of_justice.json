@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "AILogic": "NeedsPrevention",
+          "SubAbility": "DBEffect",
+          "SpellDescription": "The next time a red source of your choice would deal damage this turn, prevent that damage.",
+          "Choices": "Card.RedSource"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "NeedsPrevention",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "The next time a red source of your choice would deal damage this turn, prevent that damage.",
+        "Choices": "Card.RedSource"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

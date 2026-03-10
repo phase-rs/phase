@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SpellDescription": "Add {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, target creature gets +2/+0 until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "Description": "CARDNAME enters tapped.",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

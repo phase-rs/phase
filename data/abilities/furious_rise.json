@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, if you control a creature with power 4 or greater, exile the top card of your library. You may play that card until you exile another card with CARDNAME.",
+        "ValidPlayer": "You",
+        "IsPresent": "Creature.YouCtrl+powerGE4",
+        "Phase": "End of Turn",
+        "Execute": "ExileSelf",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup2",
+        "ValidCard": "Card.Self",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

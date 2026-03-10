@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerDescription": "Whenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMana",
+        "ValidCard": "Card.AttachedBy",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Shroud",
+        "Description": "Enchanted land has shroud. (It can't be the target of spells or abilities.)",
+        "Affected": "Land.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

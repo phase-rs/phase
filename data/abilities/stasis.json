@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUpkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {U}.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "Phase": "Untap",
+        "Skip": "True",
+        "Description": "Players skip their untap steps.",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

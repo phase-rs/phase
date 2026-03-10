@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, create a Blood token and conjure a card named Blood Artist onto the battlefield.",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Blood.token+YouCtrl",
+        "Execute": "TrigLoseLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you sacrifice a Blood token, each opponent loses 1 life and you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

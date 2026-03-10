@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Soldier"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target soldier creature",
+        "SpellDescription": "Put a +1/+1 counter on target Soldier creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CanBlockAmount": "1",
+        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
+        "Description": "Each creature you control with a +1/+1 counter on it can block an additional creature each combat."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

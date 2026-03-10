@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigMonarch",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you become the monarch."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if you're the monarch, create a 5/5 red Dragon creature token with flying.",
+        "CheckDefinedPlayer": "You.isMonarch",
+        "Execute": "TrigToken",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

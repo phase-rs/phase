@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "TargetMax": "OneEach",
+        "SpellDescription": "For each opponent, choose up to one target creature that player controls, then return that creature to its owner's hand unless its controller has you draw a card.",
+        "TargetsForEachPlayer": "True",
+        "SubAbility": "DBChoice",
+        "TgtPrompt": "For each opponent, choose up to one target creature that player controls",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

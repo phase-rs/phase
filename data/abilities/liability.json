@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Permanent.!token",
+        "Origin": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a nontoken permanent is put into a player's graveyard from the battlefield, that player loses 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

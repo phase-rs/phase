@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice an artifact. If you don't, tap CARDNAME and it deals 2 damage to you.",
+        "Phase": "Upkeep",
+        "Execute": "TrigElderSpawnSacrifice",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

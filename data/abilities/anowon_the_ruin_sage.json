@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of your upkeep, each player sacrifices a non-Vampire creature.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

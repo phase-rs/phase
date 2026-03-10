@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "DBReturn",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self+Creature",
+        "TriggerDescription": "When CARDNAME dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "AnyMana",
+        "Description": "Creatures you control have \"{T}: Add one mana of any color.\"",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

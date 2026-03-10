@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "TriggerDescription": "When CARDNAME becomes blocked, you may return target card named Groffskithur from your graveyard to your hand.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

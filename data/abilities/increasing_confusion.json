@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Mill",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player mills X cards. If this spell was cast from a graveyard, that player mills twice that many cards instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

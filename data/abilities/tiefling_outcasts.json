@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Demon.Other+YouCtrl,Devil.Other+YouCtrl,Imp.Other+YouCtrl,Tiefling.Other+YouCtrl",
+        "Description": "Other Demons, Devils, Imps, and Tieflings you control get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

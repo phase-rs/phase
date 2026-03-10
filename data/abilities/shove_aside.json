@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature or planeswalker",
+        "SpellDescription": "CARDNAME deals 3 damage to target creature or planeswalker."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Caster": "You",
+        "EffectZone": "All",
+        "Description": "If you aren't the starting player, you may cast CARDNAME as though it had flash."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 W U B R G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Exile the top three cards of your library. You may play them this turn without paying their mana costs.",
+        "SubAbility": "DBEffect",
+        "RememberChanged": "True",
+        "ChangeNum": "All"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a land card, put that card onto the battlefield tapped, then shuffle.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

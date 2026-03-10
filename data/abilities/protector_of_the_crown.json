@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigMonarch",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "You",
+        "ReplaceWith": "DmgSelf",
+        "Description": "All damage that would be dealt to you is dealt to CARDNAME instead.",
+        "DamageTarget": "Self"
+      }
+    }
+  ],
+  "faces": []
+}

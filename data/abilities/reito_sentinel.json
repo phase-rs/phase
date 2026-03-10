@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target card in a graveyard",
+        "SpellDescription": "Put target card from a graveyard on the bottom of its owner's library.",
+        "LibraryPosition": "-1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "TriggerDescription": "When CARDNAME enters, target player mills three cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

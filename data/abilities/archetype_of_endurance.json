@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have hexproof.",
+        "AddKeyword": "Hexproof"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "CantHaveKeyword": "Hexproof",
+        "Description": "Creatures your opponents control lose hexproof and can't have or gain hexproof.",
+        "Affected": "Creature.OppCtrl",
+        "RemoveKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

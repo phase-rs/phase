@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or another creature you control dies, put a +1/+1 counter on target creature you control.",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

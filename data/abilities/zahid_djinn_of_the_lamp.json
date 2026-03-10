@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "3 U tapXType<1/Artifact>",
+        "Description": "You may pay {3}{U} and tap an untapped artifact you control rather than pay this spell's mana cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

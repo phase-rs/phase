@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.cmcEQX,Enchantment.cmcEQX"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "NoRegen": "True",
+        "SpellDescription": "Destroy target artifact or enchantment with mana value X. It can't be regenerated. You gain X life.",
+        "TgtPrompt": "Select target artifact or enchantment"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

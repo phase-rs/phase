@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a Beast you control enters, draw a card.",
+        "ValidCard": "Beast.YouCtrl",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

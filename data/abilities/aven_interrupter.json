@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile target spell. It becomes plotted. (Its owner may cast it as a sorcery on a later turn without paying its mana cost.)",
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Activator": "Opponent",
+        "Type": "Spell",
+        "Amount": "2",
+        "ValidCard": "Card.wasCastFromGraveyard,Card.wasCastFromExile",
+        "Description": "Spells your opponents cast from graveyards or from exile cost {2} more to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Mutates",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever this creature mutates, other creatures you control get +2/+1 until end of turn.",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

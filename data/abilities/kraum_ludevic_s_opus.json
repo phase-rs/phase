@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ActivatorThisTurnCast": "EQ2",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "Whenever an opponent casts their second spell each turn, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

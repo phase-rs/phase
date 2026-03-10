@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPut",
+        "TriggerDescription": "When NICKNAME enters, put a +1/+1 counter on another target creature.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME attacks, target modified creature you control gains lifelink until end of turn. (Equipment, Auras you control, and counters are modifications.)",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

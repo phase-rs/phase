@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "DBChoose",
+          "StartingWith": "You",
+          "SubAbility": "DBDestroyAll",
+          "SpellDescription": "Choose a nonland permanent you don't control, then each other player chooses a nonland permanent they don't control that hasn't been chosen this way. Destroy all other nonland permanents."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "DBChoose",
+        "StartingWith": "You",
+        "SubAbility": "DBDestroyAll",
+        "SpellDescription": "Choose a nonland permanent you don't control, then each other player chooses a nonland permanent they don't control that hasn't been chosen this way. Destroy all other nonland permanents."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

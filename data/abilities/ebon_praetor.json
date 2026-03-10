@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "RemoveCounter",
+        "counter_type": "M2M2",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PlayerTurn": "True",
+        "SubAbility": "DBPutCounter",
+        "ActivationPhases": "Upkeep",
+        "ActivationLimit": "1",
+        "SpellDescription": "Remove a -2/-2 counter from CARDNAME. If the sacrificed creature was a Thrull, put a +1/+0 counter on CARDNAME. Activate only during your upkeep and only once each turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, put a -2/-2 counter on CARDNAME.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

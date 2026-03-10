@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDig",
+        "Planeswalker": "True",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Discard your hand, then exile the top three cards of your library. Until end of turn, you may play cards exiled this way.",
+        "Defined": "You",
+        "Mode": "Hand"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "CARDNAME deals 2 damage to any target."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard,Library",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "SubAbility": "DBEffect2",
+        "Planeswalker": "True",
+        "ChangeNum": "Z",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Search your graveyard and library for any number of red instant and/or sorcery cards, exile them, then shuffle. You may cast them this turn. Add six {R}.",
+        "RememberChanged": "True",
+        "ChangeType": "Instant.Red,Sorcery.Red"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

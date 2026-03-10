@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may have it deal damage to target creature or planeswalker equal to the number of Goblins you control.",
+        "Execute": "TrigDamage",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Activator": "Player",
+          "SpellDescription": "Add {C}. Any player may activate this ability but only during their turn before the end step.",
+          "ActivationPhases": "Upkeep->Main2",
+          "PlayerTurn": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/CHARGE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Activator": "Player",
+        "SpellDescription": "Add {C}. Any player may activate this ability but only during their turn before the end step.",
+        "ActivationPhases": "Upkeep->Main2",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each player's end step, put a charge counter on CARDNAME for each untapped land that player controls.",
+        "ValidPlayer": "Player",
+        "Execute": "TrigCounters",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "g_1_1_snake",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "TokenAmount": "2",
+        "SpellDescription": "Create two 1/1 green Snake creature tokens."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a nontoken Snake you control enters, you may return CARDNAME from your graveyard to your hand.",
+        "Origin": "Any",
+        "ValidCard": "Card.Snake+!token+YouCtrl",
+        "Execute": "TrigChange",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

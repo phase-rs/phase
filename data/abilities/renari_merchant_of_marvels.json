@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "ValidCard": "Dragon,Artifact",
+        "EffectZone": "Battlefield",
+        "ValidSA": "Spell",
+        "Caster": "You",
+        "Description": "You may cast Dragon spells and artifact spells as though they had flash."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

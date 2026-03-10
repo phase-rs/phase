@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.YouCtrl",
+        "SubAbility": "DBPutCounter",
+        "SpellDescription": "Creatures you control gain deathtouch until end of turn.",
+        "KW": "Deathtouch",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "SpellDescription": "Until end of turn, if one or more tokens would be created under your control, twice that many of those tokens are created instead.",
+          "ReplacementEffects": "TokenReplace"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Until end of turn, if one or more tokens would be created under your control, twice that many of those tokens are created instead.",
+        "ReplacementEffects": "TokenReplace"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "ChangeType": "Card",
+        "SubAbility": "DBToken",
+        "RememberChanged": "True",
+        "SpellDescription": "Exile all cards from all graveyards, then create a 1/1 white Spirit creature token with flying for each card exiled this way."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

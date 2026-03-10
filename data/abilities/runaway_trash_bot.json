@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +1/+0 for each artifact and/or enchantment card in your graveyard.",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

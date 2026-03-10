@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "Execute": "TrigDrain",
+        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability, you lose 1 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

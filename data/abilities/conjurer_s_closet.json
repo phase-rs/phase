@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your end step, you may exile target creature you control, then return it to the battlefield under your control.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "Execute": "ConjurerExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

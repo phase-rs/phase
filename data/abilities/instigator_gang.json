@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "Phase": "Upkeep",
+            "WerewolfTransformCondition": "True"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "1",
+            "Description": "Attacking creatures you control get +1/+0.",
+            "Affected": "Creature.attacking+YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "WerewolfUntransformCondition": "True",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.attacking+YouCtrl",
+            "AddPower": "3",
+            "Description": "Attacking creatures you control get +3/+0."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

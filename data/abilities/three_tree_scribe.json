@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Ante,Command,Exile,Hand,Library",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control leaves the battlefield without dying, put a +1/+1 counter on target creature you control.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

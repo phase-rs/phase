@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "RolledDieOnce",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you roll one or more dice, create a 1/1 blue Faerie Dragon creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

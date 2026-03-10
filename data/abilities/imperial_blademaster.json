@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Alone": "True",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl",
+        "Execute": "TrigDraft",
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, draft a card from CARDNAME's spellbook."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

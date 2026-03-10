@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ValidPlayer": "You",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When you unlock this door, destroy all creatures with power 3 or greater.",
+            "Execute": "TrigDestroy",
+            "ThisDoor": "True"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Hexproof",
+            "Description": "Other permanents you control have hexproof.",
+            "Affected": "Permanent.Other+YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

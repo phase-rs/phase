@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "Execute": "TrigTransform",
+            "WerewolfTransformCondition": "True"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "CantAttack",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Description": "CARDNAME can't attack unless you control a creature with power 4 or greater.",
+            "IsPresent": "Creature.YouCtrl+powerGE4",
+            "PresentCompare": "EQ0"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "WerewolfUntransformCondition": "True",
+            "TriggerZones": "Battlefield",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

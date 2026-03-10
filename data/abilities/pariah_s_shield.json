@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DmgEquipped",
+        "DamageTarget": "Equipped",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "You",
+        "IsPresent": "Card.equipping",
+        "PresentDefined": "Self",
+        "Description": "All damage that would be dealt to you is dealt to equipped creature instead."
+      }
+    }
+  ],
+  "faces": []
+}

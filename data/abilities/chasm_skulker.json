@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever you draw a card, put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME dies, create X 1/1 blue Squid creature tokens with islandwalk, where X is the number of +1/+1 counters on CARDNAME.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

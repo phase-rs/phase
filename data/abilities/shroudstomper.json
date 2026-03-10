@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, each opponent loses 2 life. You gain 2 life and draw a card.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, each opponent loses 2 life. You gain 2 life and draw a card.",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

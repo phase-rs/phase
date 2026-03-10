@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 3,
+        "types": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Until end of turn, target land becomes a 3/3 creature that's still a land. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDestroy",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, destroy target enchantment."
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigReturn",
+        "ValidCard": "Spirit,Arcane",
+        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may return CARDNAME to its owner's hand.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

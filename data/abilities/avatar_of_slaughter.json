@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All creatures have double strike and attack each combat if able.",
+        "Affected": "Creature",
+        "AddKeyword": "Double Strike"
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Secondary": "True",
+        "ValidCreature": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

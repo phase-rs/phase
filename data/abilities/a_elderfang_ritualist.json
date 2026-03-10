@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME dies, you may exile it. If you do, return another target Elf or Tyvar card from your graveyard to your hand.",
+        "Origin": "Battlefield",
+        "OptionalDecider": "TriggeredCardController",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

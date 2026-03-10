@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, create a 1/1 colorless Phyrexian Mite artifact creature token with toxic 1 and \"This creature can't block.\"",
+        "Execute": "TrigToken",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

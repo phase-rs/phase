@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZoneAll",
+            "origin": "Battlefield",
+            "destination": "Hand",
+            "target": {
+              "type": "All",
+              "filter": "Creature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "RememberTargets": "True",
+            "SubAbility": "DBCleanup",
+            "ChangeType": "Creature.blockingRemembered,Creature.isBlockedByRemembered",
+            "SpellDescription": "Return all creatures blocking or blocked by target creature to their owner's hand.",
+            "UseAllOriginZones": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Counter",
+            "target": {
+              "type": "Filtered",
+              "filter": "Card.MultiColor"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TargetType": "Spell",
+            "SpellDescription": "Counter target multicolored spell.",
+            "TgtPrompt": "Select target multicolored spell"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

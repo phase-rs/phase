@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Attacked": "Player.Opponent",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a creature attacks one of your opponents, that player loses 1 life.",
+        "ValidCard": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

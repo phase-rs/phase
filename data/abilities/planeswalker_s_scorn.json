@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "Random": "True",
+          "SorcerySpeed": "True",
+          "SpellDescription": "Target opponent reveals a card at random from their hand. Target creature gets -X/-X until end of turn, where X is the revealed card's mana value. Activate only as a sorcery.",
+          "ValidTgts": "Opponent",
+          "SubAbility": "DBPump",
+          "RememberRevealed": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Random": "True",
+        "SorcerySpeed": "True",
+        "SpellDescription": "Target opponent reveals a card at random from their hand. Target creature gets -X/-X until end of turn, where X is the revealed card's mana value. Activate only as a sorcery.",
+        "ValidTgts": "Opponent",
+        "SubAbility": "DBPump",
+        "RememberRevealed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

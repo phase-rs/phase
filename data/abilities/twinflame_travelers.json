@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "Description": "If a triggered ability of another Elemental you control triggers, it triggers an additional time.",
+        "ValidCard": "Elemental.Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

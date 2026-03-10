@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Spells that target CARDNAME cost {2} less to cast.",
+        "ValidTarget": "Card.Self",
+        "Type": "Spell",
+        "Activator": "Player",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

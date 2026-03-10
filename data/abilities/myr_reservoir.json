@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Amount": "2",
+          "RestrictValid": "Spell.Myr,Activated.Myr+inZoneBattlefield",
+          "SpellDescription": "Add {C}{C}. Spend this mana only to cast Myr spells or activate abilities of Myr."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "RestrictValid": "Spell.Myr,Activated.Myr+inZoneBattlefield",
+        "SpellDescription": "Add {C}{C}. Spend this mana only to cast Myr spells or activate abilities of Myr."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.Myr+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target Myr card in your graveyard",
+        "SpellDescription": "Return target Myr card from your graveyard to your hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

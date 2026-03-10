@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAttach",
+        "ValidCard": "Card.Equipment+YouCtrl",
+        "TriggerDescription": "Whenever an Equipment you control enters, you may attach it to target creature you control.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Caster": "You",
+        "ValidCard": "Card.Aura,Card.Equipment",
+        "ValidSA": "Spell",
+        "Description": "You may cast Aura and Equipment spells as though they had flash."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

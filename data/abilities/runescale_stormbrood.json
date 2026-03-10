@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "Whenever you cast a noncreature spell or a Dragon spell, this creature gets +2/+0 until end of turn.",
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Card.nonCreature,Dragon",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPump"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Counter",
+            "target": {
+              "type": "Filtered",
+              "filter": "Card.cmcLE2"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target spell with mana value 2 or less",
+            "TargetType": "Spell",
+            "SpellDescription": "Counter target spell with mana value 2 or less. (Then shuffle this card into its owner's library.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

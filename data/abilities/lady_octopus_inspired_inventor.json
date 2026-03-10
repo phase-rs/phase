@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Valid": "Artifact.YouOwn",
+          "WithoutManaCost": "True",
+          "Amount": "1",
+          "ValidZone": "Hand",
+          "ValidSA": "Spell.cmcLEX",
+          "Controller": "You",
+          "Optional": "True",
+          "SpellDescription": "You may cast an artifact spell from your hand with mana value less than or equal to the number of ingenuity counters on NICKNAME without paying its mana cost."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Artifact.YouOwn",
+        "WithoutManaCost": "True",
+        "Amount": "1",
+        "ValidZone": "Hand",
+        "ValidSA": "Spell.cmcLEX",
+        "Controller": "You",
+        "Optional": "True",
+        "SpellDescription": "You may cast an artifact spell from your hand with mana value less than or equal to the number of ingenuity counters on NICKNAME without paying its mana cost."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Number": "1",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you draw your first or second card each turn, put an ingenuity counter on NICKNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl"
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Number": "2",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you draw your first or second card each turn, put an ingenuity counter on NICKNAME.",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

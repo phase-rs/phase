@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Repeat",
+        "params": {
+          "RepeatSubAbility": "DBFlip",
+          "AILogic": "MaxX",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Flip X coins. For each flip you win, create a 2/2 green Sheep creature token named Rabid Sheep.",
+          "MaxRepeat": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "DBFlip",
+        "AILogic": "MaxX",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Flip X coins. For each flip you win, create a 2/2 green Sheep creature token named Rabid Sheep.",
+        "MaxRepeat": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

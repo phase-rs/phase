@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "SpellDescription": "Add {G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "ConditionSVarCompare": "GE10",
+          "Defined": "ExiledWith",
+          "WithoutManaCost": "True",
+          "Controller": "You",
+          "Amount": "All",
+          "SpellDescription": "You may play the exiled card without paying its mana cost if creatures you control have total power 10 or greater.",
+          "ConditionCheckSVar": "X",
+          "Optional": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionSVarCompare": "GE10",
+        "Defined": "ExiledWith",
+        "WithoutManaCost": "True",
+        "Controller": "You",
+        "Amount": "All",
+        "SpellDescription": "You may play the exiled card without paying its mana cost if creatures you control have total power 10 or greater.",
+        "ConditionCheckSVar": "X",
+        "Optional": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

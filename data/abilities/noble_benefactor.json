@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, each player may search their library for a card and put that card into their hand. Then each player who searched their library this way shuffles.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

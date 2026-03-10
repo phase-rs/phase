@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, CARDNAME has first strike.",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Card.Self",
+        "IsPresent": "Planeswalker.Elspeth+YouCtrl",
+        "Description": "CARDNAME gets +1/+0 as long as you control an Elspeth planeswalker."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast your first spell during each opponent's turn, you may tap or untap target nonland permanent.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTapOrUntap",
+        "ActivatorThisTurnCast": "EQ1",
+        "ValidCard": "Card",
+        "ValidActivatingPlayer": "You",
+        "OpponentTurn": "True",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

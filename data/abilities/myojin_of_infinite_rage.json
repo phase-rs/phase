@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/DIVINITY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Land",
+        "SpellDescription": "Destroy all lands."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Affected": "Card.Self+counters_GE1_DIVINITY",
+        "Description": "CARDNAME has indestructible as long as it has a divinity counter on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

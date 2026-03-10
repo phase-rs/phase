@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "TrigTapOrUntap",
+        "TriggerDescription": "Whenever a player attacks enchanted player with one or more creatures, that attacking player may tap or untap target permanent of their choice.",
+        "TriggerZones": "Battlefield",
+        "AttackedTarget": "Player.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

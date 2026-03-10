@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Starscourge — At the beginning of combat on your turn, exile up to one target creature card from a graveyard. If you exiled a card this way, create a token that's a copy of that card, except it's a 5/5 black Demon.",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Demon.YouCtrl",
+        "Description": "Demons you control have menace, lifelink, and haste.",
+        "AddKeyword": "Menace & Lifelink & Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

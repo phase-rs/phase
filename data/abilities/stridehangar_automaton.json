@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Thopter.YouCtrl",
+        "AddToughness": "1",
+        "Description": "Thopters you control get +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "ValidToken": "Artifact.YouCtrl",
+        "ReplaceWith": "DBReplace",
+        "Description": "If one or more artifact tokens would be created under your control, those tokens plus an additional 1/1 colorless Thopter artifact creature token with flying are created instead.",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

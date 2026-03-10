@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Instant.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBReturn",
+        "TgtPrompt": "Choose target instant card in your graveyard",
+        "TargetMax": "1",
+        "SpellDescription": "Return up to one target instant card and up to one target sorcery card from your graveyard to your hand, then discard a card. Exile CARDNAME.",
+        "TargetMin": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever this creature attacks, conjure a card named Cantor of the Refrain into your graveyard.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigConjure"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

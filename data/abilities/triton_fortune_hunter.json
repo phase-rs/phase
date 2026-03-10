@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, draw a card.",
+        "ValidActivatingPlayer": "You",
+        "TargetsValid": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

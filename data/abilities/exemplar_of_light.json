@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on this creature.",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ActivationLimit": "1",
+        "ValidCard": "Card.Self",
+        "ValidSource": "You",
+        "CounterType": "P1P1",
+        "TriggerDescription": "Whenever you put one or more +1/+1 counters on this creature, draw a card. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

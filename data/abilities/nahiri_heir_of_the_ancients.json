@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_kor_warrior",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAttach",
+        "Planeswalker": "True",
+        "RememberTokens": "True",
+        "SpellDescription": "Create a 1/1 white Kor Warrior creature token. You may attach an Equipment you control to it."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 6,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ForceRevealToController": "True",
+        "ChangeNum": "1",
+        "Optional": "True",
+        "ChangeValid": "Card.Warrior,Card.Equipment",
+        "RestRandomOrder": "True",
+        "SpellDescription": "Look at the top six cards of your library. You may reveal a Warrior or Equipment card from among them and put it into your hand. Put the rest on the bottom of your library in a random order."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals damage to target creature or planeswalker equal to twice the number of Equipment you control.",
+        "TgtPrompt": "Select target creature or planeswalker",
+        "Planeswalker": "True",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "Description": "CARDNAME enters tapped.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

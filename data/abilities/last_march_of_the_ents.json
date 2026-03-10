@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "CheatBattlefield",
+        "SpellDescription": "Draw cards equal to the greatest toughness among creatures you control, then put any number of creature cards from your hand onto the battlefield.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "Description": "This spell can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

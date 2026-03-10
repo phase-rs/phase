@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you gain 3 life and you may return up to one target creature card from your graveyard to your hand.",
+        "ValidSource": "Creature.EquippedBy",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddSVar": "SwordOfLightAndShadowCE",
+        "AddKeyword": "Protection from white & Protection from black",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+2 and has protection from white and from black."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

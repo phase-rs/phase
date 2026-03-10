@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "Battlefield",
+        "Condition": "PlayerTurn",
+        "Amount": "X",
+        "Description": "During your turn, spells you cast cost {1} less to cast for each creature you control with power 4 or greater.",
+        "Activator": "You",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

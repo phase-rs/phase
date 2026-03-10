@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When this Aura enters, create three 1/1 green and white Human Citizen creature tokens.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land has \"{1}, {T}: Target creature gets +1/+1 until end of turn for each creature you control. Activate only as a sorcery.\"",
+        "AddAbility": "FriendlyPump",
+        "Affected": "Land.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

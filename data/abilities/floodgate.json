@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+withFlying",
+        "Execute": "Sacrifice",
+        "TriggerDescription": "When CARDNAME has flying, sacrifice it."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, it deals damage equal to half the number of Islands you control, rounded down, to each nonblue creature without flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigUpkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {R}{G}{W}."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

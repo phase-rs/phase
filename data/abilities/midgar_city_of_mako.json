@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplacementResult": "Updated",
+            "Destination": "Battlefield",
+            "Description": "This land enters tapped.",
+            "ReplaceWith": "ETBTapped",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "You may sacrifice an artifact or creature. If you do, draw two cards.",
+            "Optional": "True",
+            "Defined": "You",
+            "SacValid": "Artifact,Creature",
+            "RememberSacrificed": "True",
+            "SubAbility": "DBDraw"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

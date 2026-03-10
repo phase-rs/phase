@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 white Spirit creature tokens with flying.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the number of creatures you control.",
+        "CharacteristicDefining": "True",
+        "SetToughness": "X",
+        "SetPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

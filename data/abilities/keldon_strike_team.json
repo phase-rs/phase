@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+kicked",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, create two 1/1 white Soldier creature tokens."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Self+ThisTurnEntered",
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Haste",
+        "Description": "As long as CARDNAME entered this turn, creatures you control have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

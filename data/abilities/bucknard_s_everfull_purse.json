@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "SubAbility": "DBTreasure",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Roll a d4 and create a number of Treasure tokens equal to the result. The player to your right gains control of CARDNAME.",
+          "Sides": "4",
+          "ResultSVar": "X",
+          "Defined": "You"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBTreasure",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Roll a d4 and create a number of Treasure tokens equal to the result. The player to your right gains control of CARDNAME.",
+        "Sides": "4",
+        "ResultSVar": "X",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

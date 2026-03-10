@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigMana",
+            "TriggerDescription": "Whenever you cast a spell, add {R}. Until end of turn, you don't lose this mana as steps and phases end.",
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Card"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "You",
+            "AddKeyword": "Creatures you control can boast twice during each of your turns rather than once.",
+            "Description": "Creatures you control can boast twice during each of your turns rather than once."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 2,
+            "destination": "Exile"
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Exile the top two cards of your library. You may play those cards this turn.",
+            "SubAbility": "DBEffect",
+            "RememberChanged": "True",
+            "ChangeNum": "All",
+            "Defined": "You"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

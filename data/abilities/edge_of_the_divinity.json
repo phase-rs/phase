@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy+White",
+        "AddToughness": "2",
+        "Description": "As long as enchanted creature is white, it gets +1/+2.",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy+Black",
+        "AddPower": "2",
+        "AddToughness": "1",
+        "Description": "As long as enchanted creature is black, it gets +2/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

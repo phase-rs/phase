@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Dinosaur",
+        "Description": "Dinosaur spells you cast cost {2} less to cast.",
+        "Activator": "You",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

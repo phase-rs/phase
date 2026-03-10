@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "ReplaceColorless",
+          "SpellDescription": "Until end of turn, if a player taps a nonbasic land for mana, it produces colorless mana instead of any other type."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "ReplaceColorless",
+        "SpellDescription": "Until end of turn, if a player taps a nonbasic land for mana, it produces colorless mana instead of any other type."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

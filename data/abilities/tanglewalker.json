@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "IsPresent": "Artifact.DefenderCtrl+Land",
+        "ValidAttacker": "Creature.YouCtrl",
+        "Description": "Each creature you control can't be blocked as long as defending player controls an artifact land."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

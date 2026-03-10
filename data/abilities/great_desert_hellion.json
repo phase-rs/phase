@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigSacrifice",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you discard a card. If you discard a card this way, perpetually increase CARDNAME's intensity by 1.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, you may discard your hand. If you do, draw cards equal to CARDNAME's intensity."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

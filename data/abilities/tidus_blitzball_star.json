@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an artifact you control enters, put a +1/+1 counter on NICKNAME.",
+        "ValidCard": "Artifact.YouCtrl",
+        "Destination": "Battlefield",
+        "IsPresent": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigTap",
+        "TriggerDescription": "Whenever NICKNAME attacks, tap target creature an opponent controls.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

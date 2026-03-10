@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever a creature you control enters with a counter on it, you may have it deal damage equal to its power to any target.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+HasCounters",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

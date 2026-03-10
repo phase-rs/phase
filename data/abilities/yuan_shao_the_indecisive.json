@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Description": "Each creature you control can't be blocked by more than one creature.",
+        "Max": "1",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

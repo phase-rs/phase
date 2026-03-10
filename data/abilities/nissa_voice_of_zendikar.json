@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_0_1_plant",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 0/1 green Plant creature token.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterType": "P1P1",
+          "CounterNum": "1",
+          "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+          "ValidCards": "Creature.YouCtrl",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterType": "P1P1",
+        "CounterNum": "1",
+        "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+        "ValidCards": "Creature.YouCtrl",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 0
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain X life and draw X cards, where X is the number of lands you control.",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

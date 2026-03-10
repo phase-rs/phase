@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Repeat",
+        "params": {
+          "RepeatSubAbility": "DBChoose",
+          "ValidTgts": "Opponent",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Target opponent loses 5 life unless that player discards two cards or sacrifices a creature or planeswalker. Repeat this process once.",
+          "MaxRepeat": "2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "DBChoose",
+        "ValidTgts": "Opponent",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Target opponent loses 5 life unless that player discards two cards or sacrifices a creature or planeswalker. Repeat this process once.",
+        "MaxRepeat": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

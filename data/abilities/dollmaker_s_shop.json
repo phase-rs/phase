@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackersDeclaredOneTarget",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever one or more non-Toy creatures you control attack a player, create a 1/1 white Toy artifact creature token.",
+            "ValidAttackers": "Creature.YouCtrl+!Toy",
+            "AttackedTarget": "Player",
+            "AttackingPlayer": "You",
+            "Execute": "TrigToken"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetPower": "X",
+            "SetToughness": "X",
+            "Description": "Creatures you control have base power and toughness each equal to the number of creatures you control.",
+            "AffectedZone": "Battlefield",
+            "Affected": "Creature.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

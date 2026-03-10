@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME.",
+              "Defined": "Self"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 R R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME.",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME attacks, add {R} at the beginning of your next main phase this turn.",
+            "Execute": "TrigDelTrig",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDelTrig",
+            "TriggerDescription": "Whenever CARDNAME attacks, add {C}{C} at the beginning of your next main phase this turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

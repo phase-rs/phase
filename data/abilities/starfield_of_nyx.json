@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigChange",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you may return target enchantment card from your graveyard to the battlefield.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "PresentCompare": "GE5",
+        "SetPower": "AffectedX",
+        "IsPresent": "Enchantment.YouCtrl",
+        "Affected": "Enchantment.YouCtrl+nonAura+Other",
+        "Description": "As long as you control five or more enchantments, each other non-Aura enchantment you control is a creature in addition to its other types and has base power and base toughness each equal to its mana value.",
+        "AddType": "Creature",
+        "SetToughness": "AffectedX"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

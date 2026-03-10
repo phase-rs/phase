@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_1_1_a_servo",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 colorless Servo artifact creature token.",
+        "TokenOwner": "You",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "StaticAbilities": "GrantAffinity",
+          "Triggers": "TrigCastSpell",
+          "SpellDescription": "The next spell you cast this turn has affinity for artifacts. (It costs {1} less to cast for each artifact you control as you cast it.)"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "StaticAbilities": "GrantAffinity",
+        "Triggers": "TrigCastSpell",
+        "SpellDescription": "The next spell you cast this turn has affinity for artifacts. (It costs {1} less to cast for each artifact you control as you cast it.)"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "Defined": "Valid Artifact.YouCtrl",
+          "Ultimate": "True",
+          "AtEOT": "Exile",
+          "SpellDescription": "For each artifact you control, create a token that's a copy of it. Those tokens gain haste. Exile those tokens at the beginning of the next end step.",
+          "PumpKeywords": "Haste",
+          "Planeswalker": "True",
+          "AILogic": "DuplicatePerms"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Valid Artifact.YouCtrl",
+        "Ultimate": "True",
+        "AtEOT": "Exile",
+        "SpellDescription": "For each artifact you control, create a token that's a copy of it. Those tokens gain haste. Exile those tokens at the beginning of the next end step.",
+        "PumpKeywords": "Haste",
+        "Planeswalker": "True",
+        "AILogic": "DuplicatePerms"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's precombat main phase, that player adds {G}{G}.",
+        "ValidPlayer": "Player",
+        "Execute": "TrigAddMana",
+        "TriggerZones": "Command",
+        "Phase": "Main1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

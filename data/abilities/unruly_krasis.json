@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Adapt": "3"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, you may have the base power and toughness of another target creature you control become X/X until end of turn, where X is CARDNAME's power.",
+        "Execute": "TrigAnimate",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

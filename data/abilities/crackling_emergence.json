@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "3",
+        "SetColor": "Red",
+        "SetToughness": "3",
+        "AddType": "Creature & Spirit",
+        "Description": "Enchanted land is a 3/3 red Spirit creature with haste. It's still a land.",
+        "Affected": "Land.EnchantedBy",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Destroy",
+      "params": {
+        "Description": "If enchanted land would be destroyed, instead sacrifice CARDNAME and that land gains indestructible until end of turn.",
+        "ValidCard": "Card.EnchantedBy",
+        "ReplaceWith": "CracklingEgress"
+      }
+    }
+  ],
+  "faces": []
+}

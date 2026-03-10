@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "R",
+            "params": {
+              "SpellDescription": "Add {R}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {R}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Battlefield",
+            "ReplacementResult": "Updated",
+            "ReplaceWith": "ETBTapped",
+            "Description": "This land enters tapped.",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Token",
+            "name": "b_0_1_wizard_snipe",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create a 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\"",
+            "TokenOwner": "You"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

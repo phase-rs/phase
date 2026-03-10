@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever an artifact you control enters, you may return CARDNAME from your graveyard to your hand.",
+        "Execute": "TrigChange",
+        "Destination": "Battlefield",
+        "ValidCard": "Artifact.YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

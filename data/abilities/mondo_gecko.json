@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseColor",
+        "params": {
+          "SubAbility": "DBAnimate",
+          "Defined": "You",
+          "SpellDescription": "Until end of turn, CARDNAME becomes the color of your choice and gains hexproof from that color."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAnimate",
+        "Defined": "You",
+        "SpellDescription": "Until end of turn, CARDNAME becomes the color of your choice and gains hexproof from that color."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card for each color among permanents you control.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

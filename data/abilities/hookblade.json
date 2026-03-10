@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, attach it to target creature you control.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigAttach"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+0."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, equipped creature has flying.",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

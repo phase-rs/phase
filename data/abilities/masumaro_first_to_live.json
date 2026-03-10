@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to twice the number of cards in your hand.",
+        "CharacteristicDefining": "True",
+        "SetPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

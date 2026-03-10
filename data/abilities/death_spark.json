@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 1 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard with a creature card directly above it, you may pay {1}. If you do, return CARDNAME to your hand.",
+        "PresentCompare": "EQ1",
+        "IsPresent": "Creature.YouOwn+DirectlyAbove",
+        "PresentZone": "Graveyard",
+        "Phase": "Upkeep",
+        "TriggerZones": "Graveyard",
+        "ValidPlayer": "You",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

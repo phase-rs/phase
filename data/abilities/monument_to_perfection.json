@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Land.Basic,Land.Locus,Land.Sphere",
+        "ChangeTypeDesc": "basic, Sphere, or Locus land card",
+        "SpellDescription": "Search your library for a basic, Sphere, or Locus land card, reveal it, put it into your hand, then shuffle."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 9,
+        "toughness": 9,
+        "types": [
+          "Artifact",
+          "Creature",
+          "Phyrexian",
+          "Construct"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "SVarCompare": "GE9",
+        "CheckSVar": "CountAll",
+        "RemoveCreatureTypes": "True",
+        "RemoveAllAbilities": "True",
+        "SpellDescription": "CARDNAME becomes a 9/9 Phyrexian Construct artifact creature, loses all abilities, and gains indestructible and toxic 9. Activate only if there are nine or more lands with different names among the basic, Sphere, and Locus lands you control.",
+        "Defined": "Self",
+        "Keywords": "Indestructible & Toxic:9"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

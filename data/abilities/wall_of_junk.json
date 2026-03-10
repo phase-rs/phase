@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "DelTrig",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME blocks, return it to its owner's hand at end of combat. (Return it only if it's on the battlefield.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

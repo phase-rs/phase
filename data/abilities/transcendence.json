@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseGame",
+        "TriggerDescription": "When you have 20 or more life, you lose the game.",
+        "LifeTotal": "You",
+        "LifeAmount": "GE20"
+      }
+    },
+    {
+      "mode": "LifeLost",
+      "params": {
+        "Execute": "TrigLifeGain",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you lose life, you gain 2 life for each 1 life you lost. (Damage dealt to you causes you to lose life.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "GameLoss"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Layer": "CantHappen",
+        "ValidLoseReason": "LifeReachedZero",
+        "Description": "You don't lose the game for having 0 or less life."
+      }
+    }
+  ],
+  "faces": []
+}

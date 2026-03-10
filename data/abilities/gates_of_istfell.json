@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W",
+        "params": {
+          "SpellDescription": "Add {W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {W}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 W U U"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "You gain 2 life and draw two cards.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "Description": "CARDNAME enters tapped."
+      }
+    }
+  ],
+  "faces": []
+}

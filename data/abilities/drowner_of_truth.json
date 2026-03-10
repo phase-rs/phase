@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "When you cast this spell, if {C} was spent to cast it, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this creature: Add {C}.\"",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigToken",
+            "CheckSVar": "CastSA>Count$Adamant_1.Colorless.1.0"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Combo G U",
+            "params": {
+              "SpellDescription": "Add {G} or {U}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {G} or {U}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "ETBTapped",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Description": "CARDNAME enters tapped.",
+            "ReplacementResult": "Updated"
+          }
+        }
+      ]
+    }
+  ]
+}

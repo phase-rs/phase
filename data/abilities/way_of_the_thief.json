@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "IsPresent": "Gate.YouCtrl",
+        "ValidAttacker": "Card.EnchantedBy",
+        "Description": "Enchanted creature can't be blocked as long as you control a Gate."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

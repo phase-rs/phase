@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "TriggerDescription": "When CARDNAME enters, search your library for a basic Plains card, reveal it, put it into your hand, then shuffle. You gain 2 life.",
+            "Execute": "TrigChange",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigToken",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, create two 1/1 colorless Gnome artifact creature tokens."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "1",
+            "Description": "Creatures you control get +1/+1.",
+            "AddPower": "1",
+            "Affected": "Creature.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

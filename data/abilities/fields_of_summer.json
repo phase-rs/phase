@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "TriggeredActivator",
+        "TriggerZones": "Command",
+        "Execute": "LifeSummer",
+        "TriggerDescription": "Whenever a player casts a spell, that player may gain 2 life."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, you may gain 10 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

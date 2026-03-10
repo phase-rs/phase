@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": 2
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "StackDescription": "{p:You} gains 2 life,",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "You gain 2 life, draw two cards, then discard two cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

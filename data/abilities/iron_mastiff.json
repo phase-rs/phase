@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DBTrigRollDice",
+        "TriggerDescription": "Whenever CARDNAME attacks, roll a d20 for each player being attacked and ignore all but the highest roll. ABILITY",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "RingTemptsYou",
+      "params": {
+        "TriggerDescription": "Whenever the Ring tempts you, if you chose a creature other than CARDNAME as your Ring-bearer, draw a card.",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Description": "You may cast sorcery spells as though they had flash.",
+        "Caster": "You",
+        "ValidSA": "Spell",
+        "ValidCard": "Sorcery"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

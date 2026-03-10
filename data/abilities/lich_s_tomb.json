@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeLost",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever you lose life, sacrifice a permanent for each 1 life you lost. (Damage causes loss of life.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "GameLoss"
+      },
+      "params": {
+        "Description": "You don't lose the game for having 0 or less life.",
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You",
+        "ValidLoseReason": "LifeReachedZero",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

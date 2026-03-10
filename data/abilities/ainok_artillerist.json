@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has reach as long as it has a +1/+1 counter on it.",
+        "AddKeyword": "Reach",
+        "Affected": "Card.Self+counters_GE1_P1P1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

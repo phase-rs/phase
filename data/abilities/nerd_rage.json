@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "FreeCard",
+        "TriggerDescription": "When CARDNAME enters, draw two cards.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "AttackTrig",
+        "Description": "Enchanted creature has \"You have no maximum hand size\" and \"Whenever this creature attacks, if you have ten or more cards in hand, it gets +10/+10 until end of turn.\"",
+        "AddStaticAbility": "NoMaxHandSize",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

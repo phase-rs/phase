@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Sliver+YouCtrl",
+        "AddTrigger": "SpitefulTrig",
+        "Description": "Sliver creatures you control have \"Whenever this creature is dealt damage, it deals that much damage to target player or planeswalker.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

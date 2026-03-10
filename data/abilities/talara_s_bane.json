@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Target opponent reveals their hand. You choose a green or white creature card from it. You gain life equal to that creature card's toughness, then that player discards that card.",
+          "RememberRevealed": "True",
+          "SubAbility": "DBChoose",
+          "ValidTgts": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Target opponent reveals their hand. You choose a green or white creature card from it. You gain life equal to that creature card's toughness, then that player discards that card.",
+        "RememberRevealed": "True",
+        "SubAbility": "DBChoose",
+        "ValidTgts": "Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

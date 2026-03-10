@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked, you may draw a card.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

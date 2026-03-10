@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "DBPump",
+        "ValidCard": "Card.YouOwn+Dragon",
+        "TriggerDescription": "Whenever you draw a Dragon card, it perpetually gets +1/+1.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+kicked",
+        "Execute": "TrigSeek",
+        "TriggerDescription": "When this creature enters, if it was kicked, seek a Dragon card. CARDNAME and that Dragon card each perpetually get +1/+1."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

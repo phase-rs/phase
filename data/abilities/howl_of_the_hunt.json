@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Creature.EnchantedBy+Wolf,Creature.EnchantedBy+Werewolf",
+        "PresentCompare": "EQ1",
+        "Execute": "TrigUntap",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if enchanted creature is a Wolf or Werewolf, untap that creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Vigilance",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +2/+2 and has vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

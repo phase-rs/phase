@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "RolledDie",
+      "params": {
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you roll a die, you may reveal the top card of your library. Do this only once each turn. Whenever you reveal a card with mana value less than the result this way, you may exile it. If you do, you may play it this turn.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReveal",
+        "ResolvedLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

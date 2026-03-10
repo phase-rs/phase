@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.ControllerControlsIsland+attacking,Creature.ControllerControlsIsland+blocking"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDelayTrig",
+        "SpellDescription": "Choose target attacking or blocking creature whose controller controls an Island. CARDNAME deals 2 damage to that creature at end of combat. Activate only before the end of combat step.",
+        "TgtPrompt": "Select target attacking or blocking creature whose controller controls an Island",
+        "ConditionCompare": "GE1",
+        "IsCurse": "True",
+        "ActivationFirstCombat": "True",
+        "ConditionDefined": "Targeted",
+        "ConditionPresent": "Creature.ControllerControlsIsland",
+        "StackDescription": "SpellDescription",
+        "ActivationPhases": "BeginCombat->Combat Damage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

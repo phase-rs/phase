@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Execute": "TrigRemoveCounter",
+        "Destination": "Battlefield",
+        "NoResolvingCheck": "True",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+counters_GE1_M1M1",
+        "TriggerDescription": "Whenever another creature you control enters while this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

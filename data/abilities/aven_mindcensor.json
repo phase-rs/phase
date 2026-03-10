@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "LimitSearchLibrary",
+        "Affected": "Player.Opponent",
+        "Description": "If an opponent would search a library, that player searches the top four cards of that library instead."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

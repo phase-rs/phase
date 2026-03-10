@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.equalPT+YouCtrl",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a creature you control with power equal to its toughness attacks, it gains trample until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

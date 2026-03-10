@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerZones": "Command",
+        "ValidCard": "Land",
+        "TriggerDescription": "Whenever you tap a land for mana, add one mana of any type that land produced.",
+        "Static": "True",
+        "Activator": "You",
+        "Execute": "TrigMana"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

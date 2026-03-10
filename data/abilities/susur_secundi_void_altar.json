@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "B",
+        "params": {
+          "SpellDescription": "Add {B}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "STATION 12+ {1}{B}, {T}, Pay 2 life, Sacrifice a creature: Draw cards equal to the sacrificed creature's power. Activate only as a sorcery.",
+        "Affected": "Card.Self+counters_GE12_CHARGE",
+        "AddAbility": "SusurDraw"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "This land enters tapped.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

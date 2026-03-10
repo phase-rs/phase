@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile it unless you discard a creature card.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBExileMe"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, exile CARDNAME and return target creature card from your graveyard to the battlefield.",
+        "Destination": "Graveyard",
+        "Execute": "TrigBodySnatcherExileMe",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.YouCtrl+Other",
+        "Description": "Fateful hour — As long as you have 5 or less life, other creatures you control have vigilance.",
+        "Condition": "FatefulHour"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

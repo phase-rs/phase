@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "Execute": "TrigExile",
+        "CombatDamage": "True",
+        "TriggerDescription": "When CARDNAME deals combat damage to a player, exile it and the top card of your library in a face-down pile, shuffle that pile, then manifest those cards. (To manifest a card, put it onto the battlefield face down as a 2/2 creature. You may turn it face up at any time for its mana cost if it is a creature card.)",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "IsPresent": "Creature.YouCtrl+Other",
+        "PresentCompare": "EQ0",
+        "ValidAttacker": "Card.Self",
+        "Description": "CARDNAME can't be blocked as long as you control no other creatures."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

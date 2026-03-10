@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigUpkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {W}{W}.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveLandTypes": "True",
+        "Description": "All Mountains are Plains.",
+        "Affected": "Mountain",
+        "AddType": "Plains"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

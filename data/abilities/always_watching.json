@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Vigilance",
+        "Description": "Nontoken creatures you control get +1/+1 and have vigilance.",
+        "AddToughness": "1",
+        "Affected": "Creature.!token+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "CanAttack",
+          "TgtPrompt": "Select target creature with defender",
+          "SpellDescription": "Target creature with defender can attack this turn as though it didn't have defender.",
+          "ValidTgts": "Creature.withDefender"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "CanAttack",
+        "TgtPrompt": "Select target creature with defender",
+        "SpellDescription": "Target creature with defender can attack this turn as though it didn't have defender.",
+        "ValidTgts": "Creature.withDefender"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 1,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Creatures you control get +0/+1 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CombatDamageToughness"
+      },
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "Description": "Each creature you control assigns combat damage equal to its toughness rather than its power."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters or dies, put a +1/+1 counter on target creature."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Secondary": "True",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "When CARDNAME enters or dies, put a +1/+1 counter on target creature.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

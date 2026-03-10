@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPumpAll",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, creatures you control get +1/+0 and gain trample until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

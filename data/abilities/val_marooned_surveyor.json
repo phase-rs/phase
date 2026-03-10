@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discover",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigDmg",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you discover, investigate, scry, surveil, or seek one or more cards, NICKNAME deals 2 damage to each opponent and you gain 2 life."
+      }
+    },
+    {
+      "mode": "Investigated",
+      "params": {
+        "Secondary": "True",
+        "ValidPlayer": "You",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever you discover, investigate, scry, surveil, or seek one or more cards, NICKNAME deals 2 damage to each opponent and you gain 2 life.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Scry",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigDmg",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you discover, investigate, scry, surveil, or seek one or more cards, NICKNAME deals 2 damage to each opponent and you gain 2 life.",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "Surveil",
+      "params": {
+        "ValidPlayer": "You",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you discover, investigate, scry, surveil, or seek one or more cards, NICKNAME deals 2 damage to each opponent and you gain 2 life.",
+        "Execute": "TrigDmg",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SeekAll",
+      "params": {
+        "Secondary": "True",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you discover, investigate, scry, surveil, or seek one or more cards, NICKNAME deals 2 damage to each opponent and you gain 2 life.",
+        "Execute": "TrigDmg",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

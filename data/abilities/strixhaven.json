@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, return up to one target instant or sorcery card from a graveyard to its owner's hand.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Demonstrate",
+        "Affected": "Instant,Sorcery",
+        "AffectedZone": "Stack",
+        "Description": "Instant and sorcery spells players cast have demonstrate. (Whenever a player casts an instant or sorcery spell, they may copy it. If they do, they choose an opponent to also copy it. Players may choose new targets for their copies.)",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

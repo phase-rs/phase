@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "OverwriteColors": "True",
+          "Keywords": "Flying",
+          "Power": "4",
+          "RemoveCardTypes": "True",
+          "Planeswalker": "True",
+          "Types": "Creature,Dragon",
+          "AILogic": "Always",
+          "SpellDescription": "Until end of turn, each planeswalker you control becomes a 4/4 red Dragon creature and gains flying.",
+          "Colors": "Red",
+          "RemoveCreatureTypes": "True",
+          "Toughness": "4",
+          "ValidCards": "Planeswalker.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "OverwriteColors": "True",
+        "Keywords": "Flying",
+        "Power": "4",
+        "RemoveCardTypes": "True",
+        "Planeswalker": "True",
+        "Types": "Creature,Dragon",
+        "AILogic": "Always",
+        "SpellDescription": "Until end of turn, each planeswalker you control becomes a 4/4 red Dragon creature and gains flying.",
+        "Colors": "Red",
+        "RemoveCreatureTypes": "True",
+        "Toughness": "4",
+        "ValidCards": "Planeswalker.YouCtrl"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "r_4_4_dragon_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 4/4 red Dragon creature token with flying.",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Attacked": "You,Planeswalker.YouCtrl",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever a creature attacks you or a planeswalker you control, each Dragon you control deals 1 damage to that creature.",
+        "ValidCard": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

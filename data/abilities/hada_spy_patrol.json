@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetPower": "2",
+        "SetToughness": "2",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE2_LEVEL",
+        "Description": "LEVEL 1-2 2/2 CARDNAME can't be blocked."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "3",
+        "IsPresent": "Card.Self+counters_GE3_LEVEL",
+        "AddKeyword": "Shroud",
+        "SetToughness": "3",
+        "Description": "LEVEL 3+ 3/3 Shroud (This creature can't be the target of spells or abilities.),,,CARDNAME can't be blocked.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

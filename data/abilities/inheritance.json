@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature",
+        "Destination": "Graveyard",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature dies, you may pay {3}. If you do, draw a card.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

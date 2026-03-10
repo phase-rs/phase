@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "X",
+        "AddKeyword": "Vigilance",
+        "Description": "Enchanted creature gets +1/+1 for each +1/+1 counter on other creatures you control. Enchanted creature has vigilance and \"{W}, {T}: Bolster 1.\"",
+        "Affected": "Creature.EnchantedBy",
+        "AddAbility": "ABBolster",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

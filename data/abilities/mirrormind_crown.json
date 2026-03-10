@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "SVarCompare": "EQ0",
+        "Optional": "True",
+        "ValidPlayer": "You",
+        "Layer": "Copy",
+        "ActiveZones": "Battlefield",
+        "Description": "As long as this Equipment is attached to a creature, the first time you would create one or more tokens each turn, you may instead create that many tokens that are copies of equipped creature.",
+        "ReplaceWith": "DBCopy",
+        "CheckSVar": "X",
+        "IsPresent": "Card.Self+AttachedTo Creature"
+      }
+    }
+  ],
+  "faces": []
+}

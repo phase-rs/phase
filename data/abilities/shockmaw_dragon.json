@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, it deals 1 damage to each creature that player controls.",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDamage",
+        "CombatDamage": "True",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

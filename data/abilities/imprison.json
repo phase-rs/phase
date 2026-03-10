@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "TriggerDescription": "Whenever a player activates an ability of enchanted creature with {T} in its activation cost that isn't a mana ability, you may pay {1}. If you do, counter that ability. If you don't, destroy CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidSA": "SpellAbility.!ManaAbility+hasTapCost",
+        "Execute": "TrigDestroy1"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.EnchantedBy",
+        "TriggerDescription": "Whenever enchanted creature attacks or blocks, you may pay {1}. If you do, tap the creature, remove it from combat, and creatures it was blocking that had become blocked by only that creature this combat become unblocked. If you don't, destroy CARDNAME.",
+        "Execute": "TrigDestroy2"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever enchanted creature attacks or blocks, you may pay {1}. If you do, tap the creature, remove it from combat, and creatures it was blocking that had become blocked by only that creature this combat become unblocked. If you don't, destroy CARDNAME.",
+        "Secondary": "True",
+        "Execute": "TrigDestroy3",
+        "ValidCard": "Card.EnchantedBy",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

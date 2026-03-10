@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "MephidrossCounters",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Each creature you control is a Vampire in addition to its other types and has \"Whenever this creature deals damage to a creature, put a +1/+1 counter on this creature.\"",
+        "AddType": "Vampire",
+        "AddTrigger": "MephidrossPutCounter"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.YouOwn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBSetLife",
+        "TargetsWithDifferentCMC": "True",
+        "SpellDescription": "Return X target cards with different mana values from your graveyard to your hand.",
+        "StackDescription": "Return X target cards with different mana values from your graveyard to your hand. ({c:Targeted})",
+        "TargetMin": "X",
+        "TargetMax": "X",
+        "TgtPrompt": "Choose X target cards to return from your graveyard",
+        "RememberChanged": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

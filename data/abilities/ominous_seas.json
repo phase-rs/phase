@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "u_8_8_kraken",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<8/FORESHADOW>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create an 8/8 blue Kraken creature token.",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you draw a card, put a foreshadow counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

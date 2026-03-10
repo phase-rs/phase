@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigUntap",
+        "TriggerDescription": "When CARDNAME enters, untap up to five lands.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

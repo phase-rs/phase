@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "During each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard. (If a card has multiple permanent types, choose one as you play it.)",
+        "AffectedZone": "Graveyard",
+        "Condition": "PlayerTurn",
+        "EffectZone": "Battlefield",
+        "MayPlayLimit": "1",
+        "Affected": "Land.YouOwn",
+        "MayPlayText": "Land",
+        "MayPlay": "True"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Graveyard",
+        "MayPlay": "True",
+        "EffectZone": "Battlefield",
+        "Affected": "Creature.YouOwn+nonLand",
+        "MayPlayText": "Creature",
+        "Condition": "PlayerTurn",
+        "MayPlayLimit": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Planeswalker.YouOwn+nonLand",
+        "EffectZone": "Battlefield",
+        "MayPlayLimit": "1",
+        "MayPlayText": "Planeswalker",
+        "MayPlay": "True",
+        "Condition": "PlayerTurn",
+        "AffectedZone": "Graveyard"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Graveyard",
+        "MayPlay": "True",
+        "MayPlayLimit": "1",
+        "EffectZone": "Battlefield",
+        "MayPlayText": "Artifact",
+        "Condition": "PlayerTurn",
+        "Affected": "Artifact.YouOwn+nonLand"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlayLimit": "1",
+        "EffectZone": "Battlefield",
+        "Affected": "Enchantment.YouOwn+nonLand",
+        "MayPlayText": "Enchantment",
+        "MayPlay": "True",
+        "AffectedZone": "Graveyard",
+        "Condition": "PlayerTurn"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "AffectedZone": "Graveyard",
+        "MayPlayText": "Battle",
+        "EffectZone": "Battlefield",
+        "Affected": "Battle.YouOwn+nonLand",
+        "Condition": "PlayerTurn",
+        "MayPlayLimit": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Card.Self",
+        "AddToughness": "1",
+        "IsPresent": "Plains.YouCtrl",
+        "Description": "CARDNAME gets +1/+1 as long as you control a Plains."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

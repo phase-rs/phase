@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "IsPresent": "Card.Self+Enchantment",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "When an opponent casts a spell, if CARDNAME is an enchantment, CARDNAME becomes a 1/1 Bird creature with flying.",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

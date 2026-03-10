@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "DBEffect",
+        "CheckSVar": "AltCostPaid"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "W U B R G",
+        "Description": "You may cast CARDNAME from your graveyard by paying {W}{U}{B}{R}{G} rather than paying its mana cost. If you do, it enters with two +1/+1 counters on it.",
+        "ValidSA": "Spell.Self",
+        "EffectZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

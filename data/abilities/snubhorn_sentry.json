@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +3/+0 as long as you have the city's blessing.",
+        "Affected": "Card.Self",
+        "Condition": "Blessing",
+        "AddPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

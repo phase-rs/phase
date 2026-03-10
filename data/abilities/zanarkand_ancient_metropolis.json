@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "G",
+            "params": {
+              "SpellDescription": "Add {G}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {G}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "Destination": "Battlefield",
+            "Description": "This land enters tapped.",
+            "ReplaceWith": "ETBTapped"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Token",
+            "name": "c_1_1_hero",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "RememberTokens": "True",
+            "TokenOwner": "You",
+            "SubAbility": "DBPutCounter",
+            "SpellDescription": "Create a 1/1 colorless Hero creature token. Put a +1/+1 counter on it for each land you control. (Then exile this card. You may play the land later from exile.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

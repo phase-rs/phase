@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a noncreature spell, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Card.nonCreature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddOrRemoveCounter",
+        "params": {
+          "ValidTgts": "Saga.YouCtrl",
+          "TgtPrompt": "Select target Saga you control",
+          "SpellDescription": "Put a lore counter on target Saga you control or remove one from it. (Activate only if this creature attacked this turn and only once each turn.)",
+          "CounterType": "LORE",
+          "CounterNum": "1",
+          "Boast": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Saga.YouCtrl",
+        "TgtPrompt": "Select target Saga you control",
+        "SpellDescription": "Put a lore counter on target Saga you control or remove one from it. (Activate only if this creature attacked this turn and only once each turn.)",
+        "CounterType": "LORE",
+        "CounterNum": "1",
+        "Boast": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "CounterAdded",
+      "params": {
+        "ValidSource": "You",
+        "ValidCard": "Saga.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you put a lore counter on a Saga you control, put a +1/+1 counter on up to one other target creature.",
+        "CounterType": "LORE"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

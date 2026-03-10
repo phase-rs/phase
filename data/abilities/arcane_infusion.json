@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeValid": "Card.Instant,Card.Sorcery",
+        "RestRandomOrder": "True",
+        "ChangeNum": "1",
+        "Optional": "True",
+        "SpellDescription": "Look at the top four cards of your library. You may reveal an instant or sorcery card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "StackDescription": "SpellDescription",
+        "ForceRevealToController": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

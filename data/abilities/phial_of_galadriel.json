@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ValidPlayer": "You",
+        "ActiveZones": "Battlefield",
+        "Hellbent": "True",
+        "ReplaceWith": "DrawTwo",
+        "Description": "If you would draw a card while you have no cards in hand, draw two cards instead."
+      }
+    },
+    {
+      "event": "GainLife",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You",
+        "ReplaceWith": "GainDouble",
+        "SVarCompare": "LE5",
+        "CheckSVar": "Y",
+        "Description": "If you would gain life while you have 5 or less life, you gain twice that much life instead.",
+        "AILogic": "DoubleLife"
+      }
+    }
+  ],
+  "faces": []
+}

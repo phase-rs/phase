@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R R",
+        "params": {
+          "SpellDescription": "Add {R}{R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}{R}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDoom",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player may put a doom counter on CARDNAME or remove a doom counter from it. Then if it has three or more doom counters on it, sacrifice CARDNAME. When you do, it deals 6 damage to each creature.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

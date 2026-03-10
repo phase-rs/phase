@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Mutates",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "Whenever this creature mutates, return target instant or sorcery card from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

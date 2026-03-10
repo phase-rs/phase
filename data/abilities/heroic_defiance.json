@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "EQ0",
+        "Description": "Enchanted creature gets +3/+3 unless it shares a color with the most common color among all permanents or a color tied for most common.",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "3",
+        "AddPower": "3",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Choose target creature. If a spell or ability that targets that creature would cause a source to deal damage to that creature this turn, prevent that damage.",
+          "ReplacementEffects": "RPrevent",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Choose target creature. If a spell or ability that targets that creature would cause a source to deal damage to that creature this turn, prevent that damage.",
+        "ReplacementEffects": "RPrevent",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to an opponent, target player mills four cards.",
+        "CombatDamage": "True",
+        "ValidTarget": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

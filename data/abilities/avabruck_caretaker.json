@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of combat on your turn, put two +1/+1 counters on another target creature you control.",
+            "TriggerZones": "Battlefield",
+            "Phase": "BeginCombat",
+            "Execute": "TrigPutCounter"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "BeginCombat",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPutCounterAll",
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of combat on your turn, put two +1/+1 counters on each creature you control."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Other permanents you control have hexproof.",
+            "Affected": "Permanent.Other+YouCtrl",
+            "AddKeyword": "Hexproof"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "TgtPrompt": "Choose target card in a graveyard",
+        "SubAbility": "TrigImmediateTrig",
+        "SpellDescription": "Exile target card from a graveyard. When a creature card is exiled this way, put a +1/+1 counter on target creature you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "ManaConvert"
+      },
+      "params": {
+        "ManaConversion": "AnyType->AnyColor",
+        "ValidSA": "Activated",
+        "Description": "You may spend mana as though it were mana of any color to activate abilities of creatures you control.",
+        "ValidPlayer": "You",
+        "ValidCard": "Creature.YouCtrl+inZoneBattlefield"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainsAbilitiesOf": "Creature.ExiledWithSource",
+        "EffectZone": "Battlefield",
+        "GainsAbilitiesOfZones": "Exile",
+        "Description": "Creatures you control with +1/+1 counters on them have all activated abilities of all creature cards exiled with CARDNAME.",
+        "Affected": "Creature.YouCtrl+counters_GE1_P1P1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

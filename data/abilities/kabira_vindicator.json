@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "6",
+        "AddStaticAbility": "SPump1",
+        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LE4_LEVEL",
+        "Description": "LEVEL 2-4 3/6 Other creatures you control get +1/+1.",
+        "SetPower": "3",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Self+counters_GE5_LEVEL",
+        "Description": "LEVEL 5+ 4/8 Other creatures you control get +2/+2.",
+        "SetPower": "4",
+        "SetToughness": "8",
+        "AddStaticAbility": "SPump2",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

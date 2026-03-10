@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, exile the top X cards of target opponent's library, where X is the number of outlaws you control. Until end of turn, you may cast spells from among those cards, and mana of any type can be spent to cast those spells.",
+        "Execute": "TrigDig"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Mercenary",
+        "Description": "Creatures you control but don't own are Mercenaries in addition to their other types.",
+        "Affected": "Creature.YouCtrl+YouDontOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

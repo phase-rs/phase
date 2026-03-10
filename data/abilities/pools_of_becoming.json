@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "Phase": "End of Turn",
+        "TriggerZones": "Command",
+        "TriggerDescription": "At the beginning of your end step, put the cards in your hand on the bottom of your library in any order, then draw that many cards.",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, reveal the top three cards of your planar deck. Each of the revealed cards' {CHAOS} abilities triggers. Then put the revealed cards on the bottom of your planar deck in any order.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

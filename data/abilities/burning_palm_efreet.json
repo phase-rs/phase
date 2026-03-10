@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.withFlying"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 R R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature with flying",
+        "SubAbility": "DBDebuff",
+        "SpellDescription": "CARDNAME deals 2 damage to target creature with flying and that creature loses flying until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

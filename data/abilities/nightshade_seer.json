@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "SubAbility": "DBNightshadePump",
+          "Defined": "You",
+          "RevealValid": "Card.Black",
+          "RememberRevealed": "True",
+          "AnyNumber": "True",
+          "SpellDescription": "Reveal any number of black cards in your hand. Target creature gets -X/-X until end of turn, where X is the number of cards revealed this way."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBNightshadePump",
+        "Defined": "You",
+        "RevealValid": "Card.Black",
+        "RememberRevealed": "True",
+        "AnyNumber": "True",
+        "SpellDescription": "Reveal any number of black cards in your hand. Target creature gets -X/-X until end of turn, where X is the number of cards revealed this way."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

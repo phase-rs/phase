@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color. Activate only if CARDNAME entered this turn.",
+          "IsPresent": "Card.Self+ThisTurnEntered"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color. Activate only if CARDNAME entered this turn.",
+        "IsPresent": "Card.Self+ThisTurnEntered"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_1_1_a_phyrexian_mite_toxic_noblock",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 1/1 colorless Phyrexian Mite artifact creature token with toxic 1 and \"This creature can't block.\" (Players dealt combat damage by it also get a poison counter.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

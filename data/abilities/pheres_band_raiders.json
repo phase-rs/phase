@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, you may pay {2}{G}. If you do, create a 3/3 green Centaur enchantment creature token.",
+        "TriggerZones": "Battlefield",
+        "Execute": "GFGToken",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

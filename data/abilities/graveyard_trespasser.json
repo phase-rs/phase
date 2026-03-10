@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigExile",
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard. If a creature card was exiled this way, each opponent loses 1 life and you gain 1 life.",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "Attacks",
+          "params": {
+            "Secondary": "True",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigExile",
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard. If a creature card was exiled this way, each opponent loses 1 life and you gain 1 life."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "Execute": "TrigExileN",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to two target cards from graveyards. For each creature card exiled this way, each opponent loses 1 life and you gain 1 life."
+          }
+        },
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigExileN",
+            "Secondary": "True",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to two target cards from graveyards. For each creature card exiled this way, each opponent loses 1 life and you gain 1 life."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

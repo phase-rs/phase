@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Zombie.attacking"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target attacking Zombie gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it. If its toughness is 0 or less, it's still put into its owner's graveyard.)",
+        "TgtPrompt": "Select target attacking Zombie",
+        "KW": "Indestructible"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

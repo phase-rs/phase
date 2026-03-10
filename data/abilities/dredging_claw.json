@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.YouOwn",
+        "TriggerZones": "Battlefield",
+        "Origin": "Graveyard",
+        "Execute": "TrigAttach",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a creature enters from your graveyard, you may attach CARDNAME to it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Menace",
+        "Description": "Equipped creature gets +1/+0 and has menace."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

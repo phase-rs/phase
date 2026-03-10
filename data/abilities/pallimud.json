@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power is equal to the number of tapped lands the chosen player controls.",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

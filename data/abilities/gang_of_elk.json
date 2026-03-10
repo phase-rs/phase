@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked, it gets +2/+2 until end of turn for each creature blocking it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

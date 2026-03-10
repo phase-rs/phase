@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "IsPresent": "Creature.OppCtrl",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Amount": "2",
+        "Description": "This spell costs {2} less to cast if your opponents control three or more creatures.",
+        "Type": "Spell",
+        "PresentCompare": "GE3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

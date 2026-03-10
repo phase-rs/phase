@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a noncreature spell, you may pay {1}. If you do, NICKNAME gets +2/+1 and creatures you control gain haste until end of turn.",
+        "ValidCard": "Card.nonCreature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

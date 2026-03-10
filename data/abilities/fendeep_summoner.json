@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 5,
+        "types": [
+          "Creature",
+          "Warrior",
+          "Treefolk"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Swamp"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Up to two target Swamps each become 3/5 Treefolk Warrior creatures in addition to their other types until end of turn.",
+        "TargetMax": "2",
+        "TgtPrompt": "Select target Swamp",
+        "TargetMin": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

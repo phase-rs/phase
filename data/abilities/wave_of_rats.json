@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+dealtCombatDamageThisTurn Player",
+        "Execute": "TrigReturn",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, if it dealt combat damage to a player this turn, return it to the battlefield under its owner's control.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

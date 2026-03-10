@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigChoose",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME attacks, defending player chooses a nonland card in your graveyard. Return that card to your hand. CARDNAME gets +X/+0 until end of turn, where X is the mana value of that card."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "CharacteristicDefining": "True",
+            "SetColor": "All",
+            "Description": "CARDNAME is all colors.",
+            "Affected": "Card.Self"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

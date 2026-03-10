@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDestroyAll",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, destroy all Curses attached to you.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Description": "You have hexproof. (You can't be the target of spells or abilities your opponents control.)",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

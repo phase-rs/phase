@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.hasKeywordConvoke+Other",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigScry",
+        "TriggerDescription": "Whenever you cast another spell that has convoke, scry 2, then draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

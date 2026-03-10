@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopy",
+        "TriggerDescription": "Whenever a nontoken Zombie you control enters, create a token that's a copy of that creature.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Zombie.!token+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

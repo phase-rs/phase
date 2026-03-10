@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChoose",
+        "TriggerDescription": "Whenever CARDNAME attacks or becomes the target of a spell an opponent controls, ABILITY",
+        "ValidSource": "Card.OppCtrl",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or becomes the target of a spell an opponent controls, ABILITY",
+        "ValidSource": "Spell.OppCtrl",
+        "ValidTarget": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "Execute": "TrigChoose"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "SubAbility": "DBReturnCorrupted",
+        "TgtPrompt": "Choose up to one creature card in your graveyard",
+        "SpellDescription": "Return up to one target creature card from your graveyard to the battlefield. Corrupted — For each opponent who has three or more poison counters as you cast this spell, put up to one target creature card from that player's graveyard onto the battlefield under your control."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "CountCorruptedPlayers",
+        "Static": "True",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "Origin": "Stack",
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "DBCleanup"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

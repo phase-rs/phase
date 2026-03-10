@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a creature spell, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

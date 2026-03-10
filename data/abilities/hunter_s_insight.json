@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "TrigDamage",
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature.YouCtrl",
+          "SpellDescription": "Choose target creature you control. Whenever that creature deals combat damage to a player or planeswalker this turn, draw that many cards."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "TrigDamage",
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature.YouCtrl",
+        "SpellDescription": "Choose target creature you control. Whenever that creature deals combat damage to a player or planeswalker this turn, draw that many cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

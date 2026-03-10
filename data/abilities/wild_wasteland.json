@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "ExileTwo",
+        "TriggerDescription": "At the beginning of your upkeep, exile the top two cards of your library. You may play those cards this turn.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "Description": "Skip your draw step.",
+        "ValidPlayer": "You",
+        "Phase": "Draw",
+        "ActiveZones": "Battlefield",
+        "Skip": "True"
+      }
+    }
+  ],
+  "faces": []
+}

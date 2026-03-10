@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Flying",
+        "SpellDescription": "CARDNAME gains flying until end of turn.",
+        "Defined": "Self"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.YouCtrl",
+        "KW": "Indestructible & Hexproof",
+        "SpellDescription": "Creatures you control gain hexproof and indestructible until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

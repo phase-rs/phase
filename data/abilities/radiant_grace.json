@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigCurse",
+            "TriggerDescription": "When enchanted creature dies, return CARDNAME to the battlefield transformed under your control attached to target opponent.",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.EnchantedBy",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Enchanted creature gets +1/+0 and has vigilance.",
+            "Affected": "Creature.EnchantedBy",
+            "AddPower": "1",
+            "AddKeyword": "Vigilance"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ValidCard": "Creature.EnchantedPlayerCtrl",
+            "ActiveZones": "Battlefield",
+            "Destination": "Battlefield",
+            "ReplaceWith": "ETBTapped",
+            "ReplacementResult": "Updated",
+            "Description": "Creatures enchanted player controls enter tapped."
+          }
+        }
+      ]
+    }
+  ]
+}

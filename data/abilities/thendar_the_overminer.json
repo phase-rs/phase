@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever a nonbasic land is put into a graveyard from the battlefield, its controller conjures a card named Wastes onto the battlefield tapped.",
+        "Execute": "TrigConjure",
+        "ValidCard": "Land.nonBasic"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if you control two or more tapped creatures, destroy up to one target nonbasic land.",
+        "Execute": "TrigDestroy",
+        "PresentCompare": "GE2",
+        "IsPresent": "Creature.YouCtrl+tapped"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

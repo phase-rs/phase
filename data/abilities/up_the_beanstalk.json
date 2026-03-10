@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters and whenever you cast a spell with mana value 5 or greater, draw a card.",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters and whenever you cast a spell with mana value 5 or greater, draw a card.",
+        "ValidCard": "Card.cmcGE5",
+        "Secondary": "True",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

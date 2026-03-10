@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "PresentCompare": "EQ0",
+        "Description": "CARDNAME can't block unless you control another Wolf or Werewolf.",
+        "IsPresent": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

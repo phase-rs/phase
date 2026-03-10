@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "NoRegen": "True",
+        "UnlessPayer": "TargetedController",
+        "SpellDescription": "Destroy target creature unless its controller pays life equal to its toughness. A creature destroyed this way can't be regenerated.",
+        "UnlessCost": "PayLife<X>"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

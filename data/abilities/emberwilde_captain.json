@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
+        "Execute": "TrigMonarch",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "CheckDefinedPlayer": "You.isMonarch",
+        "NoResolvingCheck": "True",
+        "AttackingPlayer": "Player.Opponent",
+        "Execute": "TrigDmg",
+        "TriggerZones": "Battlefield",
+        "AttackedTarget": "You",
+        "TriggerDescription": "Whenever an opponent attacks you while you're the monarch, CARDNAME deals damage to that player equal to the number of cards in their hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

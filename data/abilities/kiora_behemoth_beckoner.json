@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "true",
+        "SpellDescription": "Untap target Permanent."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.powerGE4+YouCtrl",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a creature you control with power 4 or greater enters, draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

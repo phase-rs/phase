@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+Other",
+        "AddKeyword": "Vigilance",
+        "Description": "Other creatures you control have vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

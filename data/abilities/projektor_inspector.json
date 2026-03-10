@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Detective.YouCtrl+Other,Card.Self",
+        "TriggerDescription": "Whenever CARDNAME or another Detective you control enters and whenever a Detective you control is turned face up, you may draw a card. If you do, discard a card.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Detective.YouCtrl",
+        "Secondary": "True",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME or another Detective you control enters and whenever a Detective you control is turned face up, you may draw a card. If you do, discard a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

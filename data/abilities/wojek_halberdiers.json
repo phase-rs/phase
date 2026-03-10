@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME gains first strike until end of turn.",
+        "PresentCompare": "GE2",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Creature.attacking+Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBattalionPump",
+        "NoResolvingCheck": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

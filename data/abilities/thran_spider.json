@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "7"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ChangeNum": "1",
+        "RestRandomOrder": "True",
+        "ChangeValid": "Artifact",
+        "SpellDescription": "Look at the top four cards of your library. You may reveal an artifact card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "ForceRevealToController": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you and target opponent each create a tapped Powerstone token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

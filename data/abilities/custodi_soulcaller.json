@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSoulcall",
+        "TriggerDescription": "Whenever CARDNAME attacks, return target creature card with mana value X or less from your graveyard to the battlefield, where X is the number of players you attacked this combat."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

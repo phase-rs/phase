@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "SpellDescription": "Until end of turn, creatures you control have base power and toughness X/X and gain all creature types.",
+          "Toughness": "X",
+          "Power": "X",
+          "StackDescription": "SpellDescription",
+          "AddAllCreatureTypes": "True",
+          "ValidCards": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Until end of turn, creatures you control have base power and toughness X/X and gain all creature types.",
+        "Toughness": "X",
+        "Power": "X",
+        "StackDescription": "SpellDescription",
+        "AddAllCreatureTypes": "True",
+        "ValidCards": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

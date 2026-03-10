@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Flying & First Strike & Vigilance & Trample & Haste & Protection from black & Protection from red",
+        "Description": "Creatures you control have flying, first strike, vigilance, trample, haste, and protection from black and from red."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

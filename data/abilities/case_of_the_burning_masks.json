@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile the top three cards of your library. Choose one of them. You may play that card this turn.",
+        "IsPresent": "Card.Self+IsSolved",
+        "SubAbility": "DBChoose",
+        "RememberChanged": "True",
+        "ChangeNum": "All"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this Case enters, it deals 3 damage to target creature an opponent controls.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "To solve — Three or more sources you controlled dealt damage this turn. (If unsolved, solve at the beginning of your end step.)",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "IsPresent": "Card.Self+!IsSolved",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "Execute": "TrigSolve",
+        "SVarCompare": "GE3"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

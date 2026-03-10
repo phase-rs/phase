@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Draw",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidPlayer": "Player",
+        "TriggerDescription": "At the beginning of each player's draw step, that player draws an additional card."
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever an opponent draws a card, CARDNAME deals 1 damage to that player.",
+        "ValidCard": "Card.OppOwn",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

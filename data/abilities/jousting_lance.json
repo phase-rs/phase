@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+0.",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Affected": "Creature.EquippedBy",
+        "Description": "During your turn, equipped creature has first strike.",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

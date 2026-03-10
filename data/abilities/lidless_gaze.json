@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SpellDescription": "Exile the top card of each player's library. Until the end of your next turn, you may play those cards, and mana of any type can be spent to cast them.",
+        "SubAbility": "DBEffect",
+        "Defined": "Player",
+        "ChangeNum": "All"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

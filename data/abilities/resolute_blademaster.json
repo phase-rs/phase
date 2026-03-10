@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, creatures you control gain double strike until end of turn.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

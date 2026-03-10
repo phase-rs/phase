@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Bird"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target bird creature",
+        "KW": "Banding",
+        "SpellDescription": "Target Bird creature gains banding until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.Bird",
+        "AddPower": "1",
+        "Description": "Bird creatures get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

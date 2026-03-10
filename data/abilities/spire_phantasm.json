@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+NotedGuessPhantasm",
+        "Origin": "Any",
+        "Execute": "DrawACard",
+        "TriggerDescription": "When CARDNAME enters, if you guessed correctly for a card named Spire Phantasm, draw a card.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

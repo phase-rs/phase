@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a nontoken creature enters, its controller creates a token that's a copy of that creature.",
+        "ValidCard": "Creature.!token",
+        "Execute": "TrigVesuvaCopy",
+        "Destination": "Battlefield",
+        "TriggerZones": "Command",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, destroy target creature and all other creatures with the same name as that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

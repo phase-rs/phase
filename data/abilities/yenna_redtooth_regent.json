@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "RememberTokens": "True",
+          "Defined": "Targeted",
+          "NonLegendary": "True",
+          "SorcerySpeed": "True",
+          "ValidTgts": "Enchantment.YouCtrl+doesNotShareNameWith OtherYourBattlefield",
+          "SubAbility": "DBUntap",
+          "SpellDescription": "Choose target enchantment you control that doesn't have the same name as another permanent you control. Create a token that's a copy of it, except it isn't legendary. If the token is an Aura, untap CARDNAME, then scry 2. Activate only as a sorcery.",
+          "TgtPrompt": "Choose target enchantment you control that doesn't have the same name as another permanent you control."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberTokens": "True",
+        "Defined": "Targeted",
+        "NonLegendary": "True",
+        "SorcerySpeed": "True",
+        "ValidTgts": "Enchantment.YouCtrl+doesNotShareNameWith OtherYourBattlefield",
+        "SubAbility": "DBUntap",
+        "SpellDescription": "Choose target enchantment you control that doesn't have the same name as another permanent you control. Create a token that's a copy of it, except it isn't legendary. If the token is an Aura, untap CARDNAME, then scry 2. Activate only as a sorcery.",
+        "TgtPrompt": "Choose target enchantment you control that doesn't have the same name as another permanent you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

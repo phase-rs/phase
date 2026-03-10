@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 5,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put five +1/+1 counters on NICKNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "TrigTreasure",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player attacks one or more of your opponents, that attacking player creates a Treasure token.",
+        "AttackedTarget": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "ValidToken": "Treasure",
+        "ActiveZones": "Battlefield",
+        "Description": "If you would create one or more Treasure tokens, instead create those tokens plus an additional Treasure token.",
+        "ValidPlayer": "You",
+        "ReplaceWith": "DBReplace"
+      }
+    }
+  ],
+  "faces": []
+}

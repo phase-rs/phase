@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Pirate.Other+YouCtrl",
+        "TriggerDescription": "Whenever CARDNAME or another Pirate you control enters, create a tapped Treasure token.",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "TreasureEquip",
+        "Affected": "Treasure.YouCtrl",
+        "Description": "Treasures you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0,\" equip Pirate {1}, and equip {3}.",
+        "AddType": "Equipment",
+        "AddKeyword": "Equip:3 & Equip:1:Creature.Pirate+YouCtrl:Pirate"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

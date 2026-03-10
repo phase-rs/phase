@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPreventDamage"
+      },
+      "params": {
+        "Description": "Damage that would be dealt by CARDNAME can't be prevented.",
+        "ValidSource": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "SetToughness": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power and toughness are each equal to half the highest life total among your opponents, rounded up."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

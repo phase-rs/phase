@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Player,Planeswalker"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "CARDNAME deals 3 damage to target player or planeswalker. That player or that planeswalker's controller discards two cards.",
+        "TgtPrompt": "Select target player or planeswalker"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

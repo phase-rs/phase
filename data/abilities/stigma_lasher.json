@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigEffect",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals damage to a player, that player can't gain life for the rest of the game."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

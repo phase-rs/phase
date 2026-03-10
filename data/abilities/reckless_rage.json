@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouDontCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDealDamage",
+        "SpellDescription": "CARDNAME deals 4 damage to target creature you don't control and 2 damage to target creature you control.",
+        "TgtPrompt": "Select target creature you don't control (4 damage)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

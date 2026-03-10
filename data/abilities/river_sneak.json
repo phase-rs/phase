@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Merfolk.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever another Merfolk you control enters, CARDNAME gets +1/+1 until end of turn.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

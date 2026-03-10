@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigInitiative",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you take the initiative.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you attack, if you or a player you're attacking has the initiative, you create two 1/1 white Soldier creature tokens that are tapped and attacking.",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

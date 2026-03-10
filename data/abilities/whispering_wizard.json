@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ActivationLimit": "1",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.nonCreature",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you cast a noncreature spell, create a 1/1 white Spirit creature token with flying. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

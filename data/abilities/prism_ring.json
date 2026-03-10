@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever you cast a spell of the chosen color, you gain 1 life.",
+        "ValidCard": "Card.ChosenColor",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

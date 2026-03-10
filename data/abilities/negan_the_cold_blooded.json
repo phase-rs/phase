@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChoose",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures."
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerDescription": "Whenever an opponent sacrifices a creature, you create a Treasure token.",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

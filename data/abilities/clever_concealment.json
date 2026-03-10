@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Phases",
+        "params": {
+          "ValidTgts": "Permanent.nonLand+YouCtrl",
+          "TgtPrompt": "Select any number of target nonland permanents you control",
+          "TargetMax": "MaxTgts",
+          "TargetMin": "0",
+          "SpellDescription": "Any number of target nonland permanents you control phase out. (Treat them and anything attached to them as though they don't exist until your next turn.)"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Permanent.nonLand+YouCtrl",
+        "TgtPrompt": "Select any number of target nonland permanents you control",
+        "TargetMax": "MaxTgts",
+        "TargetMin": "0",
+        "SpellDescription": "Any number of target nonland permanents you control phase out. (Treat them and anything attached to them as though they don't exist until your next turn.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

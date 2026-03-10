@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a Mountain card from outside the game underneath it.",
+        "Execute": "LiftMountain"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a Mountain card from outside the game underneath it.",
+        "ValidCard": "Card.Self",
+        "Execute": "LiftMountain",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "DropMountain",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, put all cards underneath it onto the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

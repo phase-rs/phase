@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ImprintCards": "Self",
+          "ActivationZone": "Hand",
+          "Triggers": "Cast",
+          "ValidTgts": "Land",
+          "Duration": "Permanent",
+          "RememberObjects": "Targeted & Self",
+          "ForgetOnMoved": "Exile",
+          "SpellDescription": "Target land gains \"{T}: Add {B}, {R}, or {G}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+          "StaticAbilities": "Land,MayPlay"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromHand<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ImprintCards": "Self",
+        "ActivationZone": "Hand",
+        "Triggers": "Cast",
+        "ValidTgts": "Land",
+        "Duration": "Permanent",
+        "RememberObjects": "Targeted & Self",
+        "ForgetOnMoved": "Exile",
+        "SpellDescription": "Target land gains \"{T}: Add {B}, {R}, or {G}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+        "StaticAbilities": "Land,MayPlay"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

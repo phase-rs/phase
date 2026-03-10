@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDiscard",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, discard up to two cards, then draw that many cards.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an artifact or Lesson spell, put a +1/+1 counter on NICKNAME.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Artifact,Lesson"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

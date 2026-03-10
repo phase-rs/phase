@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Player.controlsCreature.powerGE4_GE1",
+        "SpellDescription": "Each player who controls a creature with power 4 or greater draws a card. Then destroy all creatures.",
+        "SubAbility": "DBDestroy"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

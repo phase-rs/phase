@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Alliance — Whenever another creature you control enters, this creature gets +1/+0 until end of turn.",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

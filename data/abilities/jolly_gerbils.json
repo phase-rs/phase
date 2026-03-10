@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "GiveGift",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you give a gift, draw a card.",
+        "Execute": "TrigDraw",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

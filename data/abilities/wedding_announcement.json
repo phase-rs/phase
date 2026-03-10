@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "At the beginning of your end step, put an invitation counter on CARDNAME. If you attacked with two or more creatures this turn, draw a card. Otherwise, create a 1/1 white Human creature token. Then if CARDNAME has three or more invitation counters on it, transform it.",
+            "Phase": "End of Turn",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "1",
+            "Description": "Creatures you control get +1/+1.",
+            "Affected": "Creature.YouCtrl",
+            "AddPower": "1"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

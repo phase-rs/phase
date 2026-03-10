@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveAllAbilities": "True",
+        "SetPower": "1",
+        "AddKeyword": "Defender",
+        "RemoveCreatureTypes": "True",
+        "Affected": "Card.EnchantedBy",
+        "AddType": "Citizen",
+        "Description": "Enchanted creature is a Citizen with base power and toughness 1/1. It has defender and loses all other abilities. (It also loses all other creature types.)",
+        "SetToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C U",
+        "params": {
+          "SpellDescription": "Add {C}{U}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}{U}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, sacrifice it unless you return an untapped Island you control to its owner's hand.",
+        "Execute": "TrigSacUnless",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

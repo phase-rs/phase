@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, you gain 2 life.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "TrigGainLife",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, you gain 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

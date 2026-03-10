@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "RememberChanged": "True",
+        "ChangeNum": "All",
+        "SpellDescription": "Exile the top X cards of your library. You may play them until the end of your next turn.",
+        "SubAbility": "DBMayPlay"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

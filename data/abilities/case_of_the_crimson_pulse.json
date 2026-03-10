@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigLoot",
+        "TriggerDescription": "When this Case enters, discard a card, then draw two cards."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "IsPresent": "Card.Self+!IsSolved",
+        "Phase": "End of Turn",
+        "TriggerDescription": "To solve — You have no cards in hand. (If unsolved, solve at the beginning of your end step.)",
+        "Execute": "TrigSolve",
+        "TriggerZones": "Battlefield",
+        "Hellbent": "True"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "Solved — At the beginning of your upkeep, discard your hand, then draw two cards.",
+        "Phase": "Upkeep",
+        "IsPresent": "Card.Self+IsSolved",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

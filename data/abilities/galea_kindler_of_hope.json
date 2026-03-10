@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigAnimate",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "When you cast an Equipment spell this way, it gains \"When this Equipment enters, attach it to target creature you control.\"",
+        "ValidCard": "Equipment",
+        "ValidSA": "Spell.MayPlaySource"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "MayLookAt": "You",
+        "Description": "You may look at the top card of your library any time."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Affected": "Aura.TopLibrary+YouCtrl+nonLand,Equipment.TopLibrary+YouCtrl+nonLand",
+        "MayPlay": "True",
+        "Description": "You may cast Aura and Equipment spells from the top of your library. When you cast an Equipment spell this way, it gains \"When this Equipment enters, attach it to target creature you control.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

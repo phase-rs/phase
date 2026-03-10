@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "HeraldsWarCry",
+        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on it.",
+        "ValidCard": "Creature.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "X",
+        "Activator": "You",
+        "Description": "Angels and Humans you cast cost 1 less for each +1/+1 counter on CARDNAME.",
+        "ValidCard": "Angel,Human"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

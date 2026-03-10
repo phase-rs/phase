@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cycle CARDNAME, you may search your library for a basic land card, reveal that card, put it into your hand, then shuffle. (Do this before you draw.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

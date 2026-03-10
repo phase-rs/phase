@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Player",
+        "AddKeyword": "UntapAdjust:Artifact:1",
+        "Description": "Players can't untap more than one artifact during their untap steps."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

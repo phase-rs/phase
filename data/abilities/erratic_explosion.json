@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "SubAbility": "Damage",
+          "RevealedLibraryPosition": "-1",
+          "Valid": "Card.nonLand",
+          "RevealedDestination": "Library",
+          "ValidDescription": "nonland",
+          "SpellDescription": "Choose any target. Reveal cards from the top of your library until you reveal a nonland card. CARDNAME deals damage equal to that card's mana value to that permanent or player. Put the revealed cards on the bottom of your library in any order.",
+          "RememberFound": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "Damage",
+        "RevealedLibraryPosition": "-1",
+        "Valid": "Card.nonLand",
+        "RevealedDestination": "Library",
+        "ValidDescription": "nonland",
+        "SpellDescription": "Choose any target. Reveal cards from the top of your library until you reveal a nonland card. CARDNAME deals damage equal to that card's mana value to that permanent or player. Put the revealed cards on the bottom of your library in any order.",
+        "RememberFound": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

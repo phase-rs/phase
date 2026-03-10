@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ExecuteMode": "PerTarget",
+        "Description": "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.",
+        "ReplaceWith": "ExileTop",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "faces": []
+}

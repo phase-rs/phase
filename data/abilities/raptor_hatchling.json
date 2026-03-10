@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, create a 3/3 green Dinosaur creature token with trample."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

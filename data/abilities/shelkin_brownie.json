@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Debuff",
+        "params": {
+          "Keywords": "Bands with other",
+          "ValidTgts": "Creature",
+          "SpellDescription": "Target creature loses all \"bands with other\" abilities until end of turn.",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Bands with other",
+        "ValidTgts": "Creature",
+        "SpellDescription": "Target creature loses all \"bands with other\" abilities until end of turn.",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

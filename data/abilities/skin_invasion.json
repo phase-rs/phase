@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.EnchantedBy",
+            "TriggerDescription": "When enchanted creature dies, return CARDNAME to the battlefield transformed under your control.",
+            "Execute": "TrigChangeZone",
+            "Origin": "Battlefield",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "MustAttack",
+          "params": {
+            "Description": "Enchanted creature attacks each combat if able.",
+            "ValidCreature": "Creature.EnchantedBy"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

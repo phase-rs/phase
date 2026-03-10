@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Creature.AttachedBy",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever enchanted creature deals damage to a player, return target creature that player controls to its owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "Draw two cards.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_3_3_elk",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 3/3 green Elk creature token.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "Ultimate": "True",
+          "Defined": "Valid Permanent.Other+YouCtrl+nonLand",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "For each other nonland permanent you control, create a token that's a copy of that permanent.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Defined": "Valid Permanent.Other+YouCtrl+nonLand",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "For each other nonland permanent you control, create a token that's a copy of that permanent.",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigClone",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, CARDNAME becomes a copy of up to one target creature you control until end of turn, except he has hexproof.",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

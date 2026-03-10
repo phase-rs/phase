@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile three cards at random from your graveyard. Choose a noncreature, nonland card from among them and copy it. You may cast the copy without paying its mana cost.",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "3",
+        "IsPresent": "Card.YouOwn",
+        "ValidCard": "Card.Self",
+        "PresentZone": "Graveyard",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "PresentCompare": "GE9",
+        "Description": "This spell costs {3} less to cast if you have nine or more cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player",
+        "IsPresent": "Card.Self+wasDealtDamageThisTurn",
+        "TriggerDescription": "At the beginning of each end step, if CARDNAME was dealt damage this turn, put a +0/+1 counter on it.",
+        "Phase": "End of Turn",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

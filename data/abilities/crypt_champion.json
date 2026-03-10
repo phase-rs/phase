@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME enters, each player puts a creature card with mana value 3 or less from their graveyard onto the battlefield.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ManaNotSpent": "R",
+        "TriggerDescription": "When CARDNAME enters, sacrifice it unless {R} was spent to cast it.",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

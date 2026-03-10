@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.tapped",
+        "Phase": "Main",
+        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, you lose 1 life and draft a card from CARDNAME's spellbook. That card perpetually becomes an enchantment in addition to its other types.",
+        "ValidPlayer": "You",
+        "PresentDefined": "Self",
+        "TriggerZones": "Battlefield",
+        "PhaseCount": "2",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

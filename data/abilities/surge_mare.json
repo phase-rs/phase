@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": -2,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCard": "Card.Self",
+        "SpellDescription": "CARDNAME gets +2/-2 until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidTarget": "Opponent",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals damage to an opponent, you may draw a card. If you do, discard a card.",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.Green",
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked by green creatures."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

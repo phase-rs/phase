@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has base power 0 and has \"At the beginning of your upkeep, you lose 1 life unless you sacrifice this creature.\"",
+        "AddSVar": "TrigLoseLife",
+        "AddTrigger": "WitherTrig",
+        "SetPower": "0",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

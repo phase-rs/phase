@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCrank",
+        "TriggerDescription": "Whenever you crank CARDNAME, put two +1/+1 counters on target creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

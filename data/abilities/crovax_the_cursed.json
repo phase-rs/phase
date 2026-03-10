@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "NICKNAME gains flying until end of turn.",
+        "Defined": "Self",
+        "StackDescription": "SpellDescription",
+        "KW": "Flying"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSacrifice",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice a creature. If you do, put a +1/+1 counter on NICKNAME. If you don't, remove a +1/+1 counter from NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

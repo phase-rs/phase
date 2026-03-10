@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.Colorless+Other+YouCtrl",
+        "Description": "Other colorless creatures you control get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

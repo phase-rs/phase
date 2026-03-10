@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCastOrCopy",
+      "params": {
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, put a +1/+1 counter on target creature you control.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

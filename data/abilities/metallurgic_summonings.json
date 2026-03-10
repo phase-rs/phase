@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 U U"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsPresent": "Card.Artifact+YouCtrl",
+        "PresentCompare": "GE6",
+        "SpellDescription": "Return all instant and sorcery cards from your graveyard to your hand. Activate only if you control six or more artifacts.",
+        "ChangeType": "Instant.YouOwn,Sorcery.YouOwn"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, create an X/X colorless Construct artifact creature token, where X is that spell's mana value.",
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

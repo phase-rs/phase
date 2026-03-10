@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard and create a Food token.",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard and create a Food token.",
+        "Execute": "TrigExile",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Foods you control have all activated abilities of all creature cards exiled with CARDNAME.",
+        "EffectZone": "Battlefield",
+        "Affected": "Food.YouCtrl",
+        "GainsAbilitiesOfZones": "Exile",
+        "GainsAbilitiesOf": "Creature.ExiledWithSource"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

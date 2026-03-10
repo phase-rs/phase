@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "When CARDNAME enters, for each player, put a contested counter on target land that player controls.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidSource": "Creature",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player.controlsLand.counters\\_GE1\\_CONTESTED",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "Whenever a creature deals combat damage to a player, if that player controls one or more lands with contested counters on them, that creature's controller gains control of one of those lands of their choice and untaps it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

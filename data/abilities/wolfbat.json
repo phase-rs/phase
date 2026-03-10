@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "Number": "2",
+        "TriggerDescription": "Whenever you draw your second card each turn, you may pay {B}. If you do, return this card from your graveyard to the battlefield with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

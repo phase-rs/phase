@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Proliferate",
+      "params": {
+        "IsPresent": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "PresentZone": "Battlefield",
+        "TriggerDescription": "Whenever you proliferate, if CARDNAME is in your graveyard or on the battlefield, CARDNAME perpetually gets +1/+1. You may cast it from your graveyard this turn.",
+        "ValidPlayer": "You",
+        "Execute": "TrigPerpetualBuff"
+      }
+    },
+    {
+      "mode": "Proliferate",
+      "params": {
+        "PresentZone": "Graveyard",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "Whenever you proliferate, if CARDNAME is in your graveyard or on the battlefield, CARDNAME perpetually gets +1/+1. You may cast it from your graveyard this turn.",
+        "ValidPlayer": "You",
+        "IsPresent": "Card.StrictlySelf",
+        "Execute": "TrigPerpetualBuff",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "ValidCard": "Card.Self+powerGE7",
+        "Description": "As long as CARDNAME's power is 7 or greater, it can attack as though it didn't have defender."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

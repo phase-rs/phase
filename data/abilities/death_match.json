@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever a creature enters, that creature's controller may have target creature of their choice get -3/-3 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "TriggeredCardController"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

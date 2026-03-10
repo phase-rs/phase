@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "LifeLost",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigLimDulSac",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you lose life, for each 1 life you lost, sacrifice a permanent other than CARDNAME unless you discard a card. (Damage dealt to you causes you to lose life.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+withTrample",
+        "AddStaticAbility": "Static",
+        "Description": "Creatures you control with trample have \"You may have this creature assign its combat damage as though it weren't blocked.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Wolf.YouCtrl,Werewolf.YouCtrl",
+            "Description": "Wolves and Werewolves you control have haste.",
+            "AddKeyword": "Haste"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

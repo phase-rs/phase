@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Thrull"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "LoseControl": "LoseControl,LeavesPlay",
+        "SpellDescription": "Gain control of target Thrull for as long as you control CARDNAME.",
+        "TgtPrompt": "Select target Thrull"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Thrull",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Description": "Thrull creatures get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

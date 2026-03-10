@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "CanRepeatModes": "True",
+          "CharmNum": "3",
+          "Choices": "DBPutCounter,DBChangeZone1,DBChangeZone2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "CanRepeatModes": "True",
+        "CharmNum": "3",
+        "Choices": "DBPutCounter,DBChangeZone1,DBChangeZone2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

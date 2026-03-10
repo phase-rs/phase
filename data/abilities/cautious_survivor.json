@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentDefined": "Self",
+        "IsPresent": "Card.tapped",
+        "Phase": "Main",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, you gain 2 life.",
+        "PhaseCount": "2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

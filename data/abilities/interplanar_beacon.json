@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo AnyDifferent",
+        "params": {
+          "Amount": "2",
+          "RestrictValid": "Spell.Planeswalker",
+          "SpellDescription": "Add two mana of different colors. Spend this mana only to cast planeswalker spells."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "RestrictValid": "Spell.Planeswalker",
+        "SpellDescription": "Add two mana of different colors. Spend this mana only to cast planeswalker spells."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Planeswalker",
+        "TriggerDescription": "Whenever you cast a planeswalker spell, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

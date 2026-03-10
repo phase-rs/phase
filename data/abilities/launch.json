@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, return CARDNAME to its owner's hand.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has flying.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

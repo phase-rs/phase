@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, target opponent loses 3 life and you gain 3 life.",
+        "Execute": "TrigLoseLife",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "Description": "CARDNAME enters tapped.",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

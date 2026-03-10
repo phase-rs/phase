@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature attacks, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        "OptionalDecider": "You",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1.",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AE",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "SubAbility": "PickOne",
+          "NoPeek": "True",
+          "RememberRevealed": "True",
+          "SpellDescription": "Target opponent reveals the top X cards of their library. You may put a nonland permanent card with mana value X or less from among them onto the battlefield under your control. That player puts the rest on the bottom of their library in a random order.",
+          "ValidTgts": "Opponent",
+          "PeekAmount": "X"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "PickOne",
+        "NoPeek": "True",
+        "RememberRevealed": "True",
+        "SpellDescription": "Target opponent reveals the top X cards of their library. You may put a nonland permanent card with mana value X or less from among them onto the battlefield under your control. That player puts the rest on the bottom of their library in a random order.",
+        "ValidTgts": "Opponent",
+        "PeekAmount": "X"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigInvestigate",
+        "TriggerDescription": "Whenever another nontoken creature you control enters, investigate.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.YouCtrl+!token+Other",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

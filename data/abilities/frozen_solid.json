@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Creature.EnchantedBy",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When enchanted creature is dealt damage, destroy it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Layer": "CantHappen",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
+        "ValidStepTurnToController": "You",
+        "AddSVar": "FrozenSolidDestroy",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "faces": []
+}

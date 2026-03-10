@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Creature.Legendary+YouCtrl",
+        "TriggerDescription": "Whenever you attack with one or more legendary creatures, you may pay {2}{B}. If you do, return this card from your graveyard to the battlefield tapped and attacking.",
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Assassin.YouCtrl",
+        "AddKeyword": "Menace",
+        "Description": "Assassins you control have menace."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

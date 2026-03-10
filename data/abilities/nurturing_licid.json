@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Enchantment",
+          "Aura"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveCardTypes": "True",
+        "RevertCost": "G",
+        "SubAbility": "DBAttach",
+        "SpellDescription": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {G} to end this effect.",
+        "Keywords": "Enchant:Creature",
+        "RemoveEnchantmentTypes": "True",
+        "Duration": "Permanent",
+        "RemoveThisAbility": "True",
+        "Defined": "Self"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "Defined": "Enchanted",
+          "SpellDescription": "Regenerate enchanted creature."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Enchanted",
+        "SpellDescription": "Regenerate enchanted creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

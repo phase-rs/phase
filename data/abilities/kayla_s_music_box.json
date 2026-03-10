@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at the top card of your library, then exile it face down. (You may look at it any time.)",
+        "ChangeNum": "All",
+        "ExileFaceDown": "True",
+        "WithMayLook": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "MayPlay",
+          "SpellDescription": "Until end of turn, you may play cards you own exiled with CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "MayPlay",
+        "SpellDescription": "Until end of turn, you may play cards you own exiled with CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

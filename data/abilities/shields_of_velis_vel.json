@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 1,
+        "target": {
+          "type": "All",
+          "filter": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAnimate",
+        "ValidCards": "Creature",
+        "SpellDescription": "Creatures target player controls get +0/+1 and gain all creature types until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

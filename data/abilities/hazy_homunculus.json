@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "IsPresent": "Land.DefenderCtrl+untapped",
+        "ValidAttacker": "Card.Self",
+        "Description": "CARDNAME can't be blocked as long as defending player controls an untapped land."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

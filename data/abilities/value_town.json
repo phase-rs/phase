@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Combo U R",
+            "params": {
+              "SpellDescription": "Add {U} or {R}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {U} or {R}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Description": "CARDNAME enters tapped.",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "ReplacementResult": "Updated",
+            "ReplaceWith": "ETBTapped"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Draw",
+            "count": 2
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBDamage",
+            "SpellDescription": "Draw two cards. This spell deals 2 damage to each opponent. (Then exile this card. You may play the land later from exile.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

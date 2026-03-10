@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Destination": "Graveyard",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When enchanted creature dies, return that card to the battlefield under your control.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

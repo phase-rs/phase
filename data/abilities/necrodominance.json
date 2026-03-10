@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of your end step, you may pay any amount of life. If you do, draw that many cards.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetMaxHandSize": "5",
+        "Description": "Your maximum hand size is five.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "Phase": "Draw",
+        "Skip": "True",
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Description": "Skip your draw step."
+      }
+    },
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.YouCtrl,Card.token+YouCtrl",
+        "Description": "If a card or token would be put into your graveyard from anywhere, exile it instead.",
+        "Destination": "Graveyard",
+        "ReplaceWith": "Exile",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

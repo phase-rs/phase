@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, each opponent discards two cards.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+kicked"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

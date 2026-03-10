@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control are the chosen type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
+        "RemoveCreatureTypes": "True",
+        "AffectedZone": "All",
+        "Affected": "Creature.YouCtrl",
+        "AddType": "ChosenType"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

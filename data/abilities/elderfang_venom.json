@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Elf.YouCtrl",
+        "Execute": "TrigLoseLife",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an Elf you control dies, each opponent loses 1 life and you gain 1 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Deathtouch",
+        "Description": "Attacking Elves you control have deathtouch.",
+        "Affected": "Elf.attacking+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

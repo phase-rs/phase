@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may return target artifact card from your graveyard to your hand.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Historic",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you cast a historic spell, put a +1/+1 counter on CARDNAME. (Artifacts, legendaries, and Sagas are historic.)",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

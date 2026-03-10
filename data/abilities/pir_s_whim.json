@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AssignGroup",
+        "params": {
+          "SpellDescription": "For each player, choose friend or foe. Each friend searches their library for a land card, puts it onto the battlefield tapped, then shuffles. Each foe sacrifices an artifact or enchantment they control.",
+          "Defined": "Player",
+          "AILogic": "FriendOrFoe",
+          "Choices": "DBSearch,DBSacrifice"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "For each player, choose friend or foe. Each friend searches their library for a land card, puts it onto the battlefield tapped, then shuffles. Each foe sacrifices an artifact or enchantment they control.",
+        "Defined": "Player",
+        "AILogic": "FriendOrFoe",
+        "Choices": "DBSearch,DBSacrifice"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

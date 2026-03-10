@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Opponent",
+        "TriggerDescription": "Whenever CARDNAME deals 6 or more damage to an opponent, destroy target land that player controls.",
+        "DamageAmount": "GE6",
+        "Execute": "TrigDestroy",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

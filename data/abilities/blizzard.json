@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Snow.Land+YouCtrl",
+        "PresentCompare": "EQ0",
+        "Description": "Cast CARDNAME only if you control a snow land."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidStepTurnToController": "You",
+        "ValidCard": "Creature.withFlying",
+        "Layer": "CantHappen",
+        "Description": "Creatures with flying don't untap during their controllers' untap steps."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Other Treefolk creatures you control get +1/+1.",
+        "Affected": "Creature.Treefolk+Other+YouCtrl",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Treefolk and Forests you control have indestructible.",
+        "Affected": "Treefolk.Other+YouCtrl,Forest.Other+YouCtrl",
+        "AddKeyword": "Indestructible"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

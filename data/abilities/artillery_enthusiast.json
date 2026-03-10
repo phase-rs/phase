@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSeek",
+        "TriggerDescription": "When CARDNAME enters, you may discard a card. If you do, seek a card with mana value equal to that card's mana value.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.modified+YouCtrl",
+        "AddKeyword": "Menace",
+        "Description": "Modified creatures you control have menace."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

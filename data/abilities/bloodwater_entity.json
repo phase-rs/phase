@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may put target instant or sorcery card from your graveyard on top of your library.",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

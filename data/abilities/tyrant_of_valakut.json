@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+surged",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if its surge cost was paid, it deals 3 damage to any target.",
+        "Execute": "TrigDealDamage",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

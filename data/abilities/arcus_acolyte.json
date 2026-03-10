@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Outlast:GW",
+        "Affected": "Creature.YouCtrl+Other+counters_LT1_P1P1",
+        "Description": "Each other creature you control without a +1/+1 counter on it has outlast {G/W}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

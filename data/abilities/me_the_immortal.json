@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigCounter",
+        "TriggerDescription": "At the beginning of combat on your turn, put your choice of a +1/+1, first strike, vigilance, or menace counter on CARDNAME.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CountersRemain"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "Counters remain on NICKNAME as it moves to any zone other than a player's hand or library."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "AffectedZone": "Graveyard",
+        "EffectZone": "Graveyard",
+        "Affected": "Card.Self",
+        "RaiseCost": "Discard<2/Card>",
+        "Description": "You may cast NICKNAME from your graveyard by discarding two cards in addition to paying its other costs."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

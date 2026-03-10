@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<2/Card>"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonblack creature",
+        "SpellDescription": "Destroy target nonblack creature. It can't be regenerated.",
+        "AITgts": "BetterThanSource",
+        "CostDesc": "{T}, Exile two cards from your graveyard and CARDNAME:",
+        "NoRegen": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

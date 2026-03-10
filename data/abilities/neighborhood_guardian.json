@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another creature you control with power 2 or less enters, target creature you control gets +1/+1 until end of turn.",
+        "ValidCard": "Creature.powerLE2+YouCtrl+Other",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

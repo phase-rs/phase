@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Enchanted",
+        "SpellDescription": "Enchanted creature gets +1/+0 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2 and has flying.",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

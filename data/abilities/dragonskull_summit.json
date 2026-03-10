@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo B R",
+        "params": {
+          "SpellDescription": "Add {B} or {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B} or {R}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped unless you control a Swamp or a Mountain.",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "LandTapped",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

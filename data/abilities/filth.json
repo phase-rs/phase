@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Graveyard",
+        "AddKeyword": "Landwalk:Swamp",
+        "IsPresent": "Swamp.YouCtrl",
+        "Description": "As long as CARDNAME is in your graveyard and you control a Swamp, creatures you control have swampwalk.",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

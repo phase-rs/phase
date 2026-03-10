@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.OppCtrl",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Chainsword — Whenever a creature an opponent controls dies, that player loses 2 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

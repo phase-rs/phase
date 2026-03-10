@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Creature",
+          "SpellDescription": "Create a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.",
+          "NumCopies": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "SpellDescription": "Create a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.",
+        "NumCopies": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

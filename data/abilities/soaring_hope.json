@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "LibraryPosition": "0",
+        "SpellDescription": "Put CARDNAME on top of its owner's library."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME enters, you gain 3 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Flying",
+        "Description": "Enchanted creature has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

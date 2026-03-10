@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Main2",
+          "Planeswalker": "True",
+          "SpellDescription": "Until your next turn, you may cast sorcery spells as though they had flash.",
+          "StaticAbilities": "STPlay",
+          "Duration": "UntilYourNextTurn"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Main2",
+        "Planeswalker": "True",
+        "SpellDescription": "Until your next turn, you may cast sorcery spells as though they had flash.",
+        "StaticAbilities": "STPlay",
+        "Duration": "UntilYourNextTurn"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature,Enchantment"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+        "TgtPrompt": "Select target artifact, creature, or enchantment",
+        "SubAbility": "DBDraw",
+        "Planeswalker": "True",
+        "TargetMax": "1",
+        "TargetMin": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "OnlySorcerySpeed": "True",
+        "Description": "Each opponent can cast spells only any time they could cast a sorcery.",
+        "Caster": "Opponent",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

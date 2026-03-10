@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDebuff",
+        "TriggerDescription": "Neurotraumal Rod — Whenever a creature attacks you, it gets -1/-0 until end of turn.",
+        "Attacked": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Attacked": "Player.Opponent",
+        "ValidCard": "Creature",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a creature attacks one of your opponents, it gets +0/+1 until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

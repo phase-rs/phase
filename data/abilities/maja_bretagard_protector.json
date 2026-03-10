@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, create a 1/1 white Human Warrior creature token.",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Other creatures you control get +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

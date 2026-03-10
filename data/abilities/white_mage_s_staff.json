@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1, has \"Whenever this creature attacks, you gain 1 life,\" and is a Cleric in addition to its other types.",
+        "AddSVar": "AE",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddTrigger": "TrigAttack",
+        "AddType": "Cleric"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

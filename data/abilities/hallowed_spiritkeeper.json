@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, create X 1/1 white Spirit creature tokens with flying, where X is the number of creature cards in your graveyard.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

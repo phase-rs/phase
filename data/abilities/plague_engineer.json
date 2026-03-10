@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.ChosenType+OppCtrl",
+        "AddPower": "-1",
+        "AddToughness": "-1",
+        "Description": "Creatures of the chosen type your opponents control get -1/-1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

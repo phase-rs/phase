@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, investigate for each opponent who lost life this turn.",
+        "ValidPlayer": "You",
+        "Execute": "TrigInvestigate",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a Clue you control is put into a graveyard from the battlefield, create a 1/1 white and black Spirit creature token with flying. This ability triggers only once each turn.",
+        "Execute": "TrigToken",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "ValidCard": "Clue.YouCtrl",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

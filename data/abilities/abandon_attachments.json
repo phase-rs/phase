@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "UnlessCost": "Discard<1/Card>",
+        "UnlessPayer": "You",
+        "UnlessSwitched": "True",
+        "SpellDescription": "You may discard a card. If you do, draw two cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

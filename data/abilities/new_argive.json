@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a historic creature you control attacks, it gets +2/+2 until end of turn. (Artifacts, legendaries, and Sagas are historic.)",
+        "TriggerZones": "Command",
+        "ValidCard": "Creature.YouCtrl+Historic",
+        "Execute": "TrigPump"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, reveal cards from the top of your library until you reveal a historic card. Put that card into your hand and the rest on the bottom of your library in a random order."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

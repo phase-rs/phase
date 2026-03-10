@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this Spacecraft enters, mill three cards, then return a creature or Spacecraft card from your graveyard to your hand.",
+        "Execute": "TrigMill",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "AddKeyword": "Flying & Lifelink",
+        "Description": "STATION 8+ Flying, lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

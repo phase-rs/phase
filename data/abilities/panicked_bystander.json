@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME or another creature you control dies, you gain 1 life.",
+            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+            "Origin": "Battlefield",
+            "Destination": "Graveyard",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigGainLife1"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "Phase": "End of Turn",
+            "TriggerDescription": "At the beginning of your end step, if you gained 3 or more life this turn, transform CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "SVarCompare": "GE3",
+            "ValidPlayer": "You",
+            "CheckSVar": "YouLifeGained"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 0,
+            "toughness": 0,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "KW": "Deathtouch",
+            "SpellDescription": "CARDNAME gains deathtouch until end of turn.",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+            "Destination": "Graveyard",
+            "TriggerDescription": "Whenever CARDNAME or another creature you control dies, you gain 1 life.",
+            "Origin": "Battlefield",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigGainLife2"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this creature enters, put a -1/-1 counter on target creature.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature with a -1/-1 counter on it dies, you may put a land card from your hand or graveyard onto the battlefield tapped.",
+        "Execute": "TrigChangeZone",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.counters_GE1_M1M1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

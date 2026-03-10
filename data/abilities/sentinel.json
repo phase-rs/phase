@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.blockedBySource,Creature.blockingSource"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Change CARDNAME's base toughness to 1 plus the power of target creature blocking or blocked by CARDNAME. (This effect lasts indefinitely.)",
+        "TgtPrompt": "Select target creature blocking or being blocked by this creature",
+        "SubAbility": "DBAnimate",
+        "StackDescription": "None"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

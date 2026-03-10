@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerDescription": "Whenever another permanent you control is turned face up, if it's a creature, put two +1/+1 counters on it.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Permanent.Creature+YouCtrl+Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

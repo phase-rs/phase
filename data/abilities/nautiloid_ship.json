@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExileGrave",
+        "TriggerDescription": "When CARDNAME enters, exile target player's graveyard.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may put a creature card exiled with CARDNAME onto the battlefield under your control.",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigPut",
+        "ValidTarget": "Player"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Exile",
+        "Static": "True",
+        "Execute": "DBForget",
+        "Destination": "Any",
+        "ValidCard": "Card.IsRemembered"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBCleanup",
+        "Destination": "Any",
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

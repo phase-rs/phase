@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBSuspect",
+        "SpellDescription": "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
+        "LoseControl": "EOT",
+        "Untap": "True",
+        "AddKWs": "Haste"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Description": "This spell can't be countered. (This includes by the ward ability.)",
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

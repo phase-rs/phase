@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Scry",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Scry 1."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

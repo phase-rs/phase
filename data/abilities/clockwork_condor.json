@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "DelTrig",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, remove a +1/+1 counter from it at end of combat."
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "DelTrig",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, remove a +1/+1 counter from it at end of combat.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

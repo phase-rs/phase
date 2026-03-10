@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_human",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<X/Food>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenAmount": "X",
+        "TokenOwner": "You",
+        "SpellDescription": "Create X 1/1 white Human creature tokens."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack, you create a Food token for each player being attacked. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+        "Execute": "TrigFood",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

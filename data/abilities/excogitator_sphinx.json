@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "Type": "Instant,Sorcery",
+          "SpellDescription": "Seek an instant or sorcery card."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Instant,Sorcery",
+        "SpellDescription": "Seek an instant or sorcery card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.YouCtrl",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, investigate."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

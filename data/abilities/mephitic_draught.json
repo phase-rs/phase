@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters or is put into a graveyard from the battlefield, you draw a card and you lose 1 life.",
+        "Origin": "Any",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME enters or is put into a graveyard from the battlefield, you draw a card and you lose 1 life.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Pump",
+        "Description": "Enchanted land has \"{T}: Prevent the next 1 damage that would be dealt to any target this turn.\"",
+        "Affected": "Land.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

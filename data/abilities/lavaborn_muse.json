@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Opponent",
+        "TriggerDescription": "At the beginning of each opponent's upkeep, if that player has two or fewer cards in hand, CARDNAME deals 3 damage to that player.",
+        "SVarCompare": "LE2",
+        "Phase": "Upkeep",
+        "Execute": "TrigDamage",
+        "CheckSVar": "CardsInHand"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

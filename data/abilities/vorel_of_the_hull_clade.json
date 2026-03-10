@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "MultiplyCounter",
+        "counter_type": "",
+        "multiplier": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature,Land"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact, creature, or land",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Double the number of each kind of counter on target artifact, creature, or land."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

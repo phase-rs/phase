@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "Gains": "white",
+          "SpellDescription": "Target permanent you control gains protection from white until end of turn.",
+          "ValidTgts": "Permanent.YouCtrl",
+          "TgtPrompt": "Select target permanent you control"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Gains": "white",
+        "SpellDescription": "Target permanent you control gains protection from white until end of turn.",
+        "ValidTgts": "Permanent.YouCtrl",
+        "TgtPrompt": "Select target permanent you control"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Colors": "White",
+        "SpellDescription": "Target spell or permanent becomes white until end of turn.",
+        "OverwriteColors": "True",
+        "TgtZone": "Stack,Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

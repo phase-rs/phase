@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "AddTrigger": "TrigBlocks & TrigBecomeBlocked",
+        "AddToughness": "2",
+        "Affected": "Card.EquippedBy",
+        "Description": "Equipped creature gets +0/+2 and has hexproof and \"Whenever a creature with deathtouch blocks or becomes blocked by this creature, destroy that creature.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,120 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Draw a card. Activate only as a sorcery.",
+            "SorcerySpeed": "True"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "SpellDescription": "Transform CARDNAME.",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Mana",
+                "cost": "Discard<1/Hand>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "SpellDescription": "Transform CARDNAME.",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "SpellDescription": "You may cast a creature spell from your graveyard this turn. If you do, it enters with a finality counter on it and is a Vampire in addition to its other types. (If a creature with a finality counter on it would die, exile it instead.)",
+              "Triggers": "SpellCast",
+              "StaticAbilities": "StaticPlay"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "You may cast a creature spell from your graveyard this turn. If you do, it enters with a finality counter on it and is a Vampire in addition to its other types. (If a creature with a finality counter on it would die, exile it instead.)",
+            "Triggers": "SpellCast",
+            "StaticAbilities": "StaticPlay"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

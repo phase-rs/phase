@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigScry",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, scry 2, then draw a card. Discard a card unless CARDNAME entered this turn.",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

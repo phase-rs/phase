@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Creature",
+          "Elemental"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target land you control",
+        "SpellDescription": "Target land you control becomes a 4/4 Elemental creature with trample. It's still a land.",
+        "Duration": "Permanent",
+        "Planeswalker": "True",
+        "Keywords": "Trample"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Forest"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "SpellDescription": "Untap up to four target Forests.",
+        "Planeswalker": "True",
+        "TargetMax": "4",
+        "TgtPrompt": "Choose target forest"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Search your library for any number of basic land cards, put them onto the battlefield, then shuffle. Those lands become 4/4 Elemental creatures with trample. They're still lands.",
+        "RememberChanged": "True",
+        "Ultimate": "True",
+        "SubAbility": "DBAnimate",
+        "Planeswalker": "True",
+        "ChangeType": "Land.Basic",
+        "ChangeTypeDesc": "basic land",
+        "ChangeNum": "XFetch"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

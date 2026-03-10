@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "Sides": "20",
+          "SpellDescription": "Roll a d20.",
+          "ResultSubAbilities": "1-9:DBSToken,10-19:DBKToken,20:DBTokens"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Sides": "20",
+        "SpellDescription": "Roll a d20.",
+        "ResultSubAbilities": "1-9:DBSToken,10-19:DBKToken,20:DBTokens"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapAll",
+        "params": {
+          "ValidCards": "Creature.toughnessLE2",
+          "SpellDescription": "Tap all creatures with toughness 2 or less."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.toughnessLE2",
+        "SpellDescription": "Tap all creatures with toughness 2 or less."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "RemoveKeywords": "Flying",
+          "SpellDescription": "All other creatures lose flying until end of turn.",
+          "ValidCards": "Creature.StrictlyOther"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveKeywords": "Flying",
+        "SpellDescription": "All other creatures lose flying until end of turn.",
+        "ValidCards": "Creature.StrictlyOther"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

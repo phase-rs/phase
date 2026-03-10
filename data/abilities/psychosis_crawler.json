@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you draw a card, each opponent loses 1 life.",
+        "ValidCard": "Card.YouOwn",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of cards in your hand.",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

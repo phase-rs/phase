@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "DBDraw",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, draw a card. If it enters from your library or was cast from your library, draw two cards instead."
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "When NICKNAME becomes the target of a spell, shuffle NICKNAME into its owner's library.",
+        "ValidSource": "Spell",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigShuffle",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

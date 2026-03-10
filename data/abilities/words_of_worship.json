@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "DrawReplace",
+          "SpellDescription": "The next time you would draw a card this turn, you gain 5 life instead."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "DrawReplace",
+        "SpellDescription": "The next time you would draw a card this turn, you gain 5 life instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

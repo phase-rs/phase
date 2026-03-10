@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "2",
+        "AddKeyword": "Flying",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE2_LEVEL",
+        "Description": "LEVEL 1-2 2/2 Flying",
+        "Affected": "Card.Self",
+        "SetPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "2",
+        "AddKeyword": "Flying",
+        "IsPresent": "Card.Self+counters_GE3_LEVEL",
+        "Description": "LEVEL 3+ 4/2 Flying",
+        "Affected": "Card.Self",
+        "SetPower": "4"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

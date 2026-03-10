@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Permanent.tapped+YouCtrl",
+        "Execute": "TrigUntap",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a permanent you control enters tapped, untap it.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

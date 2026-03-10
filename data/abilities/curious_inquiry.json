@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "AddTrigger": "TrigDamageDone",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +1/+1 and has \"Whenever this creature deals combat damage to a player, investigate.\" (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

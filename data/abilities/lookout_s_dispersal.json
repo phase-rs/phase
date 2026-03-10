@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "UnlessCost": "4",
+        "SpellDescription": "Counter target spell unless its controller pays {4}.",
+        "TgtPrompt": "Select target spell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {1} less to cast if you control a Pirate.",
+        "Amount": "1",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "IsPresent": "Pirate.YouCtrl",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

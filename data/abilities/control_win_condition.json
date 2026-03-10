@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "CharacteristicDefining": "True",
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of turns you've taken this game. (If this is in your deck, please keep track of your turns. This means you, Mark.)"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self",
+        "Description": "This spell can't be countered.",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "faces": []
+}

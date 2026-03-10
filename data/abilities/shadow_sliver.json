@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Shadow",
+        "Description": "All Sliver creatures have shadow. (They can block or be blocked by only creatures with shadow.)",
+        "Affected": "Creature.Sliver"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

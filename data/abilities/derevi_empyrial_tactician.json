@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Command",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G W U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put NICKNAME onto the battlefield from the command zone.",
+        "ActivationZone": "Command"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigTapOrUntap",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME enters or a creature you control deals combat damage to a player, you may tap or untap target permanent.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or a creature you control deals combat damage to a player, you may tap or untap target permanent.",
+        "Secondary": "True",
+        "Execute": "TrigTapOrUntap",
+        "OptionalDecider": "You",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

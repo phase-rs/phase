@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, create a 5/5 green Wurm creature token.",
+        "ValidPlayer": "You",
+        "Execute": "TrigToken",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Description": "Creatures with flying can't attack you or planeswalkers you control.",
+        "ValidCard": "Creature.withFlying",
+        "Target": "You,Planeswalker.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

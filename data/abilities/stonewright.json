@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Pump",
+        "Description": "As long as CARDNAME is paired with another creature, each of those creatures have \"{R}: This creature gets +1/+0 until end of turn.\"",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

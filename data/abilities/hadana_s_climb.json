@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigPutCounter",
+            "TriggerZones": "Battlefield",
+            "Phase": "BeginCombat",
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. Then if that creature has three or more +1/+1 counters on it, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Any",
+            "params": {
+              "SpellDescription": "Add one mana of any color.",
+              "Amount": "1"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add one mana of any color.",
+            "Amount": "1"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 0,
+            "toughness": 0,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouCtrl"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1 G U"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Target creature you control gains flying and gets +X/+X until end of turn, where X is its power.",
+            "KW": "Flying",
+            "TgtPrompt": "Select target creature you control"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, exile the top ten cards of your library. You may cast any number of spells with total mana value 10 or less from among them without paying their mana costs.",
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "Exile",
+        "Description": "If CARDNAME would enter and it wasn't cast or no mana was spent to cast it, exile it instead.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+!wasCast,Card.Self+CastSa Spell.ManaSpent EQ0"
+      }
+    }
+  ],
+  "faces": []
+}

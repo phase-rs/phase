@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo R W",
+        "params": {
+          "SpellDescription": "Add {R} or {W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R} or {W}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 2,
+        "toughness": 1,
+        "types": [
+          "Creature",
+          "Elemental"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 R W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "Keywords": "Double Strike",
+        "SpellDescription": "Until end of turn, this land becomes a 2/1 red and white Elemental creature with double strike. It's still a land.",
+        "OverwriteColors": "True",
+        "Colors": "Red,White"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "This land enters tapped.",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

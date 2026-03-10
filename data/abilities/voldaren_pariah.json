@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME.",
+              "Defined": "Self"
+            }
+          },
+          "cost": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME.",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "Execute": "TrigSacrifice",
+            "TriggerDescription": "When this creature transforms into CARDNAME, target opponent sacrifices three creatures.",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

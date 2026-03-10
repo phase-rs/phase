@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals damage equal to the power of the chosen creature or card to target creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Cost": "ChooseCard<1/Creature.YouCtrl+inZoneBattlefield;Creature.YouOwn+inZoneExile+warped>",
+        "Description": "As an additional cost to cast this spell, choose a creature you control or a warped creature card you own in exile.",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

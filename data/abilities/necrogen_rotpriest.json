@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl+withToxic"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Deathtouch",
+        "TgtPrompt": "Select target creature you control with toxic",
+        "SpellDescription": "Target creature you control with toxic gains deathtouch until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control with toxic deals combat damage to a player, that player gets an additional poison counter.",
+        "Execute": "TrigPoison",
+        "ValidSource": "Creature.YouCtrl+withToxic",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

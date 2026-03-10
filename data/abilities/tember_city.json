@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Land",
+        "TriggerZones": "Command",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever a player taps a land for mana, CARDNAME deals 1 damage to that player."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, each other player sacrifices a nonland permanent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+2."
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "CARDNAME's equip ability costs {2} less to activate if it targets a colorless creature.",
+        "Amount": "2",
+        "ValidSpell": "Activated.Equip",
+        "ValidTarget": "Creature.Colorless",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

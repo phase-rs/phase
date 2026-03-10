@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Graveyard",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self+YouOwn",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if it entered from your graveyard or you cast it from your graveyard, exile it. If you do, create a 5/5 black Demon creature token with flying."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+wasCastFromYourGraveyardByYou",
+        "TriggerDescription": "When CARDNAME enters, if it entered from your graveyard or you cast it from your graveyard, exile it. If you do, create a 5/5 black Demon creature token with flying.",
+        "Secondary": "True",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

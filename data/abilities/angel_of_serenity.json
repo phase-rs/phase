@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may exile up to three other target creatures from the battlefield and/or creature cards from graveyards.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, return the exiled cards to their owners' hands.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

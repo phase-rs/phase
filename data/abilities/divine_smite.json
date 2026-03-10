@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Phases",
+        "params": {
+          "SpellDescription": "Target creature or planeswalker an opponent controls phases out. If that permanent is black, exile it instead. (If it phases out, treat it and anything attached to it as though they don't exist until its controller's next turn.)",
+          "ConditionPresent": "Card.Black",
+          "ConditionDefined": "Targeted",
+          "IsCurse": "True",
+          "ConditionCompare": "EQ0",
+          "SubAbility": "DBExile",
+          "StackDescription": "SpellDescription",
+          "ValidTgts": "Creature.OppCtrl,Planeswalker.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature or planeswalker an opponent controls phases out. If that permanent is black, exile it instead. (If it phases out, treat it and anything attached to it as though they don't exist until its controller's next turn.)",
+        "ConditionPresent": "Card.Black",
+        "ConditionDefined": "Targeted",
+        "IsCurse": "True",
+        "ConditionCompare": "EQ0",
+        "SubAbility": "DBExile",
+        "StackDescription": "SpellDescription",
+        "ValidTgts": "Creature.OppCtrl,Planeswalker.OppCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

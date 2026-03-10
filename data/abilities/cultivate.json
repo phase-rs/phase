@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "2",
+        "SpellDescription": "Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.",
+        "SubAbility": "DBChangeZone1",
+        "Reveal": "True",
+        "ChangeType": "Land.Basic",
+        "ChangeTypeDesc": "basic land",
+        "RememberChanged": "True",
+        "StackDescription": "SpellDescription",
+        "Shuffle": "False"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

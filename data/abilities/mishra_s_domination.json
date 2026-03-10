@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.EnchantedBy+YouCtrl",
+        "AddToughness": "2",
+        "Description": "As long as you control enchanted creature, it gets +2/+2. Otherwise, it can't block.",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Secondary": "True",
+        "Description": "As long as you control enchanted creature, it gets +2/+2. Otherwise, it can't block.",
+        "IsPresent": "Card.EnchantedBy+YouDontCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

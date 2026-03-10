@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "Description": "CARDNAME costs {2} less to cast if a creature died this turn.",
+        "CheckSVar": "X",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

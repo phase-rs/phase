@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": "Hand"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ChangeValid": "Creature",
+        "ForceRevealToController": "True",
+        "DestinationZone2": "Graveyard",
+        "SpellDescription": "Look at the top three cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest into your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

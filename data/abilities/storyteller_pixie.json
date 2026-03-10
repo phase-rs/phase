@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an Adventure spell, draw a card.",
+        "ValidCard": "Card.Adventure",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

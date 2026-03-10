@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "RonsoCounter",
+        "TriggerDescription": "Ronso Rage — At the beginning of combat on your turn, put a +1/+1 counter on NICKNAME and tap target creature an opponent controls. Then you may have NICKNAME become a copy of that creature, except its name is Kimahri, Valiant Guardian and it has vigilance and this ability.",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

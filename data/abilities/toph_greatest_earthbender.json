@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigEarthbend",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, earthbend X, where X is the amount of mana spent to cast her."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Double Strike",
+        "Affected": "Creature.Land+YouCtrl",
+        "Description": "Land creatures you control have double strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME enters or dies, return target artifact card from your graveyard to your hand.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters or dies, return target artifact card from your graveyard to your hand.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.YouCtrl",
+        "AddKeyword": "Ward:1",
+        "Description": "Artifacts you control have ward {1}. (Whenever an artifact you control becomes the target of a spell or ability an opponent controls, counter it unless that player pays {1}.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

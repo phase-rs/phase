@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw two cards, then discard a card.",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "4",
+        "SetToughness": "4",
+        "Affected": "Artifact.EnchantedBy",
+        "AddType": "Creature",
+        "Description": "Enchanted artifact is a creature with base power and toughness 4/4 in addition to its other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

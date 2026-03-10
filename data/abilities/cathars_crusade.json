@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "CatharsCounters",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerDescription": "Whenever a creature you control enters, put a +1/+1 counter on each creature you control.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

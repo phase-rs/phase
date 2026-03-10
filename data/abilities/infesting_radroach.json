@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigRadiation",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, they get that many rad counters.",
+        "ValidTarget": "Player"
+      }
+    },
+    {
+      "mode": "Milled",
+      "params": {
+        "PresentZone": "Graveyard",
+        "Execute": "TrigReturn",
+        "ValidPlayer": "Opponent",
+        "OptionalDecider": "You",
+        "IsPresent": "Card.StrictlySelf",
+        "TriggerDescription": "Whenever an opponent mills a nonland card, if CARDNAME is in your graveyard, you may return it to your hand.",
+        "TriggerZones": "Graveyard",
+        "ValidCard": "Card.nonLand"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Creature.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you cast a noncreature spell, CARDNAME gets +2/+0 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

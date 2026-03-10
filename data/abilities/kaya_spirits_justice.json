@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Surveil",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "Planeswalker": "True",
+        "SubAbility": "DBExile",
+        "SpellDescription": "Surveil 2, then exile a card from a graveyard."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "wb_1_1_spirit_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 white and black Spirit creature token with flying.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target creature you control",
+        "SubAbility": "DBForEach",
+        "SpellDescription": "Exile target creature you control. For each other player, exile up to one target creature that player controls."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield,Graveyard",
+        "Execute": "TrigCopy",
+        "Destination": "Exile",
+        "TriggerDescription": "Whenever one or more creatures you control and/or creature cards in your graveyard are put into exile, you may choose a creature card from among them. Until end of turn, target token you control becomes a copy of it, except it has flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a Vampire card, reveal it, then shuffle and put that card on top.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever another Vampire you control enters, target creature gets +1/+1 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPump",
+        "ValidCard": "Vampire.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

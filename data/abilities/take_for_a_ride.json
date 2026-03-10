@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
+        "LoseControl": "EOT",
+        "Untap": "True",
+        "AddKWs": "Haste"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "Count$CommittedCrimeThisTurn.1.0",
+        "Description": "CARDNAME has flash as long as you've committed a crime this turn. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)",
+        "CharacteristicDefining": "True",
+        "AddKeyword": "Flash"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

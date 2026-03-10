@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "RememberTapped": "True",
+        "AnyNumber": "True",
+        "CardChoices": "Creature.YouCtrl+untapped",
+        "ChoiceAmount": "Count$Valid Creature.YouCtrl+untapped",
+        "SpellDescription": "Tap any number of untapped creatures you control. You gain 4 life for each creature tapped this way."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

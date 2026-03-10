@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature,Player",
+          "TgtPrompt": "Select target creature or player",
+          "ReplacementEffects": "Protect",
+          "SpellDescription": "Until end of turn, each time damage is dealt to target creature or player, prevent X of that damage, where X is a number from 1 to 3 chosen at random each time."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature,Player",
+        "TgtPrompt": "Select target creature or player",
+        "ReplacementEffects": "Protect",
+        "SpellDescription": "Until end of turn, each time damage is dealt to target creature or player, prevent X of that damage, where X is a number from 1 to 3 chosen at random each time."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

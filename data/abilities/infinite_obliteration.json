@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "ValidDescription": "creature",
+          "Defined": "You",
+          "ValidCards": "Creature",
+          "SubAbility": "ExileYard",
+          "SpellDescription": "Choose a creature card name. Search target opponent's graveyard, hand, and library for any number of cards with that name and exile them. Then that player shuffles."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidDescription": "creature",
+        "Defined": "You",
+        "ValidCards": "Creature",
+        "SubAbility": "ExileYard",
+        "SpellDescription": "Choose a creature card name. Search target opponent's graveyard, hand, and library for any number of cards with that name and exile them. Then that player shuffles."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

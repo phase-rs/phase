@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player loses 1 life. If the sacrificed creature was legendary, amass Orcs 2.",
+        "SubAbility": "DBAmass",
+        "ValidTgts": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "ValidPlayer": "Player.Opponent",
+        "Description": "Your opponents can't gain life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

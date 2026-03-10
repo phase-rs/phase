@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "StoreSVar",
+        "params": {
+          "Expression": "CardToughness",
+          "ConditionPresent": "Card.Creature",
+          "ConditionCompare": "GE1",
+          "ConditionDefined": "Targeted",
+          "ValidTgts": "Any",
+          "XColor": "Black",
+          "Type": "Targeted",
+          "SubAbility": "StoreTgtPW",
+          "SVar": "Limit",
+          "SpellDescription": "Spend only black mana on X. CARDNAME deals X damage to any target. You gain life equal to the damage dealt, but not more life than the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Expression": "CardToughness",
+        "ConditionPresent": "Card.Creature",
+        "ConditionCompare": "GE1",
+        "ConditionDefined": "Targeted",
+        "ValidTgts": "Any",
+        "XColor": "Black",
+        "Type": "Targeted",
+        "SubAbility": "StoreTgtPW",
+        "SVar": "Limit",
+        "SpellDescription": "Spend only black mana on X. CARDNAME deals X damage to any target. You gain life equal to the damage dealt, but not more life than the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

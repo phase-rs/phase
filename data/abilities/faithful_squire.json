@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidCard": "Spirit,Arcane",
+            "ValidActivatingPlayer": "You",
+            "Execute": "TrigPutCounter",
+            "OptionalDecider": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on CARDNAME."
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigFlip",
+            "OptionalDecider": "You",
+            "IsPresent": "Card.Self+counters_GE2_KI",
+            "TriggerZones": "Battlefield",
+            "Phase": "End of Turn",
+            "TriggerDescription": "At the beginning of the end step, if there are two or more ki counters on CARDNAME, you may flip it."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 0,
+            "toughness": 0,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "SubCounter<1/KI>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Prevent all damage that would be dealt to target creature this turn.",
+            "KW": "Prevent all damage that would be dealt to CARDNAME."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

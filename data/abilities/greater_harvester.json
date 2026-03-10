@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigSacYou",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice a permanent."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigSacOpp",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player sacrifices two permanents."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

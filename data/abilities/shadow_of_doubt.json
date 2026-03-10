@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Players can't search libraries this turn. Draw a card.",
+          "StaticAbilities": "STCantSearch",
+          "SubAbility": "DBDraw"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Players can't search libraries this turn. Draw a card.",
+        "StaticAbilities": "STCantSearch",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

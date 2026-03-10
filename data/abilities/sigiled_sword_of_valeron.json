@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.EquippedBy",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever equipped creature attacks, create a 2/2 white Knight creature token with vigilance that's attacking."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.EquippedBy",
+        "AddType": "Knight",
+        "Description": "Equipped creature gets +2/+0, has vigilance, and is a Knight in addition to its other types.",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

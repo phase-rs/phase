@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "Whenever a 1/1 creature you control enters, you may return CARDNAME from your graveyard to the battlefield, then attach it to that creature.",
+        "ValidCard": "Creature.powerEQ1+toughnessEQ1+YouCtrl",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +1/+2.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

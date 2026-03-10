@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Permanent.nonLand",
+        "SubAbility": "DBEndTurn",
+        "SpellDescription": "Return all nonland permanents to their owners' hands."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "Affected": "Card.Self",
+        "EffectZone": "All",
+        "Amount": "3",
+        "Condition": "NotPlayerTurn",
+        "Description": "As long as it's not your turn, this spell costs {3} more to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

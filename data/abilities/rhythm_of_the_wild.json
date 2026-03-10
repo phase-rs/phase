@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Riot",
+        "Affected": "Creature.!token+YouCtrl",
+        "Description": "Nontoken creatures you control have riot. (They enter with your choice of a +1/+1 counter or haste.)"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "Creature spells you control can't be countered.",
+        "ValidSA": "Spell.Creature+YouCtrl",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

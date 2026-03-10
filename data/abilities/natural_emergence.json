@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigBounce",
+        "TriggerDescription": "When CARDNAME enters, return a red or green enchantment you control to its owner's hand.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.YouCtrl",
+        "SetPower": "2",
+        "AddType": "Creature",
+        "AddKeyword": "First Strike",
+        "Description": "Lands you control are 2/2 creatures with first strike. They're still lands.",
+        "SetToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

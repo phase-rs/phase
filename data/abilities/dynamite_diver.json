@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "When this creature dies, it deals 1 damage to any target.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "TapPowerValue"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Activated.Saddle+Mount,Activated.Crew+Vehicle",
+        "Value": "2",
+        "Description": "This creature saddles Mounts and crews Vehicles as though its power were 2 greater."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

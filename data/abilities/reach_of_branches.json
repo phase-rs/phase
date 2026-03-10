@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "g_2_5_treefolk_shaman",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 2/5 green Treefolk Shaman creature token.",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerZones": "Graveyard",
+        "ValidCard": "Forest.YouCtrl",
+        "TriggerDescription": "Whenever a Forest you control enters, you may return CARDNAME from your graveyard to your hand.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

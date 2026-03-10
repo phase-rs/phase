@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever a creature dies, CARDNAME deals 2 damage to that creature's controller.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand,Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Chooser": "You",
+        "DefinedPlayer": "Targeted",
+        "StackDescription": "SpellDescription",
+        "IsCurse": "True",
+        "ChangeType": "Card.nonLand",
+        "ChangeNum": "1",
+        "Mandatory": "True",
+        "SpellDescription": "Target opponent reveals their hand. You choose a nonland card from that player's graveyard or hand and exile it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

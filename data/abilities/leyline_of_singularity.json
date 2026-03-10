@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All nonland permanents are legendary.",
+        "Affected": "Permanent.nonLand",
+        "AddType": "Legendary"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

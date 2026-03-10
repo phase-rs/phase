@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerDescription": "Whenever you sacrifice CARDNAME or another creature, it perpetually gains \"{2}, Exile this card from your graveyard: Create an X/X green Ooze creature token, where X is this card's power. Activate only as a sorcery.\"",
+        "ValidCard": "Card.Self,Creature",
+        "ValidPlayer": "You",
+        "Execute": "TrigEffect",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

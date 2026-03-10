@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "TgtPrompt": "Select target creature you control",
+          "SubAbility": "DBDraw",
+          "Gains": "Choice",
+          "ValidTgts": "Creature.YouCtrl",
+          "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn. Draw a card.",
+          "Choices": "AnyColor"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature you control",
+        "SubAbility": "DBDraw",
+        "Gains": "Choice",
+        "ValidTgts": "Creature.YouCtrl",
+        "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn. Draw a card.",
+        "Choices": "AnyColor"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

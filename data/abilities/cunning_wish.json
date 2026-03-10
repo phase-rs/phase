@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Sideboard",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Instant.YouOwn",
+        "Reveal": "True",
+        "ChangeTypeDesc": "instant card they own",
+        "ChangeNum": "1",
+        "SpellDescription": "You may reveal an instant card you own from outside the game and put it into your hand. Exile CARDNAME.",
+        "SubAbility": "DBChange",
+        "Hidden": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

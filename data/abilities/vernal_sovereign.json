@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a green and white Elemental creature token with \"This creature's power and toughness are each equal to the number of creatures you control.\"",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a green and white Elemental creature token with \"This creature's power and toughness are each equal to the number of creatures you control.\"",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

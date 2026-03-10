@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "ExileFromHand<1/Card.White+Other>",
+        "Condition": "NotPlayerTurn",
+        "Description": "If it's not your turn, you may exile a white card from your hand rather than pay this spell's mana cost."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Creatures you control get +1/+1.",
+        "Affected": "Creature.YouCtrl",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

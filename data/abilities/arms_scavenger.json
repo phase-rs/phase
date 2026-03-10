@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraft",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, draft a card from CARDNAME's spellbook, then exile it. Until end of turn, you may play that card.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card",
+        "Amount": "1",
+        "Activator": "You",
+        "ValidSpell": "Activated.Equip",
+        "Condition": "PlayerTurn",
+        "Description": "Equip abilities you activate cost {1} less to activate."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "NoPeek": "True",
+          "ValidTgts": "Opponent",
+          "RememberRevealed": "True",
+          "SubAbility": "DBDamage",
+          "SpellDescription": "Target opponent reveals the top card of their library."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "NoPeek": "True",
+        "ValidTgts": "Opponent",
+        "RememberRevealed": "True",
+        "SubAbility": "DBDamage",
+        "SpellDescription": "Target opponent reveals the top card of their library."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

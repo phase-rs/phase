@@ -1,0 +1,140 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "4 U B R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBReturn",
+            "RememberChanged": "True",
+            "SorcerySpeed": "True",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Exile CARDNAME, then return him to the battlefield transformed under his owner's control. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDiscard",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, each opponent discards a card.",
+            "Origin": "Any"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 2
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": 2
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Draw two cards.",
+            "Planeswalker": "True"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 10
+            },
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature,Planeswalker"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -3
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME deals 10 damage to target creature or planeswalker.",
+            "TgtPrompt": "Select target creature or planeswalker",
+            "Planeswalker": "True"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature,Planeswalker"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -4
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "SpellDescription": "Put target creature or planeswalker card from a graveyard onto the battlefield under your control.",
+            "GainControl": "True",
+            "TgtPrompt": "Select target creature or planeswalker card in a graveyard"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 1,
+            "destination": "Exile"
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -12
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "SpellDescription": "Exile all but the bottom card of target player's library.",
+            "Ultimate": "True",
+            "ChangeNum": "All",
+            "ValidTgts": "Player"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

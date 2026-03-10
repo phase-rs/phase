@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card.nonCreature,Dragon",
+        "TriggerDescription": "Whenever you cast a noncreature or Dragon spell, this creature deals 1 damage to each opponent.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

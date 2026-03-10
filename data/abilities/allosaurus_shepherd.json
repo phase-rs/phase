@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Creature.Elf+YouCtrl",
+          "Toughness": "5",
+          "Power": "5",
+          "Types": "Dinosaur",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Until end of turn, each Elf creature you control has base power and toughness 5/5 and becomes a Dinosaur in addition to its other creature types."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.Elf+YouCtrl",
+        "Toughness": "5",
+        "Power": "5",
+        "Types": "Dinosaur",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Until end of turn, each Elf creature you control has base power and toughness 5/5 and becomes a Dinosaur in addition to its other creature types."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen",
+        "ValidSA": "Spell"
+      }
+    },
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell.Green+YouCtrl",
+        "ActiveZones": "Battlefield",
+        "Layer": "CantHappen",
+        "Description": "Green spells you control can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

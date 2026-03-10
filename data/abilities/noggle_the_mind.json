@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "1",
+        "RemoveCreatureTypes": "True",
+        "SetToughness": "1",
+        "Affected": "Creature.EnchantedBy",
+        "AddType": "Noggle",
+        "Description": "Enchanted creature loses all abilities and is a colorless Noggle with base power and toughness 1/1. (It loses all colors and all other creature types.)",
+        "SetColor": "Colorless",
+        "RemoveAllAbilities": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

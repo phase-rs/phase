@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a creature you control with a +1/+1 counter on it dies, draw a card.",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+counters_GE1_P1P1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

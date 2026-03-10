@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigTreasure",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create a Treasure token.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Whenever you sacrifice a token, CARDNAME gains flying until end of turn.",
+        "ValidCard": "Permanent.token+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidPlayer": "You",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

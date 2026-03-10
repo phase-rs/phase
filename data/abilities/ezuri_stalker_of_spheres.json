@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you may pay {3}. If you do, proliferate twice.",
+        "Execute": "TrigProliferate",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Proliferate",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you proliferate, draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

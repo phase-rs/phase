@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "{p:Targeted} draws two cards and loses 2 life.",
+        "SpellDescription": "Target player draws two cards and loses 2 life.",
+        "SubAbility": "DBLoseLife",
+        "ValidTgts": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

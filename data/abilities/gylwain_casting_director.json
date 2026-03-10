@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or another nontoken creature you control enters, ABILITY",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self,Creature.!token+Other+YouCtrl",
+        "Execute": "TrigCharm",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

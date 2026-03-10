@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetLife",
+        "params": {
+          "Defined": "You",
+          "SubAbility": "DBNoUntap",
+          "SpellDescription": "Your life total becomes equal to your starting life total.",
+          "LifeAmount": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SubAbility": "DBNoUntap",
+        "SpellDescription": "Your life total becomes equal to your starting life total.",
+        "LifeAmount": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigScry",
+            "TriggerDescription": "Whenever CARDNAME attacks or blocks, scry 2.",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Blocks",
+          "params": {
+            "Secondary": "True",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME attacks or blocks, scry 2.",
+            "Execute": "TrigScry"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Counter",
+            "target": {
+              "type": "Filtered",
+              "filter": "Card.nonCreature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Counter target noncreature spell. (Then exile this card. You may cast the creature later from exile.)",
+            "TargetType": "Spell",
+            "TgtPrompt": "Select target noncreature spell"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

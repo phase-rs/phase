@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDiscard",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, discard your hand, then draw three cards."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "CARDNAME attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

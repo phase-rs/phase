@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SearchedLibrary",
+      "params": {
+        "SearchOwnLibrary": "True",
+        "Execute": "TrigSac",
+        "ValidPlayer": "Player.Opponent",
+        "TriggerDescription": "Whenever an opponent searches their library, that player sacrifices a creature and loses 10 life.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.Other",
+        "Execute": "DeathGift",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature dies, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

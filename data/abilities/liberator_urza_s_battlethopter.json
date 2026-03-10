@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidSA": "Spell.ManaSpent GTX",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "Execute": "TrigCounter",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell, if the amount of mana spent to cast that spell is greater than CARDNAME's power, put a +1/+1 counter on NICKNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "ValidCard": "Artifact,Card.Colorless",
+        "Description": "You may cast colorless spells and artifact spells as though they had flash.",
+        "ValidSA": "Spell",
+        "Caster": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

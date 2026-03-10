@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_kor_warrior",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberTokens": "True",
+        "SpellDescription": "Create a 1/1 white Kor Warrior creature token. You may attach an Equipment you control to it.",
+        "TokenOwner": "You",
+        "SubAbility": "DBChooseToken",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigMultiple",
+        "params": {
+          "Optional": "True",
+          "ChangeValid": "Card.Warrior,Card.Equipment",
+          "RestRandomOrder": "True",
+          "ForceRevealToController": "True",
+          "SpellDescription": "Look at the top six cards of your library. You may reveal a Warrior card and/or Equipment card from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+          "Planeswalker": "True",
+          "DigNum": "6"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ChangeValid": "Card.Warrior,Card.Equipment",
+        "RestRandomOrder": "True",
+        "ForceRevealToController": "True",
+        "SpellDescription": "Look at the top six cards of your library. You may reveal a Warrior card and/or Equipment card from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+        "Planeswalker": "True",
+        "DigNum": "6"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature or planeswalker",
+        "SpellDescription": "CARDNAME deals damage to target creature or planeswalker equal to twice the number of Warriors and Equipment you control.",
+        "Planeswalker": "True",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

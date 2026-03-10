@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "CheckSVar": "RaidTest",
+        "Execute": "ABMana",
+        "TriggerDescription": "Raid — When CARDNAME enters, if you attacked this turn, add {R}{W}{B}.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

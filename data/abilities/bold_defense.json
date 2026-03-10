@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Creatures you control get +1/+1 until end of turn. If CARDNAME was kicked, instead creatures you control get +2/+2 and gain first strike until end of turn.",
+        "SubAbility": "Kicked"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter target spell.",
+        "TargetType": "Spell",
+        "TgtPrompt": "Select target spell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Landwalk:Plains",
+        "Affected": "Creature.White",
+        "Description": "White creatures have plainswalk."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

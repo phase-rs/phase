@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When CARDNAME exploits a creature, each opponent sacrifices a creature.",
+        "ValidCard": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

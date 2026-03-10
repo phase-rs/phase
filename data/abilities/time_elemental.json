@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.!enchanted"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target permanent that isn't enchanted to its owner's hand.",
+        "TgtPrompt": "Select target unenchanted permanent"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME attacks or blocks, at end of combat, sacrifice it and it deals 5 damage to you.",
+        "Execute": "DelayedTrig"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "When CARDNAME attacks or blocks, at end of combat, sacrifice it and it deals 5 damage to you.",
+        "ValidCard": "Card.Self",
+        "Execute": "DelayedTrig"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

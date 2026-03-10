@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "RemoveType": "Creature",
+        "CheckSVar": "X",
+        "SVarCompare": "LT7",
+        "Description": "As long as your devotion to red and white is less than seven, NICKNAME isn't a creature."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Menace",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have menace."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "Prevent all damage that would be dealt to attacking creatures you control.",
+        "Prevent": "True",
+        "ValidTarget": "Creature.attacking+YouCtrl",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

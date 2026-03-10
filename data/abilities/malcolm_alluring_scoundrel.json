@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a chorus counter on it. Draw a card, then discard a card. If there are four or more chorus counters on NICKNAME, you may cast the discarded card without paying its mana cost.",
+        "ValidTarget": "Player",
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

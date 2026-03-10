@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Dragons you control get +2/+0 until end of turn.",
+        "ValidCards": "Dragon.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigCopy",
+        "SVarCompare": "GE3",
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self+wasCastByYou",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enter, if you cast them and there are three or more Dragon and/or Lesson cards in your graveyard, create a token that's a copy of CARDNAME, except it's not legendary."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "For Segovia! (When this Equipment enters the battlefield, create a -1/-1 blue Squid creature token, then attach this to it. Yes, it's a -1/-1 creature.)",
+        "Execute": "TrigToken",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddKeyword": "Skulk",
+        "Description": "Equipped creature gets +2/+2 and has skulk."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

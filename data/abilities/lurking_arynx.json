@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MustBlock",
+        "params": {
+          "CheckSVar": "FormidableTest",
+          "PrecostDesc": "Formidable —",
+          "SpellDescription": "Target creature blocks CARDNAME this turn if able. Activate only if creatures you control have total power 8 or greater.",
+          "ValidTgts": "Creature",
+          "TgtPrompt": "Select target creature that must block this creature this turn",
+          "SVarCompare": "GE8"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CheckSVar": "FormidableTest",
+        "PrecostDesc": "Formidable —",
+        "SpellDescription": "Target creature blocks CARDNAME this turn if able. Activate only if creatures you control have total power 8 or greater.",
+        "ValidTgts": "Creature",
+        "TgtPrompt": "Select target creature that must block this creature this turn",
+        "SVarCompare": "GE8"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

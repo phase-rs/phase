@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo W B",
+        "params": {
+          "SpellDescription": "Add {W} or {B}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {W} or {B}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When this land enters, you gain 1 life.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "This land enters tapped.",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

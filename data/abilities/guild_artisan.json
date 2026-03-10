@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.IsCommander+YouOwn",
+        "Description": "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, create two Treasure tokens.\" (They're artifacts with \"{T}, Sacrifice this artifact: Add one mana of any color.\")",
+        "AddTrigger": "AttacksPlayer"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

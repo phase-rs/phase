@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, you may return an instant or sorcery card exiled with CARDNAME to its owner's hand.",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

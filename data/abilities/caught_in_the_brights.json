@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When a Vehicle you control attacks, exile enchanted creature.",
+        "Execute": "TrigExile",
+        "ValidCard": "Vehicle.YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't attack or block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "1 W ExileFromGrave<1/Creature>",
+        "Description": "You may pay {1}{W} and exile a creature card from your graveyard rather than pay CARDNAME's mana cost.",
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

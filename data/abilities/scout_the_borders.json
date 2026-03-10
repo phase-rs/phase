@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 5,
+        "destination": ""
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "SpellDescription": "Reveal the top five cards of your library. You may put a creature or land card from among them into your hand. Put the rest into your graveyard.",
+        "Reveal": "True",
+        "DestinationZone2": "Graveyard",
+        "ChangeValid": "Creature,Land",
+        "Optional": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

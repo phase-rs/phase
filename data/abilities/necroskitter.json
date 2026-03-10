@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.OppCtrl+counters_GE1_M1M1",
+        "TriggerDescription": "Whenever a creature an opponent controls with a -1/-1 counter on it dies, you may return that card to the battlefield under your control.",
+        "Origin": "Battlefield",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

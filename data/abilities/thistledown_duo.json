@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPump11",
+        "TriggerDescription": "Whenever you cast a white spell, CARDNAME gets +1/+1 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.White"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Blue",
+        "TriggerDescription": "Whenever you cast a blue spell, CARDNAME gains flying until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPumpKW"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

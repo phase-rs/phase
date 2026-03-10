@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "OppPerms",
+          "RememberObjects": "Caster & Valid Permanent.OppCtrl",
+          "SpellDescription": "Until end of turn, permanents your opponents control gain \"When this permanent deals damage to the player who cast CARDNAME, sacrifice this permanent. You lose 2 life.\""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "OppPerms",
+        "RememberObjects": "Caster & Valid Permanent.OppCtrl",
+        "SpellDescription": "Until end of turn, permanents your opponents control gain \"When this permanent deals damage to the player who cast CARDNAME, sacrifice this permanent. You lose 2 life.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

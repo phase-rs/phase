@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidCard": "Enchantment.YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, draw a card."
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "ValidPlayer": "You",
+        "ValidCard": "Card.Room",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

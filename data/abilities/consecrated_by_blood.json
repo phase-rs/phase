@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2 and has flying and \"Sacrifice two other creatures: Regenerate this creature.\"",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddAbility": "Regenerate"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

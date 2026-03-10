@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "AnyNumber": "True",
+          "RememberRevealed": "True",
+          "SpellDescription": "Reveal any number of green cards in your hand. Return an enchantment card from your graveyard to your hand for each card revealed this way.",
+          "RevealValid": "Card.Green+YouCtrl",
+          "SubAbility": "DBChangeZone"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AnyNumber": "True",
+        "RememberRevealed": "True",
+        "SpellDescription": "Reveal any number of green cards in your hand. Return an enchantment card from your graveyard to your hand for each card revealed this way.",
+        "RevealValid": "Card.Green+YouCtrl",
+        "SubAbility": "DBChangeZone"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

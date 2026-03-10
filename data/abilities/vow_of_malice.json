@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Intimidate",
+        "Description": "Enchanted creature gets +2/+2, has intimidate, and can't attack you or planeswalkers you control. (A creature with intimidate can't be blocked except by artifact creatures and/or creatures that share a color with it.)",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Target": "You,Planeswalker.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

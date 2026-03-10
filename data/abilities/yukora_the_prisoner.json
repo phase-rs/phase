@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSac",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, sacrifice all non-Ogre creatures you control.",
+        "Origin": "Battlefield",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

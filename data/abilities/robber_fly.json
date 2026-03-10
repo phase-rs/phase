@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked, defending player discards all the cards in their hand, then draws that many cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Vote",
+        "params": {
+          "EachVote": "True",
+          "SubAbility": "DBChange",
+          "Defined": "Player",
+          "Choices": "DBTime,DBMoney",
+          "SpellDescription": "Council's dilemma — Starting with you, each player votes for time or money. For each time vote, take an extra turn after this one. For each money vote, choose a permanent owned by the voter and gain control of it. Exile CARDNAME."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "EachVote": "True",
+        "SubAbility": "DBChange",
+        "Defined": "Player",
+        "Choices": "DBTime,DBMoney",
+        "SpellDescription": "Council's dilemma — Starting with you, each player votes for time or money. For each time vote, take an extra turn after this one. For each money vote, choose a permanent owned by the voter and gain control of it. Exile CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

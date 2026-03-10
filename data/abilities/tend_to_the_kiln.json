@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAnimateAll",
+        "Origin": "Any",
+        "TriggerDescription": "When this enchantment enters, all non-Elemental instant and sorcery cards you own perpetually become Elemental kindreds in addition to their other types.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast an Elemental spell, put a flame counter on this enchantment. Then if it has three or more flame counters on it, remove them, conjure a card named Flamebraider onto the battlefield, and it gains haste and \"At the beginning of the end step, sacrifice this creature.\"",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Elemental",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

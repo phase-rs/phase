@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "TriggerDescription": "Coven — At the beginning of combat on your turn, if you control three or more creatures with different powers, CARDNAME gains flying until end of turn.",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "SVarCompare": "GE3"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

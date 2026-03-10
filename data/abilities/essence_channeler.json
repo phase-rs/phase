@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter1",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, put its counters on target creature you control.",
+        "Execute": "TrigPutCounter2",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "Affected": "Card.Self",
+        "AddKeyword": "Flying & Vigilance",
+        "Description": "As long as you've lost life this turn, CARDNAME has flying and vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

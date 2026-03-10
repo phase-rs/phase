@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Exile target permanent you own. Return it to the battlefield under your control at the beginning of the next end step.",
+        "TgtPrompt": "Select target permanent you own",
+        "SubAbility": "DelTrig",
+        "RememberChanged": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "Unblockable",
+          "SpellDescription": "Creatures can't be blocked this turn.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "Unblockable",
+        "SpellDescription": "Creatures can't be blocked this turn.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Emblem — Venser, the Sojourner",
+          "Planeswalker": "True",
+          "Image": "emblem_venser_the_sojourner",
+          "AILogic": "Always",
+          "SpellDescription": "You get an emblem with \"Whenever you cast a spell, exile target permanent.\"",
+          "Duration": "Permanent",
+          "Triggers": "TrigSpellCast",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Emblem — Venser, the Sojourner",
+        "Planeswalker": "True",
+        "Image": "emblem_venser_the_sojourner",
+        "AILogic": "Always",
+        "SpellDescription": "You get an emblem with \"Whenever you cast a spell, exile target permanent.\"",
+        "Duration": "Permanent",
+        "Triggers": "TrigSpellCast",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Goblin creatures get +1/+1 and have mountainwalk.",
+        "AddPower": "1",
+        "AddKeyword": "Landwalk:Mountain",
+        "AddToughness": "1",
+        "Affected": "Creature.Goblin+Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

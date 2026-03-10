@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Description": "You may cast spells as though they had flash.",
+        "ValidSA": "Spell",
+        "Caster": "You",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

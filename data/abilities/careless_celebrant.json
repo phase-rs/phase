@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, it deals 2 damage to target creature or planeswalker an opponent controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, it connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigConnive",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "DiscardedAll",
+      "params": {
+        "TriggerDescription": "Whenever you discard one or more cards, exile them from your graveyard.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "Execute": "TrigExile",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When NICKNAME dies, put the cards exiled with it into their owner's hand.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigReturn",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

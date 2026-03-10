@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "CheckSVar": "X",
+        "SVarCompare": "EQ0",
+        "TriggerDescription": "At the beginning of your end step, if you didn't attack with a creature this turn, sacrifice CARDNAME.",
+        "ValidPlayer": "You",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "CuriousObsessionDraw",
+        "Description": "Enchanted creature gets +1/+1 and has \"Whenever this creature deals damage to an opponent, you may draw a card.\"",
+        "AddPower": "1",
+        "AddTrigger": "TriggerDamageDone",
+        "AddToughness": "1",
+        "Affected": "Creature.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

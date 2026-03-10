@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+bargained",
+        "Execute": "TrigKicker",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if it was bargained, it fights up to one target creature you don't control. (Each deals damage equal to its power to the other.)",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

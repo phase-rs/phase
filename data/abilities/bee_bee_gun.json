@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "TriggerDescription": "Whenever you crank CARDNAME, until end of turn, target creature gains \"{2}: This creature fights another target creature.\"",
+        "Execute": "TrigCrank",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

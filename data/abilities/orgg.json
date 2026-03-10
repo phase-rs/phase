@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "UnlessDefender": "!controlsCreature.untapped+powerGE3",
+        "Description": "CARDNAME can't attack if defending player controls an untapped creature with power 3 or greater.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.Self",
+        "Description": "CARDNAME can't block creatures with power 3 or greater.",
+        "ValidAttacker": "Creature.powerGE3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

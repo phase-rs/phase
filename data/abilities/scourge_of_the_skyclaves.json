@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Self+kicked",
+        "TriggerDescription": "When you cast CARDNAME, if it was kicked, each player loses half their life, rounded up.",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to 20 minus the highest life total among players."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

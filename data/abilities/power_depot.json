@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+          "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+        "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped",
+        "Description": "CARDNAME enters tapped."
+      }
+    }
+  ],
+  "faces": []
+}

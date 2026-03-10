@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigPumpAll",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Beacon of Hope — When CARDNAME enters, creatures you control get +1/+1 and gain vigilance until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

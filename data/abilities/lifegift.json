@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "ValidCard": "Land",
+        "TriggerDescription": "Whenever a land enters, you may gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

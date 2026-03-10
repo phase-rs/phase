@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, double the number of +1/+1 counters on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDoubleCounters",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GT9_P1P1",
+        "AddKeyword": "Trample",
+        "Description": "CARDNAME has trample as long as it has ten or more +1/+1 counters on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

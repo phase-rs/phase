@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +3/+0.",
+        "AddPower": "3"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as equipped creature is attacking, it has first strike and must be blocked by a Dalek if able.",
+        "AddKeyword": "First Strike & MustBeBlockedBy Creature.Dalek",
+        "Affected": "Creature.EquippedBy+attacking"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "DBPrevent",
+          "SpellDescription": "Prevent the next 1 damage that would be dealt by CARDNAME this turn.",
+          "StackDescription": "SpellDescription",
+          "RememberObjects": "Self",
+          "ForgetOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "DBPrevent",
+        "SpellDescription": "Prevent the next 1 damage that would be dealt by CARDNAME this turn.",
+        "StackDescription": "SpellDescription",
+        "RememberObjects": "Self",
+        "ForgetOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals 1 damage to that player."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

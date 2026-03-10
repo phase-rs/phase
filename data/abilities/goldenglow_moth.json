@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "TrigGainLife",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME blocks, you may gain 4 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

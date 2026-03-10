@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, CARDNAME deals damage to that player equal to the number of cards in their hand and you gain 1 life for each card in your hand.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection from red & Protection from white",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +2/+2 and has protection from red and from white.",
+        "Affected": "Creature.EquippedBy",
+        "AddSVar": "SwordOfWarAndPeaceCE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

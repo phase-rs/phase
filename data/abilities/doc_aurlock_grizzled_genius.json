@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "2",
+        "Description": "Spells you cast from your graveyard or from exile cost {2} less to cast.",
+        "Activator": "You",
+        "Type": "Spell",
+        "ValidCard": "Card.wasCastFromYourGraveyard,Card.wasCastFromExile"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidSpell": "Static.Plotting",
+        "Description": "Plotting cards from your hand costs {2} less.",
+        "Amount": "2",
+        "AffectedZone": "Hand",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

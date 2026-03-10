@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "If CARDNAME would be put into a graveyard from anywhere, reveal CARDNAME and shuffle it into its owner's library instead.",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "ReplaceWith": "DBShuffle"
+      }
+    }
+  ],
+  "faces": []
+}

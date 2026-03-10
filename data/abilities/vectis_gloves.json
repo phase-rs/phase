@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+0 and has artifact landwalk. (It can't be blocked as long as defending player controls an artifact land.)",
+        "AddPower": "2",
+        "AddKeyword": "Landwalk:Land.Artifact:artifact land"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

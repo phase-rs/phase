@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 1,
+            "toughness": -1,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME gets +1/-1 until end of turn."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME.",
+              "Defined": "Self"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "5 R R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME.",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 1,
+            "toughness": 0,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME gets +1/+0 until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

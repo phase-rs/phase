@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "Triggers": "TrigRemove",
+          "SpellDescription": "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.",
+          "ValidTgts": "Creature.nonLegendary",
+          "ReplacementEffects": "ReplaceETB",
+          "TgtPrompt": "Choose target nonlegendary creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "Triggers": "TrigRemove",
+        "SpellDescription": "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.",
+        "ValidTgts": "Creature.nonLegendary",
+        "ReplacementEffects": "ReplaceETB",
+        "TgtPrompt": "Choose target nonlegendary creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

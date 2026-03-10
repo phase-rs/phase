@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "Execute": "TrigCharm",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME becomes tapped, ABILITY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

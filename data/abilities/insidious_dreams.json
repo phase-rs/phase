@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 B"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<X/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card",
+        "LibraryPosition": "0",
+        "Mandatory": "True",
+        "ChangeNum": "X",
+        "SpellDescription": "Search your library for X cards, then shuffle and put those cards on top in any order.",
+        "Reorder": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

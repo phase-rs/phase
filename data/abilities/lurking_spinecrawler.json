@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChoose",
+        "TriggerDescription": "When CARDNAME enters, you may choose a nonland card in your hand. If you do, that card perpetually incorporates {1}{B} and gains \"When you cast this spell, each opponent sacrifices a creature. Each opponent who can't discards a card.\""
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a multicolored spell, for each of that spell's colors, each opponent loses 1 life and you gain 1 life.",
+        "ValidCard": "Card.MultiColor",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDrain"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

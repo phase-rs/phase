@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterTypeAddedAll",
+      "params": {
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Whenever one or more counters are put on this creature, target creature an opponent controls perpetually gains \"When this creature dies, you lose 1 life.\"",
+        "TriggerZones": "Battlefield",
+        "ValidObject": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

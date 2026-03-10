@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "ValidTgts": "Opponent",
+          "NoPeek": "True",
+          "ConditionCheckSVar": "X",
+          "ConditionSVarCompare": "GE10",
+          "SubAbility": "DBTwoPiles",
+          "SpellDescription": "If your library has ten or more cards in it, target opponent looks at the top ten cards of your library and separates them into two face-down piles. Exile one of those piles. Search the other pile for a card, put it into your hand, then shuffle the rest of that pile into your library.",
+          "StackDescription": "SpellDescription",
+          "NoReveal": "True",
+          "PeekAmount": "10",
+          "RememberPeeked": "True",
+          "Defined": "You"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "NoPeek": "True",
+        "ConditionCheckSVar": "X",
+        "ConditionSVarCompare": "GE10",
+        "SubAbility": "DBTwoPiles",
+        "SpellDescription": "If your library has ten or more cards in it, target opponent looks at the top ten cards of your library and separates them into two face-down piles. Exile one of those piles. Search the other pile for a card, put it into your hand, then shuffle the rest of that pile into your library.",
+        "StackDescription": "SpellDescription",
+        "NoReveal": "True",
+        "PeekAmount": "10",
+        "RememberPeeked": "True",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

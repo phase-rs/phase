@@ -1,0 +1,93 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDiscard",
+        "Planeswalker": "True",
+        "AILogic": "Main2",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Draw a card. Then discard a card unless you attacked this turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "u_1_1_ninja_unblockable",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 1/1 blue Ninja creature token with \"This creature can't be blocked.\""
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "Name": "Emblem — Kaito Shizuki",
+          "AILogic": "Always",
+          "Image": "emblem_kaito_shizuki",
+          "Stackable": "False",
+          "Triggers": "TrigDamage",
+          "Duration": "Permanent",
+          "SpellDescription": "You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "Name": "Emblem — Kaito Shizuki",
+        "AILogic": "Always",
+        "Image": "emblem_kaito_shizuki",
+        "Stackable": "False",
+        "Triggers": "TrigDamage",
+        "Duration": "Permanent",
+        "SpellDescription": "You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\""
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "Execute": "TrigPhase",
+        "IsPresent": "Card.Self+ThisTurnEntered",
+        "TriggerDescription": "At the beginning of your end step, if CARDNAME entered this turn, he phases out."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

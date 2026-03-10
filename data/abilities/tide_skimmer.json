@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack with two or more creatures with flying, draw a card.",
+        "ValidAttackersAmount": "GE2",
+        "ValidAttackers": "Creature.withFlying"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

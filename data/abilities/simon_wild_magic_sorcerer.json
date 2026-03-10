@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigRollDice",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant.cmcGE3,Sorcery.cmcGE3",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell with mana value 3 or greater, ABILITY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

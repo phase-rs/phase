@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Waterbend<5>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "PlayerTurn": "True",
+        "SpellDescription": "Put a +1/+1 counter on this creature. Activate only during your turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.powerLE2",
+        "ValidAttacker": "Creature.Self",
+        "Description": "This creature can't be blocked by creatures with power 2 or less."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Artifact.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an artifact you control enters, you may discard a card. If you do, draw a card.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

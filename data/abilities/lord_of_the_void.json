@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, exile the top seven cards of that player's library, then put a creature card from among them onto the battlefield under your control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.,,,,,,Morbid — You may put that card onto the battlefield instead of putting it into your hand if a creature died this turn.",
+        "ChangeType": "Land.Basic",
+        "DestinationAlternative": "Battlefield",
+        "ChangeTypeDesc": "basic land",
+        "DestAltSVar": "Count$ThisTurnEntered_Graveyard_from_Battlefield_Creature",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

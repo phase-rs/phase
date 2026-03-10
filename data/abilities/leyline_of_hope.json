@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "CheckSVar": "Y",
+        "SVarCompare": "GEZ",
+        "Description": "As long as you have at least 7 life more than your starting life total, creatures you control get +2/+2.",
+        "AddPower": "2",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "GainLife",
+      "params": {
+        "Description": "If you would gain life, you gain that much life plus 1 instead.",
+        "ReplaceWith": "GainLife",
+        "ActiveZones": "Battlefield",
+        "AILogic": "DoubleLife",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "faces": []
+}

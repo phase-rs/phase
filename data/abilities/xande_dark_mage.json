@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "NICKNAME gets +1/+1 for each noncreature, nonland card in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

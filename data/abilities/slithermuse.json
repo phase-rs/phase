@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, choose an opponent. If that player has more cards in hand than you, draw cards equal to the difference.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChooseOpp"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

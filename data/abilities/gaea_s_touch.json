@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G G",
+        "params": {
+          "SpellDescription": "Add {G}{G}."
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G}{G}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may put a basic Forest card from your hand onto the battlefield. Activate only as a sorcery and only once each turn.",
+        "SorcerySpeed": "True",
+        "ChangeType": "Forest.Basic+YouCtrl",
+        "ChangeNum": "1",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

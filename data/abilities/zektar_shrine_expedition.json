@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "r_7_1_elemental_trample_haste",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "SubCounter<3/QUEST>"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 7/1 red Elemental creature token with trample and haste. Exile it at the beginning of the next end step.",
+        "AtEOT": "Exile"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may put a quest counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "TrigPutCounter",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

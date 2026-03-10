@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, each player exiles the top X cards of their library, where X is the amount of mana spent to cast NICKNAME."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPlay",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever NICKNAME attacks, you may cast an instant or sorcery card from among cards exiled with NICKNAME without paying its mana cost."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "LOYALTY",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Put a loyalty counter on CARDNAME for each creature you control.",
+        "StackDescription": "SpellDescription",
+        "Defined": "Self"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Target creature gets +X/+X until end of turn, where X is the number of creatures you control."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Duration": "Permanent",
+          "SpellDescription": "You get an emblem with \"Whenever a creature you control enters, you may draw a card.\"",
+          "Planeswalker": "True",
+          "AILogic": "Always",
+          "Ultimate": "True",
+          "Triggers": "HuatliCreatureETB",
+          "Image": "emblem_huatli_radiant_champion",
+          "Name": "Emblem — Huatli, Radiant Champion"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "SpellDescription": "You get an emblem with \"Whenever a creature you control enters, you may draw a card.\"",
+        "Planeswalker": "True",
+        "AILogic": "Always",
+        "Ultimate": "True",
+        "Triggers": "HuatliCreatureETB",
+        "Image": "emblem_huatli_radiant_champion",
+        "Name": "Emblem — Huatli, Radiant Champion"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

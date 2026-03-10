@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "TriggerDescription": "Whenever another permanent you control leaves the battlefield, if it had counters on it, investigate.",
+        "Origin": "Battlefield",
+        "ValidCard": "Permanent.YouCtrl+Other+HasCounters",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

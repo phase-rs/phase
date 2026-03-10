@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever a creature token you control deals combat damage to a player, draw a card.",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.token+YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetMaxHandSize": "Unlimited",
+        "Description": "You have no maximum hand size.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

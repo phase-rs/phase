@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "BURDEN",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "AILogic": "TheOneRing",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Put a burden counter on CARDNAME, then draw a card for each burden counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.wasCastByYou+Self",
+        "TriggerDescription": "When CARDNAME enters, if you cast it, you gain protection from everything until your next turn.",
+        "Execute": "TrigPump",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigLoseLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you lose 1 life for each burden counter on CARDNAME.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

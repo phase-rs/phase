@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigLoot",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, you may draw a card. If you do, discard a card.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "TrigLoot",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, you may draw a card. If you do, discard a card.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

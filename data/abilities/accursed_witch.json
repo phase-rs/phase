@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChoose",
+            "Origin": "Battlefield",
+            "TriggerDescription": "When CARDNAME dies, return it to the battlefield transformed under your control attached to target opponent."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Activator": "Player.Opponent",
+            "Type": "Spell",
+            "Description": "Spells your opponents cast that target CARDNAME cost {1} less to cast.",
+            "Amount": "1",
+            "ValidTarget": "Card.Self"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "ValidPlayer": "Player.EnchantedBy",
+            "Execute": "TrigDrain",
+            "TriggerDescription": "At the beginning of enchanted player's upkeep, that player loses 1 life and you gain 1 life.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Description": "Spells you cast that target enchanted player cost {1} less to cast.",
+            "ValidTarget": "Player.EnchantedBy",
+            "Activator": "You",
+            "Amount": "1",
+            "Type": "Spell"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

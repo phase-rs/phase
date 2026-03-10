@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigAttackAttach",
+        "TriggerDescription": "Whenever an equipped creature you control other than CARDNAME attacks or dies, you may attach all Equipment attached to that creature to NICKNAME.",
+        "ValidCard": "Creature.equipped+YouCtrl+Other",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.equipped+YouCtrl+Other",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever an equipped creature you control other than CARDNAME attacks or dies, you may attach all Equipment attached to that creature to NICKNAME.",
+        "Origin": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigAttach"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

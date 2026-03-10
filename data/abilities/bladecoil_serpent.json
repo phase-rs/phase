@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "CheckSVar": "UU",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, for each {U}{U} spent to cast it, draw a card."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "CheckSVar": "BB",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When CARDNAME enters, for each {B}{B} spent to cast it, each opponent discards a card."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "CheckSVar": "RR",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPump",
+        "TriggerDescription": "When CARDNAME enters, for each {R}{R} spent to cast it, it gets +1/+0 and gains trample and haste until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

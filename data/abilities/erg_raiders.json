@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "At the beginning of your end step, if CARDNAME didn't attack this turn, CARDNAME deals 2 damage to you unless it came under your control this turn.",
+        "Phase": "End of Turn",
+        "IsPresent": "Card.Self+!attackedThisTurn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

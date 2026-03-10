@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+Enchantment",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "When an opponent casts a spell, if CARDNAME is an enchantment, CARDNAME becomes a 3/3 Illusion creature with flying and \"At the beginning of your upkeep, sacrifice CARDNAME unless you pay {1}{U}.\"",
+        "Execute": "TrigAnimate"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

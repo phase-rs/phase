@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+!token,Card.Self",
+        "Execute": "TrigDig",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another nontoken creature you control enters, look at the top X cards of your library, where X is that creature's mana value. You may reveal a creature card from among them that doesn't share a creature type with a creature you control and put it into your hand. Put the rest on the bottom of your library in a random order."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

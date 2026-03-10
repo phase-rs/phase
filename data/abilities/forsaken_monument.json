@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMana",
+        "Static": "True",
+        "TriggerDescription": "Whenever you tap a permanent for {C}, add an additional {C}.",
+        "Activator": "You",
+        "ValidCard": "Permanent",
+        "Produced": "C"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Colorless",
+        "TriggerDescription": "Whenever you cast a colorless spell, you gain 2 life.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Colorless creatures you control get +2/+2.",
+        "Affected": "Creature.Colorless+YouCtrl",
+        "AddToughness": "2",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

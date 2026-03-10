@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Shark"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target Shark",
+        "KW": "Trample",
+        "SpellDescription": "Target Shark gains trample until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever you discard a card, put a +1/+1 counter on CARDNAME and it deals 1 damage to each opponent.",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

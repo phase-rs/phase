@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCrank",
+        "TriggerDescription": "Whenever you crank CARDNAME, each time a source you control would deal damage this turn, it deals double that damage instead."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

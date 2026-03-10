@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.White",
+        "OptionalDecider": "You",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever a player casts a white spell, you may pay {3}. If you do, untap target permanent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

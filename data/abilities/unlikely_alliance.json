@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.!attacking+!blocking"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonattacking, nonblocking creature",
+        "SpellDescription": "Target nonattacking, nonblocking creature gets +0/+2 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigChange",
+        "ValidTarget": "Opponent",
+        "TriggerDescription": "Whenever CARDNAME deals damage to an opponent, you may put a Goblin creature card from your hand onto the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

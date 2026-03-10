@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "TriggerDescription": "At the beginning of each combat, CARDNAME gains flying until end of turn if you control a creature with flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power and toughness are each equal to twice the number of creatures you control.",
+        "SetPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

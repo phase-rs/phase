@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Description": "All Sliver creatures have haste.",
+        "Affected": "Creature.Sliver"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver",
+        "AddAbility": "Pump",
+        "Description": "All Slivers have \"{1}, Sacrifice this permanent: Target Sliver creature gets +2/+2 until end of turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

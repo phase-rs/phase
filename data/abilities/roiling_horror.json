@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterRemoved",
+      "params": {
+        "TriggerZones": "Exile",
+        "CounterType": "TIME",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, target player loses 1 life and you gain 1 life.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "Y",
+        "Description": "CARDNAME's power and toughness are each equal to your life total minus the life total of an opponent with the most life.",
+        "CharacteristicDefining": "True",
+        "SetPower": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

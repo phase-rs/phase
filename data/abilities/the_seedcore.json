@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "RestrictValid": "Spell.Creature+Phyrexian",
+          "SpellDescription": "Add one mana of any color. Spend this mana only to cast Phyrexian creature spells."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.Creature+Phyrexian",
+        "SpellDescription": "Add one mana of any color. Spend this mana only to cast Phyrexian creature spells."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.powerEQ1+toughnessEQ1"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CheckSVar": "X",
+        "SVarCompare": "GE3",
+        "TgtPrompt": "Select target 1/1 creature",
+        "PrecostDesc": "Corrupted —",
+        "SpellDescription": "Target 1/1 creature gets +2/+1 until end of turn. Activate only if an opponent has three or more poison counters."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

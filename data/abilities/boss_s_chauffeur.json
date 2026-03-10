@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Alliance — Whenever another creature you control enters, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, create a 1/1 green and white Citizen creature token for each +1/+1 counter on it.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

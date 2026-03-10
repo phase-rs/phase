@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted creature loses all abilities and is a Toy artifact creature with base power and toughness 0/2 in addition to its other types.",
+        "RemoveAllAbilities": "True",
+        "SetToughness": "2",
+        "SetPower": "0",
+        "AddType": "Artifact & Creature & Toy"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "TurnFaceUp",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidCard": "Card.EnchantedBy+faceDown",
+        "Description": "As long as enchanted creature is face down, it can't be turned face up.",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

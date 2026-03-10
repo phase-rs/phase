@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When CARDNAME dies, conjure two cards named Mitotic Slime onto the battlefield.",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Description": "This spell costs {X} less to cast, where X is the greatest power among creatures you control.",
+        "EffectZone": "All",
+        "Amount": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

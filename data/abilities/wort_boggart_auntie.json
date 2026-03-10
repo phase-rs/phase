@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may return target Goblin card from your graveyard to your hand.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

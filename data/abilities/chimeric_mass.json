@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact",
+          "Creature",
+          "Construct"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "staticAbilities": "Static",
+        "SpellDescription": "Until end of turn, CARDNAME becomes a Construct artifact creature with \"This creature's power and toughness are each equal to the number of charge counters on it.\"",
+        "RemoveCreatureTypes": "True",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

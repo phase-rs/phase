@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "Metalcraft — CARDNAME gets +1/+0 as long as you control three or more artifacts.",
+        "Condition": "Metalcraft",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

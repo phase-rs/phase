@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Lifelink & Flying",
+            "Affected": "Creature.EnchantedBy",
+            "Description": "Enchanted creature gets +2/+2 and has flying and lifelink.",
+            "AddPower": "2",
+            "AddToughness": "2"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Combo W B",
+            "params": {
+              "SpellDescription": "Add {W} or {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {W} or {B}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "ETBTapped",
+            "ReplacementResult": "Updated",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "Description": "CARDNAME enters tapped."
+          }
+        }
+      ]
+    }
+  ]
+}

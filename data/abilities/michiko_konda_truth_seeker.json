@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "You",
+        "ValidSource": "Card.OppCtrl,Emblem.OppCtrl",
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever a source an opponent controls deals damage to you, that player sacrifices a permanent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

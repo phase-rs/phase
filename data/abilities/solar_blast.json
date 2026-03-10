@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 3 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "TrigDamage",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you cycle CARDNAME, you may have it deal 1 damage to any target.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

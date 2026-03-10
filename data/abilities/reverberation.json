@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "All damage that would be dealt this turn by target sorcery spell is dealt to that spell's controller instead.",
+          "AILogic": "Prevent",
+          "StackDescription": "SpellDescription",
+          "TgtPrompt": "Select target sorcery spell to redirect damage from",
+          "TgtZone": "Stack",
+          "ExileOnMoved": "Stack",
+          "ReplacementEffects": "SelflessDamage",
+          "RememberObjects": "TargetedSource",
+          "ValidTgts": "Sorcery"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "All damage that would be dealt this turn by target sorcery spell is dealt to that spell's controller instead.",
+        "AILogic": "Prevent",
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select target sorcery spell to redirect damage from",
+        "TgtZone": "Stack",
+        "ExileOnMoved": "Stack",
+        "ReplacementEffects": "SelflessDamage",
+        "RememberObjects": "TargetedSource",
+        "ValidTgts": "Sorcery"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

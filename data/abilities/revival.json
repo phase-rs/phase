@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouOwn+cmcLE3"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target creature card in your graveyard with mana value 3 or less",
+            "SpellDescription": "Return target creature card with mana value 3 or less from your graveyard to the battlefield."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetLife",
+            "params": {
+              "Defined": "You",
+              "LifeAmount": "X",
+              "SubAbility": "DBLoseHalf",
+              "SpellDescription": "Double your life total. Target opponent loses half their life, rounded up."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "You",
+            "LifeAmount": "X",
+            "SubAbility": "DBLoseHalf",
+            "SpellDescription": "Double your life total. Target opponent loses half their life, rounded up."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

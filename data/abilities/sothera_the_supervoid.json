@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control dies, each opponent chooses a creature they control and exiles it.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigExile"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigSac",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "SVarCompare": "EQ0",
+        "TriggerDescription": "At the beginning of your end step, if a player controls no creatures, sacrifice NICKNAME, then put a creature card exiled with it onto the battlefield under your control with two additional +1/+1 counters on it.",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

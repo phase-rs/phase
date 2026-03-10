@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy CARDNAME.",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "Player",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "Description": "You may look at the top card of your library any time.",
+        "AffectedZone": "Library"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Description": "You may play lands and cast spells from the top of your library.",
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary+YouCtrl"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPlayLand"
+      },
+      "params": {
+        "Description": "You can't play lands from your hand.",
+        "Origin": "Hand",
+        "Player": "You"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card",
+        "Origin": "Hand",
+        "Description": "You can't play lands or cast spells from your hand.",
+        "Caster": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

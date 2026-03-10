@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you may gain control of target artifact defending player controls. If you do, CARDNAME assigns no combat damage this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainControl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

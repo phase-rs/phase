@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, you lose 1 life for each +1/+1 counter on it."
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, you lose 1 life for each +1/+1 counter on it.",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Mill",
+            "count": 13,
+            "target": {
+              "type": "Filtered",
+              "filter": "Opponent"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Target opponent mills thirteen cards."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 U U"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "ActivationZone": "Graveyard",
+            "SorcerySpeed": "True",
+            "SpellDescription": "Return CARDNAME from your graveyard onto the battlefield transformed. Activate only as a sorcery.",
+            "Transformed": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "ValidTarget": "Player",
+            "TriggerDescription": "When CARDNAME deals combat damage to a player, return it to its owner's hand.",
+            "Execute": "TrigBounce",
+            "ValidSource": "Card.Self",
+            "CombatDamage": "True"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may sacrifice another creature. When you do, destroy target creature an opponent controls.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "STATION 3+ You may play an additional land on each of your turns.",
+        "Affected": "Card.Self+counters_GE3_CHARGE",
+        "AddStaticAbility": "ExplorationStatic"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "STATION 8+ Flying,,,Once during each of your turns, you may cast a permanent spell from your graveyard by sacrificing a land in addition to paying its other costs.",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "AddStaticAbility": "BroodshipStatic",
+        "AddType": "Creature",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

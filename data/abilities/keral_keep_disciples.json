@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidCard": "Planeswalker.Chandra",
+        "ValidSA": "Activated.Loyalty",
+        "TriggerDescription": "Whenever you activate a loyalty ability of a Chandra planeswalker, CARDNAME deals 1 damage to each opponent.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

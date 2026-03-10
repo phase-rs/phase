@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "Phase": "Upkeep",
+          "ValidPlayer": "You",
+          "Mode": "Phase",
+          "RememberObjects": "Self",
+          "Execute": "ChooseB",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "At the beginning of your next upkeep, choose a basic land type. CARDNAME gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Mode": "Phase",
+        "RememberObjects": "Self",
+        "Execute": "ChooseB",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "At the beginning of your next upkeep, choose a basic land type. CARDNAME gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "PresentCompare": "EQ0",
+        "IsPresent": "Land.YouCtrl+nonBasic",
+        "ValidCard": "Card.Self",
+        "PresentZone": "Library",
+        "TriggerDescription": "When CARDNAME enters, if there are no nonbasic land cards in your library, CARDNAME deals 3 damage to any target.",
+        "Origin": "Any",
+        "Execute": "TrigDamage",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

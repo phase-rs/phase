@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever you draw your second card each turn, target opponent sacrifices a nontoken creature of their choice.",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "Number": "2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "WerewolfTransformCondition": "True",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "Regenerate",
+            "params": {
+              "SpellDescription": "Regenerate CARDNAME."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Regenerate CARDNAME."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "Execute": "TrigTransform",
+            "Phase": "Upkeep",
+            "WerewolfUntransformCondition": "True",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

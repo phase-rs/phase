@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, each player discards a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Minotaur.Other+YouCtrl",
+        "AddKeyword": "First Strike",
+        "Description": "Other Minotaur creatures you control have first strike."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you have one or fewer cards in hand, Minotaurs you control get +2/+0.",
+        "SVarCompare": "LE1",
+        "AddPower": "2",
+        "Affected": "Minotaur.YouCtrl",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

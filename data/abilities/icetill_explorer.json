@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, mill a card.",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AdjustLandPlays": "1",
+        "Affected": "You",
+        "Description": "You may play an additional land on each of your turns."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.YouOwn",
+        "Description": "You may play lands from your graveyard.",
+        "AffectedZone": "Graveyard",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

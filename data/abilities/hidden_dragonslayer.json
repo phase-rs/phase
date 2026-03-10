@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigDestroy",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME is turned face up, destroy target creature with power 4 or greater an opponent controls.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self",
+        "Description": "As long as an artifact entered the battlefield under your control this turn, this creature can attack as though it didn't have defender."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

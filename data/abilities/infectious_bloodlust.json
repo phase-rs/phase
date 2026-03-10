@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When enchanted creature dies, you may search your library for a card named Infectious Bloodlust, reveal it, put it into your hand, then shuffle.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigChange",
+        "OptionalDecider": "You",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+1, has haste, and attacks each combat if able.",
+        "AddToughness": "1",
+        "AddPower": "2",
+        "AddKeyword": "Haste"
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Secondary": "True",
+        "ValidCreature": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

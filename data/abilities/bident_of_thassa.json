@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Creatures your opponents control attack this turn if able.",
+          "StaticAbilities": "MustAttack"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures your opponents control attack this turn if able.",
+        "StaticAbilities": "MustAttack"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, you may draw a card.",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

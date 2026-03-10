@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Scry",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Scry 1."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigRevealToWin",
+        "TriggerDescription": "At the beginning of your upkeep, you may reveal your hand. If you do, you win the game if you own a card named Hedron Alignment in exile, in your hand, in your graveyard, and on the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

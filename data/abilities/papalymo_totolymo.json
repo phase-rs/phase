@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatPlayers": "Opponent.LostLifeThisTurn",
+          "SubAbility": "DBSac",
+          "SpellDescription": "Each opponent who lost life this turn sacrifices a creature with the greatest power among creatures they control.",
+          "RepeatSubAbility": "DBChooseCard"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatPlayers": "Opponent.LostLifeThisTurn",
+        "SubAbility": "DBSac",
+        "SpellDescription": "Each opponent who lost life this turn sacrifices a creature with the greatest power among creatures they control.",
+        "RepeatSubAbility": "DBChooseCard"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "TriggerDescription": "Whenever you cast a noncreature spell, CARDNAME deals 1 damage to each opponent and you gain 1 life.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

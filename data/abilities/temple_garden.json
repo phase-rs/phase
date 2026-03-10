@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "DBTap",
+        "Description": "As CARDNAME enters, you may pay 2 life. If you don't, it enters tapped.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

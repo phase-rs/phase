@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.DamagedBy Equipped",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a creature dealt damage by equipped creature this turn dies, you may exile that card. If you do, create a 2/2 black Zombie creature token.",
+        "Execute": "UnscytheTrigExile",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "First Strike",
+        "AddToughness": "3",
+        "Description": "Equipped creature gets +3/+3 and has first strike.",
+        "AddPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player.Opponent",
+        "TriggerDescription": "At the beginning of each end step, if it's an opponent's turn, put a +1/+1 counter on CARDNAME for each 1 damage dealt to you this turn.",
+        "Execute": "GhostCounter",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "Execute": "GhostClear",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, remove all +1/+1 counters from CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

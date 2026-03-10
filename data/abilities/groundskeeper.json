@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.Basic+YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target basic land in your graveyard",
+        "SpellDescription": "Return target basic land card from your graveyard to your hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

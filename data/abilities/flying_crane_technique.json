@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "UntapAll",
+        "params": {
+          "SubAbility": "DBPumpAll",
+          "ValidCards": "Creature.YouCtrl",
+          "SpellDescription": "Untap all creatures you control. They gain flying and double strike until end of turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPumpAll",
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Untap all creatures you control. They gain flying and double strike until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

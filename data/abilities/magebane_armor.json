@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Affected": "Card.EquippedBy",
+        "AddToughness": "4",
+        "RemoveKeyword": "Flying",
+        "Description": "Equipped creature gets +2/+4 and loses flying."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Card.EquippedBy",
+        "Description": "Prevent all noncombat damage that would be dealt to equipped creature.",
+        "Prevent": "True",
+        "IsCombat": "False"
+      }
+    }
+  ],
+  "faces": []
+}

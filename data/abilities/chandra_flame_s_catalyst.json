@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "CARDNAME deals 3 damage to each opponent.",
+        "Defined": "Player.Opponent"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "ReplaceGraveyard": "Exile",
+          "AILogic": "ReplaySpell",
+          "TgtZone": "Graveyard",
+          "SpellDescription": "You may cast target red instant or sorcery card from your graveyard. If that spell would be put into your graveyard this turn, exile it instead.",
+          "Planeswalker": "True",
+          "ValidTgts": "Instant.Red+YouOwn,Sorcery.Red+YouOwn",
+          "Optional": "True",
+          "TgtPrompt": "Select target red instant or sorcery card"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplaceGraveyard": "Exile",
+        "AILogic": "ReplaySpell",
+        "TgtZone": "Graveyard",
+        "SpellDescription": "You may cast target red instant or sorcery card from your graveyard. If that spell would be put into your graveyard this turn, exile it instead.",
+        "Planeswalker": "True",
+        "ValidTgts": "Instant.Red+YouOwn,Sorcery.Red+YouOwn",
+        "Optional": "True",
+        "TgtPrompt": "Select target red instant or sorcery card"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Mode": "Hand",
+        "SubAbility": "DBDraw",
+        "Planeswalker": "True",
+        "SpellDescription": "Discard your hand, then draw seven cards. Until end of turn, you may cast spells from your hand without paying their mana costs.",
+        "StackDescription": "SpellDescription",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

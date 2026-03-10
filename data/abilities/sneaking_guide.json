@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature.powerLE2",
+          "SpellDescription": "Target creature with power 2 or less can't be blocked this turn.",
+          "StaticAbilities": "Unblockable",
+          "AILogic": "Pump",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "ExileOnMoved": "Battlefield",
+          "TgtPrompt": "Select target creature with power 2 or less",
+          "RememberObjects": "Targeted"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.powerLE2",
+        "SpellDescription": "Target creature with power 2 or less can't be blocked this turn.",
+        "StaticAbilities": "Unblockable",
+        "AILogic": "Pump",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "ExileOnMoved": "Battlefield",
+        "TgtPrompt": "Select target creature with power 2 or less",
+        "RememberObjects": "Targeted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

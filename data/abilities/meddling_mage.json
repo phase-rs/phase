@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card.NamedCard",
+        "Description": "Spells with the chosen name can't be cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

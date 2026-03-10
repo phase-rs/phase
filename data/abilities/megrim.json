@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Card.OppOwn",
+        "TriggerDescription": "Whenever an opponent discards a card, CARDNAME deals 2 damage to that player.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

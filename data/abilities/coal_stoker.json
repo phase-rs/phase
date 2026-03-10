@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMana",
+        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand, add {R}{R}{R}.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.wasCastFromYourHandByYou+Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

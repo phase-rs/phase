@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.Green+YouCtrl",
+        "Description": "As long as CARDNAME is untapped, green creatures you control get +1/+1.",
+        "IsPresent": "Card.Self+untapped",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

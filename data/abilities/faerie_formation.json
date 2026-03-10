@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "u_1_1_faerie_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 blue Faerie creature token with flying. Draw a card.",
+        "SubAbility": "DBDraw",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

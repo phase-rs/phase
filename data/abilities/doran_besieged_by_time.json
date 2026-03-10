@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerDescription": "Whenever a creature you control attacks or blocks, it gets +X/+X until end of turn, where X is the difference between its power and toughness.",
+        "Execute": "TrigPump1",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Secondary": "True",
+        "Execute": "TrigPump2",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control attacks or blocks, it gets +X/+X until end of turn, where X is the difference between its power and toughness."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Creature.powerLTtoughness",
+        "Amount": "1",
+        "Description": "Each creature spell you cast with toughness greater than its power costs {1} less to cast.",
+        "Type": "Spell",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

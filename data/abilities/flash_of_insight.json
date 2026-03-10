@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Hand"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DestinationZone2": "Library",
+        "SpellDescription": "Look at the top X cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.",
+        "LibraryPosition": "-1",
+        "ChangeNum": "1",
+        "NoReveal": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

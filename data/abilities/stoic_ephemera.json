@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "When CARDNAME blocks, sacrifice it at end of combat.",
+        "ValidCard": "Card.Self",
+        "Execute": "DelTrig"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

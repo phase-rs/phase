@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "IsPresent": "Artifact.YouCtrl,Enchantment.YouCtrl",
+        "TriggerDescription": "Whenever CARDNAME attacks, if you control an artifact or enchantment, CARDNAME gets +1/+1 and gains lifelink until end of turn.",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

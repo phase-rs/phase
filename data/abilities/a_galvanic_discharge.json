@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "ENERGY",
+        "count": 2,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "PayEnergy",
+        "Defined": "You",
+        "SubAbility": "DBChooseNumber",
+        "SpellDescription": "Choose target creature or planeswalker. You get {E}{E}, then you may pay any amount of {E}. CARDNAME deals that much damage to that permanent."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

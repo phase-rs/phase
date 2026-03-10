@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "ValidCards": "Card.nonBasic",
+          "Defined": "You",
+          "SelectPrompt": "Choose a card other than a basic land card to ban",
+          "SpellDescription": "Ban a card other than a basic land card for the rest of the match. (All cards with that name in any zone or sideboard are removed from the match.)",
+          "StackDescription": "None",
+          "SubAbility": "DBRemove",
+          "AILogic": "MostProminentInHumanDeck"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Card.nonBasic",
+        "Defined": "You",
+        "SelectPrompt": "Choose a card other than a basic land card to ban",
+        "SpellDescription": "Ban a card other than a basic land card for the rest of the match. (All cards with that name in any zone or sideboard are removed from the match.)",
+        "StackDescription": "None",
+        "SubAbility": "DBRemove",
+        "AILogic": "MostProminentInHumanDeck"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

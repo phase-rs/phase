@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PhaseOutAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever one or more other permanents phase out and whenever one or more other cards are put into exile from anywhere, put a time counter on CARDNAME.",
+        "ValidCards": "Permanent.phasedOutOther"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Origin": "Any",
+        "Secondary": "True",
+        "ValidCards": "Card.Other+!token+!copiedSpell",
+        "Destination": "Exile",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more other permanents phase out and whenever one or more other cards are put into exile from anywhere, put a time counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, it deals damage equal to the number of time counters on it to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

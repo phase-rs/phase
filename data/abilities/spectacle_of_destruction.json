@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Creature",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever one or more creatures die, put a wreck counter on this enchantment.",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "IsPresent": "Card.Self+counters_GE1_WRECK",
+        "Execute": "TrigRemoveCounter",
+        "TriggerDescription": "At the beginning of your upkeep, if this enchantment has one or more wreck counters on it, remove a wreck counter from it and seek a nonland card.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, if you have a full party, creatures you control gain \"Whenever this creature deals combat damage to a player, draw a card\" until end of turn.",
+        "TriggerZones": "Battlefield",
+        "SVarCompare": "EQ4",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "CheckSVar": "X",
+        "Execute": "TrigAnimateAll"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked if you had another Cleric, Rogue, Warrior, or Wizard enter the battlefield under your control this turn.",
+        "ValidAttacker": "Card.Self",
+        "CheckSVar": "JoinedParty"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "DIVINITY",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.Other"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target permanent other than CARDNAME",
+        "SpellDescription": "Put a divinity counter on target permanent other than CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Description": "Each permanent with a divinity counter on it has indestructible.",
+        "Affected": "Permanent.counters_GE1_DIVINITY"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

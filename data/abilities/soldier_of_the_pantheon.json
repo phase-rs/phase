@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.MultiColor",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a multicolored spell, you gain 1 life.",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

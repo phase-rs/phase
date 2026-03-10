@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Detain",
+        "params": {
+          "SpellDescription": "Detain target creature an opponent controls. (Until your next turn, that creature can't attack or block and its activated abilities can't be activated.)",
+          "ValidTgtsDesc": "creature an opponent controls",
+          "SubAbility": "DBDraw",
+          "ValidTgts": "Creature.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Detain target creature an opponent controls. (Until your next turn, that creature can't attack or block and its activated abilities can't be activated.)",
+        "ValidTgtsDesc": "creature an opponent controls",
+        "SubAbility": "DBDraw",
+        "ValidTgts": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

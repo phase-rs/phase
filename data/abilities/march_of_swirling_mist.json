@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Phases",
+        "params": {
+          "TargetMin": "0",
+          "TgtPrompt": "Select up to X target creatures",
+          "TargetMax": "X",
+          "Announce": "Exiled",
+          "SpellDescription": "Up to X target creatures phase out. (While they're phased out, they're treated as though they don't exist. Each one phases in before its controller untaps during their next untap step.)",
+          "AnnounceTitle": "how many blue cards to exile",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "TgtPrompt": "Select up to X target creatures",
+        "TargetMax": "X",
+        "Announce": "Exiled",
+        "SpellDescription": "Up to X target creatures phase out. (While they're phased out, they're treated as though they don't exist. Each one phases in before its controller untaps during their next untap step.)",
+        "AnnounceTitle": "how many blue cards to exile",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Description": "As an additional cost to cast this spell, you may exile any number of blue cards from your hand. This spell costs {2} less to cast for each card exiled this way.",
+        "Cost": "ExileFromHand<Y/Card.Blue/blue cards>",
+        "EffectZone": "All"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Z",
+        "EffectZone": "All",
+        "Relative": "True",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Description": "This spell costs {2} less to cast for each card exiled this way.",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

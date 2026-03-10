@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Creature.token+YouCtrl",
+        "Description": "Prevent all damage that would be dealt to creature tokens you control.",
+        "Prevent": "True"
+      }
+    }
+  ],
+  "faces": []
+}

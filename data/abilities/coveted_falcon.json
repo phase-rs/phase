@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigSteal",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks, gain control of target permanent you own but don't control."
+      }
+    },
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME is turned face up, target opponent gains control of any number of target permanents you control. Draw a card for each one they gained control of this way.",
+        "Execute": "TrigDonate",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

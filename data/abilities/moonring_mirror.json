@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever you draw a card, exile the top card of your library face down.",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigExile"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigChangeHandExile",
+        "TriggerDescription": "At the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with CARDNAME into your hand.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

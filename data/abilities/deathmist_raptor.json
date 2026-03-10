@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerDescription": "Whenever a permanent you control is turned face up, you may return CARDNAME from your graveyard to the battlefield face up or face down.",
+        "Execute": "TrigChange",
+        "ValidCard": "Permanent.YouCtrl",
+        "TriggerZones": "Graveyard",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

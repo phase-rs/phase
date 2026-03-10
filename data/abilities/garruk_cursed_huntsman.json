@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "bg_2_2_wolf_garruk",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create two 2/2 black and green Wolf creature tokens with \"When this creature dies, put a loyalty counter on each Garruk you control.\"",
+        "TokenAmount": "2",
+        "Planeswalker": "True",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target creature. Draw a card.",
+        "Planeswalker": "True",
+        "SubAbility": "DBDraw"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Duration": "Permanent",
+          "AILogic": "Always",
+          "Image": "emblem_garruk_cursed_huntsman",
+          "SpellDescription": "You get an emblem with \"Creatures you control get +3/+3 and have trample.\"",
+          "Planeswalker": "True",
+          "Name": "Emblem — Garruk, Cursed Huntsman",
+          "StaticAbilities": "STTrample",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "AILogic": "Always",
+        "Image": "emblem_garruk_cursed_huntsman",
+        "SpellDescription": "You get an emblem with \"Creatures you control get +3/+3 and have trample.\"",
+        "Planeswalker": "True",
+        "Name": "Emblem — Garruk, Cursed Huntsman",
+        "StaticAbilities": "STTrample",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

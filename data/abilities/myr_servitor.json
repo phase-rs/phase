@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "IsPresent": "Card.Self",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is on the battlefield, each player returns all cards named Myr Servitor from their graveyard to the battlefield.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "PresentZone": "Battlefield",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

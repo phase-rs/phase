@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "X X"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Draw X cards. Activate only as a sorcery.",
+            "SorcerySpeed": "True"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "AILogic": "Always",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+              "Mode": "Transform",
+              "SorcerySpeed": "True",
+              "Defined": "Self"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2 R R G G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "AILogic": "Always",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+            "Mode": "Transform",
+            "SorcerySpeed": "True",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDoneOnce",
+          "params": {
+            "ValidTarget": "Card.Self",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, put a +1/+1 counter on him. If he's attacking, untap him and there is an additional combat phase after this phase."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

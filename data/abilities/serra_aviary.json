@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Creatures with flying get +1/+1.",
+        "AddPower": "1",
+        "Affected": "Creature.withFlying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

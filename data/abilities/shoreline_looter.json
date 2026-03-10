@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Threshold — Whenever CARDNAME deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

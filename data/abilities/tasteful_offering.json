@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Boon": "True",
+          "Triggers": "SacTrig",
+          "StackDescription": "REP You get_{p:You} gets & Create a_{p:You} creates a",
+          "Duration": "Permanent",
+          "SubAbility": "DBToken",
+          "SpellDescription": "You get a two-time boon with \"Whenever you sacrifice one or more permanents, seek a nonland card.\" Create a Food token."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Boon": "True",
+        "Triggers": "SacTrig",
+        "StackDescription": "REP You get_{p:You} gets & Create a_{p:You} creates a",
+        "Duration": "Permanent",
+        "SubAbility": "DBToken",
+        "SpellDescription": "You get a two-time boon with \"Whenever you sacrifice one or more permanents, seek a nonland card.\" Create a Food token."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

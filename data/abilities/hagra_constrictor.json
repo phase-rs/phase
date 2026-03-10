@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each creature you control with a +1/+1 counter on it has menace. (A creature with menace can't be blocked except by two or more creatures.)",
+        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
+        "AddKeyword": "Menace"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

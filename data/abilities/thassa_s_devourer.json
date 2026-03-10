@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, target player mills two cards.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

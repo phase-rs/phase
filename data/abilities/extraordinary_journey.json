@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile up to X target creatures. For each of those cards, its owner may play it for as long as it remains exiled.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Battlefield",
+        "ActivationLimit": "1",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidCards": "Creature.!token+wasCastFromExile,Creature.!token+ThisTurnEnteredFrom_Exile",
+        "TriggerDescription": "Whenever one or more nontoken creatures enter, if one or more of them entered from exile or was cast from exile, you draw a card. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

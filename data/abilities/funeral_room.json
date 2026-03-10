@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Battlefield",
+            "ValidCard": "Creature.YouCtrl",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigLoseLife",
+            "TriggerDescription": "Whenever a creature you control dies, each opponent loses 1 life and you gain 1 life.",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "Execute": "TrigChangeZone",
+            "ValidCard": "Card.Self",
+            "ThisDoor": "True",
+            "ValidPlayer": "You",
+            "TriggerDescription": "When you unlock this door, return all creature cards from your graveyard to the battlefield."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

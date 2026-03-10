@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice a creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "3",
+        "Description": "Enchanted creature gets +3/+3 and has trample.",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "3",
+        "AddKeyword": "Trample"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature is a Demon Spirit.",
+        "RemoveCreatureTypes": "True",
+        "Affected": "Creature.EnchantedBy",
+        "AddType": "Demon & Spirit"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

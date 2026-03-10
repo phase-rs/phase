@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "CheckSVar": "X",
+        "Description": "As long as you've cast an instant or sorcery spell this turn, CARDNAME can attack as though it didn't have defender.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveKeyword": "Flying",
+        "Description": "All creatures lose flying.",
+        "Affected": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "RPrevent",
+          "AILogic": "Fog",
+          "SpellDescription": "Prevent all combat damage that would be dealt this turn by creatures with no +1/+1 counters."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "RPrevent",
+        "AILogic": "Fog",
+        "SpellDescription": "Prevent all combat damage that would be dealt this turn by creatures with no +1/+1 counters."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

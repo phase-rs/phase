@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "Execute": "TrigSurveil",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack, surveil X, where X is the number of opponents being attacked."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "CheckSVar": "Y",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of each end step, if three or more cards were put into your graveyard from anywhere other than the battlefield this turn, draw a card.",
+        "SVarCompare": "GE3"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

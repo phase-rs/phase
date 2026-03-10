@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "Choices": "Card,Emblem",
+          "SubAbility": "DBEffect",
+          "AILogic": "NeedsPrevention",
+          "ChoiceTitle": "Choose a source",
+          "RememberChosen": "True",
+          "SpellDescription": "Prevent all damage that would be dealt to you this turn by a source of your choice."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayEnergy<2>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "Card,Emblem",
+        "SubAbility": "DBEffect",
+        "AILogic": "NeedsPrevention",
+        "ChoiceTitle": "Choose a source",
+        "RememberChosen": "True",
+        "SpellDescription": "Prevent all damage that would be dealt to you this turn by a source of your choice."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigEnergy",
+        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E}{E} (four energy counters).",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Card.Self",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, change CARDNAME's base power and toughness to that creature's power and toughness until end of turn.",
+        "Execute": "TrigAnimateBlocker",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Creature",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAnimateAttacker",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, change CARDNAME's base power and toughness to that creature's power and toughness until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

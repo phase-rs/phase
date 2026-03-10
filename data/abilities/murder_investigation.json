@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When enchanted creature dies, create X 1/1 white Soldier creature tokens, where X is its power.",
+        "ValidCard": "Card.AttachedBy",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

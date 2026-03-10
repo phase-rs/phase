@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, create a 6/12 colorless Construct artifact creature token with trample."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each attacking creature.",
+        "Amount": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

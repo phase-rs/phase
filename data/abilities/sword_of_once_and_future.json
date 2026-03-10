@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, surveil 2. Then you may cast an instant or sorcery spell with mana value 2 or less from your graveyard without paying its mana cost. If that spell would be put into your graveyard, exile it instead.",
+        "ValidSource": "Creature.EquippedBy",
+        "Execute": "TrigSurveil",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2",
+        "AddKeyword": "Protection from blue & Protection from black",
+        "Description": "Equipped creature gets +2/+2 and has protection from blue and from black.",
+        "AddToughness": "2",
+        "AddSVar": "SwordOfOnceAndFutureCE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

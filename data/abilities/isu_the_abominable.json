@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another snow permanent you control enters, you may pay {G}, {W}, or {U}. If you do, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "ValidCard": "Permanent.Snow+Other+YouCtrl",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigChoice"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "MayLookAt": "You",
+        "Description": "You may look at the top card of your library any time."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Description": "You may play snow lands and cast snow spells from the top of your library.",
+        "Affected": "Card.TopLibrary+YouCtrl+Snow",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

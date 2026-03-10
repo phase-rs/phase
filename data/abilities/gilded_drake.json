@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExchange",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, exchange control of CARDNAME and up to one target creature an opponent controls. If you don't or can't make an exchange, sacrifice CARDNAME. This ability still resolves if its target becomes illegal."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

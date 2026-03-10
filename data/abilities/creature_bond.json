@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigDamage",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted creature dies, CARDNAME deals damage equal to that creature's toughness to the creature's controller."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

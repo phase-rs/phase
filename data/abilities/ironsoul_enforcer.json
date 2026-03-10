@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigReturn",
+        "ValidCard": "Card.Self,Card.IsCommander+YouCtrl",
+        "Alone": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or a commander you control attacks alone, return target artifact card from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

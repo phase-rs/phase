@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever enchanted creature is dealt damage, its controller creates that many 1/1 green Squirrel creature tokens.",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4 B"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "X",
+        "TargetMax": "X",
+        "TgtPrompt": "Select X target creatures",
+        "AIMaxTgtsCount": "Valid Creature.YouCtrl+cmcLE2",
+        "SpellDescription": "Destroy X target creatures.",
+        "CostDesc": "As an additional cost to cast this spell, sacrifice X creatures."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

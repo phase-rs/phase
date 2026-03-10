@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, it deals 1 damage to any target and you gain 1 life.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

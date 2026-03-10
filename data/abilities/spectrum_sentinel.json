@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.nonBasic+OppCtrl",
+        "Origin": "Any",
+        "Execute": "TrigGainLife",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever a nonbasic land enters under an opponent's control, you gain 1 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

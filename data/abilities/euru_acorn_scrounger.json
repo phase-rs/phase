@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may forage. When you do, conjure a card named Chitterspitter onto the battlefield.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigImmediateTrig"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more Squirrels you control deal combat damage to a player, you may sacrifice a token. If you do, put an acorn counter on each permanent you control named Chitterspitter.",
+        "Execute": "TrigPutCounterAll",
+        "ValidTarget": "Player",
+        "ValidSource": "Squirrel.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

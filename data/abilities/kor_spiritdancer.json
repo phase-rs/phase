@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you cast an Aura spell, you may draw a card.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Aura"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +2/+2 for each Aura attached to it.",
+        "AddPower": "X",
+        "AddToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

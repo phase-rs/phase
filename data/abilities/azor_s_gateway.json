@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBExile",
+            "SpellDescription": "Draw a card, then exile a card from your hand. If cards with five or more different mana values are exiled with CARDNAME, you gain 5 life, untap CARDNAME, and transform it."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Static": "True",
+            "Origin": "Exile",
+            "ValidCard": "Card.IsRemembered+ExiledWithSource",
+            "Execute": "DBForget",
+            "Destination": "Any"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "DBCleanup",
+            "Destination": "Any",
+            "Origin": "Battlefield",
+            "Static": "True"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Any",
+            "params": {
+              "SpellDescription": "Add X mana of any one color, where X is your life total.",
+              "Amount": "X"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add X mana of any one color, where X is your life total.",
+            "Amount": "X"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

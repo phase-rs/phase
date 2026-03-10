@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "ValidCards": "Card.nonLand",
+          "SpellDescription": "Choose a nonland card name and a number greater than 0. Target player reveals their library. If that library contains exactly the chosen number of cards with the chosen name, CARDNAME deals 8 damage to that player. Then that player shuffles their library.",
+          "SubAbility": "DBChooseNumber",
+          "ValidDescription": "nonland"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Card.nonLand",
+        "SpellDescription": "Choose a nonland card name and a number greater than 0. Target player reveals their library. If that library contains exactly the chosen number of cards with the chosen name, CARDNAME deals 8 damage to that player. Then that player shuffles their library.",
+        "SubAbility": "DBChooseNumber",
+        "ValidDescription": "nonland"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

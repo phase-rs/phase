@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "RememberDrawn": "AllReplaced",
+        "SpellDescription": "Draw a card, then each other player may draw a card. Whenever a card is drawn this way, CARDNAME deals 5 damage to target opponent chosen at random from among your opponents.",
+        "StackDescription": "SpellDescription",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters the battlefield, you may search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
+        "Execute": "TrigChange"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

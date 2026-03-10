@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent.EnchantedBy",
+        "RemoveAllAbilities": "True",
+        "AddAbility": "TreasureSac",
+        "RemoveArtifactTypes": "True",
+        "AddType": "Artifact & Treasure",
+        "RemoveCardTypes": "True",
+        "Description": "Enchanted permanent is a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other abilities. (If it was a creature, it's no longer a creature.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

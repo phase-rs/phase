@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "FlipACoin",
+        "params": {
+          "WinSubAbility": "DBMana",
+          "SubAbility": "DBAdd0",
+          "SpellDescription": "Flip a coin. If you win the flip, add {C}{C}. Activate only as a instant.",
+          "InstantSpeed": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "WinSubAbility": "DBMana",
+        "SubAbility": "DBAdd0",
+        "SpellDescription": "Flip a coin. If you win the flip, add {C}{C}. Activate only as a instant.",
+        "InstantSpeed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

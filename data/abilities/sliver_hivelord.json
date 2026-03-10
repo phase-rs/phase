@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Description": "Sliver creatures you control have indestructible.",
+        "Affected": "Creature.Sliver+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

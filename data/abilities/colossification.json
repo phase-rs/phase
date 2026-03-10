@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigTap",
+        "TriggerDescription": "When CARDNAME enters, tap enchanted creature.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "20",
+        "AddToughness": "20",
+        "Description": "Enchanted creature gets +20/+20."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

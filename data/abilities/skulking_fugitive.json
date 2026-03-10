@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME becomes the target of a spell or ability, sacrifice it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, put a divinity counter on target green, white, or blue creature. That creature has indestructible for as long as it has a divinity counter on it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "AddKeyword": "Exalted",
+        "Affected": "Creature",
+        "Description": "All creatures have exalted."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

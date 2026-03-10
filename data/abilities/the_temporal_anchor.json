@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigScry",
+        "TriggerDescription": "At the beginning of your upkeep, scry 2."
+      }
+    },
+    {
+      "mode": "Scry",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you choose to put one or more cards on the bottom of your library while scrying, exile that many cards from the bottom of your library.",
+        "Execute": "TrigExile",
+        "ToBottom": "True",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Condition": "PlayerTurn",
+        "AffectedZone": "Exile",
+        "Description": "During your turn, you may play cards exiled with CARDNAME.",
+        "Affected": "Card.ExiledWithSource"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

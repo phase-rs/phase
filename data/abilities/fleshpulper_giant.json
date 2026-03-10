@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may destroy target creature with toughness 2 or less.",
+        "Destination": "Battlefield",
+        "Execute": "TrigDestroy",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, return up to one target creature to its owner's hand.",
+            "Execute": "TrigReturn",
+            "Origin": "Any",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetToughness": "X",
+            "CharacteristicDefining": "True",
+            "SetPower": "X",
+            "Description": "CARDNAME's power and toughness are each equal to the number of creatures you control."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

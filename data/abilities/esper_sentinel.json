@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Player.Opponent",
+        "ActivatorThisTurnCast": "EQ1",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts their first noncreature spell each turn, draw a card unless that player pays {X}, where X is CARDNAME's power.",
+        "ValidCard": "Card.nonCreature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

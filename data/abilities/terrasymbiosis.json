@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerDescription": "Whenever you put one or more +1/+1 counters on a creature you control, you may draw that many cards. Do this only once each turn.",
+        "CounterType": "P1P1",
+        "ResolvedLimit": "1",
+        "ValidSource": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

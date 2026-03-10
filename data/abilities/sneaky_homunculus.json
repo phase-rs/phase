@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.powerGE2",
+        "ValidBlocker": "Creature.Self",
+        "Description": "CARDNAME can't block or be blocked by creatures with power 2 or greater."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.powerGE2",
+        "Description": "CARDNAME can't block or be blocked by creatures with power 2 or greater.",
+        "ValidAttacker": "Creature.Self",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

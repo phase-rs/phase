@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "Sides": "12",
+          "SubAbility": "DBDamageAll",
+          "ChosenSVar": "X",
+          "OtherSVar": "Y",
+          "Amount": "2",
+          "SpellDescription": "Roll two d12 and choose one result. CARDNAME deals damage equal to that result to each creature. Then create a number of Treasure tokens equal to the other result."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "Sides": "12",
+        "SubAbility": "DBDamageAll",
+        "ChosenSVar": "X",
+        "OtherSVar": "Y",
+        "Amount": "2",
+        "SpellDescription": "Roll two d12 and choose one result. CARDNAME deals damage equal to that result to each creature. Then create a number of Treasure tokens equal to the other result."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

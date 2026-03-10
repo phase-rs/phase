@@ -1,0 +1,126 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChooseCard",
+            "choices": [
+              "Card.Creature+ExiledWithSource+cmcEQX"
+            ],
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "X"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Choose a card exiled with NICKNAME with mana value X. NICKNAME becomes a copy of that card.",
+            "ChoiceZone": "Exile",
+            "SubAbility": "DBClone",
+            "ChoiceTitle": "Choose a card exiled with Valki with mana value X",
+            "Amount": "1",
+            "AILogic": "Never",
+            "StackDescription": "{p:You} chooses a card exiled with NICKNAME with mana value X. NICKNAME becomes a copy of that card."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Execute": "TrigReveal",
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "TriggerDescription": "When NICKNAME enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until NICKNAME leaves the battlefield."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 1,
+            "destination": "Exile"
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": 2
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Exile the top card of each player's library.",
+            "StackDescription": "SpellDescription",
+            "Planeswalker": "True",
+            "ChangeNum": "All",
+            "Defined": "Player"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature,Artifact"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -3
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target artifact or creature",
+            "Planeswalker": "True",
+            "SpellDescription": "Exile target artifact or creature."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZoneAll",
+            "origin": "Graveyard",
+            "destination": "Exile",
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -8
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "SpellDescription": "Exile all graveyards. Add {R}{R}{R}.",
+            "Ultimate": "True",
+            "SubAbility": "DBMana",
+            "ChangeType": "Card"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

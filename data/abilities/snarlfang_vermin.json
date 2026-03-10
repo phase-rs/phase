@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Creature",
+        "Execute": "TrigSuspect",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, if that creature is still on the battlefield, suspect that creature. It perpetually gains this ability.",
+        "ValidSource": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a suspected creature an opponent controls dies while CARDNAME is in your graveyard, that opponent loses 1 life.",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.OppCtrl+IsSuspected",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

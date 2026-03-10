@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.EquippedBy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, CARDNAME deals 2 damage to any target and you draw a card.",
+        "CombatDamage": "True",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection from red & Protection from blue",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddSVar": "SwordOfFireAndIceCE",
+        "Description": "Equipped creature gets +2/+2 and has protection from red and from blue.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self,Tyranid.YouCtrl",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Shrieking Gargoyles — Whenever CARDNAME or another Tyranid you control deals combat damage to a player, create a 1/1 blue Tyranid Gargoyle creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

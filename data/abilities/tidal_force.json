@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of each upkeep, you may tap or untap target permanent.",
+        "Execute": "TrigTapOrUntap",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

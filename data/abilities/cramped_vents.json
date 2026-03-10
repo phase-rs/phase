@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "TriggerDescription": "When you unlock this door, this Room deals 6 damage to target creature an opponent controls. You gain life equal to the excess damage dealt this way.",
+            "ValidPlayer": "You",
+            "Execute": "TrigDealDamage",
+            "ThisDoor": "True",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AffectedZone": "Hand",
+            "MayPlayAltManaCost": "PayLife<ConvertedManaCost>",
+            "Affected": "Card.YouCtrl+nonLand",
+            "MayPlayLimit": "1",
+            "MayPlayDontGrantZonePermissions": "True",
+            "Condition": "PlayerTurn",
+            "Description": "Once during each of your turns, you may cast a spell from your hand by paying life equal to its mana value rather than paying its mana cost.",
+            "MayPlay": "True"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

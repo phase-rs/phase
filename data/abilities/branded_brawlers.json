@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Description": "CARDNAME can't attack if defending player controls an untapped land.",
+        "ValidCard": "Card.Self",
+        "UnlessDefender": "!controlsLand.untapped"
+      }
+    },
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "IsPresent": "Land.YouCtrl+untapped",
+        "Description": "CARDNAME can't block if you control an untapped land."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

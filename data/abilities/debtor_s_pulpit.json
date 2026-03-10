@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land has \"{T}: Tap target creature.\"",
+        "Affected": "Card.EnchantedBy",
+        "AddAbility": "DPTapCreature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

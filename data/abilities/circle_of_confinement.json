@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, exile target creature with mana value 3 or less an opponent controls until CARDNAME leaves the battlefield. (That creature returns under its owner's control.)",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever an opponent casts a Vampire spell with the same name as a card exiled with CARDNAME, you gain 2 life.",
+        "ValidCard": "Card.Vampire+sharesNameWith Remembered.ExiledWithSource",
+        "Execute": "TrigGainLife",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Exile",
+        "Static": "True",
+        "Execute": "DBForget",
+        "Destination": "Any",
+        "ValidCard": "Card.IsRemembered+ExiledWithSource"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBCleanup",
+        "Static": "True",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

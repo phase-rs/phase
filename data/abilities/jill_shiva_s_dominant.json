@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "3 U U"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SorcerySpeed": "True",
+            "SubAbility": "DBReturn",
+            "RememberChanged": "True",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Exile NICKNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigReturn",
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "TriggerDescription": "When NICKNAME enters, return up to one other target nonland permanent to its owner's hand.",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

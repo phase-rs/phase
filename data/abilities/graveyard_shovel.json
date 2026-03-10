@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Chooser": "Targeted",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Target player exiles a card from their graveyard. If it's a creature card, you gain 2 life.",
+        "Hidden": "True",
+        "SubAbility": "DBGainLife",
+        "ChangeType": "Card",
+        "DefinedPlayer": "Targeted",
+        "IsCurse": "True",
+        "Mandatory": "True",
+        "ChangeNum": "1",
+        "RememberChanged": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

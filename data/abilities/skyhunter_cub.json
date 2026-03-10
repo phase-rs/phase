@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Affected": "Card.Self+equipped",
+        "Description": "As long as CARDNAME is equipped, it gets +1/+1 and has flying.",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

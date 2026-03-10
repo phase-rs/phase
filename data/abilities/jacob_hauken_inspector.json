@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBExile",
+            "StackDescription": "{p:You} draws a card,",
+            "SpellDescription": "Draw a card,"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library face down. You may look at that card for as long as it remains exiled.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigExile"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "MayPlayWithoutManaCost": "True",
+            "Description": "Once during each of your turns, you may play a land or cast a spell from among the cards exiled with this permanent without paying its mana cost.",
+            "AffectedZone": "Exile",
+            "Affected": "Card.ExiledWithSource",
+            "EffectZone": "Battlefield",
+            "MayPlayLimit": "1",
+            "MayPlay": "True"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

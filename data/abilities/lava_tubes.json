@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo B R",
+        "params": {
+          "SubAbility": "AddCounter",
+          "Amount": "1",
+          "SpellDescription": "Add {B} or {R}. Put a depletion counter on CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "AddCounter",
+        "Amount": "1",
+        "SpellDescription": "Add {B} or {R}. Put a depletion counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigSubCounter",
+        "TriggerDescription": "At the beginning of your upkeep, remove a depletion counter from CARDNAME.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Description": "CARDNAME doesn't untap during your untap step if it has a depletion counter on it.",
+        "ValidCard": "Card.Self+counters_GE1_DEPLETION",
+        "ActiveZones": "Battlefield",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

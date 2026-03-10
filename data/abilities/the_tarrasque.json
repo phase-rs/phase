@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigFight",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, it fights target creature defending player controls.",
+        "TargetMax": "1",
+        "TargetMin": "1"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has haste and ward {10} as long as it was cast.",
+        "Affected": "Card.Self+wasCast",
+        "AddKeyword": "Haste & Ward:10"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

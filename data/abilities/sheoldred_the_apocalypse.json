@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you draw a card, you gain 2 life.",
+        "Execute": "TrigGainLife"
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.OppCtrl",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever an opponent draws a card, they lose 2 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

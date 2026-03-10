@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "Count$YourSpeed",
+        "Affected": "Creature.Other+YouCtrl",
+        "Description": "Other creatures you control get +X/+0, where X is your speed."
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Count$YourSpeed",
+        "Description": "Noncreature spells you cast cost {X} less to cast, where X is your speed.",
+        "ValidCard": "Card.nonCreature",
+        "Type": "Spell",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

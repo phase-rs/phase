@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, choose a creature card in your hand without blitz. It perpetually gains blitz. The blitz cost is equal to its mana cost.",
+        "Destination": "Battlefield",
+        "Execute": "TrigChoose"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

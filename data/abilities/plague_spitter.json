@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 1 damage to each creature and each player.",
+        "Execute": "TrigDamageAll"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigDamageAll",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, CARDNAME deals 1 damage to each creature and each player."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

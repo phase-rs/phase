@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "CARDNAME deals 4 damage to any target and you gain 4 life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "Description": "You may exile two black cards from your hand rather than pay this spell's mana cost.",
+        "Cost": "ExileFromHand<2/Card.Black+Other>",
+        "ValidSA": "Spell.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

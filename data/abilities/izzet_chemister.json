@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Instant.YouCtrl,Sorcery.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target instant or sorcery card from your graveyard.",
+        "TgtPrompt": "Select target instant or sorcery card in your graveyard"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Optional": "True",
+          "WithoutManaCost": "True",
+          "Controller": "You",
+          "SpellDescription": "Cast any number of cards exiled with CARDNAME without paying their mana costs.",
+          "Valid": "Instant.ExiledWithSource,Sorcery.ExiledWithSource",
+          "ValidZone": "Exile",
+          "Amount": "All"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "WithoutManaCost": "True",
+        "Controller": "You",
+        "SpellDescription": "Cast any number of cards exiled with CARDNAME without paying their mana costs.",
+        "Valid": "Instant.ExiledWithSource,Sorcery.ExiledWithSource",
+        "ValidZone": "Exile",
+        "Amount": "All"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

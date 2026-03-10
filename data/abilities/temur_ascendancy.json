@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control with power 4 or greater enters, you may draw a card.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.powerGE4+YouCtrl",
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control have haste.",
+        "AddKeyword": "Haste",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

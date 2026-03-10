@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPumpCurse",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.Red",
+        "TriggerDescription": "Whenever you cast a red spell, target creature can't block this turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

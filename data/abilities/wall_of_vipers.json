@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Destroy",
+        "SpellDescription": "Destroy CARDNAME and target creature it's blocking. Any player may activate this ability.",
+        "Activator": "Player",
+        "Defined": "Self",
+        "IsCurse": "True",
+        "SubAbility": "SnakeBite"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

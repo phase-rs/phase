@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, you may draw two cards.",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "ValidTarget": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

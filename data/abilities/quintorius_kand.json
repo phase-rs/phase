@@ -1,0 +1,91 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "rw_3_2_spirit",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 3/2 red and white Spirit creature token."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Discover",
+        "params": {
+          "Num": "4",
+          "SpellDescription": "Discover 4.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Num": "4",
+        "SpellDescription": "Discover 4.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMax": "Yard",
+        "RememberChanged": "True",
+        "TgtPrompt": "Select any number of target cards in your graveyard",
+        "Ultimate": "True",
+        "StackDescription": "SpellDescription",
+        "TargetMin": "0",
+        "SubAbility": "DBMana",
+        "SpellDescription": "Exile any number of target cards from your graveyard. Add {R} for each card exiled this way. You may play those cards this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you cast a spell from exile, CARDNAME deals 2 damage to each opponent and you gain 2 life.",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.wasCastFromExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

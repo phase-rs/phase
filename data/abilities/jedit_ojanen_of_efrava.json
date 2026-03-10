@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, create a 2/2 green Cat Warrior creature token with forestwalk."
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, create a 2/2 green Cat Warrior creature token with forestwalk.",
+        "Execute": "TrigToken",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "AddKeyword": "Trample",
+        "Description": "Other creatures you control have trample."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "Description": "This spell can't be countered."
+      }
+    },
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell.Creature+YouCtrl",
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield",
+        "Description": "Creature spells you control can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

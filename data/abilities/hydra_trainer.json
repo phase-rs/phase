@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Adapt": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "Cost": "Exert<1/CARDNAME>",
+        "Description": "You may exert CARDNAME as it attacks. When you do, target creature gets +X/+X until end of turn, where X is the number of counters on permanents you control. (An exerted creature won't untap during your next untap step.)",
+        "ValidCard": "Card.Self",
+        "Trigger": "TrigPump"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

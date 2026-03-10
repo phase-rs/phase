@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When this Equipment enters, create a 1/1 white Ally creature token, then attach this Equipment to it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, equipped creature gets +1/+1 and has first strike.",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Creature.DamagedBy"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on it.",
+        "ValidCard": "Creature.Self",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "TargetedAndYou",
+        "ValidTgts": "Opponent",
+        "SpellDescription": "You and target opponent each draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

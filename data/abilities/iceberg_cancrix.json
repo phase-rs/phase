@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever another snow permanent you control enters, you may have target player mill two cards.",
+        "ValidCard": "Permanent.Other+YouCtrl+Snow"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

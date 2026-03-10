@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Deathtouch",
+        "AffectedZone": "Stack",
+        "Affected": "Instant.YouCtrl,Sorcery.YouCtrl",
+        "Description": "Instant and sorcery spells you control have deathtouch."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

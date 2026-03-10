@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentDefined": "Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, return up to one target land card from your graveyard to the battlefield. CARDNAME perpetually gets +1/+1.",
+        "ValidPlayer": "You",
+        "Phase": "Main",
+        "Execute": "TrigChangeZone",
+        "PhaseCount": "2",
+        "IsPresent": "Card.tapped"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME enters tapped.",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

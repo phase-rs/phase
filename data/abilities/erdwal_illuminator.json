@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Investigated",
+      "params": {
+        "ValidPlayer": "You",
+        "FirstTime": "True",
+        "Execute": "TrigInvestigate",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you investigate for the first time each turn, investigate an additional time."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

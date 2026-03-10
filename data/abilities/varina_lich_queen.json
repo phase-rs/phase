@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_2_2_zombie",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<2/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a tapped 2/2 black Zombie creature token.",
+        "TokenOwner": "You",
+        "TokenTapped": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Zombie.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack with one or more Zombies, draw that many cards, then discard that many cards. You gain that much life.",
+        "Execute": "TrigLoot"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

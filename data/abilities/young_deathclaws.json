@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Scavenge:CardManaCost",
+        "Affected": "Creature.YouOwn",
+        "AffectedZone": "Graveyard",
+        "Description": "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "SVarCompare": "GE3",
+        "TriggerDescription": "Corrupted — Whenever CARDNAME attacks, if an opponent has three or more poison counters, creatures you control get +1/+1 until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpAttack",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

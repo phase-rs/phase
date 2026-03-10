@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever a creature you control with reach attacks, untap it and it can't be blocked by creatures with greater power this combat.",
+        "ValidCard": "Creature.YouCtrl+withReach"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Fierce Punch — Whenever one or more creatures you control deal combat damage to a player, draw a card.",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigDraw",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+!attacking",
+        "Description": "Teleport — CARDNAME has hexproof unless he's attacking.",
+        "AddKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

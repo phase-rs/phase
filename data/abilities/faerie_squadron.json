@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+kicked",
+        "Origin": "Any",
+        "Execute": "SquadronEnlist",
+        "Destination": "Battlefield",
+        "Static": "True",
+        "TriggerDescription": "If CARDNAME was kicked, it enters with two +1/+1 counters on it and with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

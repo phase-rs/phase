@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Always",
+          "params": {
+            "IsPresent": "Card.Self+withFlying",
+            "Execute": "TrigFlip",
+            "TriggerDescription": "When CARDNAME has flying, flip it.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Creatures you control have flying.",
+            "AddKeyword": "Flying",
+            "Affected": "Creature.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.Self",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever NICKNAME attacks, put a +1/+1 counter on it."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "RaidTest",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigChangeZone",
+        "Phase": "End of Turn",
+        "TriggerDescription": "Raid — At the beginning of your end step, if you attacked this turn, return target creature card with mana value less than or equal to NICKNAME's power from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

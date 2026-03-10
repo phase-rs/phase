@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Type": "Creature",
+          "AILogic": "MostProminentComputerControls",
+          "SpellDescription": "Choose a creature type.",
+          "SubAbility": "DBPumpAll"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Creature",
+        "AILogic": "MostProminentComputerControls",
+        "SpellDescription": "Choose a creature type.",
+        "SubAbility": "DBPumpAll"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigExileMe",
+        "TriggerDescription": "When CARDNAME dies, exile CARDNAME, then return the top creature card of your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

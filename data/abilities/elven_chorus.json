@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "MayLookAt": "You",
+        "Description": "You may look at the top card of your library any time."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Affected": "Creature.TopLibrary+YouCtrl+nonLand",
+        "AffectedZone": "Library",
+        "Description": "You may cast creature spells from the top of your library."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddAbility": "AnyMana",
+        "Description": "Creatures you control have \"{T}: Add one mana of any color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

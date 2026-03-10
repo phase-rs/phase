@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Enchantment.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, each opponent loses 1 life.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "ValidCard": "Card.Room",
+        "Execute": "TrigLoseLife",
+        "ValidPlayer": "You",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, each opponent loses 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

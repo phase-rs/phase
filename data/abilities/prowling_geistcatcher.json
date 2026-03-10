@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever you sacrifice another creature, exile it. If that creature was a token, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Creature.Other",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, return each card exiled with it to the battlefield under your control.",
+        "Destination": "Any",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

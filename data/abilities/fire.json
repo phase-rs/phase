@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 2
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TargetMin": "1",
+            "SpellDescription": "CARDNAME deals 2 damage divided as you choose among one or two targets.",
+            "TgtPrompt": "Select any target to distribute damage to",
+            "DividedAsYouChoose": "2",
+            "TargetMax": "2"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Tap",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Tap target permanent. Draw a card.",
+            "SubAbility": "DBDraw"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

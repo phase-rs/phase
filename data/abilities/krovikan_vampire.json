@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.DamagedBy",
+        "Static": "True",
+        "Origin": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Any",
+        "Origin": "Graveyard",
+        "Execute": "LoseTrack",
+        "Static": "True",
+        "ValidCard": "Card.IsRemembered"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "TurnBegin",
+      "params": {
+        "Static": "True",
+        "Execute": "DBCleanup2"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each end step, if a creature dealt damage by CARDNAME this turn died, put that card onto the battlefield under your control. Sacrifice it when you lose control of CARDNAME.",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self",
+        "Execute": "TrigChange",
+        "ValidPlayer": "Player",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

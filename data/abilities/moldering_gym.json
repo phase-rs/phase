@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ValidPlayer": "You",
+            "ValidCard": "Card.Self",
+            "ThisDoor": "True",
+            "Execute": "TrigSearch",
+            "TriggerDescription": "When you unlock this door, search your library for a basic land card, put it onto the battlefield tapped, then shuffle."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "Execute": "TrigDread",
+            "ValidPlayer": "You",
+            "ValidCard": "Card.Self",
+            "ThisDoor": "True",
+            "TriggerDescription": "When you unlock this door, manifest dread, then put three +1/+1 counters on that creature."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

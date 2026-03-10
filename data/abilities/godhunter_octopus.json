@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "UnlessDefender": "controlsEnchantment,Permanent.enchanted",
+        "Description": "CARDNAME can't attack unless defending player controls an enchantment or an enchanted permanent."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When enchanted artifact is put into a graveyard, return that card to its owner's hand.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigChangeZone",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.",
+        "SetPower": "5",
+        "Affected": "Card.AttachedBy",
+        "SetToughness": "5",
+        "AddType": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

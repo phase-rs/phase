@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "Defined": "Self",
+          "Gains": "red",
+          "SpellDescription": "CARDNAME gains protection from red until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "Gains": "red",
+        "SpellDescription": "CARDNAME gains protection from red until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

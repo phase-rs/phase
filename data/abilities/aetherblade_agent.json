@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SorcerySpeed": "True",
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "4 UP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SorcerySpeed": "True",
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "ValidSource": "Card.Self",
+            "Execute": "TrigDraw",
+            "CombatDamage": "True",
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or battle, draw a card.",
+            "ValidTarget": "Player,Battle"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

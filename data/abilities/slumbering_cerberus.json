@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigUntap",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Morbid — At the beginning of each end step, if a creature died this turn, untap this creature.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

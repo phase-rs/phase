@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBBoon",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you get a boon with \"When you cast your next creature spell, that creature enters with your choice of a +1/+1 counter, a flying counter, or a lifelink counter on it.\""
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

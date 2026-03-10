@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddAbility": "Destroy",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "SetColor": "Black",
+        "Condition": "Threshold",
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target red creature.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

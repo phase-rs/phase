@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 2,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put two +1/+1 counters on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Graveyard",
+        "ReplaceWith": "Exile",
+        "Description": "If a nontoken creature an opponent controls would die, instead exile that card and create a 2/2 black Zombie creature token.",
+        "Origin": "Battlefield",
+        "ActiveZones": "Battlefield",
+        "ValidLKI": "Creature.!token+OppCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

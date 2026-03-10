@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R G W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "CARDNAME deals damage to any target equal to the number of Dogs you control. You gain life equal to the number of Cats you control."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a Dog spell, create a 1/1 green Cat creature token.",
+        "Execute": "TrigCatToken",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Dog",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDogToken",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a Cat spell, create a 1/1 white Dog creature token.",
+        "ValidCard": "Cat",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

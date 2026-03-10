@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 5,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Until end of turn, target artifact or creature becomes an artifact creature with base power and toughness 4/5. Draw a card.",
+        "ValidTgtsDesc": "artifact or creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "gw_1_1_kithkin",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 1/1 green and white Kithkin creature token."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.tapped"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target tapped creature",
+        "SpellDescription": "NICKNAME deals 4 damage to target tapped creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Battlefield"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "DestinationZone2": "Library",
+        "SubAbility": "DBShuffle",
+        "SpellDescription": "Look at the top X cards of your library where X is your life total. You may put any number of nonland permanent cards with mana value 3 or less from among them onto the battlefield. Then shuffle.",
+        "ChangeNum": "Any",
+        "Planeswalker": "True",
+        "Optional": "True",
+        "ChangeValid": "Card.Permanent+nonLand+cmcLE3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

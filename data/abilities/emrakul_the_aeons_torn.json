@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Any",
+        "Execute": "TrigShuffle",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigAddTurn",
+        "TriggerDescription": "When you cast CARDNAME, take an extra turn after this one.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

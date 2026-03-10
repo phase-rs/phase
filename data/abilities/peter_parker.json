@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+              "Defined": "Self",
+              "SorcerySpeed": "True",
+              "AILogic": "Always",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 G W U"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+            "Defined": "Self",
+            "SorcerySpeed": "True",
+            "AILogic": "Always",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, create a 2/1 green Spider creature token with reach.",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "Execute": "TrigToken"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Web-slinging:G W U:Spell.Legendary+nonColorless",
+            "Description": "Each legendary spell you cast that's one or more colors has web-slinging {G}{W}{U}. (You may cast a spell for its web-slinging cost if you also return a tapped creature you control to its owner's hand.)",
+            "Affected": "Legendary.YouCtrl+wasCast+nonColorless",
+            "AffectedZone": "Stack"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

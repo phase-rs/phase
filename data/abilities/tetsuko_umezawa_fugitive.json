@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.YouCtrl+powerLE1,Creature.YouCtrl+toughnessLE1",
+        "Description": "Creatures you control with power or toughness 1 or less can't be blocked."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

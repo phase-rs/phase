@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBEffect",
+            "SpellDescription": "Draw cards equal to the number of cards in your hand plus one. You have no maximum hand size for the rest of the game."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "U",
+            "params": {
+              "SpellDescription": "Add {U}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {U}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+            "Destination": "Battlefield",
+            "ReplaceWith": "DBTap"
+          }
+        }
+      ]
+    }
+  ]
+}

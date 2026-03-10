@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PayCumulativeUpkeep",
+      "params": {
+        "TriggerDescription": "When a player doesn't pay CARDNAME's cumulative upkeep, CARDNAME deals X damage to target player or planeswalker and each creature that player or that planeswalker's controller controls, where X is twice the number of age counters on CARDNAME minus 2.",
+        "ValidCard": "Card.Self",
+        "Paid": "False",
+        "Execute": "TrigDmg"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

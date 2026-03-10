@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SubAbility": "DBRemoveCounter",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Put a +1/+1 counter on CARDNAME. If this is the third time this ability has resolved this turn, remove all +1/+1 counters from CARDNAME, and it deals that much damage to each creature and each player."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

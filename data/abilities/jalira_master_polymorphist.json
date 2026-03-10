@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "RevealedLibraryPosition": "-1",
+          "ValidDescription": "nonlegendary creature",
+          "RevealedDestination": "Library",
+          "Valid": "Creature.nonLegendary",
+          "RevealRandomOrder": "True",
+          "SpellDescription": "Reveal cards from the top of your library until you reveal a nonlegendary creature card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+          "FoundDestination": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RevealedLibraryPosition": "-1",
+        "ValidDescription": "nonlegendary creature",
+        "RevealedDestination": "Library",
+        "Valid": "Creature.nonLegendary",
+        "RevealRandomOrder": "True",
+        "SpellDescription": "Reveal cards from the top of your library until you reveal a nonlegendary creature card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+        "FoundDestination": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

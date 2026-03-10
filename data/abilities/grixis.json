@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, put target creature card from a graveyard onto the battlefield under your control.",
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Blue, black, and/or red creature cards in your graveyard have unearth. The unearth cost is equal to the card's mana cost. (Pay the card's mana cost: Return it to the battlefield. The creature gains haste. Exile it at the beginning of the next end step or if it would leave the battlefield. Unearth only as a sorcery.)",
+        "EffectZone": "Command",
+        "AffectedZone": "Graveyard",
+        "Affected": "Creature.YouOwn+Blue,Creature.YouOwn+Red,Creature.YouOwn+Black",
+        "AddKeyword": "Unearth:CardManaCost"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

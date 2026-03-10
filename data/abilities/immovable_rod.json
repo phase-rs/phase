@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "SpellDescription": "For as long as CARDNAME remains tapped, another target permanent loses all abilities and can't attack or block."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigVenture",
+        "TriggerDescription": "Whenever CARDNAME becomes untapped, venture into the dungeon.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Untaps",
+      "params": {
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "ClearRemembered",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.IsRemembered",
+        "AddHiddenKeyword": "CARDNAME can't attack or block.",
+        "RemoveAllAbilities": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

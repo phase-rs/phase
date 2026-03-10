@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "ActivationPhases": "BeginCombat->EndCombat",
+          "PlayerTurn": "True",
+          "Choices": "DBPump,DBUntapAll"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationPhases": "BeginCombat->EndCombat",
+        "PlayerTurn": "True",
+        "Choices": "DBPump,DBUntapAll"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

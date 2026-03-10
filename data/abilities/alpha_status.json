@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "AffectedX",
+        "Description": "Enchanted creature gets +2/+2 for each other creature on the battlefield that shares a creature type with it.",
+        "AddPower": "AffectedX",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "G",
+            "params": {
+              "SpellDescription": "Add {G}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {G}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "5 G G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "C C",
+            "params": {
+              "SpellDescription": "Add {C}{C}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {C}{C}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

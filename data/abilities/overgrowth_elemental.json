@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on another target Elemental you control.",
+        "Execute": "TrigPut",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever another creature you control dies, you gain 1 life. If that creature was an Elemental, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

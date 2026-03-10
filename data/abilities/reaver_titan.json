@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Gatling Blaster — Whenever CARDNAME attacks, it deals 5 damage to each opponent.",
+        "ValidCard": "Creature.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

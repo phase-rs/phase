@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "TheftEffect",
+        "IsCurse": "True",
+        "ChangeType": "Instant,Sorcery",
+        "RememberChanged": "True",
+        "SpellDescription": "Target player reveals their hand. You choose an instant or sorcery card from it and exile that card.",
+        "StackDescription": "SpellDescription",
+        "Mandatory": "True",
+        "Chooser": "You",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

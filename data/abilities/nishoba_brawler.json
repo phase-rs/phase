@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "Description": "Domain — CARDNAME's power is each equal to the number of basic land types among lands you control.",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

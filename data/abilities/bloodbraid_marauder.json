@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Cascade",
+        "Description": "Delirium — This spell has cascade as long as there are four or more card types among cards in your graveyard. (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        "Condition": "Delirium",
+        "AffectedZone": "Stack",
+        "Affected": "Card.Self",
+        "EffectZone": "Stack"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Debuff",
+        "params": {
+          "SpellDescription": "CARDNAME loses flying until end of turn. Any player may activate this ability.",
+          "Defined": "Self",
+          "Keywords": "Flying",
+          "Activator": "Player"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME loses flying until end of turn. Any player may activate this ability.",
+        "Defined": "Self",
+        "Keywords": "Flying",
+        "Activator": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

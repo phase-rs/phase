@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Creature.OppCtrl+inZoneBattlefield",
+        "TriggerDescription": "Whenever a creature an opponent controls becomes the target of a spell or ability you control, gain control of that creature for as long as you control CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "SpellAbility.YouCtrl",
+        "Execute": "TrigGainControl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "Look": "True",
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Look at target player's hand.",
+          "ValidTgts": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Look": "True",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Look at target player's hand.",
+        "ValidTgts": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

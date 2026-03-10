@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE7",
+        "ValidCard": "Land.YouCtrl",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "IsPresent": "Land.YouCtrl",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Whenever a land you control enters, if you control seven or more lands, up to one target land you control becomes a 4/4 Elemental creature with haste. It's still a land."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Land+YouCtrl",
+        "Description": "Land creatures you control have flying.",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

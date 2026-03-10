@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.hasKeywordFlash+Other",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you cast another spell that has flash, you draw a card and each opponent loses 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

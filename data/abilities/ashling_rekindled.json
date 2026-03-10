@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDraw",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, you may discard a card. If you do, draw a card.",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "Transformed",
+          "params": {
+            "Secondary": "True",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, you may discard a card. If you do, draw a card.",
+            "Execute": "TrigDraw"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {U}. If you do, transform NICKNAME.",
+            "Phase": "Main1"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigMana",
+            "TriggerDescription": "Whenever this creature transforms into CARDNAME and at the beginning of your first main phase, add two mana of any one color. Spend this mana only to cast spells with mana value 4 or greater."
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "Whenever this creature transforms into CARDNAME and at the beginning of your first main phase, add two mana of any one color. Spend this mana only to cast spells with mana value 4 or greater.",
+            "Execute": "TrigMana",
+            "TriggerZones": "Battlefield",
+            "Phase": "Main1",
+            "Secondary": "True",
+            "ValidPlayer": "You"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Main1",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {R}. If you do, transform NICKNAME.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

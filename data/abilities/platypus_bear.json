@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "TriggerDescription": "When this creature enters, mill two cards. (Put the top two cards of your library into your graveyard.)",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "As long as there is a Lesson card in your graveyard, this creature can attack as though it didn't have defender.",
+        "PresentZone": "Graveyard",
+        "IsPresent": "Lesson.YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo Any",
+        "params": {
+          "RestrictValid": "Spell.Creature,Activated.Creature",
+          "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast creature spells or activate abilities of a creature or creature card.",
+          "Amount": "2"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.Creature,Activated.Creature",
+        "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast creature spells or activate abilities of a creature or creature card.",
+        "Amount": "2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigCounter",
+        "TriggerDescription": "Whenever you cast a creature spell with power 5 or greater, put a +1/+1 counter on CARDNAME and untap it.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.powerGE5"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

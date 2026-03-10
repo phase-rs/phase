@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "PutCounter",
+        "TriggerDescription": "At the beginning of your upkeep, put a filibuster counter on CARDNAME. Then if CARDNAME has five or more filibuster counters on it, you win the game.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a source deals damage to you, remove a filibuster counter from CARDNAME.",
+        "ValidTarget": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "RemoveCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

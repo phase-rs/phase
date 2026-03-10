@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "At the beginning of each opponent's upkeep, you may have that player gain control of equipped creature until end of turn. If you do, untap it.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+2, has haste, can't attack you or planeswalkers you control, and can't be sacrificed.",
+        "AddKeyword": "Haste",
+        "AddToughness": "2",
+        "Affected": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantSacrifice"
+      },
+      "params": {
+        "ValidCard": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature.EquippedBy",
+        "Target": "You,Planeswalker.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Detective.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a Detective you control enters and whenever a Detective you control is turned face up, put a +1/+1 counter on it.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a Detective you control enters and whenever a Detective you control is turned face up, put a +1/+1 counter on it.",
+        "ValidCard": "Detective.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "IsPresent": "Detective.YouCtrl",
+        "PresentCompare": "GE3",
+        "IsPresent2": "Card.Self+!IsSolved",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "Solved",
+        "TriggerDescription": "To solve — You control three or more Detectives. (If unsolved, solve at the beginning of your end step.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "DBReplace",
+        "IsPresent": "Card.Self+IsSolved",
+        "ValidToken": "Card.YouCtrl",
+        "Description": "Solved — If one or more tokens would be created under your control, those tokens plus a Clue token are created instead. (It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    }
+  ],
+  "faces": []
+}

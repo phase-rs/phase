@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "NoResolvingCheck": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigBattalionPump",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME gets +5/+5 until end of turn.",
+        "PresentCompare": "GE2",
+        "IsPresent": "Creature.attacking+Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

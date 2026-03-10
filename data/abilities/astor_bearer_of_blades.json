@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, look at the top seven cards of your library. You may reveal an Equipment or Vehicle card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "Execute": "TrigDig",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Equipment.YouCtrl",
+        "Description": "Equipment you control have equip {1}.",
+        "AddKeyword": "Equip:1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Vehicles you control have crew 1.",
+        "Affected": "Vehicle.YouCtrl",
+        "AddKeyword": "Crew:1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

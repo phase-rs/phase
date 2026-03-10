@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerDescription": "When there are nine or more incarnation counters on CARDNAME, exile it.",
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+counters_GE9_INCARNATION"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLose",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, you lose the game.",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "AddCounters",
+        "PreventionEffect": "True",
+        "ActiveZones": "Battlefield",
+        "ExecuteMode": "PerSource",
+        "ValidTarget": "You",
+        "AlwaysReplace": "True",
+        "Description": "If a source would deal damage to you, prevent that damage and put an incarnation counter on CARDNAME.",
+        "ValidSource": "Card,Emblem"
+      }
+    }
+  ],
+  "faces": []
+}

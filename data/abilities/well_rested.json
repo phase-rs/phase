@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has \"Whenever this creature becomes untapped, put two +1/+1 counters on it, then you gain 2 life and draw a card. This ability triggers only once each turn.\"",
+        "AddTrigger": "UntapTrigger",
+        "AddSVar": "DBPutCounter,DBGainLife,DBDraw"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

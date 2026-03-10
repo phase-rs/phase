@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Shroud",
+        "IsPresent": "Land.YouCtrl+untapped",
+        "Description": "CARDNAME has shroud as long as you control no untapped lands. (It can't be the target of spells or abilities.)",
+        "PresentCompare": "EQ0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

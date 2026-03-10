@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self,Land.Other+YouCtrl",
+        "SVarCompare": "GE7",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever CARDNAME or another land you control enters, if you control seven or more lands with different names, create a 2/2 black Zombie creature token.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "Description": "CARDNAME enters tapped."
+      }
+    }
+  ],
+  "faces": []
+}

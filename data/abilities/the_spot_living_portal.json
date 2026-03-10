@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMarkBattlefield",
+        "TriggerDescription": "When NICKNAME enters, exile up to one target nonland permanent and up to one target nonland permanent card from a graveyard."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When NICKNAME dies, put him on the bottom of his owner's library. If you do, return the exiled cards to their owners' hands.",
+        "Execute": "TrigChangeZone",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

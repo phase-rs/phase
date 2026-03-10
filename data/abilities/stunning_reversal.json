@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "The next time you would lose the game this turn, instead draw seven cards and your life total becomes 1. Exile CARDNAME.",
+          "ReplacementEffects": "LoseReplace",
+          "SubAbility": "DBExile"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "The next time you would lose the game this turn, instead draw seven cards and your life total becomes 1. Exile CARDNAME.",
+        "ReplacementEffects": "LoseReplace",
+        "SubAbility": "DBExile"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

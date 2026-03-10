@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDigUntil",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this enchantment enters, exile cards from the top of your library until you exile a nonland card. You may cast it without paying its mana cost if that spell's mana value is 8 or less. If you don't, put that card into your hand.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Dragon.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When a Dragon you control enters, return this enchantment to its owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

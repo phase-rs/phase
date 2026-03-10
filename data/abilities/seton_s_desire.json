@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "2",
+        "Description": "Enchanted creature gets +2/+2."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Condition": "Threshold",
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, all creatures able to block enchanted creature do so.",
+        "AddHiddenKeyword": "All creatures able to block CARDNAME do so."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

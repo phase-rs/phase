@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "SpellDescription": "Add {G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create a 0/1 green Plant creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped.",
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

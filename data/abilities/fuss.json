@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "PutCounterAll",
+            "params": {
+              "CounterNum": "1",
+              "SpellDescription": "Put a +1/+1 counter on each attacking creature you control.",
+              "CounterType": "P1P1",
+              "ValidCards": "Creature.attacking+YouCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "CounterNum": "1",
+            "SpellDescription": "Put a +1/+1 counter on each attacking creature you control.",
+            "CounterType": "P1P1",
+            "ValidCards": "Creature.attacking+YouCtrl"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Token",
+            "name": "c_1_1_a_thopter_flying",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBSurveil",
+            "TokenOwner": "You",
+            "TokenAmount": "3",
+            "SpellDescription": "Create three 1/1 colorless Thopter artifact creature tokens with flying. Surveil 2."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

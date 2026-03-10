@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "ScoutFlash",
+          "Triggers": "SpellCastTrig,LandPlayedTrig",
+          "SubAbility": "DBDraw",
+          "SpellDescription": "The next creature card you play this turn can be played as though it had flash."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "ScoutFlash",
+        "Triggers": "SpellCastTrig,LandPlayedTrig",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "The next creature card you play this turn can be played as though it had flash."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate CARDNAME. Activate only if there are seven or more cards in your graveyard.",
+          "Activation": "Threshold",
+          "PrecostDesc": "Threshold —"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate CARDNAME. Activate only if there are seven or more cards in your graveyard.",
+        "Activation": "Threshold",
+        "PrecostDesc": "Threshold —"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

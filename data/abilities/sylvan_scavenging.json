@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigCharm",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, ABILITY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

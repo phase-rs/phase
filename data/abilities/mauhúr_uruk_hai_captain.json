@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ReplaceWith": "AddOneMoreCounters",
+        "Description": "If one or more +1/+1 counters would be put on an Army, Goblin, or Orc you control, that many plus one +1/+1 counters are put on it instead.",
+        "ValidCounterType": "P1P1",
+        "ValidCard": "Orc.YouCtrl+inZoneBattlefield,Army.YouCtrl+inZoneBattlefield,Goblin.YouCtrl+inZoneBattlefield",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

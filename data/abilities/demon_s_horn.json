@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a player casts a black spell, you may gain 1 life.",
+        "ValidCard": "Card.Black"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

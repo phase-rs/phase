@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigBounce",
+        "Origin": "Any",
+        "ValidCard": "Permanent.YouCtrl+nonArtifact",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a nonartifact permanent you control enters, you may return another permanent you control that shares a permanent type with it to its owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

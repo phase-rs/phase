@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigCharm",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a land you control enters tapped, ABILITY",
+        "Origin": "Any",
+        "ValidCard": "Land.tapped+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Flurry — Whenever you cast your second spell each turn, put a +1/+1 counter on this creature. Scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ActivatorThisTurnCast": "EQ2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidPlayer": "You",
+        "ValidSA": "Spell",
+        "Cost": "0",
+        "Description": "If an opponent controls a Plains and you control a Mountain, you may cast this spell without paying its mana cost.",
+        "EffectZone": "All",
+        "CheckSVar": "X",
+        "CheckSecondSVar": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

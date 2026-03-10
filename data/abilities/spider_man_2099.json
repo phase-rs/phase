@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "CheckSVar": "Y",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "At the beginning of your end step, if you've played a land or cast a spell this turn from anywhere other than your hand, CARDNAME deals damage equal to his power to any target."
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Origin": "Exile,Library,Graveyard",
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "StoreVar",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Cleanup",
+        "Static": "True",
+        "Execute": "TrigReset"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "EffectZone": "All",
+        "Caster": "Player.Active",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "Z",
+        "SVarCompare": "LE3",
+        "Description": "You can't cast CARDNAME during your first, second, or third turns of the game."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

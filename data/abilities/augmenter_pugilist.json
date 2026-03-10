@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Card.Self",
+            "AddPower": "5",
+            "AddToughness": "5",
+            "Description": "As long as you control eight or more lands, CARDNAME gets +5/+5.",
+            "PresentCompare": "GE8",
+            "IsPresent": "Land.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "Clone",
+            "params": {
+              "CloneTarget": "Valid Creature.YouCtrl+NotDefinedTargeted",
+              "NonLegendary": "True",
+              "Duration": "UntilEndOfTurn",
+              "ValidTgts": "Creature.YouCtrl",
+              "TgtPrompt": "Choose target creature you control",
+              "Defined": "Targeted",
+              "StackDescription": "Each other creature {p:You} controls becomes a copy of {c:Targeted} until end of turn, except those creatures aren't legendary.",
+              "SpellDescription": "Choose target creature you control. Each other creature you control becomes a copy of it until end of turn, except those creatures aren't legendary if the chosen creature is legendary."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "CloneTarget": "Valid Creature.YouCtrl+NotDefinedTargeted",
+            "NonLegendary": "True",
+            "Duration": "UntilEndOfTurn",
+            "ValidTgts": "Creature.YouCtrl",
+            "TgtPrompt": "Choose target creature you control",
+            "Defined": "Targeted",
+            "StackDescription": "Each other creature {p:You} controls becomes a copy of {c:Targeted} until end of turn, except those creatures aren't legendary.",
+            "SpellDescription": "Choose target creature you control. Each other creature you control becomes a copy of it until end of turn, except those creatures aren't legendary if the chosen creature is legendary."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

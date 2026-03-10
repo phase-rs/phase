@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Clashed",
+      "params": {
+        "ValidPlayer": "You",
+        "Won": "True",
+        "OptionalDecider": "You",
+        "Execute": "TrigTokenW",
+        "TriggerDescription": "Whenever you clash, you may pay {1}. If you do, create a 3/1 red Elemental Shaman creature token. If you won, that token gains haste until end of turn. (This ability triggers after the clash ends.)",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Clashed",
+      "params": {
+        "OptionalDecider": "You",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you clash, you may pay {1}. If you do, create a 3/1 red Elemental Shaman creature token. If you won, that token gains haste until end of turn. (This ability triggers after the clash ends.)",
+        "ValidPlayer": "You",
+        "Execute": "TrigTokenL",
+        "Won": "False",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

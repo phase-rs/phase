@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+Enchantment",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "When an opponent plays a nonbasic land, if CARDNAME is an enchantment, CARDNAME becomes a 3/3 Beast creature.",
+        "ValidCard": "Land.nonBasic+OppCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

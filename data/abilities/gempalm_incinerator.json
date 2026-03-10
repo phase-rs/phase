@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerDescription": "When you cycle CARDNAME, you may have it deal X damage to target creature, where X is the number of Goblins on the battlefield.",
+        "Execute": "TrigDamage",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 5/5 red Dragon creature token with flying.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

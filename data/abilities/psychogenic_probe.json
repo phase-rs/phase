@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Shuffled",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "ShuffleFromEffect": "True",
+        "TriggerDescription": "Whenever a spell or ability causes a player to shuffle their library, CARDNAME deals 2 damage to that player.",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

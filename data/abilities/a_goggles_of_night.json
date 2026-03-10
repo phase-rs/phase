@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, scry 1, then draw a card.",
+        "Execute": "DBScry",
+        "ValidSource": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

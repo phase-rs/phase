@@ -1,0 +1,99 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigTransform",
+            "Origin": "Battlefield",
+            "TriggerDescription": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "DamageDone",
+          "params": {
+            "ActiveZones": "Battlefield",
+            "Description": "If a red source you control would deal an amount of noncombat damage less than NICKNAME's power to an opponent, that source deals damage equal to NICKNAME's power instead.",
+            "DamageAmount": "LTX",
+            "IsCombat": "False",
+            "ValidSource": "Card.RedSource+YouCtrl",
+            "ReplaceWith": "DmgPlus",
+            "ValidTarget": "Opponent"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "R",
+            "params": {
+              "SpellDescription": "Add {R}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {R}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "CheckSVar": "X",
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME. Activate only if red sources you controlled dealt 4 or more noncombat damage this turn and only as a sorcery.",
+              "SorcerySpeed": "True",
+              "Defined": "Self",
+              "SVarCompare": "GE4"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 R"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "CheckSVar": "X",
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME. Activate only if red sources you controlled dealt 4 or more noncombat damage this turn and only as a sorcery.",
+            "SorcerySpeed": "True",
+            "Defined": "Self",
+            "SVarCompare": "GE4"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

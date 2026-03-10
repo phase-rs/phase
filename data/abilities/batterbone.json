@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance & Lifelink",
+        "Description": "Equipped creature gets +1/+1 and has vigilance and lifelink.",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

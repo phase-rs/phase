@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesCrewed",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes crewed, until end of turn, it becomes a copy of the exiled card, except it's a Vehicle artifact in addition to its other types.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigClone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

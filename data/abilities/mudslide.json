@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's upkeep, that player may choose any number of tapped creatures without flying they control and pay {2} for each creature chosen this way. If the player does, untap those creatures.",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "DBCleanup"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "Description": "Creatures without flying don't untap during their controllers' untap steps.",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Creature.withoutFlying"
+      }
+    }
+  ],
+  "faces": []
+}

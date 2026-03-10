@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidSource": "Spell",
+        "ValidTarget": "Card.EnchantedBy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever enchanted creature becomes the target of a spell, sacrifice CARDNAME.",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidStepTurnToController": "You",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
+        "Layer": "CantHappen",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "faces": []
+}

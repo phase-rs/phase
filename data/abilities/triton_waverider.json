@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Constellation — Whenever an enchantment you control enters, CARDNAME gains flying until end of turn.",
+        "ValidCard": "Enchantment.YouCtrl",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

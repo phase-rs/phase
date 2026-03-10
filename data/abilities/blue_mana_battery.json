@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "CHARGE",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a charge counter on CARDNAME."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "AINoRecursiveCheck": "True",
+          "AILogic": "ManaRitualBattery.1",
+          "SpellDescription": "Add {U}, then add an additional {U} for each charge counter removed this way.",
+          "SubAbility": "DBMana"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<X/CHARGE>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AINoRecursiveCheck": "True",
+        "AILogic": "ManaRitualBattery.1",
+        "SpellDescription": "Add {U}, then add an additional {U} for each charge counter removed this way.",
+        "SubAbility": "DBMana"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

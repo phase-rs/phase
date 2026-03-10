@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "WandDamage",
+        "Description": "Equipped creature has \"{T}: This creature deals 1 damage to target player or planeswalker. Roll a six-sided die. On a 5 or higher, untap it.\"",
+        "Affected": "Creature.EquippedBy",
+        "AddSVar": "DBWandDmg"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

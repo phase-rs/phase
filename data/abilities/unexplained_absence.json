@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select up to one target nonland permanent each player controls",
+        "TargetMax": "OneEach",
+        "TargetMin": "0",
+        "TargetsForEachPlayer": "True",
+        "StackDescription": "SpellDescription",
+        "SubAbility": "CloakEach",
+        "RememberLKI": "True",
+        "SpellDescription": "For each player, exile up to one target nonland permanent that player controls. For each permanent exiled this way, its controller cloaks the top card of their library."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

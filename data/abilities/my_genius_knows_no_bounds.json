@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "Execute": "GeniusLife",
+        "TriggerZones": "Command",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you set this scheme in motion, you may pay {X}. If you do, you gain X life and draw X cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

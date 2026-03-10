@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, untap target permanent.",
+        "Execute": "TrigUntap",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

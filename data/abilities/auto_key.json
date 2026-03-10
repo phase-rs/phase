@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "TriggerDescription": "Whenever you crank CARDNAME, until end of turn, target creature becomes an artifact in addition to its other types and gains \"{T}: You gain 3 life.\"",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCrank"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

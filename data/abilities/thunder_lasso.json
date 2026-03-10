@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, attach it to target creature you control.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAttach"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigTap",
+        "TriggerDescription": "Whenever equipped creature attacks, tap target creature defending player controls."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Description": "Equipped creature gets +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDig",
+            "TriggerDescription": "When NICKNAME enters, look at the top five cards of your library. You may put a creature card with mana value 4 or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Battlefield",
+            "ValidCard": "Creature.Other+YouCtrl",
+            "Destination": "Any",
+            "Execute": "TrigDelayTransform",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "When another creature you control leaves the battlefield, transform NICKNAME at the beginning of the next upkeep."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigEarthbend",
+            "Phase": "BeginCombat",
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of combat on your turn, earthbend 2. (Target land you control becomes a 0/0 creature with haste that's still a land. Put two +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Vigilance",
+            "Affected": "Creature.Land+YouCtrl",
+            "Description": "Land creatures you control have vigilance."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

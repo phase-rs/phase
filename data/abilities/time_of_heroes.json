@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each creature you control with a level counter on it gets +2/+2.",
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Affected": "Creature.counters_GE1_LEVEL+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

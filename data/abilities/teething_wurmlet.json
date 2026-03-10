@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Artifact.YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an artifact you control enters, you gain 1 life. If this is the first time this ability has resolved this turn, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "PresentCompare": "GE3",
+        "Description": "CARDNAME has deathtouch as long as you control three or more artifacts.",
+        "IsPresent": "Artifact.YouCtrl",
+        "AddKeyword": "Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

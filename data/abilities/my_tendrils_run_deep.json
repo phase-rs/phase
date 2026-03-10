@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of your end step, if you control six or more lands, draw two cards, then abandon this scheme.",
+        "TriggerZones": "Command",
+        "ValidPlayer": "You",
+        "PresentCompare": "GE6",
+        "Phase": "End of Turn",
+        "IsPresent": "Land.YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Description": "You may play an additional land on each of your turns.",
+        "Affected": "You",
+        "AdjustLandPlays": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME enters, search your library, graveyard, and/or outside the game for an instant or sorcery card you own, reveal it, and put it into your hand. If you search your library this way, shuffle.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigSearch",
+            "Origin": "Any",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Instant.wasCastFromYourHand,Sorcery.wasCastFromYourHand",
+            "ValidActivatingPlayer": "You",
+            "Execute": "TrigCopy",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell from your hand, you may copy that spell. You may choose new targets for the copy."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

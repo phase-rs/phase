@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Vote",
+        "params": {
+          "VoteCard": "Permanent.nonLand+YouDontCtrl",
+          "VoteSubAbility": "DBExile",
+          "AILogic": "Judgment",
+          "Defined": "Player",
+          "VoteMessage": "for a nonland permanent you don't control",
+          "SpellDescription": "Will of the Council — Starting with you, each player votes for a nonland permanent you don't control. Exile each permanent with the most votes or tied for most votes."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "VoteCard": "Permanent.nonLand+YouDontCtrl",
+        "VoteSubAbility": "DBExile",
+        "AILogic": "Judgment",
+        "Defined": "Player",
+        "VoteMessage": "for a nonland permanent you don't control",
+        "SpellDescription": "Will of the Council — Starting with you, each player votes for a nonland permanent you don't control. Exile each permanent with the most votes or tied for most votes."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, CARDNAME gains forestwalk until end of turn. (It can't be blocked as long as defending player controls a Forest.)",
+        "ValidCard": "Spirit,Arcane",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

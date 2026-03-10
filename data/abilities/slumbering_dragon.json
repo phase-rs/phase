@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DragonWake",
+        "Attacked": "You,Planeswalker.YouCtrl",
+        "TriggerDescription": "Whenever a creature attacks you or a planeswalker you control, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "CARDNAME can't attack or block unless it has five or more +1/+1 counters on it.",
+        "ValidCard": "Card.Self",
+        "SVarCompare": "LT5",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

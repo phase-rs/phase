@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DayTimeChanges",
+      "params": {
+        "Execute": "TrigDig",
+        "TriggerDescription": "Whenever day becomes night or night becomes day, look at the top four cards of your library. You may reveal a creature card with mana value 3 or less from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "DayTime": "Neither",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "DoDay",
+        "Description": "If it's neither day nor night, it becomes day as CARDNAME enters."
+      }
+    }
+  ],
+  "faces": []
+}

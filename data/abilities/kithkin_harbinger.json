@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a Kithkin card, reveal it, then shuffle and put that card on top.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

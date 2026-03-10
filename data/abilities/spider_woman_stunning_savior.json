@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "ReplacementResult": "Updated",
+        "ActiveZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Description": "Venom Blast — Artifacts and creatures your opponents control enter tapped.",
+        "ValidCard": "Artifact.OppCtrl,Creature.OppCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever equipped creature attacks, you may have target creature block it this turn if able.",
+        "Execute": "TrigProvoke"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Double Strike",
+        "Description": "Equipped creature has double strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

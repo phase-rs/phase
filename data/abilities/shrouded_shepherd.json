@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, target creature you control gets +2/+2 until end of turn.",
+            "Execute": "TrigPump",
+            "Origin": "Any"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PumpAll",
+            "power": -1,
+            "toughness": -1,
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Creatures your opponents control get -1/-1 until end of turn. (Then exile this card. You may cast the creature later from exile.)",
+            "ValidCards": "Creature.OppCtrl",
+            "IsCurse": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

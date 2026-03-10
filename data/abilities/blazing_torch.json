@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Equipped creature can't be blocked by Vampires or Zombies.",
+        "ValidAttacker": "Creature.EquippedBy",
+        "ValidBlocker": "Creature.Vampire,Creature.Zombie"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddAbility": "TorchDamage",
+        "Description": "Equipped creature has \"{T}, Sacrifice CARDNAME: CARDNAME deals 2 damage to any target.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

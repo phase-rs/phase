@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAddPhase",
+        "PlayerTurn": "True",
+        "Phase": "Main1,Main2",
+        "Origin": "Any",
+        "TriggerDescription": "When this enchantment enters, if it's your main phase, there is an additional combat phase after this phase followed by an additional main phase. When you next attack this turn, untap each creature you control."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Deathtouch",
+        "Description": "Creatures you control get +1/+1 and have deathtouch.",
+        "AddPower": "1",
+        "Affected": "Creature.YouCtrl",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

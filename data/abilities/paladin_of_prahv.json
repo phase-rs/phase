@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Forecast": "True",
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature",
+          "Triggers": "TrigDamage",
+          "SpellDescription": "Whenever target creature deals damage this turn, you gain that much life. (Activate only during your upkeep and only once each turn.)"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W"
+          },
+          {
+            "type": "Mana",
+            "cost": "Reveal<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Forecast": "True",
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature",
+        "Triggers": "TrigDamage",
+        "SpellDescription": "Whenever target creature deals damage this turn, you gain that much life. (Activate only during your upkeep and only once each turn.)"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "Execute": "TrigGain",
+        "TriggerDescription": "Whenever CARDNAME deals damage, you gain that much life.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

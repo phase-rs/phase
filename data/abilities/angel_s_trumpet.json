@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigTapAll",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each player's end step, tap all untapped creatures that player controls that didn't attack this turn. CARDNAME deals damage to the player equal to the number of creatures tapped this way.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All creatures have vigilance.",
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

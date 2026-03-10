@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a land is put into a graveyard from the battlefield, CARDNAME gets +1/+0 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Landfall — Whenever a land you control enters, NICKNAME deals 1 damage to each opponent. If this is the second time this ability has resolved this turn, draw a card.",
+        "Execute": "TrigDamage",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

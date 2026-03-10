@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target spell",
+        "TgtZone": "Stack",
+        "IsCurse": "True",
+        "SubAbility": "DBCounter",
+        "TargetType": "Spell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "Announce": "X",
+        "Cost": "ExileFromHand<1/Card.Blue+Other+cmcEQX/blue card>",
+        "Description": "You may exile a blue card with mana value X from your hand rather than pay this spell's mana cost.",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

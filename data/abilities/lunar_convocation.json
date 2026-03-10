@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<2>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "Execute": "TrigLoseLife",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if you gained life this turn, each opponent loses 1 life.",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigToken",
+        "CheckSVar": "Y",
+        "TriggerDescription": "At the beginning of your end step, if you gained and lost life this turn, create a 1/1 black Bat creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

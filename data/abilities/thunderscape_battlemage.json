@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+kicked 1",
+        "Execute": "TrigKicker",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked with its {1}{B} kicker, target player discards two cards.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if it was kicked with its {G} kicker, destroy target enchantment.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+kicked 2",
+        "Destination": "Battlefield",
+        "Execute": "TrigKicker2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

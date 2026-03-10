@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "ConditionSVarCompare": "EQ0",
+          "SubAbility": "DBMana",
+          "SpellDescription": "Add {C}. If CARDNAME has a luck counter on it, instead add one mana of any color.",
+          "ConditionCheckSVar": "CheckCounter"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionSVarCompare": "EQ0",
+        "SubAbility": "DBMana",
+        "SpellDescription": "Add {C}. If CARDNAME has a luck counter on it, instead add one mana of any color.",
+        "ConditionCheckSVar": "CheckCounter"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

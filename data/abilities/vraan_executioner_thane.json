@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDrain",
+        "ActivationLimit": "1",
+        "ValidCards": "Creature.Other+YouCtrl",
+        "TriggerDescription": "Whenever one or more other creatures you control die, each opponent loses 2 life and you gain 2 life. This ability triggers only once each turn.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

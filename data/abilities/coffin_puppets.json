@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationPhases": "Upkeep",
+        "ActivationZone": "Graveyard",
+        "IsPresent": "Swamp.YouCtrl",
+        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield. Activate only during your upkeep and only if you control a Swamp.",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

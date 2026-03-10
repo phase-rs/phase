@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigTap",
+        "TriggerDescription": "Whenever another creature dies, tap CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice a nonblack creature.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Command",
+        "Execute": "FourthSac"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, put a 2/2 black zombie token onto the battlefield.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

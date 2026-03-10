@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "IsPresent": "Creature.EnchantedBy+withToxic",
+        "Execute": "TrigHexproof",
+        "TriggerDescription": "When CARDNAME enters, if enchanted creature has toxic, that creature gains hexproof until end of turn.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Description": "Enchanted creature gets +2/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSacUnless",
+        "TriggerDescription": "When this creature enters, sacrifice it unless you sacrifice five lands.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you play an Island, you may untap this creature.",
+        "ValidCard": "Island.YouCtrl",
+        "Execute": "TrigUntap",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Description": "This creature enters tapped.",
+        "ReplacementResult": "Updated"
+      }
+    },
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

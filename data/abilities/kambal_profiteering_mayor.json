@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCards": "Card.token+OppCtrl",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever one or more tokens enter under your opponents' control, for each of them, create a tapped token that's a copy of it. This ability triggers only once each turn.",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1",
+        "Execute": "TrigCopy"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Card.token+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever one or more tokens you control enter, each opponent loses 1 life and you gain 1 life.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

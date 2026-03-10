@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigDamage",
+            "ValidCard": "Card.nonCreature",
+            "ValidActivatingPlayer": "You",
+            "TriggerDescription": "Whenever you cast a noncreature spell, CARDNAME deals 1 damage to each opponent.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigDamage",
+            "TriggerDescription": "Whenever you cast a noncreature spell, CARDNAME deals 2 damage to each opponent.",
+            "ValidCard": "Card.nonCreature",
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

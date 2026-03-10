@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Instant,Sorcery"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put target artifact, instant, or sorcery card from a graveyard on the bottom of its owner's library.",
+        "LibraryPosition": "-1",
+        "TgtZone": "Graveyard",
+        "TgtPrompt": "Select target artifact, instant, or sorcery card"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

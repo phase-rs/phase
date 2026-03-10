@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigSurveil",
+        "TriggerDescription": "When CARDNAME enters, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Condition": "Delirium",
+        "AddPower": "1",
+        "Description": "Delirium — CARDNAME gets +1/+0 as long as there are four or more card types among cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control enters, if it was unearthed, it gets +3/+0.",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.YouCtrl+IsUnearthed",
+        "Destination": "Battlefield",
+        "TriggerZones": "Command",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Command",
+        "ValidCard": "Card.IsUnearthed",
+        "Execute": "TrigMove",
+        "Destination": "Exile",
+        "TriggerDescription": "Whenever a creature you control is exiled, if it was unearthed, shuffle that card into its owner's library."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

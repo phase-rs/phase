@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another creature or artifact you control enters, this creature deals 1 damage to each opponent.",
+        "Execute": "TrigDamage",
+        "ValidCard": "Creature.Other+YouCtrl,Artifact.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

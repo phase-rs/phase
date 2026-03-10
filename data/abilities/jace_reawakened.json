@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "Draw a card, then discard a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBPlot",
+        "SpellDescription": "You may exile a nonland card with mana value 3 or less from your hand.",
+        "RememberChanged": "True",
+        "ChangeType": "Card.nonLand+cmcLE3",
+        "StackDescription": "SpellDescription"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Ultimate": "True",
+          "Triggers": "CastTrig",
+          "Planeswalker": "True",
+          "SpellDescription": "Until end of turn, whenever you cast a spell, copy it. You may choose new targets for the copy."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Triggers": "CastTrig",
+        "Planeswalker": "True",
+        "SpellDescription": "Until end of turn, whenever you cast a spell, copy it. You may choose new targets for the copy."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Caster": "Player.Active",
+        "CheckSVar": "Count$YourTurns",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "You can't cast this spell during your first, second, or third turns of the game.",
+        "SVarCompare": "LE3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

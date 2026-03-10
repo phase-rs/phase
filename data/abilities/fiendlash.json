@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature is dealt damage, it deals damage equal to its power to target player or planeswalker.",
+        "ValidTarget": "Creature.EquippedBy",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Reach",
+        "AddPower": "2",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+0 and has reach."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

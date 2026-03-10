@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may put a creature card with lesser power from your hand onto the battlefield tapped and attacking."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Affected": "Horse.YouCtrl",
+        "Description": "Horses you control have haste. (They can attack and {T} as soon as they come under your control.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

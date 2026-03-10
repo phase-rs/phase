@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.YouCtrl",
+        "AddAbility": "FoodSac",
+        "Description": "During your turn, artifacts you control are Foods in addition to their other types and have \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\"",
+        "Condition": "PlayerTurn",
+        "AddType": "Food"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

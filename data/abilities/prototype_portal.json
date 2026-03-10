@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "AILogic": "AtOppEOT",
+          "Defined": "Imprinted.ExiledWithSource",
+          "SpellDescription": "Create a token that's a copy of the exiled card. X is the mana value of that card."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtOppEOT",
+        "Defined": "Imprinted.ExiledWithSource",
+        "SpellDescription": "Create a token that's a copy of the exiled card. X is the mana value of that card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile an artifact card from your hand.",
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Exile",
+        "Static": "True",
+        "Execute": "DBForget",
+        "ValidCard": "Card.IsImprinted+ExiledWithSource",
+        "Destination": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Static": "True",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

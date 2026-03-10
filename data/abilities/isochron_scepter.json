@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "ValidSA": "Spell",
+          "Amount": "All",
+          "ValidZone": "Exile",
+          "Valid": "Card.IsImprinted+ExiledWithSource",
+          "SpellDescription": "You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
+          "Optional": "True",
+          "WithoutManaCost": "True",
+          "CopyCard": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidSA": "Spell",
+        "Amount": "All",
+        "ValidZone": "Exile",
+        "Valid": "Card.IsImprinted+ExiledWithSource",
+        "SpellDescription": "You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
+        "Optional": "True",
+        "WithoutManaCost": "True",
+        "CopyCard": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile an instant card with mana value 2 or less from your hand.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "Static": "True",
+        "Destination": "Any",
+        "ValidCard": "Card.IsImprinted+ExiledWithSource"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "DBCleanup",
+        "Static": "True",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

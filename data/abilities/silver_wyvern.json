@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChangeTargets",
+        "params": {
+          "TgtPrompt": "Select target spell or ability that targets only CARDNAME",
+          "TargetRestriction": "Creature",
+          "TargetType": "SpellAbility.numTargets EQ1+IsTargeting Self",
+          "SpellDescription": "Change the target of target spell or ability that targets only CARDNAME. The new target must be a creature.",
+          "ValidTgts": "Card,Emblem"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target spell or ability that targets only CARDNAME",
+        "TargetRestriction": "Creature",
+        "TargetType": "SpellAbility.numTargets EQ1+IsTargeting Self",
+        "SpellDescription": "Change the target of target spell or ability that targets only CARDNAME. The new target must be a creature.",
+        "ValidTgts": "Card,Emblem"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

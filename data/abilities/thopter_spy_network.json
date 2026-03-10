@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "IsPresent": "Artifact.YouCtrl",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your upkeep, if you control an artifact, create a 1/1 colorless Thopter artifact creature token with flying.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more artifact creatures you control deal combat damage to a player, draw a card.",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.Artifact+YouCtrl",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

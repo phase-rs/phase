@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigDrain",
+        "Origin": "Any",
+        "ValidCard": "Creature.OppCtrl",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever a creature an opponent controls enters, you may have that player lose 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

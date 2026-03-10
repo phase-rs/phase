@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "Mode": "Phase",
+          "Phase": "End of Turn",
+          "Execute": "TrigToken",
+          "SpellDescription": "Create a 1/1 white Spirit creature token with flying at the beginning of the next end step."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Mode": "Phase",
+        "Phase": "End of Turn",
+        "Execute": "TrigToken",
+        "SpellDescription": "Create a 1/1 white Spirit creature token with flying at the beginning of the next end step."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

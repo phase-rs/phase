@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "RememberRevealed": "True",
+          "FoundDestination": "Exile",
+          "RevealedDestination": "Exile",
+          "ImprintFound": "True",
+          "Defined": "You",
+          "SubAbility": "DBToPlay",
+          "ValidDescription": "land",
+          "SpellDescription": "Exile cards from the top of your library until you exile a land card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+          "Valid": "Permanent.Land"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberRevealed": "True",
+        "FoundDestination": "Exile",
+        "RevealedDestination": "Exile",
+        "ImprintFound": "True",
+        "Defined": "You",
+        "SubAbility": "DBToPlay",
+        "ValidDescription": "land",
+        "SpellDescription": "Exile cards from the top of your library until you exile a land card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+        "Valid": "Permanent.Land"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

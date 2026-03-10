@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "SpellDescription": "Transform CARDNAME. Activate only once each turn.",
+              "ActivationLimit": "1",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "SpellDescription": "Transform CARDNAME. Activate only once each turn.",
+            "ActivationLimit": "1",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

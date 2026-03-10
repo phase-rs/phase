@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature",
+        "ValidPlayer": "You",
+        "Execute": "TrigSac",
+        "PresentCompare": "GE4",
+        "TriggerDescription": "At the beginning of your upkeep, if there are four or more creatures on the battlefield, sacrifice CARDNAME and destroy all creatures. They can't be regenerated."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

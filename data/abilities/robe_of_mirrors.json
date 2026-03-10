@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Shroud",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has shroud. (It can't be the target of spells or abilities.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

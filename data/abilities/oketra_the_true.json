@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_warrior_vigilance",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 white Warrior creature token with vigilance.",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "NICKNAME can't attack or block unless you control at least three other creatures.",
+        "PresentCompare": "LE2",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

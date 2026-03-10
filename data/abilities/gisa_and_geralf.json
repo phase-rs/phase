@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigMill",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, mill four cards."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Graveyard",
+        "Description": "During each of your turns, you may cast a Zombie creature spell from your graveyard.",
+        "Affected": "Zombie.YouCtrl",
+        "MayPlay": "True",
+        "Condition": "PlayerTurn",
+        "MayPlayLimit": "1",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

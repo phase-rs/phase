@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDiscard",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever you cast a creature spell, you may discard a card. If you do, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Creature.Red",
+        "Amount": "1",
+        "Activator": "You",
+        "Description": "Red creature spells you cast cost {1} less to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCards": "Creature.!token+YouCtrl",
+        "TriggerDescription": "Whenever one or more nontoken creatures you control die, create a 2/1 white and black Inkling creature token with flying. This ability triggers only once each turn.",
+        "Execute": "TrigToken",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creature tokens you control get +1/+1.",
+        "AddPower": "1",
+        "Affected": "Creature.token+YouCtrl",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When this Spacecraft enters, return up to two target non-Spacecraft creatures to their owners' hands.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE9_CHARGE",
+        "Description": "STATION 9+ Flying,,,Whenever this Spacecraft attacks, defending player mills four cards.",
+        "AddKeyword": "Flying",
+        "AddType": "Creature",
+        "AddTrigger": "AttackTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

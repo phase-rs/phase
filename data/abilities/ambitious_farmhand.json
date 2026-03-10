@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "CheckSVar": "X",
+              "PrecostDesc": "Coven —",
+              "Mode": "Transform",
+              "SVarCompare": "GE3",
+              "Defined": "Self",
+              "SpellDescription": "Transform CARDNAME. Activate only if you control three or more creatures with different powers."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 W W"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "CheckSVar": "X",
+            "PrecostDesc": "Coven —",
+            "Mode": "Transform",
+            "SVarCompare": "GE3",
+            "Defined": "Self",
+            "SpellDescription": "Transform CARDNAME. Activate only if you control three or more creatures with different powers."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "OptionalDecider": "You",
+            "Execute": "TrigChange",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, you may search your library for a basic Plains card, reveal it, put it into your hand, then shuffle.",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

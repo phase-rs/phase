@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control is turned face up, untap that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

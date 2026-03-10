@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Card.Self,Creature.PairedWith",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever NICKNAME or a creature it's paired with is dealt damage, NICKNAME deals that much damage to target opponent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

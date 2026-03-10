@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "RaiseCost",
+        "Description": "Creatures you control with flying have \"Spells your opponents cast that target this creature cost {2} more to cast.\"",
+        "Affected": "Creature.YouCtrl+withFlying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Inspired — Whenever CARDNAME becomes untapped, put a +1/+1 counter on it.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCounters"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

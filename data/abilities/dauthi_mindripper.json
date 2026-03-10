@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you may sacrifice it. If you do, defending player discards three cards.",
+        "Execute": "TrigDiscard",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

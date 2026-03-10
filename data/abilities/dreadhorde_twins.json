@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBAmass",
+        "TriggerDescription": "When CARDNAME enters, amass Zombies 2. (Put two +1/+1 counters on an Army you control. If you don't control one, create a 0/0 black Zombie Army creature token first.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Zombie tokens you control have trample.",
+        "AddKeyword": "Trample",
+        "Affected": "Zombie.token+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

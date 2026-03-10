@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever a creature you control blocks, you gain 2 life.",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

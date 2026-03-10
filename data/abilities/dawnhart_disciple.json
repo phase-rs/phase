@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Whenever another Human you control enters, CARDNAME gets +1/+1 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Human.Other+YouCtrl",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

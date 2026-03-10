@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Battlefield",
+        "Description": "CARDNAME's power is equal to the total power of the exiled cards and its toughness is equal to their total toughness.",
+        "SetPower": "TotalPower",
+        "Affected": "Card.Self",
+        "SetToughness": "TotalToughness"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

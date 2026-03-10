@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Sorcerous Inspiration — At the beginning of your upkeep, return an instant or sorcery card at random from your graveyard to your hand.",
+        "Execute": "TrigChangeZone"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Fire of Tzeentch — Whenever you cast an instant or sorcery spell, CARDNAME deals 1 damage to each opponent.",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

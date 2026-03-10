@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "All",
+          "filter": "Permanent.YouCtrl+Other"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "UseAllOriginZones": "True",
+        "ChangeType": "TargetedCard.Self,Aura.YouCtrl+AttachedTo Targeted",
+        "PlayerTurn": "True",
+        "TgtPrompt": "Select another target permanent you control",
+        "StackDescription": "Return {c:Targeted} and all Auras attached to it to their owners' hands",
+        "SpellDescription": "Return another target permanent you control and all Auras you control attached to it to their owner's hand. Activate only during your turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

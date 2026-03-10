@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerDescription": "Whenever one or more nontoken artifacts you control enter, creatures you control perpetually get +1/+1.",
+        "ValidCards": "Artifact.YouCtrl+!token",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigEffect"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Trample",
+        "Description": "Creatures you control have trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

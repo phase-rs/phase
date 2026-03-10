@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.White",
+        "Description": "White creatures get +1/+1.",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Affected": "Creature.White",
+        "Description": "Threshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.",
+        "Condition": "Threshold"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

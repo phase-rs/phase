@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever CARDNAME attacks, defending player discards a card."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.!token+OppOwn",
+        "TriggerDescription": "Whenever a card is put into an opponent's graveyard from anywhere, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

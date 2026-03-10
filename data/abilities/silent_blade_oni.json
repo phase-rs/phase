@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigReveal",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, look at that player's hand. You may cast a spell from among those cards without paying its mana cost."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

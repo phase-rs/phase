@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SpellDescription": "Add {R}{R}{R}.",
+          "Amount": "3",
+          "AILogic": "ManaRitual",
+          "AINoRecursiveCheck": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}{R}{R}.",
+        "Amount": "3",
+        "AILogic": "ManaRitual",
+        "AINoRecursiveCheck": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

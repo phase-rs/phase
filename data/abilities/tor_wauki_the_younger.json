@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME deals 2 damage to any target.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DmgPlus1",
+        "IsCombat": "False",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Card.Other+YouCtrl,Emblem.YouCtrl",
+        "Description": "If another source you control would deal noncombat damage to a permanent or player, it deals that much damage plus 1 to that permanent or player instead.",
+        "ValidTarget": "Permanent,Player"
+      }
+    }
+  ],
+  "faces": []
+}

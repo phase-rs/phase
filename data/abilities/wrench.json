@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Equipped creature gets +1/+1 and has vigilance and \"{3}, {T}: Tap target creature.\"",
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Vigilance",
+        "AddAbility": "ABTap"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

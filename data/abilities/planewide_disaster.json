@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "Disaster",
+        "TriggerDescription": "When you encounter CARDNAME, destroy all creatures. (Then planeswalk away from this phenomenon.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

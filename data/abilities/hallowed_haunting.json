@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Enchantment",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast an enchantment spell, create a white Spirit Cleric creature token with \"This creature's power and toughness are each equal to the number of Spirits you control.\""
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Flying & Vigilance",
+        "IsPresent": "Enchantment.YouCtrl",
+        "Description": "As long as you control seven or more enchantments, creatures you control have flying and vigilance.",
+        "PresentCompare": "GE7"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

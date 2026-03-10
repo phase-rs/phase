@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": 6
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 6 life."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When you cycle CARDNAME, you may gain 2 life.",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

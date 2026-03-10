@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, untap target permanent.",
+        "Execute": "TrigUntap",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, untap target permanent.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigUntap",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

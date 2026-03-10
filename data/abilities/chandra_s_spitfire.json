@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Opponent",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "CombatDamage": "False",
+        "TriggerDescription": "Whenever an opponent is dealt noncombat damage, CARDNAME gets +3/+0 until end of turn.",
+        "ValidSource": "Card,Emblem"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

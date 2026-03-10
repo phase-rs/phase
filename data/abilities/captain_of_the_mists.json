@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapOrUntap",
+        "params": {
+          "SpellDescription": "You may tap or untap target permanent.",
+          "ValidTgts": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may tap or untap target permanent.",
+        "ValidTgts": "Permanent"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever another Human you control enters, untap CARDNAME.",
+        "ValidCard": "Human.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

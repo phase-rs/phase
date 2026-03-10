@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's upkeep, that player sacrifices a permanent for each soot counter on CARDNAME.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSacrifice"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a soot counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

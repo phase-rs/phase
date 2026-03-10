@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddPower": "2",
+        "IsPresent": "Beast.YouCtrl",
+        "Description": "As long as you control a Beast, CARDNAME gets +2/+2 and has trample.",
+        "AddKeyword": "Trample",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

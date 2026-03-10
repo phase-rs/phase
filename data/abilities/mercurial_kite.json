@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Creature",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, tap that creature and it doesn't untap during its controller's next untap step.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

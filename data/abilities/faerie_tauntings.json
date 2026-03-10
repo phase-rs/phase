@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a spell during an opponent's turn, you may have each opponent lose 1 life.",
+        "ValidCard": "Card",
+        "OpponentTurn": "True",
+        "OptionalDecider": "You",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

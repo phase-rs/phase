@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Goad",
+        "params": {
+          "ValidTgts": "Creature",
+          "SubAbility": "DBEffect",
+          "SpellDescription": "Goad target creature."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Goad target creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

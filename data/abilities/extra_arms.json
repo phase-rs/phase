@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever enchanted creature attacks, it deals 2 damage to any target.",
+        "ValidCard": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AE",
+        "Affected": "Creature.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

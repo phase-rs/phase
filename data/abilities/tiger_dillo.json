@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "IsPresent": "Creature.Other+YouCtrl+powerGE4",
+        "PresentCompare": "EQ0",
+        "Description": "This creature can't attack or block unless you control another creature with power 4 or greater.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

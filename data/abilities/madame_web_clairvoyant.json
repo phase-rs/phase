@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerDescription": "Whenever you attack, you may mill a card. (You may put the top card of your library into your graveyard.)",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMill",
+        "AttackingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "You",
+        "Description": "You may look at the top card of your library any time."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may cast Spider spells and noncreature spells from the top of your library.",
+        "AffectedZone": "Library",
+        "MayPlay": "True",
+        "Affected": "Spider.TopLibrary+YouOwn+nonLand,Card.TopLibrary+YouOwn+nonCreature+nonLand"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

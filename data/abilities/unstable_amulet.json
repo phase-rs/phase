@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Command",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayEnergy<2>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "None",
+        "SpellDescription": "Exile the top card of your library.",
+        "SubAbility": "DBCleanup",
+        "Defined": "Imprinted"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigEnergy",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you get {E}{E} (two energy counters)."
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.!wasCastFromYourHand",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you cast a spell from anywhere other than your hand, CARDNAME deals 1 damage to each opponent."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup2",
+        "Destination": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

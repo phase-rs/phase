@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Card.Self",
+        "TriggerDescription": "Whenever this creature attacks, draft a card from CARDNAME's spellbook.",
+        "Execute": "TrigDraft",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, create a 1/1 white Mouse creature token.",
+        "ValidTarget": "Card.Self",
+        "ValidSource": "SpellAbility.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "FirstTime": "True",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

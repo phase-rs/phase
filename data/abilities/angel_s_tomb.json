@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a creature you control enters, you may have CARDNAME become a 3/3 white Angel artifact creature with flying until end of turn.",
+        "Origin": "Any",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigAnimateTomb"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

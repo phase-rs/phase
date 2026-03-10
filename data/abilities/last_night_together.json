@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "2",
+        "TargetMax": "2",
+        "Amount": "2",
+        "DefinedCards": "Targeted",
+        "SubAbility": "DBUntap",
+        "Defined": "You",
+        "TgtPrompt": "Choose two target creatures",
+        "SpellDescription": "Choose two target creatures."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

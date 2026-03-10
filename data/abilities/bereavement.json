@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a green creature dies, its controller discards a card.",
+        "ValidCard": "Creature.Green",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "BereavementDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

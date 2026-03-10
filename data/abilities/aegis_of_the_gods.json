@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "AddKeyword": "Hexproof",
+        "Description": "You have hexproof."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

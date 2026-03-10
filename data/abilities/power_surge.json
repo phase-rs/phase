@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "Player",
+        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals X damage to that player, where X is the number of untapped lands they controlled at the beginning of this turn.",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AITap",
+        "Affected": "Land"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

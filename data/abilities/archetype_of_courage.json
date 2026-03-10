@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have first strike.",
+        "AddKeyword": "First Strike"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures your opponents control lose first strike and can't have or gain first strike.",
+        "CantHaveKeyword": "First Strike",
+        "RemoveKeyword": "First Strike",
+        "Affected": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

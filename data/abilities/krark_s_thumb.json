@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "If you would flip a coin, instead flip two coins and ignore one.",
+        "AddKeyword": "If you would flip a coin, instead flip two coins and ignore one.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

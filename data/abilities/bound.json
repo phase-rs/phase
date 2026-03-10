@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "RememberSacrificed": "True",
+            "SpellDescription": "Sacrifice a creature. Return up to X cards from your graveyard to your hand, where X is the number of colors that creature was. Exile this card.",
+            "SacValid": "Creature",
+            "SubAbility": "DBReturnChoose"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "SubAbility": "DBDraw",
+              "SpellDescription": "Other spells you control can't be countered this turn. Draw a card.",
+              "ReplacementEffects": "CantBeCountered"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBDraw",
+            "SpellDescription": "Other spells you control can't be countered this turn. Draw a card.",
+            "ReplacementEffects": "CantBeCountered"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

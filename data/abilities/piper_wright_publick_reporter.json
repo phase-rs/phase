@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigInvestigate",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, investigate that many times. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerDescription": "Whenever you sacrifice a Clue, put a +1/+1 counter on target creature you control.",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Clue.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

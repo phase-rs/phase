@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME attacks, exile up to one target creature card from a graveyard. If you do, conjure a duplicate of it into your graveyard. The duplicate perpetually becomes a black Skeleton with base power and toughness 3/1 in addition to its other colors and types.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "When CARDNAME dies, return another target creature card with power or toughness 1 from your graveyard to the battlefield.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

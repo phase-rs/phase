@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Enchantment"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "X",
+        "TgtPrompt": "Select target artifact or enchantment",
+        "TargetMin": "X",
+        "SubAbility": "DBChangeZone",
+        "SpellDescription": "Exile target artifact or enchantment. If this spell was kicked, exile target nonland permanent instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

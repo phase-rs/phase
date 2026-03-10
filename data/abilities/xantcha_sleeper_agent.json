@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBLoseLife",
+        "SpellDescription": "NICKNAME's controller loses 2 life and you draw a card. Any player may activate this ability.",
+        "Activator": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "NICKNAME attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    },
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Target": "Player.CardOwner,Planeswalker.ControlledBy Player.CardOwner",
+        "Description": "NICKNAME can't attack its owner or planeswalkers its owner controls."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME enters under the control of an opponent of your choice.",
+        "Layer": "Control",
+        "ReplaceWith": "DBChooseOpp"
+      }
+    }
+  ],
+  "faces": []
+}

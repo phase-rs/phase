@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, create two 1/1 colorless Sliver creature tokens."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Command",
+        "Secondary": "True",
+        "Execute": "TrigToken",
+        "Phase": "Upkeep",
+        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, create two 1/1 colorless Sliver creature tokens.",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, Slivers you control gain haste and get +X/+X until end of turn, where X is the number of Slivers you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

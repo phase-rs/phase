@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "GE3",
+        "Description": "Corrupted — As long as an opponent has three or more poison counters, CARDNAME has deathtouch and lifelink.",
+        "Affected": "Card.Self",
+        "AddKeyword": "Deathtouch & Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

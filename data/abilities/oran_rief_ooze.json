@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on target creature you control.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPutCounterAll",
+        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on each attacking creature with a +1/+1 counter on it.",
+        "ValidCard": "Creature.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

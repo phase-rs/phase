@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "B",
+        "params": {
+          "SpellDescription": "Add {B}{B}{B}{B}.",
+          "Amount": "4",
+          "SubAbility": "ChangeControl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B}{B}{B}{B}.",
+        "Amount": "4",
+        "SubAbility": "ChangeControl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you may put a +1/+1 counter on CARDNAME.",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DelTrigDestroy",
+        "TriggerDescription": "When CARDNAME attacks or blocks, destroy it at end of combat.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "DelTrigDestroy",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME attacks or blocks, destroy it at end of combat.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

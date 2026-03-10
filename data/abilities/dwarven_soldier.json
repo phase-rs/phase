@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidBlocker": "Orc",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by one or more Orcs, CARDNAME gets +0/+2 until end of turn."
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by one or more Orcs, CARDNAME gets +0/+2 until end of turn.",
+        "Execute": "TrigPump",
+        "Secondary": "True",
+        "ValidBlocked": "Orc"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

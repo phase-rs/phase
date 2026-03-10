@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "You may have creatures you control assign their combat damage this turn as though they weren't blocked.",
+          "AILogic": "Evasion",
+          "StaticAbilities": "Static"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may have creatures you control assign their combat damage this turn as though they weren't blocked.",
+        "AILogic": "Evasion",
+        "StaticAbilities": "Static"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

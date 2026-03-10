@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "You have hexproof.",
+            "Affected": "You",
+            "AddKeyword": "Hexproof"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": {
+            "Other": "LifeReduced"
+          },
+          "params": {
+            "ReplaceWith": "Transform",
+            "ValidPlayer": "You",
+            "ActiveZones": "Battlefield",
+            "Result": "LE0",
+            "Description": "If your life total would be reduced to 0 or less, instead transform CARDNAME and your life total becomes 3. Then if CARDNAME didn't transform this way, you lose the game."
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigDoubleLife",
+            "TriggerDescription": "Whenever CARDNAME attacks, double your life total.",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Hexproof",
+            "Affected": "You",
+            "Description": "You have hexproof."
+          }
+        },
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetPower": "X",
+            "SetToughness": "X",
+            "CharacteristicDefining": "True",
+            "Description": "CARDNAME's power and toughness are each equal to your life total."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

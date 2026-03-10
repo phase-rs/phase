@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At end of combat, gain control of all creatures blocking CARDNAME for as long as you control CARDNAME.",
+        "Execute": "TrigGainControl",
+        "ValidPlayer": "You",
+        "Phase": "EndCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

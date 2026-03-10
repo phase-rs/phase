@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a player casts a spell, they lose 2 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "Stack",
+        "Description": "Rather than pay {2} for each previous time you've cast this spell from the command zone this game, pay 2 life that many times.",
+        "ValidCard": "Card.Self+wasCastFromCommand",
+        "Amount": "X",
+        "Type": "Spell"
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self+wasCastFromCommand",
+        "Secondary": "True",
+        "Cost": "PayLife<X>",
+        "EffectZone": "Stack"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

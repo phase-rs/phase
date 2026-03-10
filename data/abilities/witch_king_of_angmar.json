@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Indestructible",
+        "SpellDescription": "CARDNAME gains indestructible until end of turn. Tap it.",
+        "Defined": "Self",
+        "SubAbility": "DBTap"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidSource": "Creature",
+        "ValidTarget": "You",
+        "CombatDamage": "True",
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever one or more creatures deal combat damage to you, each opponent sacrifices a creature that dealt combat damage to you this turn. The Ring tempts you.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

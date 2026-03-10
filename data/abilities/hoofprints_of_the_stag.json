@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_4_4_elemental_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 W"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<4/HOOFPRINT>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 4/4 white Elemental creature token with flying. Activate only during your turn.",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you draw a card, you may put a hoofprint counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

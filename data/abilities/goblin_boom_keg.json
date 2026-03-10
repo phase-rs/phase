@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, it deals 3 damage to any target.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

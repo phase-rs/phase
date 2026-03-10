@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "ValidPlayer": "Player.EnchantedBy",
+        "TriggerDescription": "At the beginning of enchanted player's upkeep, CARDNAME deals damage to that player equal to the number of Curses attached to them.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

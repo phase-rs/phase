@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever another creature enters, you may gain 1 life.",
+        "ValidCard": "Creature.Other",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

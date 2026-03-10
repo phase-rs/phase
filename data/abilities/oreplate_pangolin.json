@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Artifact.YouCtrl+Other",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another artifact you control enters, you may pay {1}. If you do, put a +1/+1 counter on this creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

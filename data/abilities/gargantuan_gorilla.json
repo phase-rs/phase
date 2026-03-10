@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select another target creature",
+        "SpellDescription": "CARDNAME deals damage equal to its power to another target creature. That creature deals damage equal to its power to CARDNAME.",
+        "SubAbility": "DamageThis"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigSacrifice",
+        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice a Forest. If you sacrifice a snow Forest this way, CARDNAME gains trample until end of turn. If you don't sacrifice a Forest, sacrifice CARDNAME and it deals 7 damage to you.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "CheckOnTriggeredCard": "X GE4",
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME dies, if 4 or more damage was dealt to it this turn, draw three cards.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

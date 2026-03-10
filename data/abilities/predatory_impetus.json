@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Goad": "True",
+        "AddPower": "3",
+        "AddHiddenKeyword": "CARDNAME must be blocked if able.",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "3",
+        "Description": "Enchanted creature gets +3/+3, must be blocked if able, and is goaded. (It attacks each combat if able and attacks a player other than you if able.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

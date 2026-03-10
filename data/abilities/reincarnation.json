@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "AILogic": "SaveCreature",
+          "Mode": "ChangesZone",
+          "Execute": "TrigReturn",
+          "ThisTurn": "True",
+          "TriggerDescription": "When that creature dies this turn, return a creature card from its owner's graveyard to the battlefield under the control of that creature's owner.",
+          "StackDescription": "When {c:Targeted} dies this turn, return a creature card from {p:TargetedOwner}'s graveyard to the battlefield under the control of that creature's owner.",
+          "ValidCard": "Card.IsTriggerRemembered",
+          "Destination": "Graveyard",
+          "RememberObjects": "Targeted",
+          "Origin": "Battlefield",
+          "ValidTgts": "Creature",
+          "SpellDescription": "Choose target creature. When that creature dies this turn, return a creature card from its owner's graveyard to the battlefield under the control of that creature's owner."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "SaveCreature",
+        "Mode": "ChangesZone",
+        "Execute": "TrigReturn",
+        "ThisTurn": "True",
+        "TriggerDescription": "When that creature dies this turn, return a creature card from its owner's graveyard to the battlefield under the control of that creature's owner.",
+        "StackDescription": "When {c:Targeted} dies this turn, return a creature card from {p:TargetedOwner}'s graveyard to the battlefield under the control of that creature's owner.",
+        "ValidCard": "Card.IsTriggerRemembered",
+        "Destination": "Graveyard",
+        "RememberObjects": "Targeted",
+        "Origin": "Battlefield",
+        "ValidTgts": "Creature",
+        "SpellDescription": "Choose target creature. When that creature dies this turn, return a creature card from its owner's graveyard to the battlefield under the control of that creature's owner."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

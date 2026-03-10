@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+DamagedBySpider.YouCtrl",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature dealt damage this turn by a Spider you controlled dies, create a token that's a copy of that creature, except it's a Food artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life,\" and it loses all other card types.",
+        "Destination": "Graveyard",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Spider.Other+YouCtrl",
+        "Description": "Other Spiders you control have deathtouch and ward {2}.",
+        "AddKeyword": "Deathtouch & Ward:2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

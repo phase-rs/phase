@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as CARDNAME is paired with another creature, both creatures have hexproof.",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired",
+        "AddKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

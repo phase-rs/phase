@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "CheckSVar": "X",
+        "TriggerDescription": "At the beginning of your end step, if a creature died under your control this turn, draw a card."
+      }
+    },
+    {
+      "mode": "RingTemptsYou",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever the Ring tempts you, if you chose a creature other than CARDNAME as your Ring-bearer, create a 1/1 white Human Soldier creature token.",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "3",
+        "ValidCard": "Card.White",
+        "Type": "Spell",
+        "Description": "White spells cost {3} more to cast."
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "3",
+        "Type": "Ability",
+        "ValidCard": "Enchantment.White",
+        "AffectedZone": "Battlefield",
+        "Description": "Activated abilities of white enchantments cost {3} more to activate."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

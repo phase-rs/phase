@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "SpellDescription": "Target opponent loses 1 life and you gain 1 life.",
+        "SubAbility": "DBGainLife"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "CommitCrime",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ActivationLimit": "1",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you commit a crime, put a +1/+1 counter on CARDNAME. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

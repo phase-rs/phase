@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "EffectZone": "All",
+            "Description": "This spell costs {2} less to cast if you control a Wolf or a Werewolf.",
+            "Type": "Spell",
+            "Amount": "2",
+            "IsPresent": "Wolf.YouCtrl,Werewolf.YouCtrl",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self,Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
+            "Execute": "TrigDraw",
+            "TriggerDescription": "Whenever CARDNAME or another Wolf or Werewolf you control dies, draw a card."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

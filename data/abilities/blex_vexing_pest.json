@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigGainLife",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME dies, you gain 4 life.",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "1",
+            "Description": "Other Pests, Bats, Insects, Snakes, and Spiders you control get +1/+1.",
+            "EffectZone": "Battlefield",
+            "AddPower": "1",
+            "Affected": "Pest.Other+YouCtrl,Bat.Other+YouCtrl,Insect.Other+YouCtrl,Snake.Other+YouCtrl,Spider.Other+YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Dig",
+            "count": 5,
+            "destination": "Hand"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "StackDescription": "SpellDescription",
+            "ChangeNum": "Any",
+            "SubAbility": "DBLoseLife",
+            "DestinationZone2": "Graveyard",
+            "RememberChanged": "True",
+            "SpellDescription": "Look at the top five cards of your library. You may put any number of them into your hand and the rest into your graveyard."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

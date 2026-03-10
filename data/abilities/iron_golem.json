@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Card.Self",
+        "Description": "CARDNAME attacks or blocks each combat if able."
+      }
+    },
+    {
+      "mode": "MustBlock",
+      "params": {
+        "ValidCreature": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

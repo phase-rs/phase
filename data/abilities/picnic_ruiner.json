@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "NoResolvingCheck": "True",
+            "TriggerDescription": "Whenever CARDNAME attacks while you control a creature with power 4 or greater, CARDNAME gains double strike until end of turn.",
+            "IsPresent": "Creature.YouCtrl+powerGE4",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigPump",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 3,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select any number of target creatures you control to distribute counters to",
+            "DividedAsYouChoose": "3",
+            "TargetMax": "3",
+            "TargetMin": "0",
+            "SpellDescription": "Distribute three +1/+1 counters among any number of target creatures you control."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

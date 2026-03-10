@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidCard": "Instant,Sorcery",
+            "ValidActivatingPlayer": "You",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, remove an ice counter from CARDNAME. Then if it has no ice counters on it, transform it.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigRemoveCounter"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "Whenever this creature transforms into CARDNAME, return all non-Horror creatures to their owner's hands.",
+            "Execute": "TrigChange",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

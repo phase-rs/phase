@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Gotta Go Fast — Whenever CARDNAME attacks, put a +1/+1 counter on each creature you control with flash or haste.",
+        "Execute": "TrigPutCounterAll",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control with flash or haste is dealt damage, create a tapped Treasure token.",
+        "ValidTarget": "Creature.YouCtrl+withFlash,Creature.YouCtrl+withHaste",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

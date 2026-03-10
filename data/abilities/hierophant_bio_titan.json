@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {
+          "PrecostDesc": "Frenzied Metabolism —",
+          "AdditionalDesc": "This spell costs {2} less to cast for each counter removed this way."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "10 G G"
+          },
+          {
+            "type": "Mana",
+            "cost": "RemoveAnyCounter<X/P1P1/Creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Frenzied Metabolism —",
+        "AdditionalDesc": "This spell costs {2} less to cast for each counter removed this way."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Amount": "Y",
+        "Relative": "True"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self",
+        "Description": "Titanic — CARDNAME can't be blocked by creatures with power 2 or less.",
+        "ValidBlocker": "Creature.powerLE2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

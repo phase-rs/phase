@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Zombie"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Deathtouch",
+        "SpellDescription": "Target Zombie gains deathtouch until end of turn.",
+        "TgtPrompt": "Select target Zombie"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create a 2/2 black Zombie creature token.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

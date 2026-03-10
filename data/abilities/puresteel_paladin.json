@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Equipment.YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever an Equipment you control enters, you may draw a card.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "Metalcraft",
+        "Description": "Metalcraft — Equipment you control have equip {0} as long as you control three or more artifacts.",
+        "Affected": "Equipment.YouCtrl",
+        "AddKeyword": "Equip:0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you gain life, CARDNAME gains flying until end of turn.",
+        "ValidPlayer": "You",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

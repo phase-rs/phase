@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Graveyard",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Exile Cannon — When CARDNAME enters from a graveyard, exile up to one target nonland permanent.",
+        "TriggerZones": "Battlefield",
+        "Execute": "DBChangeZone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

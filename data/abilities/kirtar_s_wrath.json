@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "SpellDescription": "Destroy all creatures. They can't be regenerated. Threshold — If there are seven or more cards in your graveyard, instead destroy all creatures, then create two 1/1 white Spirit creature tokens with flying. Creatures destroyed this way can't be regenerated.",
+          "BranchConditionSVar": "X",
+          "BranchConditionSVarCompare": "GE7",
+          "TrueSubAbility": "ThreshDestruction",
+          "FalseSubAbility": "Destruction"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy all creatures. They can't be regenerated. Threshold — If there are seven or more cards in your graveyard, instead destroy all creatures, then create two 1/1 white Spirit creature tokens with flying. Creatures destroyed this way can't be regenerated.",
+        "BranchConditionSVar": "X",
+        "BranchConditionSVarCompare": "GE7",
+        "TrueSubAbility": "ThreshDestruction",
+        "FalseSubAbility": "Destruction"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

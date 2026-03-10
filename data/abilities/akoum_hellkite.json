@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Landfall — Whenever a land you control enters, CARDNAME deals 1 damage to any target. If that land was a mountain, CARDNAME deals 2 damage instead.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "TrigDamage",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

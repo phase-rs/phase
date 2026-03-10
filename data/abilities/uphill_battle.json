@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "ReplacementResult": "Updated",
+        "ValidCause": "LandAbility.OppCtrl,Spell.wasCast+Permanent+CastSa Spell.OppCtrl",
+        "Destination": "Battlefield",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Creature",
+        "Description": "Creatures played by your opponents enter tapped."
+      }
+    }
+  ],
+  "faces": []
+}

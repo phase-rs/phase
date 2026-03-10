@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player,Battle",
+        "CombatDamage": "True",
+        "Execute": "TrigReturn",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever this creature deals combat damage to a player or battle, return target creature card from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

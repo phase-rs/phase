@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "TriggerDescription": "When you unlock this door, exile the top two cards of your library. You may play them until the end of your next turn.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDig",
+            "ValidPlayer": "You",
+            "ThisDoor": "True"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackersDeclared",
+          "params": {
+            "TriggerDescription": "Whenever you attack, attacking creatures you control get +1/+0 until end of turn.",
+            "AttackingPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPump"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

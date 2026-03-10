@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 0
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "6 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "SpellDescription": "Target opponent loses 1 life for each Spider you control."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Delirium — When CARDNAME enters, if there are four or more card types among cards in your graveyard, create three 1/2 green Spider creature tokens with reach.",
+        "Delirium": "True",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

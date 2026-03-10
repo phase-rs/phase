@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill three cards. You may put an artifact card with mana value 2 or 3 from among them into your hand.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill three cards. You may put an artifact card with mana value 2 or 3 from among them into your hand.",
+        "Execute": "TrigMill"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Improvise",
+        "CheckSVar": "X",
+        "SVarCompare": "EQ0",
+        "EffectZone": "Battlefield",
+        "AffectedZone": "Stack",
+        "Description": "The first nonartifact spell you cast each turn has improvise. (Your artifacts can help cast that spell. Each artifact you tap after you're done activating mana abilities pays for {1}.)",
+        "Affected": "Card.nonArtifact+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

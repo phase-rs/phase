@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMax": "1",
+        "TargetMin": "0",
+        "SpellDescription": "Put two +1/+1 counters on up to one target creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "FoundDestination": "Hand",
+          "Valid": "Card.Creature",
+          "ValidDescription": "creature",
+          "RevealedDestination": "Library",
+          "RevealRandomOrder": "True",
+          "Planeswalker": "True",
+          "SpellDescription": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+          "RevealedLibraryPosition": "-1"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "FoundDestination": "Hand",
+        "Valid": "Card.Creature",
+        "ValidDescription": "creature",
+        "RevealedDestination": "Library",
+        "RevealRandomOrder": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+        "RevealedLibraryPosition": "-1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -11
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put X +1/+1 counters on target creature, where X is your life total. That creature gains trample until end of turn.",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SubAbility": "DBPump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

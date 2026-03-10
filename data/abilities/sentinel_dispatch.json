@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of the first upkeep, create a 1/1 colorless Construct artifact creature token with defender.",
+        "Execute": "TrigToken",
+        "FirstUpkeepThisGame": "True",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

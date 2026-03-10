@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Landfall — Whenever a land you control enters, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "Execute": "TrigInvestigate",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerDescription": "Whenever you sacrifice a Clue, put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Clue.YouCtrl",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

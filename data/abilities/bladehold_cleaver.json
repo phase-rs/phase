@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraft",
+        "TriggerDescription": "Whenever equipped creature dies, draft a card from CARDNAME's spellbook.",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.EquippedBy",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +2/+2.",
+        "AddPower": "2",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

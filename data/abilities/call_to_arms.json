@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "When the chosen color isn't the most common color among nontoken permanents the chosen player controls or is tied for most common, sacrifice CARDNAME.",
+        "SVarCompare": "LEY",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.White",
+        "AddToughness": "1",
+        "CheckSVar": "X",
+        "SVarCompare": "GTY",
+        "Description": "White creatures get +1/+1 as long as the chosen color is the most common color among nontoken permanents the chosen player controls but isn't tied for most common.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

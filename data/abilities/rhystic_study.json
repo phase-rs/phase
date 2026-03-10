@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

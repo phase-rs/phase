@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Exile the top card of your library.",
+        "ChangeNum": "All"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "Description": "You may look at the top card of your library any time.",
+        "MayLookAt": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "MayPlay": "True",
+        "Affected": "Instant.TopLibrary+YouCtrl+nonLand,Sorcery.TopLibrary+YouCtrl+nonLand",
+        "Description": "You may cast instant and sorcery spells from the top of your library."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

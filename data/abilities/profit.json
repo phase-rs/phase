@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PumpAll",
+            "power": 1,
+            "toughness": 1,
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidCards": "Creature.YouCtrl",
+            "SpellDescription": "Creatures you control get +1/+1 until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PumpAll",
+            "power": -1,
+            "toughness": -1,
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidCards": "Creature.OppCtrl",
+            "IsCurse": "True",
+            "SpellDescription": "Creatures your opponents control get -1/-1 until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

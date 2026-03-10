@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo B R",
+        "params": {
+          "SpellDescription": "Add {B} or {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B} or {R}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "1 Return<1/Land.Basic>",
+        "Description": "You may pay {1} and return a basic land you control to its owner's hand rather than pay this spell's mana cost."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "Description": "CARDNAME enters tapped.",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

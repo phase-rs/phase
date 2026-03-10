@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerDescription": "When you set this scheme in motion, choose an opponent.",
+        "TriggerZones": "Command",
+        "ValidCard": "Card.Self",
+        "Execute": "ChooseTheWretch"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "Abandon",
+        "Attacked": "Player.Chosen",
+        "TriggerDescription": "When the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
+        "ValidCard": "Card"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "Execute": "Abandon",
+        "TriggerDescription": "When the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
+        "Secondary": "True",
+        "ValidTarget": "Player.Chosen",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "Description": "Permanents the chosen player controls don't untap during their untap step.",
+        "ValidCard": "Permanent.ChosenCtrl",
+        "ActiveZones": "Command",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

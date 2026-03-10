@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+wasCastByYou",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Drain Life — When CARDNAME enters, if you cast it, target opponent loses half their life, rounded up. You gain life equal to the life lost this way.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

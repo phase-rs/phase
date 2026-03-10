@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounters",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may pay {3}{G}. If you do, put two +1/+1 counters on CARDNAME.",
+        "ValidCard": "Land.YouCtrl",
+        "OptionalDecider": "You",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may have it deal 2 damage to target creature.",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Description": "CARDNAME costs {2} less to cast if there is a land card in your graveyard.",
+        "PresentZone": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Amount": "2",
+        "IsPresent": "Land.YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetColor": "ChosenColor",
+        "CharacteristicDefining": "True",
+        "Description": "Impossible Girl — If CARDNAME is your commander, choose a color before the game begins. CARDNAME is the chosen color.",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "Description": "If a triggered ability of a Doctor you control triggers, that ability triggers an additional time.",
+        "ValidCard": "Doctor.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

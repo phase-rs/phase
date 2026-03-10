@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters the battlefield, open an Attraction.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigOpenAttraction"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "As long as you control three or more Attractions, NICKNAME gets +2/+0 and has menace.",
+        "AddPower": "2",
+        "CheckSVar": "X",
+        "AddKeyword": "Menace",
+        "SVarCompare": "GE3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

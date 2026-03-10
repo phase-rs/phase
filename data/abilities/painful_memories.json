@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at target opponent's hand and choose a card from it. Put that card on top of that player's library.",
+        "LibraryPosition": "0",
+        "ChangeType": "Card",
+        "ChangeNum": "1",
+        "IsCurse": "True",
+        "Mandatory": "True",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

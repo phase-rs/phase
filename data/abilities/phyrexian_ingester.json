@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile target nontoken creature.",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReset",
+        "Static": "True",
+        "Origin": "Battlefield",
+        "Destination": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
+        "Origin": "Exile",
+        "Execute": "DBForget",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +X/+Y, where X is the exiled creature card's power and Y is its toughness.",
+        "AddPower": "X",
+        "AddToughness": "Y",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Monstrosity": "5"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, blocks, or becomes the target of a spell, it deals damage equal to its power to each opponent.",
+        "ValidSource": "Spell",
+        "ValidTarget": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidBlocker": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME blocks a creature with flying, CARDNAME gets +0/+2 until end of turn.",
+        "ValidCard": "Creature.withFlying",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

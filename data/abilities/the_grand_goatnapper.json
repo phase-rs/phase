@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Goat"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonGoat"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Perpetual",
+        "SpellDescription": "Target non-Goat creature perpetually becomes a Goat in addition to its other types. Then conjure a card named Goatnap into your hand. Activate only as a sorcery.",
+        "SorcerySpeed": "True",
+        "SubAbility": "DBConjure",
+        "TgtPrompt": "Select target non-Goat creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.wasCastByYou",
+        "AffectedZone": "Stack",
+        "AddKeyword": "Affinity:Goat",
+        "Description": "Spells you cast have affinity for Goats."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "ManaConvert"
+      },
+      "params": {
+        "EffectZone": "Command",
+        "ValidSA": "Spell",
+        "Description": "You may spend mana as though it were mana of any color to cast creature spells with mana value equal to the chosen number.",
+        "ValidPlayer": "You",
+        "ValidCard": "Creature.YouCtrl+cmcEQChosen",
+        "ManaConversion": "AnyType->AnyColor"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

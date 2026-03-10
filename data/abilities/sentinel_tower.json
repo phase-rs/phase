@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDmg",
+        "PlayerTurn": "True",
+        "TriggerDescription": "Whenever an instant or sorcery spell is cast during your turn, CARDNAME deals damage to any target equal to 1 plus the number of instant and sorcery spells cast before that spell this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

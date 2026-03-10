@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, if you gained or lost life this turn, target opponent loses 3 life unless they sacrifice a nonland permanent or discard a card.",
+        "CheckSVar": "X",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGenericChoice"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "CARDNAME can't block.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Demon.YouCtrl",
+        "Description": "As long as you control a Demon, CARDNAME has \"{B}: Regenerate CARDNAME.\"",
+        "AddAbility": "Regen",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

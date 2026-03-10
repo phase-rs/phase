@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever enchanted creature attacks, it gets +X/+0 until end of turn, where X is your devotion to red.",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

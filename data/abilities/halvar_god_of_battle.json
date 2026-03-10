@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "OptionalDecider": "You",
+            "TriggerDescription": "At the beginning of each combat, you may attach target Aura or Equipment attached to a creature you control to target creature you control.",
+            "Phase": "BeginCombat",
+            "Execute": "TrigTargetAuraEquip"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Creatures you control that are enchanted or equipped gain double strike.",
+            "Affected": "Creature.YouCtrl+enchanted,Creature.YouCtrl+equipped",
+            "AddKeyword": "Double Strike"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.AttachedBy",
+            "Origin": "Battlefield",
+            "Execute": "TrigReturn",
+            "TriggerDescription": "Whenever equipped creature dies, return it to its owner's hand.",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.EquippedBy",
+            "Description": "Equipped creature gets +2/+0 and has vigilance.",
+            "AddKeyword": "Vigilance",
+            "AddPower": "2"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

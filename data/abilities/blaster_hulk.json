@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigEnergy",
+        "TriggerDescription": "Whenever CARDNAME attacks, you get {E}{E}, then you may pay eight {E}. When you do, CARDNAME deals 8 damage divided as you choose among up to eight targets.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Count$CountersRemovedThisTurn ENERGY You",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

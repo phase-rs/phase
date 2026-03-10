@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player loses 1 life and discards a card.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLifeDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Hellbent": "True",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Description": "Hellbent — Skip your upkeep step if you have no cards in hand.",
+        "Skip": "True"
+      }
+    }
+  ],
+  "faces": []
+}

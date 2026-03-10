@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "Origin": "Any",
+        "ValidCard": "Creature.Other+Colorless+YouCtrl",
+        "TriggerDescription": "Whenever another colorless creature you control enters, target opponent loses 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

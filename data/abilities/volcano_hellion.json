@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, it deals an amount of damage of your choice to you and target creature. The damage can't be prevented.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDmg",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

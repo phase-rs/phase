@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Artifact.YouCtrl",
+          "SetPower": "1",
+          "TgtPrompt": "Select target artifact you control",
+          "SetToughness": "1",
+          "SpellDescription": "Create a token that's a copy of target artifact you control, except it's a 1/1 Soldier creature in addition to its other types.",
+          "AddTypes": "Creature & Soldier"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "6"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Artifact.YouCtrl",
+        "SetPower": "1",
+        "TgtPrompt": "Select target artifact you control",
+        "SetToughness": "1",
+        "SpellDescription": "Create a token that's a copy of target artifact you control, except it's a 1/1 Soldier creature in addition to its other types.",
+        "AddTypes": "Creature & Soldier"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Artifact creatures you control get +2/+2.",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Affected": "Creature.Artifact+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

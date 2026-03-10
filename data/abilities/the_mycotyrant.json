@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This creature can't block,\" where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.",
+        "SetPower": "Y",
+        "SetToughness": "Y",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

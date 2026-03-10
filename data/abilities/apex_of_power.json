@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 7,
+        "destination": "Exile"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "All",
+        "SpellDescription": "Exile the top seven cards from your library. Until end of turn, you may cast nonland cards exiled this way. If this spell was cast from your hand, add ten mana of any one color.",
+        "RememberChanged": "True",
+        "SubAbility": "DBEffect"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

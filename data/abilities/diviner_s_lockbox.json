@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "SubAbility": "DBReveal",
+          "Defined": "You",
+          "SorcerySpeed": "True",
+          "SpellDescription": "Choose a card name, then reveal the top card of your library. If that card has the chosen name, sacrifice CARDNAME and draw three cards. Activate only as a sorcery."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBReveal",
+        "Defined": "You",
+        "SorcerySpeed": "True",
+        "SpellDescription": "Choose a card name, then reveal the top card of your library. If that card has the chosen name, sacrifice CARDNAME and draw three cards. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

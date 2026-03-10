@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, it gets +1/+1 and gains haste until end of turn.",
+        "ValidCard": "Card.Self+kicked",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

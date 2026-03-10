@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetLife",
+        "params": {
+          "ValidTgts": "Player",
+          "LifeAmount": "X",
+          "SpellDescription": "Double target player's life total. Shuffle CARDNAME into its owner's library.",
+          "SubAbility": "DBShuffle"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "LifeAmount": "X",
+        "SpellDescription": "Double target player's life total. Shuffle CARDNAME into its owner's library.",
+        "SubAbility": "DBShuffle"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

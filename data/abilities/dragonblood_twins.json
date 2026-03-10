@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigAnimate",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you cast your second spell each turn, until end of turn, this creature has base power and toughness 4/4 and gains flying.",
+        "ValidActivatingPlayer": "You",
+        "ActivatorThisTurnCast": "EQ2",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

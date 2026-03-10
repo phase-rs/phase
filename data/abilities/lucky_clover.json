@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant.Adventure,Sorcery.Adventure",
+        "TriggerDescription": "Whenever you cast an Adventure instant or sorcery spell, copy it. You may choose new targets for the copy.",
+        "Execute": "TrigCopySpell"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

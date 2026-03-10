@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "IsCombat": "True",
+        "ValidTarget": "Creature.EnchantedBy",
+        "Description": "Prevent all combat damage that would be dealt to and dealt by enchanted creature.",
+        "Prevent": "True"
+      }
+    },
+    {
+      "event": "DamageDone",
+      "params": {
+        "Secondary": "True",
+        "Description": "Prevent all combat damage that would be dealt to and dealt by enchanted creature.",
+        "IsCombat": "True",
+        "Prevent": "True",
+        "ValidSource": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "faces": []
+}

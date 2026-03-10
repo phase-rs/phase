@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you cycle CARDNAME, you may have target player lose life equal to the number of Zombies on the battlefield.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "TargetMin": "X",
+          "DefinedCards": "Targeted",
+          "TargetMax": "X",
+          "XMaxLimit": "Snow",
+          "IsCurse": "True",
+          "ValidTgts": "Creature.attacking",
+          "TgtPrompt": "Select X target attacking creatures",
+          "RepeatSubAbility": "DBChoose",
+          "SpellDescription": "Choose X target attacking creatures. For each of those creatures, its controller may pay {1} or {2}. If that player doesn't, destroy that creature at end of combat. If that player pays only {1}, prevent all combat damage that would be dealt to and dealt by that creature this combat.",
+          "StackDescription": "SpellDescription",
+          "ActivationPhases": "BeginCombat->Declare Attackers"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "X",
+        "DefinedCards": "Targeted",
+        "TargetMax": "X",
+        "XMaxLimit": "Snow",
+        "IsCurse": "True",
+        "ValidTgts": "Creature.attacking",
+        "TgtPrompt": "Select X target attacking creatures",
+        "RepeatSubAbility": "DBChoose",
+        "SpellDescription": "Choose X target attacking creatures. For each of those creatures, its controller may pay {1} or {2}. If that player doesn't, destroy that creature at end of combat. If that player pays only {1}, prevent all combat damage that would be dealt to and dealt by that creature this combat.",
+        "StackDescription": "SpellDescription",
+        "ActivationPhases": "BeginCombat->Declare Attackers"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

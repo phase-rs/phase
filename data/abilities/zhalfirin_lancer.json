@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Knight you control enters, CARDNAME gets +1/+1 and gains vigilance until end of turn.",
+        "Execute": "TrigPump",
+        "ValidCard": "Knight.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

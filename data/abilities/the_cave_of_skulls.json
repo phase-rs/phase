@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, create two 1/1 white Warrior creature tokens.",
+        "TriggerZones": "Command",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouOwn",
+        "AddKeyword": "Scavenge:CardManaCost",
+        "Description": "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost. (Exile a creature card from your graveyard and pay its mana cost: Put a number of +1/+1 counters equal to that card's power on target creature. Scavenge only as a sorcery.)",
+        "AffectedZone": "Graveyard",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

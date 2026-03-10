@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has \"Whenever this creature attacks, create a 1/1 green Squirrel creature token. Put a +1/+1 counter on that token for each Aura and Equipment attached to this creature other than CARDNAME.\"",
+        "Affected": "Creature.EnchantedBy",
+        "AddTrigger": "AttackTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

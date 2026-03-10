@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+!token",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a nontoken creature you control dies, put a slime counter on CARDNAME, then create a green Ooze creature token with \"This creature's power and toughness are each equal to the number of slime counters on CARDNAME.\"",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "CheckSVar": "X",
+        "ValidAttacker": "Card.Self",
+        "Description": "CARDNAME can't be blocked as long as you've cast an instant or sorcery spell this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

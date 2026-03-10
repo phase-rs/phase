@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has first strike.",
+        "AddKeyword": "First Strike"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Condition": "Threshold",
+        "AddPower": "3",
+        "Description": "Threshold — Enchanted creature gets +3/+0 as long as there are seven or more cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

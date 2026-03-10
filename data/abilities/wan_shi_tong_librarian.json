@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When NICKNAME enters, put X +1/+1 counters on him. Then draw half X cards, rounded down.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter1",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SearchedLibrary",
+      "params": {
+        "SearchOwnLibrary": "True",
+        "TriggerDescription": "Whenever an opponent searches their library, put a +1/+1 counter on NICKNAME and draw a card.",
+        "ValidPlayer": "Player.Opponent",
+        "Execute": "TrigPutCounter2",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

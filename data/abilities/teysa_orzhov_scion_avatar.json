@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Command",
+        "ValidCard": "Creature.!token",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a nontoken creature dies, create a 1/1 white Spirit creature token with flying.",
+        "Execute": "TrigToken",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

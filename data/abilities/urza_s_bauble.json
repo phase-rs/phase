@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "ValidTgts": "Player",
+          "Random": "True",
+          "SpellDescription": "Look at a card at random in target player's hand. You draw a card at the beginning of the next turn's upkeep.",
+          "SubAbility": "DelTrigSlowtrip"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "Random": "True",
+        "SpellDescription": "Look at a card at random in target player's hand. You draw a card at the beginning of the next turn's upkeep.",
+        "SubAbility": "DelTrigSlowtrip"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

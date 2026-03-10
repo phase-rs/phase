@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigInitiative",
+        "TriggerDescription": "When CARDNAME enters, you take the initiative and create a Treasure token."
+      }
+    },
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack the player who has the initiative, create a Treasure token.",
+        "ValidAttackers": "Creature.YouCtrl",
+        "Execute": "DBTreasure",
+        "AttackedTarget": "Player.hasInitiative"
+      }
+    },
+    {
+      "mode": "DungeonCompleted",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you complete a dungeon, create a 5/5 red Dragon creature token with flying.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

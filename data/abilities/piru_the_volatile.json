@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "TrigUpkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {R}{W}{B}.",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, it deals 7 damage to each nonlegendary creature.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

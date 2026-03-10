@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you cast a red permanent spell, CARDNAME deals 1 damage to any target.",
+        "ValidCard": "Permanent.Red"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "Activator": "You",
+        "ValidCard": "Permanent.Red",
+        "Cost": "PayLife<2>",
+        "ReduceColor": "R",
+        "Description": "As an additional cost to cast red permanent spells, you may pay 2 life. Those spells cost {R} less to cast if you paid life this way. This effect reduces only the amount of red mana you pay.",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

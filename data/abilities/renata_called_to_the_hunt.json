@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "Description": "NICKNAME's power is equal to your devotion to green."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

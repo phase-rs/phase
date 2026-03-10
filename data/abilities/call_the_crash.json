@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "SpellDescription": "Conjure two cards named Siege Rhino onto the battlefield.",
+          "Amount": "2",
+          "Zone": "Battlefield",
+          "Name": "Siege Rhino",
+          "Conjure": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Conjure two cards named Siege Rhino onto the battlefield.",
+        "Amount": "2",
+        "Zone": "Battlefield",
+        "Name": "Siege Rhino",
+        "Conjure": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

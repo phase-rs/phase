@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "When an opponent casts an artifact spell, if CARDNAME is an enchantment, CARDNAME becomes a 5/3 Soldier creature with trample.",
+        "ValidCard": "Artifact",
+        "IsPresent": "Card.Self+Enchantment"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

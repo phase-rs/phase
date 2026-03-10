@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a black card is put into an opponent's graveyard from anywhere, you may draw a card.",
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You",
+        "Destination": "Graveyard",
+        "Origin": "Any",
+        "ValidCard": "Card.Black+!token+OppOwn",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

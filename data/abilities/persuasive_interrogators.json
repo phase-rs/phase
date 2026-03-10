@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPoison",
+        "ValidPlayer": "You",
+        "ValidCard": "Clue",
+        "TriggerDescription": "Whenever you sacrifice a Clue, target opponent gets two poison counters. (A player with ten or more poison counters loses the game.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

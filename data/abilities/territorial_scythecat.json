@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

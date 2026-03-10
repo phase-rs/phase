@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "This turn, when target creature you control attacks and isn't blocked, it assigns no combat damage this turn and you put a cube counter on CARDNAME.",
+          "Triggers": "TrigAttackerUnblocked",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "This turn, when target creature you control attacks and isn't blocked, it assigns no combat damage this turn and you put a cube counter on CARDNAME.",
+        "Triggers": "TrigAttackerUnblocked",
+        "ExileOnMoved": "Battlefield"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate target creature.",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<1/CUBE>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate target creature.",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

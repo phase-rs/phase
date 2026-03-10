@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Goblin.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more Goblins you control attack, create a 1/1 red Goblin creature token that's tapped and attacking.",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "Whenever another creature you control enters, CARDNAME deals 1 damage to each opponent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

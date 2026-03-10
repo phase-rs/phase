@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "AddType": "Bird",
+        "Description": "Equipped creature gets +1/+0, has flying, and is a Bird in addition to its other types.",
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

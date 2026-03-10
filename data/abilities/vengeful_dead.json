@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidCard": "Card.Self,Zombie.Other",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever CARDNAME or another Zombie dies, each opponent loses 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

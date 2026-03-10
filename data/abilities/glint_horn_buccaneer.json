@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsPresent": "Card.Self+attacking",
+        "SpellDescription": "Draw a card. Activate only if CARDNAME is attacking.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever you discard a card, CARDNAME deals 1 damage to each opponent.",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

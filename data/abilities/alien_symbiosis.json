@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +1/+1, has menace, and is a Symbiote in addition to its other types.",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "1",
+        "AddType": "Symbiote",
+        "AddToughness": "1",
+        "AddKeyword": "Menace"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Graveyard",
+        "MayPlay": "True",
+        "EffectZone": "Graveyard",
+        "RaiseCost": "Discard<1/Card>",
+        "Description": "You may cast this card from your graveyard by discarding a card in addition to paying its other costs.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

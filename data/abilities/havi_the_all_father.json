@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Sage Project — Whenever NICKNAME or another legendary creature you control dies, return target legendary creature card with lesser mana value from your graveyard to the battlefield tapped.",
+        "ValidCard": "Card.Self,Creature.Legendary+YouCtrl+Other",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Historic+YouOwn",
+        "AddKeyword": "Indestructible",
+        "PresentCompare": "GE4",
+        "Description": "CARDNAME has indestructible as long as there are four or more historic cards in your graveyard. (Artifacts, legendaries, and Sagas are historic.)",
+        "Affected": "Card.Self",
+        "PresentZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

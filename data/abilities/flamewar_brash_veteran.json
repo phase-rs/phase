@@ -1,0 +1,89 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 1,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "AILogic": "AristocratCounters",
+            "SubAbility": "DBConvert",
+            "SorcerySpeed": "True",
+            "SpellDescription": "Put a +1/+1 counter on NICKNAME and convert it. Activate only as a sorcery."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZoneAll",
+            "origin": "Exile",
+            "destination": "Hand",
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1"
+              },
+              {
+                "type": "Mana",
+                "cost": "Discard<1/Hand>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Put all exiled cards you own with intel counters on them into your hand.",
+            "ChangeType": "Card.YouOwn+counters_GE1_INTEL"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "ValidTarget": "Player",
+            "Execute": "TrigDig",
+            "CombatDamage": "True",
+            "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, exile that many cards from the top of your library face down. Put an intel counter on each of them. Convert NICKNAME.",
+            "TriggerZones": "Battlefield",
+            "ValidSource": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

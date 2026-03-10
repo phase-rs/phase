@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Creature.Red,Creature.Artifact",
+        "SpellDescription": "You may put a red creature card or an artifact creature card from your hand onto the battlefield. Sacrifice it at the beginning of the next end step.",
+        "Optional": "You",
+        "AtEOT": "Sacrifice",
+        "StackDescription": "SpellDescription",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "LT5",
+        "Description": "As long as your devotion to red is less than five, NICKNAME is not a creature.",
+        "RemoveType": "Creature",
+        "CheckSVar": "X",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+Other",
+        "Description": "Other creatures you control have haste.",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

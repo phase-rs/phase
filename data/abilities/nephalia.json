@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Command",
+        "Execute": "TrigMill",
+        "TriggerDescription": "At the beginning of your end step, mill seven cards. Then return a card at random from your graveyard to your hand."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, return target card from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

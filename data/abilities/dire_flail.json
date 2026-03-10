@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.EquippedBy",
+            "AddPower": "2",
+            "Description": "Equipped creature gets +2/+0."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Equipped creature gets +3/+0 and has \"Whenever this creature attacks, you may sacrifice an artifact other than CARDNAME. When you do, this creature deals damage equal to its power to target creature.\"",
+            "AddPower": "3",
+            "AddTrigger": "AttacksTrig",
+            "Affected": "Creature.EquippedBy"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

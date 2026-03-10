@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "If a source would deal damage to you, it deals double that damage to you instead.",
+        "ReplaceWith": "DmgTwice",
+        "ValidSource": "Card,Emblem",
+        "ValidTarget": "You"
+      }
+    },
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DmgTwice",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Card,Emblem",
+        "ValidTarget": "Card.Self",
+        "Description": "If a source would deal damage to CARDNAME, it deals double that damage to CARDNAME instead."
+      }
+    }
+  ],
+  "faces": []
+}

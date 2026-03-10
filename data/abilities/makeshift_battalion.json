@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "IsPresent": "Creature.attacking+Other",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "PresentCompare": "GE2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

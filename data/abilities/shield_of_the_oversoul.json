@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy+Green",
+        "AddKeyword": "Indestructible",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Description": "As long as enchanted creature is green, it gets +1/+1 and has indestructible. (Lethal damage and effects that say \"destroy\" don't destroy it. If its toughness is 0 or less, it's still put into its owner's graveyard.)"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy+White",
+        "AddToughness": "1",
+        "Description": "As long as enchanted creature is white, it gets +1/+1 and has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

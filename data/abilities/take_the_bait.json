@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "RPrevent",
+          "OpponentTurn": "True",
+          "SubAbility": "DBUnTapAll",
+          "ActivationPhases": "BeginCombat->EndCombat",
+          "SpellDescription": "Prevent all combat damage that would be dealt to you and planeswalkers you control this turn. Untap all attacking creatures and goad them. After this phase, there is an additional combat phase."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "RPrevent",
+        "OpponentTurn": "True",
+        "SubAbility": "DBUnTapAll",
+        "ActivationPhases": "BeginCombat->EndCombat",
+        "SpellDescription": "Prevent all combat damage that would be dealt to you and planeswalkers you control this turn. Untap all attacking creatures and goad them. After this phase, there is an additional combat phase."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

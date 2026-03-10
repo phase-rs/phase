@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "ValidTgts": "Instant.YouCtrl+cmcEQX,Sorcery.YouCtrl+cmcEQX",
+          "TargetType": "Spell",
+          "AILogic": "Once",
+          "MayChooseTarget": "True",
+          "SpellDescription": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Instant.YouCtrl+cmcEQX,Sorcery.YouCtrl+cmcEQX",
+        "TargetType": "Spell",
+        "AILogic": "Once",
+        "MayChooseTarget": "True",
+        "SpellDescription": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

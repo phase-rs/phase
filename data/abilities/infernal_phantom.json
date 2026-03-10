@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Enchantment.YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidPlayer": "You",
+        "ValidCard": "Card.Room"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "When CARDNAME dies, it deals damage equal to its power to any target.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

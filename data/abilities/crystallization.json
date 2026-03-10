@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When enchanted creature becomes the target of a spell or ability, exile that creature.",
+        "Execute": "TrigExile",
+        "ValidTarget": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "Enchanted creature can't attack or block.",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

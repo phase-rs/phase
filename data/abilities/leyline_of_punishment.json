@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "Description": "Players can't gain life.",
+        "ValidPlayer": "Player"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPreventDamage"
+      },
+      "params": {
+        "Description": "Damage can't be prevented."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

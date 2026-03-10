@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, create a 5/5 red Dragon creature token with flying."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Affected": "Creature",
+        "AddAbility": "Pump",
+        "Description": "All creatures have \"{R}: This creature gets +1/+0 until end of turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

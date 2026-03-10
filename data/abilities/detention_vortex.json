@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Activator": "Player.Opponent",
+        "SorcerySpeed": "True",
+        "Defined": "Self",
+        "SpellDescription": "Destroy CARDNAME. Only your opponents may activate this ability and only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "ValidCard": "Card.EnchantedBy",
+        "Description": "Enchanted permanent can't attack or block, and its activated abilities can't be activated."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

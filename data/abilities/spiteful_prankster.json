@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever another creature dies, CARDNAME deals 1 damage to target player or planeswalker.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, CARDNAME has first strike.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

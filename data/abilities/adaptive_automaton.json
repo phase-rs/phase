@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME is the chosen type in addition to its other types.",
+        "Affected": "Card.Self",
+        "AddType": "ChosenType"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.ChosenType+Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other creatures you control of the chosen type get +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

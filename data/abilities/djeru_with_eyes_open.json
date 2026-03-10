@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a planeswalker card, reveal it, put it into your hand, then shuffle.",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "PreventionEffect": "True",
+        "Description": "If a source would deal damage to a planeswalker you control, prevent 1 of that damage.",
+        "ValidTarget": "Planeswalker.YouCtrl",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "DBReplace"
+      }
+    }
+  ],
+  "faces": []
+}

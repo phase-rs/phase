@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Artifact.YouCtrl",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever an artifact you control enters, CARDNAME gets +1/+0 until end of turn.",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

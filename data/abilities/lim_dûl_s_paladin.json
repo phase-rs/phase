@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDiscard",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, you may discard a card. If you don't, sacrifice CARDNAME and draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBlockedPump",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked, CARDNAME gets +6/+3 until end of turn.",
+        "ValidBlocker": "Creature"
+      }
+    },
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "Execute": "DBNoCombatDamage",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, it assigns no combat damage this turn and defending player loses 4 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

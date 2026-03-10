@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidCard": "Beast",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a Beast enters, you may gain 3 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

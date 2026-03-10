@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReanimate",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "IsPresent": "Card.StrictlySelf",
+        "TriggerDescription": "When CARDNAME enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with CARDNAME.\" Return enchanted creature card to the battlefield under your control and attach CARDNAME to it. When CARDNAME leaves the battlefield, that creature's controller sacrifices it."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Static": "True",
+        "Execute": "DBCleanup",
+        "Destination": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets -1/-0.",
+        "AddPower": "-1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

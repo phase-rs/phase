@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCataclysm",
+        "TriggerDescription": "When CARDNAME enters, each player chooses two nontoken, non-Vehicle creatures they control. Exile them until CARDNAME leaves the battlefield."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigInvestigate",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks, put a card exiled with it into its owner's graveyard. If you do, investigate."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

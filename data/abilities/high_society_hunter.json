@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever this creature attacks, you may sacrifice another creature. If you do, put a +1/+1 counter on this creature.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever another nontoken creature dies, draw a card.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.!token+Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

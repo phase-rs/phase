@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attacking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "RememberTargets": "True",
+        "SubAbility": "DBChangeZoneAll",
+        "SpellDescription": "Exile target attacking creature and all Equipment attached to it.",
+        "TgtPrompt": "Select target attacking creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

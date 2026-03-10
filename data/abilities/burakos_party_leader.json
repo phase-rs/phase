@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME attacks, defending player loses X life and you create X Treasure tokens, where X is the number of creatures in your party.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME is also a Cleric, Rogue, Warrior, and Wizard.",
+        "Affected": "Card.Self",
+        "AddType": "Cleric & Rogue & Warrior & Wizard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

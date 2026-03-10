@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Creature.cmcGE6",
+        "Type": "Spell",
+        "Amount": "2",
+        "Description": "Creature spells you cast with mana value 6 or greater cost {2} less to cast.",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

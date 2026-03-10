@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 1 damage to you.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

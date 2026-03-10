@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may tap target creature.",
+        "Execute": "TrigTap",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, if you have the initiative, double the toughness of each creature you control until end of turn.",
+        "ValidCard": "Card.Self",
+        "CheckDefinedPlayer": "You.hasInitiative",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDoubleToughness"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CombatDamageToughness"
+      },
+      "params": {
+        "Description": "Each creature you control assigns combat damage equal to its toughness rather than its power.",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

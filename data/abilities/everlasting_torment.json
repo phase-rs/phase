@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "Description": "Players can't gain life.",
+        "ValidPlayer": "Player"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPreventDamage"
+      },
+      "params": {
+        "Description": "Damage can't be prevented."
+      }
+    },
+    {
+      "mode": {
+        "Other": "WitherDamage"
+      },
+      "params": {
+        "Description": "All damage is dealt as though its source had wither. (A source with wither deals damage to creatures in the form of -1/-1 counters.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

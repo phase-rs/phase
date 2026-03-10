@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<1/Ally>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target card in a graveyard",
+        "SpellDescription": "Exile target card from a graveyard."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever this creature attacks, you may cast an Ally spell from among cards you own exiled with this creature.",
+        "Execute": "TrigCast"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

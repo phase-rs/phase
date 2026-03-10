@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "SpellDescription": "Create a token that's a copy of another target creature you control. It gains haste. Sacrifice it at the beginning of the next end step. Activate only as a sorcery.",
+          "PumpKeywords": "Haste",
+          "AtEOT": "Sacrifice",
+          "SorcerySpeed": "True",
+          "ValidTgts": "Creature.Other+YouCtrl",
+          "TgtPrompt": "Select another target creature you control"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a token that's a copy of another target creature you control. It gains haste. Sacrifice it at the beginning of the next end step. Activate only as a sorcery.",
+        "PumpKeywords": "Haste",
+        "AtEOT": "Sacrifice",
+        "SorcerySpeed": "True",
+        "ValidTgts": "Creature.Other+YouCtrl",
+        "TgtPrompt": "Select another target creature you control"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "SorcerySpeed": "True",
+          "SpellDescription": "Create five tokens that are copies of another target creature you control. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.",
+          "TgtPrompt": "Select another target creature you control",
+          "ValidTgts": "Creature.Other+YouCtrl",
+          "NumCopies": "5",
+          "PumpKeywords": "Haste",
+          "AtEOT": "Sacrifice"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "6 R R R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "SpellDescription": "Create five tokens that are copies of another target creature you control. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.",
+        "TgtPrompt": "Select another target creature you control",
+        "ValidTgts": "Creature.Other+YouCtrl",
+        "NumCopies": "5",
+        "PumpKeywords": "Haste",
+        "AtEOT": "Sacrifice"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

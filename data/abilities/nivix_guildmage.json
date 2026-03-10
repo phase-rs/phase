@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "Draw a card, then discard a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
+          "TargetType": "Spell",
+          "AILogic": "Once",
+          "MayChooseTarget": "True",
+          "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
+        "TargetType": "Spell",
+        "AILogic": "Once",
+        "MayChooseTarget": "True",
+        "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

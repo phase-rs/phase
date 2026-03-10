@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Planeswalker.Nissa+YouCtrl",
+        "Description": "As long as you control a Nissa planeswalker, CARDNAME gets +2/+0 and has vigilance.",
+        "Affected": "Card.Self",
+        "AddKeyword": "Vigilance",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

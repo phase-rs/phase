@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "IgnoreLandWalk"
+      },
+      "params": {
+        "Description": "Creatures with swampwalk can be blocked as though they didn't have swampwalk.",
+        "ValidKeyword": "Landwalk:Swamp"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

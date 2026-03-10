@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 white Spirit creature token with flying.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has \"Whenever a creature you control enters, this creature gets +1/+1 until end of turn.\"",
+        "AddTrigger": "NurturingChangeZone",
+        "AddSVar": "NurturingPump",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

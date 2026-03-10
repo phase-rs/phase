@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, untap all creatures, then phase them out until CARDNAME leaves the battlefield. Put a time counter on CARDNAME for each creature phased out this way.",
+        "Destination": "Battlefield",
+        "Execute": "TrigUntap",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

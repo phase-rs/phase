@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigChangeZone",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted land dies, return that card to its owner's hand.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "4",
+        "AddKeyword": "Trample",
+        "Description": "Enchanted land is a 4/2 red Beast creature with trample. It's still a land.",
+        "Affected": "Land.AttachedBy",
+        "SetToughness": "2",
+        "AddType": "Creature & Beast",
+        "SetColor": "Red"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

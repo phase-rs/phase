@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, create a Food token.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigFood"
+      }
+    },
+    {
+      "mode": "ManaExpend",
+      "params": {
+        "TriggerDescription": "Whenever you expend 4, CARDNAME gets +1/+1 until end of turn. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
+        "Amount": "4",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "Player": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

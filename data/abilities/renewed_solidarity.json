@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigCopy",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, for each token you control of the chosen type that entered this turn, create a token that's a copy of it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.ChosenType+YouCtrl",
+        "Description": "Creatures you control of the chosen type get +1/+0.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

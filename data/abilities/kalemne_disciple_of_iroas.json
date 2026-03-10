@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.cmcGE5",
+        "TriggerDescription": "Whenever you cast a creature spell with mana value 5 or greater, you get an experience counter.",
+        "Execute": "TrigExperience"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Description": "CARDNAME gets +1/+1 for each experience counter you have.",
+        "AddToughness": "X",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

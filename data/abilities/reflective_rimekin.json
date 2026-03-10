@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigBoon",
+        "TriggerDescription": "When this creature enters, you get a one-time boon with \"When you cast an instant or sorcery spell with mana value 3 or less, copy it. You may choose new targets for the copy.\"",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you gain 1 life and draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

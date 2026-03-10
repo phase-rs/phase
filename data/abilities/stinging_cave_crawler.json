@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "SVarCompare": "GE4",
+        "TriggerDescription": "Descend 4 — Whenever CARDNAME attacks, if there are four or more permanent cards in your graveyard, you draw a card and you lose 1 life.",
+        "CheckSVar": "X",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

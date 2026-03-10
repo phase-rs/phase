@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "AILogic": "AtOppEOT",
+          "SubAbility": "DBPutCounter",
+          "SpellDescription": "Add {C}. Put a point counter on CARDNAME."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtOppEOT",
+        "SubAbility": "DBPutCounter",
+        "SpellDescription": "Add {C}. Put a point counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature deals combat damage to you, remove a point counter from CARDNAME.",
+        "Execute": "TrigRemove",
+        "ValidTarget": "You",
+        "ValidSource": "Creature",
+        "CombatDamage": "True"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.YouCtrl",
+        "ValidTarget": "Opponent",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to an opponent, put a point counter on CARDNAME. Then if it has ten or more point counters on it, remove them all and that player loses the game."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

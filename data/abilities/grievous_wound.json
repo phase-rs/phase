@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever enchanted player is dealt damage, they lose half their life, rounded up.",
+        "ValidTarget": "Player.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "Description": "Enchanted player can't gain life.",
+        "ValidPlayer": "Player.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Amount": "UrzaAmount",
+          "SpellDescription": "Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C} instead."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "UrzaAmount",
+        "SpellDescription": "Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C} instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

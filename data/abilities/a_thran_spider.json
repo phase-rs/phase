@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "7"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at the top four cards of your library. Put one of them into your hand and the rest on the bottom of your library in a random order.",
+        "NoReveal": "True",
+        "ChangeNum": "1",
+        "RestRandomOrder": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you and target opponent each create a tapped Powerstone token.",
+        "Origin": "Any",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

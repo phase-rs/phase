@@ -1,0 +1,95 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "TgtPrompt": "Select up to one target artifact or creature",
+        "Planeswalker": "True",
+        "RememberChanged": "True",
+        "SubAbility": "DBDelTrig",
+        "SpellDescription": "Exile up to one target artifact or creature. Return that card to the battlefield under its owner's control at the beginning of that player's next end step."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_2_2_samurai_double_strike",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 2/2 white Samurai creature token with double strike."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSubAbility": "DBChoose",
+          "StackDescription": "SpellDescription",
+          "Planeswalker": "True",
+          "SpellDescription": "For each player, choose a creature that player controls. Each player sacrifices all creatures they control not chosen this way.",
+          "SubAbility": "DBSacAll",
+          "RepeatPlayers": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "DBChoose",
+        "StackDescription": "SpellDescription",
+        "Planeswalker": "True",
+        "SpellDescription": "For each player, choose a creature that player controls. Each player sacrifices all creatures they control not chosen this way.",
+        "SubAbility": "DBSacAll",
+        "RepeatPlayers": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AttackRestrict"
+      },
+      "params": {
+        "MaxAttackers": "1",
+        "Description": "No more than one creature can attack CARDNAME each combat.",
+        "ValidDefender": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

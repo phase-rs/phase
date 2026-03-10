@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "SubCounter<3/QUEST>"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select up to two target creatures from your graveyard.",
+        "SpellDescription": "Return up to two target creature cards from your graveyard to your hand.",
+        "TargetMin": "0",
+        "TargetMax": "2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "OptionalDecider": "You",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may put a quest counter on CARDNAME.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

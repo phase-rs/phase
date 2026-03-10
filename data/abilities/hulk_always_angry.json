@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDestroyAll",
+        "TriggerDescription": "When NICKNAME enters, destroy all artifacts.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "NICKNAME attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

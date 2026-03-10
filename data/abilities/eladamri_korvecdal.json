@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Card.TopLibrary+YouOwn",
+          "Card.YouOwn+inZoneHand"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<2/Creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChangeZone",
+        "SpellDescription": "Reveal a card from your hand or the top of your library. If you reveal a creature card this way, put it onto the battlefield. Activate only during your turn.",
+        "PlayerTurn": "True",
+        "Reveal": "True",
+        "ChoiceTitle": "Reveal a card from your hand or the top of your library",
+        "AILogic": "GoodCreature",
+        "ChoiceZone": "Hand,Library"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "You",
+        "Description": "You may look at the top card of your library any time."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may cast creature spells from the top of your library.",
+        "Affected": "Creature.TopLibrary+YouCtrl+nonLand",
+        "AffectedZone": "Library",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

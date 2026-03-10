@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Sliver creatures you control have menace.",
+        "Affected": "Creature.Sliver+YouCtrl",
+        "AddKeyword": "Menace"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

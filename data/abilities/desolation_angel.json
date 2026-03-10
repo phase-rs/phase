@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDestroyYourLand",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, destroy all lands you control. If it was kicked, destroy all lands instead."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

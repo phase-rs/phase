@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever you cast a black spell, you may destroy target creature if it's tapped.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.Black"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you cast a white spell, you may tap target creature.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigTap",
+        "ValidCard": "Card.White"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Other white creatures you control get +1/+1.",
+        "Affected": "Creature.White+Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Affected": "Creature.Black+Other+YouCtrl",
+        "Description": "Other black creatures you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

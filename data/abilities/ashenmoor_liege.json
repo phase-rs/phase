@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, that player loses 4 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other red creatures you control get +1/+1.",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.Red+Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Other black creatures you control get +1/+1.",
+        "AddPower": "1",
+        "Affected": "Creature.Black+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

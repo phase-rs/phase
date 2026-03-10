@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a legendary creature you control with mana value 4 or greater enters, you become the monarch.",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.Legendary+YouCtrl+cmcGE4",
+        "Execute": "TrigMonarch",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, if you're the monarch, create two 1/1 white Human Soldier creature tokens.",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "CheckDefinedPlayer": "You.isMonarch",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

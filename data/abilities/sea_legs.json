@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy+Pirate",
+        "Description": "Enchanted creature gets +0/+2 as long as it's a Pirate. Otherwise, it gets -2/-0."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "-2",
+        "Affected": "Creature.EnchantedBy+nonPirate"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

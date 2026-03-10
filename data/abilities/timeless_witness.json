@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you may return target card from your graveyard to your hand.",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

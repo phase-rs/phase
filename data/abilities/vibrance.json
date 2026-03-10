@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "CastSA>Count$Adamant_2.Red.2.0",
+        "Execute": "TrigDamage",
+        "Origin": "Any",
+        "TriggerDescription": "When this creature enters, if {R}{R} was spent to cast it, this creature deals 3 damage to any target."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "CastSA>Count$Adamant_2.Green.2.0",
+        "Execute": "TrigSearch",
+        "TriggerDescription": "When this creature enters, if {G}{G} was spent to cast it, search your library for a land card, reveal it, put it into your hand, then shuffle. You gain 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

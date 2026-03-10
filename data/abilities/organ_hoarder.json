@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDig",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, look at the top three cards of your library, then put one of them into your hand and the rest into your graveyard.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

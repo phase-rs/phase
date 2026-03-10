@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": "Library"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Condition": "Bargain",
+        "SpellDescription": "If this spell was bargained, look at the top four cards of your library, then put up to two of them back on top of your library in any order and the rest into your graveyard.",
+        "ChangeNum": "2",
+        "SubAbility": "DBDraw",
+        "Optional": "True",
+        "DestinationZone2": "Graveyard",
+        "LibraryPosition": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

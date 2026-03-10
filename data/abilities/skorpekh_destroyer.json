@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Artifact.YouCtrl",
+        "Execute": "TrigPump",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Hyperphase Threshers — Whenever an artifact you control enters, CARDNAME gains first strike until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +1/+1 and has flying.",
+        "AddToughness": "1",
+        "Condition": "Threshold",
+        "AddPower": "1",
+        "AddKeyword": "Flying",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

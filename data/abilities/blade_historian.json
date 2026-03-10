@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Double Strike",
+        "Description": "Attacking creatures you control have double strike.",
+        "Affected": "Creature.attacking+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

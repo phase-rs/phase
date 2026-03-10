@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "u_1_1_faerie_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberOriginalTokens": "True",
+        "SubAbility": "DBImmediateTrig",
+        "SpellDescription": "Create two 1/1 blue Faerie creature tokens with flying. When you do, tap target creature an opponent controls.",
+        "TokenOwner": "You",
+        "TokenAmount": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

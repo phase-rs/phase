@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may draw a card for each other creature you control that shares a creature type with it. If you do, discard a card.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may draw a card for each other creature you control that shares a creature type with it. If you do, discard a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddType": "ChosenType",
+        "Description": "CARDNAME is the chosen type in addition to its other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

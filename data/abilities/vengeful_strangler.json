@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME dies, return it to the battlefield transformed under your control attached to target creature or planeswalker an opponent controls.",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChoose",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "CantBlock",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Description": "CARDNAME can't block."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigSac",
+            "Phase": "Upkeep",
+            "TriggerDescription": "At the beginning of your upkeep, enchanted permanent's controller sacrifices a nonland permanent and loses 1 life.",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

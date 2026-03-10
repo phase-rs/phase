@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice a Snake.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player skips their next untap step.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigSkipPhase"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

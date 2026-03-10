@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigFight",
+        "TriggerDescription": "When CARDNAME enters, you may have enchanted creature fight target creature an opponent controls. (Each deals damage equal to its power to the other.)",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "1",
+        "Description": "Enchanted creature gets +1/+1 and has trample.",
+        "AddPower": "1",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

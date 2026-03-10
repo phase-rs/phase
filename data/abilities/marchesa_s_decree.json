@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMonarch",
+        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidCard": "Creature.YouDontCtrl",
+        "Attacked": "You,Planeswalker.YouCtrl",
+        "TriggerDescription": "Whenever a creature attacks you or a planeswalker you control, that creature's controller loses 1 life.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

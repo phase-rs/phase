@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets -4/-4 for each card in your hand.",
+        "AddToughness": "-X",
+        "AddPower": "-X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

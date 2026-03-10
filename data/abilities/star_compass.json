@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ManaReflected",
+        "params": {
+          "SpellDescription": "Add one mana of any color a basic land you control could produce.",
+          "ReflectProperty": "Produce",
+          "ColorOrType": "Color",
+          "Valid": "Basic.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color a basic land you control could produce.",
+        "ReflectProperty": "Produce",
+        "ColorOrType": "Color",
+        "Valid": "Basic.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

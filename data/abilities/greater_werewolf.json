@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCounter",
+        "TriggerDescription": "At end of combat, put a -0/-2 counter on each creature blocking or blocked by CARDNAME.",
+        "Phase": "EndCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

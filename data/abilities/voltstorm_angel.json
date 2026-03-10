@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E} (three energy counters).",
+        "Execute": "TrigEnergy"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigImmediateTrig",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, you may pay {E}{E}. When you do, ABILITY",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

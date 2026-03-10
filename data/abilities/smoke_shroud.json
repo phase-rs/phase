@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When a Ninja you control enters, you may return CARDNAME from your graveyard to the battlefield attached to that creature.",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Graveyard",
+        "ValidCard": "Card.Ninja+YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Description": "Enchanted creature gets +1/+1 and has flying.",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

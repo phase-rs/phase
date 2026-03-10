@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Permanent",
+        "TriggerZones": "Battlefield",
+        "Origin": "Graveyard",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another permanent enters from a graveyard, draw a card.",
+        "Execute": "DBDraw"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "DBDraw",
+        "TriggerDescription": "Whenever a player casts a spell from a graveyard, draw a card.",
+        "ValidCard": "Card.wasCastFromGraveyard",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

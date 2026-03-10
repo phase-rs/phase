@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBProtect",
+        "Defined": "Self",
+        "KW": "Flying",
+        "SpellDescription": "CARDNAME gains flying and protection from green and from white until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, destroy that creature. It can't be regenerated.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Creature",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

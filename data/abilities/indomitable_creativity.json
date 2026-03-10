@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "X",
+        "Origin": "Battlefield",
+        "SpellDescription": "Destroy X target artifacts and/or creatures. For each permanent destroyed this way, its controller reveals cards from the top of their library until an artifact or creature card is revealed and exiles that card. Those players put the exiled cards onto the battlefield, then shuffle.",
+        "TargetMin": "X",
+        "SubAbility": "DBTransform",
+        "Destination": "Graveyard",
+        "TgtPrompt": "Select X target artifacts and/or creatures",
+        "RememberDestroyed": "True",
+        "StackDescription": "Destroy {c:Targeted}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

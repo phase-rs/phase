@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield",
+          "SpellDescription": "Add two mana of any one color. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+          "Amount": "2"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield",
+        "SpellDescription": "Add two mana of any one color. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+        "Amount": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

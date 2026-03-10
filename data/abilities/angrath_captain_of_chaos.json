@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Amass",
+        "params": {
+          "Type": "Zombie",
+          "Num": "2",
+          "Planeswalker": "True",
+          "SpellDescription": "Amass Zombies 2. (Put two +1/+1 counters on an Army you control. If you don't control one, create a 0/0 black Zombie Army creature token first.)"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Zombie",
+        "Num": "2",
+        "Planeswalker": "True",
+        "SpellDescription": "Amass Zombies 2. (Put two +1/+1 counters on an Army you control. If you don't control one, create a 0/0 black Zombie Army creature token first.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Menace",
+        "Description": "Creatures you control have menace."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

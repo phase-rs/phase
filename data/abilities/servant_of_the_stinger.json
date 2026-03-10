@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "CheckDefinedPlayer": "You.committedCrimeThisTurn",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, if you've committed a crime this turn, you may sacrifice CARDNAME. If you do, search your library for a card, put it into your hand, then shuffle. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)",
+        "Execute": "TrigSearch"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

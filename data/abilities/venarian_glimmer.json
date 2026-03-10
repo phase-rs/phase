@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Mode": "RevealYouChoose",
+        "DiscardValid": "Card.nonLand+cmcLEX",
+        "DiscardValidDesc": "nonland card with mana value X or less",
+        "SpellDescription": "Target player reveals their hand. You choose a nonland card with mana value X or less from it. That player discards that card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

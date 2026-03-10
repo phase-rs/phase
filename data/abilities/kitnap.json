@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigTap",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, tap enchanted creature. If the gift wasn't promised, put three stun counters on it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainControl": "You",
+        "Description": "You control enchanted creature.",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

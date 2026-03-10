@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "BecomesBlocked",
+        "params": {
+          "ValidTgts": "Creature.attacking+unblocked",
+          "TgtPrompt": "Select target unblocked attacking creature",
+          "ActivationPhases": "Declare Blockers->EndCombat",
+          "ActivationAfterBlockers": "True",
+          "SpellDescription": "Target unblocked attacking creature becomes blocked. Activate only during combat after blockers are declared. (This ability works on creatures that can't be blocked.)"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.attacking+unblocked",
+        "TgtPrompt": "Select target unblocked attacking creature",
+        "ActivationPhases": "Declare Blockers->EndCombat",
+        "ActivationAfterBlockers": "True",
+        "SpellDescription": "Target unblocked attacking creature becomes blocked. Activate only during combat after blockers are declared. (This ability works on creatures that can't be blocked.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

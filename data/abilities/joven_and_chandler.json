@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Opponent",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever this creature deals combat damage to an opponent, destroy target artifact that player controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

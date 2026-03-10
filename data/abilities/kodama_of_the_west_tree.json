@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a modified creature you control deals combat damage to an opponent, search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        "CombatDamage": "True",
+        "Execute": "TrigSearch",
+        "ValidTarget": "Opponent",
+        "ValidSource": "Creature.modified+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.modified+YouCtrl",
+        "Description": "Modified creatures you control have trample.",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

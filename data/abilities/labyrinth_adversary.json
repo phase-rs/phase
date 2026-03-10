@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "TrigImmediateTrig",
+        "AttackingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack, you may pay {1}{R}. When you do, target creature can't block this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

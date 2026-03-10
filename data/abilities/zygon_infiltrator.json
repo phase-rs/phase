@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Tap another target creature and put a stun counter on it. CARDNAME becomes a copy of that creature for as long as that creature remains tapped. Activate only as a sorcery. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+        "SubAbility": "DBCounter",
+        "SorcerySpeed": "True",
+        "TgtPrompt": "Select another target creature",
+        "PrecostDesc": "Body-print —"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

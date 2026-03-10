@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, you may collect evidence 4. (Exile cards with total mana value 4 or greater from your graveyard.)",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigEvidence"
+      }
+    },
+    {
+      "mode": "CollectEvidence",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigInvestigate",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you collect evidence, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

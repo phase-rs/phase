@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME enters, if you control a Desert or there is a Desert card in your graveyard, you gain 3 life.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Desert": "True",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't attack or block and its activated abilities can't be activated."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

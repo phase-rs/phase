@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When NICKNAME enters, return up to one target creature to its owner's hand.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigReturn"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigDraw",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

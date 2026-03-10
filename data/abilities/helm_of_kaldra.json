@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "kaldra",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionSVarCompare": "EQ3",
+        "SubAbility": "DBAttachEach",
+        "AILogic": "Never",
+        "ConditionCheckSVar": "AllThree",
+        "SpellDescription": "If you control Equipment named Helm of Kaldra, Sword of Kaldra, and Shield of Kaldra, create Kaldra, a legendary 4/4 colorless Avatar creature token. Attach those Equipment to it.",
+        "RememberTokens": "True",
+        "StackDescription": "{p:You} creates Kaldra, a legendary 4/4 colorless Avatar creature token."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has first strike, trample, and haste.",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "First Strike & Trample & Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

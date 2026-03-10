@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "G",
+            "params": {
+              "Amount": "X",
+              "SpellDescription": "Add {G} for each Dinosaur you control."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "X",
+            "SpellDescription": "Add {G} for each Dinosaur you control."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Escape:CardManaCost ExileFromGrave<3/Card.Other/other>",
+            "AffectedZone": "Graveyard",
+            "Description": "Each Dinosaur card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)",
+            "Affected": "Dinosaur.YouOwn"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

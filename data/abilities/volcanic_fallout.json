@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 2 damage to each creature and each player.",
+        "ValidCards": "Creature",
+        "ValidDescription": "each creature and each player.",
+        "ValidPlayers": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

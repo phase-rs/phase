@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "Players can't cast noncreature spells from graveyards or exile.",
+        "ValidCard": "Card.nonCreature",
+        "Origin": "Graveyard,Exile"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Graveyard",
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield",
+        "ValidLKI": "Permanent",
+        "Prevent": "True",
+        "Description": "Permanent cards in graveyards can't enter the battlefield."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Search your library for an artifact card with mana value 5 or less, put it onto the battlefield tapped, then shuffle.",
+        "ChangeNum": "1",
+        "ChangeType": "Artifact.cmcLE5",
+        "Tapped": "True",
+        "Shuffle": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "5"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Search your library for an artifact card with mana value 5 or less, put it onto the battlefield tapped, then shuffle.",
+        "ChangeType": "Artifact.cmcLE5",
+        "ChangeNum": "1",
+        "Shuffle": "True",
+        "Tapped": "True",
+        "ActivationZone": "Graveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

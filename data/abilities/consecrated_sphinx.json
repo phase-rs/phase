@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent draws a card, you may draw two cards.",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.OppOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

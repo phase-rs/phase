@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Affected": "Pirate.attacking+YouCtrl",
+        "Description": "Attacking Pirates you control get +2/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

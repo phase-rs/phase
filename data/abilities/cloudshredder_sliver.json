@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Sliver+YouCtrl",
+        "AddKeyword": "Flying & Haste",
+        "Description": "Sliver creatures you control have flying and haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

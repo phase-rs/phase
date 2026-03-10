@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature dies, exile it.",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+0.",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying & First Strike & Double Strike & Deathtouch & Haste & Hexproof & Indestructible & Lifelink & Menace & Protection & Reach & Trample & Vigilance",
+        "Affected": "Creature.EquippedBy",
+        "SharedRestrictions": "Card.ExiledWithSource",
+        "Description": "As long as a card exiled with CARDNAME has flying, equipped creature has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.",
+        "SharedKeywordsZone": "Exile"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

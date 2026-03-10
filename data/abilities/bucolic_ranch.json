@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "1",
+          "SpellDescription": "Add one mana of any color. Spend this mana only to cast a Mount spell.",
+          "RestrictValid": "Spell.Mount"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "SpellDescription": "Add one mana of any color. Spend this mana only to cast a Mount spell.",
+        "RestrictValid": "Spell.Mount"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "SpellDescription": "Look at the top card of your library. If it's a Mount card, you may reveal it and put it into your hand. If you don't put it into your hand, you may put it on the bottom of your library.",
+          "RevealOptional": "True",
+          "RememberRevealed": "True",
+          "PeekAmount": "1",
+          "AILogic": "AtOppEOT",
+          "RevealValid": "Card.Mount",
+          "SubAbility": "DBChangeZone"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at the top card of your library. If it's a Mount card, you may reveal it and put it into your hand. If you don't put it into your hand, you may put it on the bottom of your library.",
+        "RevealOptional": "True",
+        "RememberRevealed": "True",
+        "PeekAmount": "1",
+        "AILogic": "AtOppEOT",
+        "RevealValid": "Card.Mount",
+        "SubAbility": "DBChangeZone"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

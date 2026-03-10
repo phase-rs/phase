@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "CheckSVar": "X",
+            "SVarCompare": "GE8",
+            "Description": "CARDNAME gets +3/+0 as long as an opponent has eight or more cards in their graveyard.",
+            "AddPower": "3",
+            "Affected": "Card.Self"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "Description": "CARDNAME enters tapped.",
+            "ReplaceWith": "ETBTapped"
+          }
+        }
+      ]
+    }
+  ]
+}

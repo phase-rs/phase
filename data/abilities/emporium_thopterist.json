@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigConjure",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, conjure a card named Ornithopter into your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Affected": "Thopter.YouCtrl",
+        "Description": "Thopters you control get +2/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

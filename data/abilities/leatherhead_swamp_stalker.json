@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigImmediateTrig",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, you may remove a counter from her. When you do, destroy target artifact or enchantment that player controls.",
+        "ValidTarget": "Player",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigRollUpkeep",
+        "TriggerDescription": "At the beginning of your upkeep, roll a six-sided die and put a number of +1/+1 counters on CARDNAME equal to the result.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigRollEnd",
+        "TriggerDescription": "At the beginning of your end step, roll a six-sided die and remove a number of +1/+1 counters from CARDNAME equal to the result.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

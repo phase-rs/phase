@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of combat on your turn, up to one target land you control becomes an X/X Elemental creature with trample and haste until end of turn, where X is NICKNAME's power. It's still a land.",
+        "Execute": "TrigAnimate",
+        "Phase": "BeginCombat"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

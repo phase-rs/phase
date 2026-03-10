@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigTap",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, tap target artifact or creature an opponent controls and put a stun counter on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "CombatDamage": "True",
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or battle, draw a card.",
+            "ValidTarget": "Player,Battle",
+            "ValidSource": "Card.Self",
+            "Execute": "TrigDraw"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

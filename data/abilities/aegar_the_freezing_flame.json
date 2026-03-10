@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ExcessDamage",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature or planeswalker an opponent controls is dealt excess damage, if a Giant, Wizard, or spell you controlled dealt damage to it this turn, draw a card.",
+        "ValidTarget": "Creature.OppCtrl+DamagedByGiant.YouCtrl;Wizard.YouCtrl;Spell.YouCtrl,Planeswalker.OppCtrl+DamagedByGiant.YouCtrl;Wizard.YouCtrl;Spell.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

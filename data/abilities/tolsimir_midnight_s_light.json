@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create Voja Fenstalker, a legendary 5/5 green and white Wolf creature token with trample."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a Wolf you control attacks, if NICKNAME attacked this combat, target creature an opponent controls blocks that Wolf this combat if able.",
+        "NoResolvingCheck": "True",
+        "ValidCard": "Wolf.YouCtrl",
+        "IsPresent": "Card.Self+attackedThisCombat",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigForceBlock"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

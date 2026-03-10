@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.YouOwn",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you cycle a card, put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Historic+YouOwn",
+        "AffectedZone": "Hand",
+        "Description": "Each historic card in your hand has cycling {2}{W}. ({2}{W}, Discard that card: Draw a card.)",
+        "AddKeyword": "Cycling:2 W",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "PlayerTurn": "True",
+        "ActiveZones": "Battlefield",
+        "Prevent": "True",
+        "Description": "During your turn, prevent all damage that would be dealt to you.",
+        "ValidTarget": "You"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DmgMinus1",
+        "Description": "If a source would deal damage to another Dinosaur you control, prevent all but 1 of that damage.",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Permanent.Dinosaur+YouCtrl+Other",
+        "PreventionEffect": "True"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "Execute": "TrigPutCounter",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, you may put a charge counter on CARDNAME. If you do, CARDNAME deals damage equal to the number of charge counters on it to any target.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

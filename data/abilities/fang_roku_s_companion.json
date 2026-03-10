@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever NICKNAME attacks, another target legendary creature you control gets +X/+0 until end of turn, where X is NICKNAME's power.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBReturn",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When NICKNAME dies, if he wasn't a Spirit, return this card to the battlefield under your control. He's a Spirit in addition to his other types.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self+nonSpirit"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

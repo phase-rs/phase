@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 2,
+            "toughness": 0,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "SpellDescription": "CARDNAME gets +2/+0 until end of turn."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "AbilityCast",
+          "params": {
+            "ValidSA": "SpellAbility.!ManaAbility",
+            "ValidActivatingPlayer": "Opponent",
+            "Execute": "TrigDmg",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever an opponent activates an ability that isn't a mana ability, CARDNAME deals 1 damage to that player."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "StaticAbilities": "STCantBeCast,STCantBeActivated",
+              "AILogic": "BeginningOfOppTurn",
+              "SubAbility": "DBChange",
+              "StackDescription": "SpellDescription",
+              "SpellDescription": "Your opponents can't cast spells or activate planeswalkers' loyalty abilities this turn. Exile CARDNAME."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "StaticAbilities": "STCantBeCast,STCantBeActivated",
+            "AILogic": "BeginningOfOppTurn",
+            "SubAbility": "DBChange",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Your opponents can't cast spells or activate planeswalkers' loyalty abilities this turn. Exile CARDNAME."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

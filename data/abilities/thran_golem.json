@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddKeyword": "Flying & First Strike & Trample",
+        "Description": "As long as CARDNAME is enchanted, it gets +2/+2 and has flying, first strike, and trample.",
+        "AddPower": "2",
+        "Affected": "Card.Self+enchanted"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "SubAbility": "DBPumpAll",
+          "AILogic": "MostProminentOppControls",
+          "Type": "Creature",
+          "SpellDescription": "Creatures of the creature type of your choice get -3/-3 until end of turn.",
+          "Defined": "You"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPumpAll",
+        "AILogic": "MostProminentOppControls",
+        "Type": "Creature",
+        "SpellDescription": "Creatures of the creature type of your choice get -3/-3 until end of turn.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

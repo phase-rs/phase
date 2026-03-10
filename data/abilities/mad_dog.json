@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if CARDNAME didn't attack or come under your control this turn, sacrifice it.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSacrifice"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

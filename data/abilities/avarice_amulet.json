@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Destination": "Graveyard",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "When equipped creature dies, target opponent gains control of CARDNAME.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+0 and has vigilance and \"At the beginning of your upkeep, draw a card.\"",
+        "AddPower": "2",
+        "AddKeyword": "Vigilance",
+        "AddTrigger": "AvariceUpkeepTrig",
+        "Affected": "Creature.EquippedBy",
+        "AddSVar": "AvariceUpkeepSVar"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

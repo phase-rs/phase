@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "-X",
+        "Description": "Enchanted creature gets -X/-0, where X is the number of cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

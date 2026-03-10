@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "PreventionEffect": "True",
+        "AlwaysReplace": "True",
+        "ValidTarget": "Card.Self+counters_GE1_P1P1",
+        "Description": "If damage would be dealt to CARDNAME while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from CARDNAME.",
+        "ReplaceWith": "DBRemoveCounters",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

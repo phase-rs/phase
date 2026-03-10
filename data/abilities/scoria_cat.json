@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "PresentCompare": "EQ0",
+        "Description": "CARDNAME gets +3/+3 as long as you control no untapped lands.",
+        "Affected": "Card.Self",
+        "AddPower": "3",
+        "AddToughness": "3",
+        "IsPresent": "Land.YouCtrl+untapped"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

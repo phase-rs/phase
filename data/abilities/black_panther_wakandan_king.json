@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select target land you control",
+        "SubAbility": "DBMove",
+        "PrecostDesc": "Mine Vibranium —",
+        "SpellDescription": "Move all +1/+1 counters from target land you control onto target creature. If one or more +1/+1 counters are moved this way, you gain that much life and draw a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Survey the Realm — Whenever NICKNAME or another creature you control enters, put a +1/+1 counter on target land you control.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self,Creature.YouCtrl+Other",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

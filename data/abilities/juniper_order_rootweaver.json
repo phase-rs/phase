@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigCounter",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, put a +1/+1 counter on target creature you control.",
+        "ValidCard": "Card.Self+kicked",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

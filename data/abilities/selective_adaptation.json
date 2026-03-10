@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigMultiple",
+        "params": {
+          "DestinationZone2": "Graveyard",
+          "SpellDescription": "Reveal the top seven cards of your library. Choose from among them a card with flying, a card with first strike, and so on for double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Put one of the chosen cards onto the battlefield, the other chosen cards into your hand, and the rest into your graveyard.",
+          "ChooseAmount": "1",
+          "StackDescription": "SpellDescription",
+          "ChosenZone": "Battlefield",
+          "Reveal": "True",
+          "ChangeValid": "Card.withFlying,Card.withFirst Strike,Card.withDeathtouch,Card.withHaste,Card.withHexproof,Card.withIndestructible,Card.withLifelink,Card.withMenace,Card.withReach,Card.withTrample,Card.withVigilance",
+          "DestinationZone": "Hand",
+          "DigNum": "7",
+          "SourceZone": "Library"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DestinationZone2": "Graveyard",
+        "SpellDescription": "Reveal the top seven cards of your library. Choose from among them a card with flying, a card with first strike, and so on for double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Put one of the chosen cards onto the battlefield, the other chosen cards into your hand, and the rest into your graveyard.",
+        "ChooseAmount": "1",
+        "StackDescription": "SpellDescription",
+        "ChosenZone": "Battlefield",
+        "Reveal": "True",
+        "ChangeValid": "Card.withFlying,Card.withFirst Strike,Card.withDeathtouch,Card.withHaste,Card.withHexproof,Card.withIndestructible,Card.withLifelink,Card.withMenace,Card.withReach,Card.withTrample,Card.withVigilance",
+        "DestinationZone": "Hand",
+        "DigNum": "7",
+        "SourceZone": "Library"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

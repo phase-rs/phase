@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 5
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "SubAbility": "DBGainLife",
+        "UnlessPayer": "Targeted",
+        "SpellDescription": "Unless target player pays {3}, that player loses 5 life and you gain 5 life.",
+        "UnlessCost": "3",
+        "UnlessResolveSubs": "WhenNotPaid"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

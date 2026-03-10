@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, that player discards a card.",
+        "ValidSource": "Creature.EquippedBy",
+        "CombatDamage": "True",
+        "Execute": "TrigDiscard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

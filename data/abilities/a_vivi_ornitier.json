@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo U R",
+        "params": {
+          "SpellDescription": "Add X mana in any combination of {U} and/or {R}, where X is CARDNAME's power.",
+          "Amount": "X"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add X mana in any combination of {U} and/or {R}, where X is CARDNAME's power.",
+        "Amount": "X"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a noncreature spell, put a +1/+1 counter on CARDNAME and it deals 1 damage to each opponent.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

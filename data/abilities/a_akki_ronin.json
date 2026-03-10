@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "Alone": "True",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl",
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, you may put a card from your hand on the bottom of your library. If you do, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

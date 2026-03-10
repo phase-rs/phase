@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Creatures target player controls don't untap during that player's next untap step.",
+          "Triggers": "RemoveEffect",
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Player",
+          "StaticAbilities": "DontUntap",
+          "Duration": "Permanent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures target player controls don't untap during that player's next untap step.",
+        "Triggers": "RemoveEffect",
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Player",
+        "StaticAbilities": "DontUntap",
+        "Duration": "Permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
+              "SorcerySpeed": "True",
+              "AILogic": "Always",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 BP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
+            "SorcerySpeed": "True",
+            "AILogic": "Always",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME dies, each opponent sacrifices an artifact or creature.",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigSac",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

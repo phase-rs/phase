@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsSingleTarget": "True",
+        "Execute": "TrigCopyTarget",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a player casts a spell that targets only a single creature other than CARDNAME, you may copy that spell. The copy targets NICKNAME. (A copy of an Aura spell becomes a token.)",
+        "TargetsValid": "Creature.Other+inZoneBattlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

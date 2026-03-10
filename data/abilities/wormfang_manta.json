@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigSkip",
+        "TriggerDescription": "When CARDNAME enters, you skip your next turn.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAdd",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, you take an extra turn after this one."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

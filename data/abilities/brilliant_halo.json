@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, return CARDNAME to its owner's hand.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +1/+2.",
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

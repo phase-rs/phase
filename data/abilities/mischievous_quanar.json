@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetState",
+        "params": {
+          "Defined": "Self",
+          "Mode": "TurnFaceDown",
+          "SpellDescription": "Turn CARDNAME face down."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "Mode": "TurnFaceDown",
+        "SpellDescription": "Turn CARDNAME face down."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigCopy",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, copy target instant or sorcery spell. You may choose new targets for that copy."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

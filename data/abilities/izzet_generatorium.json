@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SVarCompare": "GE4",
+        "SpellDescription": "Draw a card. Activate only if you've paid or lost four or more {E} this turn.",
+        "CheckSVar": "Count$CountersRemovedThisTurn ENERGY You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ValidCounterType": "ENERGY",
+        "Description": "If you would get one or more {E} (energy counters), you get that many plus one {E} instead.",
+        "ReplaceWith": "OneMore",
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "ENERGY",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "You get {E}.",
+        "AILogic": "AtOppEOT"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you get one or more {E} (energy counters), put a +1/+1 counter on target creature you control.",
+        "CounterType": "ENERGY",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

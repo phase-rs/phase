@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, attach it to target creature you control. That creature deals damage equal to its power to up to one target creature you don't control.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigAttach",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Reach & Ward:2",
+        "Description": "Equipped creature has reach and ward {2}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

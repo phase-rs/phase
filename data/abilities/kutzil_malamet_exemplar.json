@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever one or more creatures you control each with power greater than its base power deals combat damage to a player, draw a card.",
+        "ValidSource": "Creature.YouCtrl+powerGTbasePower"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Caster": "Opponent",
+        "Description": "Your opponents can't cast spells during your turn.",
+        "ValidCard": "Card",
+        "Condition": "PlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

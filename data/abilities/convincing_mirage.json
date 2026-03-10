@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land is the chosen type.",
+        "Affected": "Card.EnchantedBy",
+        "AddType": "ChosenType",
+        "RemoveLandTypes": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "TrueSubAbility": "Blink",
+          "FalseSubAbility": "Return",
+          "BranchConditionSVar": "HasUnearth",
+          "ValidTgts": "Permanent.YouCtrl",
+          "TgtPrompt": "Select target permanent you control",
+          "PlayerTurn": "True",
+          "SpellDescription": "Return target permanent you control to its owner's hand. If it has unearth, instead exile it, then return that card to its owner's hand. Activate only during your turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TrueSubAbility": "Blink",
+        "FalseSubAbility": "Return",
+        "BranchConditionSVar": "HasUnearth",
+        "ValidTgts": "Permanent.YouCtrl",
+        "TgtPrompt": "Select target permanent you control",
+        "PlayerTurn": "True",
+        "SpellDescription": "Return target permanent you control to its owner's hand. If it has unearth, instead exile it, then return that card to its owner's hand. Activate only during your turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

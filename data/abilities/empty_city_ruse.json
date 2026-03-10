@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "SkipPhase",
+        "params": {
+          "Duration": "UntilTheEndOfTargetedNextTurn",
+          "SpellDescription": "Target opponent skips all combat phases of their next turn.",
+          "Start": "FromNext",
+          "ValidTgts": "Opponent",
+          "Phase": "BeginCombat"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "UntilTheEndOfTargetedNextTurn",
+        "SpellDescription": "Target opponent skips all combat phases of their next turn.",
+        "Start": "FromNext",
+        "ValidTgts": "Opponent",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

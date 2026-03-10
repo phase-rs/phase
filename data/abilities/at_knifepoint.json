@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CommitCrime",
+      "params": {
+        "TriggerDescription": "Whenever you commit a crime, create a 1/1 red Mercenary creature token with \"{T}: Target creature you control gets +1/+0 until end of turn. Activate only as a sorcery.\" This ability triggers only once each turn.",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "During your turn, outlaws you control have first strike. (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws.)",
+        "Affected": "Creature.Outlaw+YouCtrl",
+        "AddKeyword": "First Strike",
+        "Condition": "PlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

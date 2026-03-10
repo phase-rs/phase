@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature",
+          "ExileOnMoved": "Graveyard",
+          "SpellDescription": "You may cast target creature card in a graveyard this turn. When you cast it this turn, CARDNAME gains all activated abilities of that card until end of turn.",
+          "TgtZone": "Graveyard",
+          "Triggers": "DTCast",
+          "TgtPrompt": "Select target creature card",
+          "StaticAbilities": "STPlay",
+          "RememberObjects": "Targeted",
+          "Name": "Havengul Lich's Delayed Trigger"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "ExileOnMoved": "Graveyard",
+        "SpellDescription": "You may cast target creature card in a graveyard this turn. When you cast it this turn, CARDNAME gains all activated abilities of that card until end of turn.",
+        "TgtZone": "Graveyard",
+        "Triggers": "DTCast",
+        "TgtPrompt": "Select target creature card",
+        "StaticAbilities": "STPlay",
+        "RememberObjects": "Targeted",
+        "Name": "Havengul Lich's Delayed Trigger"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

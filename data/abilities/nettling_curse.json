@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "IsCurse": "True",
+          "SpellDescription": "Enchanted creature attacks this turn if able.",
+          "StaticAbilities": "MustAttack",
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Enchanted"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "SpellDescription": "Enchanted creature attacks this turn if able.",
+        "StaticAbilities": "MustAttack",
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Enchanted"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLifeAttack"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever enchanted creature attacks or blocks, its controller loses 3 life.",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLifeBlock"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

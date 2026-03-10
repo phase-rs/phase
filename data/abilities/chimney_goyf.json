@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME dies, target opponent puts a card from their hand on top of their library.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "SetToughness": "Y",
+        "Description": "CARDNAME's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

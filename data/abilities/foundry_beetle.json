@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, a random artifact card in your hand perpetually gains \"This spell costs {1} less to cast.\"",
+        "Execute": "TrigRandom",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "First Strike",
+        "Description": "Equipped creature has first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "SpellDescription": "CARDNAME deals 4 damage to each creature.",
+        "ValidDescription": "each creature."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamageAll",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you cycle CARDNAME, you may have it deal 1 damage to each creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

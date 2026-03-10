@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBTop",
+        "SpellDescription": "Draw a card, then put a card from your hand on top of your library."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.Other+YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBReturn",
+        "SpellDescription": "Exile another target permanent you own, then return it to the battlefield under your control.",
+        "Planeswalker": "True",
+        "RememberTargets": "True",
+        "TgtPrompt": "Select another target permanent you own"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseDirection",
+        "params": {
+          "Ultimate": "True",
+          "SubAbility": "DBControl",
+          "AILogic": "Aminatou",
+          "SpellDescription": "Choose left or right. Each player gains control of all nonland permanents other than CARDNAME controlled by the next player in the chosen direction.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "SubAbility": "DBControl",
+        "AILogic": "Aminatou",
+        "SpellDescription": "Choose left or right. Each player gains control of all nonland permanents other than CARDNAME controlled by the next player in the chosen direction.",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

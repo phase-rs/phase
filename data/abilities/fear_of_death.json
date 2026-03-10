@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, mill two cards.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets -X/-0, where X is the number of cards in your graveyard.",
+        "AddPower": "-X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

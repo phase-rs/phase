@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Draft",
+        "params": {
+          "SpellDescription": "Draft a card from CARDNAME's spellbook.",
+          "Spellbook": "Twin-Silk Spider,Drider,Brood Weaver,Glowstone Recluse,Gnottvold Recluse,Hatchery Spider,Mammoth Spider,Netcaster Spider,Sentinel Spider,Snarespinner,Sporecap Spider,Spidery Grasp,Spider Spawning,Prey Upon,Arachnoform"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 BG"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<2/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draft a card from CARDNAME's spellbook.",
+        "Spellbook": "Twin-Silk Spider,Drider,Brood Weaver,Glowstone Recluse,Gnottvold Recluse,Hatchery Spider,Mammoth Spider,Netcaster Spider,Sentinel Spider,Snarespinner,Sporecap Spider,Spidery Grasp,Spider Spawning,Prey Upon,Arachnoform"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Creature.Spider+Other+YouCtrl",
+        "Description": "Other Spiders you control get +1/+2.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

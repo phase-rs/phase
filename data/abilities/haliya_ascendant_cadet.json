@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, put a +1/+1 counter on target creature you control.",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, put a +1/+1 counter on target creature you control.",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl+counters_GE1_P1P1",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever one or more creatures you control with +1/+1 counters on them deal combat damage to a player, draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Pump",
+            "power": 0,
+            "toughness": 0,
+            "target": {
+              "type": "Filtered",
+              "filter": "Card"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBDmg",
+            "SpellDescription": "CARDNAME deals damage to target spell's controller equal to that spell's mana value.",
+            "TargetType": "Spell",
+            "PumpZone": "Stack",
+            "TgtZone": "Stack",
+            "TgtPrompt": "Select target spell",
+            "StackDescription": "None"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "CopySpellAbility",
+            "params": {
+              "MayChooseTarget": "True",
+              "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+              "ValidTgts": "Instant,Sorcery",
+              "TargetType": "Spell"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "MayChooseTarget": "True",
+            "SpellDescription": "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+            "ValidTgts": "Instant,Sorcery",
+            "TargetType": "Spell"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

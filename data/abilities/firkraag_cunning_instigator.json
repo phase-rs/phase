@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "ValidAttackers": "Dragon.YouCtrl",
+        "AttackedTarget": "Opponent",
+        "Execute": "TrigGoad",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more Dragons you control attack an opponent, goad target creature that player controls."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature deals combat damage to one of your opponents, if that creature had to attack this combat, you put a +1/+1 counter on CARDNAME and you draw a card.",
+        "ValidSource": "Creature.hadToAttackThisCombat",
+        "ValidTarget": "Opponent",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

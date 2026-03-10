@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Player",
+          "StaticAbilities": "STCantPlayLand",
+          "AILogic": "BeginningOfOppTurn",
+          "SpellDescription": "Target player can't play lands this turn.",
+          "RememberObjects": "Targeted",
+          "SubAbility": "DBDraw"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "StaticAbilities": "STCantPlayLand",
+        "AILogic": "BeginningOfOppTurn",
+        "SpellDescription": "Target player can't play lands this turn.",
+        "RememberObjects": "Targeted",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

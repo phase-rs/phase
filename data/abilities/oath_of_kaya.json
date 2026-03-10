@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "When CARDNAME enters, it deals 3 damage to any target and you gain 3 life."
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackedTarget": "Planeswalker.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever an opponent attacks a planeswalker you control with one or more creatures, CARDNAME deals 2 damage to that player and you gain 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "ActivatorThisTurnCast": "EQ2",
+        "TriggerDescription": "Whenever you cast your second spell each turn, put a +1/+1 counter on CARDNAME. It can't be blocked this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

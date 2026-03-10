@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "FalseSubAbility": "DBPump",
+          "BranchConditionSVarCompare": "GE1",
+          "SpellDescription": "CARDNAME gets +1/+1 until end of turn. If mana from a Treasure was spent to activate this ability, put a +1/+1 counter on CARDNAME instead.",
+          "BranchConditionSVar": "TreasureCheck",
+          "TrueSubAbility": "DBPutCounter"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "FalseSubAbility": "DBPump",
+        "BranchConditionSVarCompare": "GE1",
+        "SpellDescription": "CARDNAME gets +1/+1 until end of turn. If mana from a Treasure was spent to activate this ability, put a +1/+1 counter on CARDNAME instead.",
+        "BranchConditionSVar": "TreasureCheck",
+        "TrueSubAbility": "DBPutCounter"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

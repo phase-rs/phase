@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "BranchConditionSVarCompare": "GE1",
+          "FalseSubAbility": "NormalTokens",
+          "TrueSubAbility": "AttackingTokens",
+          "SpellDescription": "Create three 1/1 white Ninja Turtle Spirit creature tokens. If this spell's sneak cost was paid, they enter tapped and attacking.",
+          "BranchConditionSVar": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "BranchConditionSVarCompare": "GE1",
+        "FalseSubAbility": "NormalTokens",
+        "TrueSubAbility": "AttackingTokens",
+        "SpellDescription": "Create three 1/1 white Ninja Turtle Spirit creature tokens. If this spell's sneak cost was paid, they enter tapped and attacking.",
+        "BranchConditionSVar": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

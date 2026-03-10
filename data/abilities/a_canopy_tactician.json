@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "Amount": "3",
+          "SpellDescription": "Add {G}{G}{G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "3",
+        "SpellDescription": "Add {G}{G}{G}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Elf.Other+YouCtrl",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Other Elves you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

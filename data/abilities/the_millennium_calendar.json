@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "MultiplyCounter",
+        "counter_type": "TIME",
+        "multiplier": 2,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Double the number of time counters on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "UntapAll",
+      "params": {
+        "Phase": "Untap",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you untap one or more permanents during your untap step, put that many time counters on CARDNAME.",
+        "PlayerTurn": "True",
+        "ValidCards": "Permanent"
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When there are 1,000 or more time counters on CARDNAME, sacrifice it and each opponent loses 1,000 life.",
+        "IsPresent": "Card.Self+counters_GE1000_TIME"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

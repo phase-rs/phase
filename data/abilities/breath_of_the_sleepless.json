@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a creature spell during an opponent's turn, tap up to one target creature.",
+        "Execute": "TrigTap",
+        "ValidCard": "Creature",
+        "OpponentTurn": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "EffectZone": "Battlefield",
+        "ValidCard": "Spirit",
+        "Caster": "You",
+        "Description": "You may cast Spirit spells as though they had flash.",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

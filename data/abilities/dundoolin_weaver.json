@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "IsPresent": "Creature.YouCtrl",
+        "Origin": "Any",
+        "PresentCompare": "GE3",
+        "TriggerDescription": "When this creature enters, if you control three or more creatures, return target permanent card from your graveyard to your hand.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

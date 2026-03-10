@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose two target creatures",
+        "TargetMin": "2",
+        "SpellDescription": "Return two target creatures to their owners' hands.",
+        "TargetMax": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "U",
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "CheckSVar": "CreaturesEntered",
+        "Description": "If an opponent had two or more creatures enter the battlefield under their control this turn, you may pay {U} rather than pay this spell's mana cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

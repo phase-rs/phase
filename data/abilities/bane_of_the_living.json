@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpAll",
+        "TriggerDescription": "When CARDNAME is turned face up, all creatures get -X/-X until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

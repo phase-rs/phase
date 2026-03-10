@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever one or more Faeries you control deal combat damage to a player, put a +1/+1 counter on CARDNAME.",
+        "ValidSource": "Faerie.YouCtrl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME dies, each opponent loses X life and you gain X life, where X is its power.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLose",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

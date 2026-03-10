@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create two 3/3 colorless Phyrexian Golem artifact creature tokens.",
+        "Origin": "Any",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Description": "Golem creatures you control have trample.",
+        "Affected": "Creature.Golem+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

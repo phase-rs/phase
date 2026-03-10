@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When CARDNAME enters, conjure a card named Lightning Bolt into your library. It perpetually gains storm. Then shuffle.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, draw a card.",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

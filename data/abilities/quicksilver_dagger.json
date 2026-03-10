@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has \"{T}: This creature deals 1 damage to target player or planeswalker. You draw a card.\"",
+        "AddAbility": "Damage",
+        "Affected": "Creature.EnchantedBy",
+        "AddSVar": "QuicksilverDraw"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

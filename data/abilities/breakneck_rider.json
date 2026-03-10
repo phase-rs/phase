@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "WerewolfTransformCondition": "True",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "Phase": "Upkeep",
+            "WerewolfUntransformCondition": "True",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Trample",
+            "AddPower": "1",
+            "Affected": "Creature.YouCtrl+attacking",
+            "Description": "Attacking creatures you control get +1/+0 and have trample."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

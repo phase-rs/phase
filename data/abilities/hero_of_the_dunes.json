@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME enters, return target artifact or creature card with mana value 3 or less from your graveyard to the battlefield.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.cmcLE3+YouCtrl",
+        "AddPower": "1",
+        "Description": "Creatures you control with mana value 3 or less get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

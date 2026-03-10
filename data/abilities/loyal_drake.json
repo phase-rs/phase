@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Lieutenant — At the beginning of combat on your turn, if you control your commander, draw a card.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

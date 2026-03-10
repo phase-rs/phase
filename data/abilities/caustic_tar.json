@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.AttachedBy",
+        "AddAbility": "LoseLife",
+        "Description": "Enchanted land has \"{T}: Target player loses 3 life.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

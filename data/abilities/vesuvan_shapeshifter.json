@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "TurnFaceUp",
+      "params": {
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "DBCopy",
+        "Optional": "True",
+        "Secondary": "True",
+        "ActiveZones": "Battlefield",
+        "Description": "As CARDNAME is turned face up, you may choose another creature on the battlefield. If you do, until CARDNAME is turned face down, it becomes a copy of that creature, except it has \"At the beginning of your upkeep, you may turn this creature face down.\"",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

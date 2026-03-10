@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "• NCR — At the beginning of your end step, return target creature card with mana value 3 or less from your graveyard to the battlefield with a finality counter on it.",
+        "Affected": "Card.Self+ChosenModeNCR",
+        "AddTrigger": "NCRTrigger"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "LegionTrigger",
+        "Affected": "Card.Self+ChosenModeLegion",
+        "Description": "• Legion — Whenever a creature you control dies, put two +1/+1 counters on target creature you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

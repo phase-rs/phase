@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigAnimate",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, target creature you control or creature card in your graveyard perpetually gains \"Whenever a creature you control with greater mana value than this card dies, return this card from your graveyard to the battlefield tapped.\""
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

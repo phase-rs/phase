@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PumpAll",
+        "power": -3,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.attacking",
+        "SpellDescription": "Attacking creatures get -3/-0 until end of turn.",
+        "IsCurse": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "IsPresent": "Creature.attacking",
+        "Cost": "U",
+        "PresentCompare": "GE3",
+        "Description": "If three or more creatures are attacking, you may pay {U} rather than pay this spell's mana cost.",
+        "ValidSA": "Spell.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

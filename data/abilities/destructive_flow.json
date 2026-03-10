@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigSac",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player sacrifices a nonbasic land.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

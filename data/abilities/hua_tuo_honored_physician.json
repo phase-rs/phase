@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put target creature card from your graveyard on top of your library. Activate only during your turn, before attackers are declared.",
+        "TgtPrompt": "Choose target creature card in your graveyard",
+        "PlayerTurn": "True",
+        "ActivationPhases": "Upkeep->BeginCombat",
+        "ActivationFirstCombat": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

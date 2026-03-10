@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "StackDescription": "REP your_{p:You}'s",
+          "SpellDescription": "Creatures and planeswalkers your opponents control perpetually gain \"If this permanent would die, exile it instead.\"",
+          "Replacements": "BrittleExile",
+          "ValidCards": "Creature.OppCtrl,Planeswalker.OppCtrl",
+          "Duration": "Perpetual",
+          "SubAbility": "DBDamage"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "REP your_{p:You}'s",
+        "SpellDescription": "Creatures and planeswalkers your opponents control perpetually gain \"If this permanent would die, exile it instead.\"",
+        "Replacements": "BrittleExile",
+        "ValidCards": "Creature.OppCtrl,Planeswalker.OppCtrl",
+        "Duration": "Perpetual",
+        "SubAbility": "DBDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

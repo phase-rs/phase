@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Lieutenant — As long as you control your commander, CARDNAME gets +2/+2 and has \"Whenever CARDNAME becomes blocked, you may draw two cards.\"",
+        "AddPower": "2",
+        "Affected": "Card.Self",
+        "AddSVar": "StormsurgeKrakenDraw",
+        "AddToughness": "2",
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
+        "AddTrigger": "TrigBlocked"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Each player reveals their hand, chooses one card of each color from it, then discards all other nonland cards.",
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "DBReveal"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Each player reveals their hand, chooses one card of each color from it, then discards all other nonland cards.",
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "DBReveal"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

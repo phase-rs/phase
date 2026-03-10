@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Type": "Card",
+          "ValidTypes": "Creature,Land",
+          "StackDescription": "SpellDescription",
+          "SubAbility": "DBDig",
+          "SpellDescription": "Choose creature or land."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Card",
+        "ValidTypes": "Creature,Land",
+        "StackDescription": "SpellDescription",
+        "SubAbility": "DBDig",
+        "SpellDescription": "Choose creature or land."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

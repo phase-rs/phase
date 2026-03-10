@@ -1,0 +1,97 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "DBCantAttackBlock",
+          "RememberObjects": "Targeted",
+          "Planeswalker": "True",
+          "IsCurse": "True",
+          "StackDescription": "{c:Targeted} can't attack or block until your next turn.",
+          "SpellDescription": "Up to one target creature can't attack or block until your next turn.",
+          "TargetMax": "1",
+          "TargetMin": "0",
+          "Duration": "UntilYourNextTurn",
+          "TgtPrompt": "Select up to one target creature",
+          "ForgetOnMoved": "Battlefield",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "DBCantAttackBlock",
+        "RememberObjects": "Targeted",
+        "Planeswalker": "True",
+        "IsCurse": "True",
+        "StackDescription": "{c:Targeted} can't attack or block until your next turn.",
+        "SpellDescription": "Up to one target creature can't attack or block until your next turn.",
+        "TargetMax": "1",
+        "TargetMin": "0",
+        "Duration": "UntilYourNextTurn",
+        "TgtPrompt": "Select up to one target creature",
+        "ForgetOnMoved": "Battlefield",
+        "ValidTgts": "Creature"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Draw a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_2_2_a_drone_deathtouch_leavedrain",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 2/2 colorless Drone artifact creature token with deathtouch and \"When this creature leaves the battlefield, each opponent loses 2 life and you gain 2 life.\""
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, you may return one of them to its owner's hand. If you do, you may activate loyalty abilities of NICKNAME twice this turn rather than only once.",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.YouCtrl",
+        "CombatDamage": "True",
+        "Execute": "TrigLoyalty"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

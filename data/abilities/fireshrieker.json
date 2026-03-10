@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has double strike.",
+        "AddKeyword": "Double Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

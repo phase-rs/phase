@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAnimate",
+        "ValidCard": "Card",
+        "IsPresent": "Card.Self+Enchantment",
+        "TriggerDescription": "When an opponent casts a spell, if CARDNAME is an enchantment, CARDNAME becomes an Illusion creature with power and toughness each equal to that spell's mana value.",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

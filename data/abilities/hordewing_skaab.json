@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageAll",
+      "params": {
+        "ValidTarget": "Opponent",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever one or more Zombies you control deal combat damage to one or more of your opponents, you may draw cards equal to the number of opponents dealt damage this way. If you do, discard that many cards.",
+        "ValidSource": "Creature.Zombie+YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Zombie.YouCtrl+Other",
+        "Description": "Other Zombies you control have flying.",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_1_1_skeleton_opp_life",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "Targeted",
+        "Planeswalker": "True",
+        "ValidTgts": "Opponent",
+        "SpellDescription": "Target opponent creates a 1/1 black Skeleton creature token with \"When this creature dies, each opponent gains 2 life.\""
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "Planeswalker": "True",
+          "ResultSubAbilities": "1:DBSkipTurn,12-20:DBDraw",
+          "SpellDescription": "Roll a d20. If you roll a 1, skip your next turn. If you roll a 12 or higher, draw a card.",
+          "Sides": "20"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ResultSubAbilities": "1:DBSkipTurn,12-20:DBDraw",
+        "SpellDescription": "Roll a d20. If you roll a 1, skip your next turn. If you roll a 12 or higher, draw a card.",
+        "Sides": "20"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "r_3_3_fighter_first_strike",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "SubAbility": "DBCleric",
+        "SpellDescription": "You get an adventuring party. (Your party is a 3/3 red Fighter with first strike, a 1/1 white Cleric with lifelink, a 2/2 black Rogue with hexproof, and a 1/1 blue Wizard with flying.)",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

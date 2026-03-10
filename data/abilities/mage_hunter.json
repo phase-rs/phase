@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDrain",
+        "TriggerDescription": "Whenever an opponent casts or copies an instant or sorcery spell, they lose 1 life.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    },
+    {
+      "mode": "SpellCopy",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever an opponent casts or copies an instant or sorcery spell, they lose 1 life.",
+        "ValidActivatingPlayer": "Opponent",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDrain"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

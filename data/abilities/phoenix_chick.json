@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack with three or more creatures, you may pay {R}{R}. If you do, return CARDNAME from your graveyard to the battlefield tapped and attacking with a +1/+1 counter on it.",
+        "ValidAttackers": "Creature",
+        "ValidAttackersAmount": "GE3",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

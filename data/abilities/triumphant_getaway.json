@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, heist target opponent's library twice.",
+        "Execute": "TrigHeist",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.YouDontOwn",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell you don't own, each opponent loses 2 life and you gain 2 life.",
+        "Execute": "TrigDrain",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

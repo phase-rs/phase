@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Panharmonicon",
+          "params": {
+            "ValidCause": "Permanent",
+            "ValidCard": "Permanent.YouCtrl",
+            "ValidMode": "ChangesZone,ChangesZoneAll",
+            "Destination": "Battlefield",
+            "Description": "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "CopySpellAbility",
+            "params": {
+              "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+              "MayChooseTarget": "True",
+              "ValidTgts": "Card,Emblem",
+              "AILogic": "AlwaysCopyActivatedAbilities",
+              "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+            "MayChooseTarget": "True",
+            "ValidTgts": "Card,Emblem",
+            "AILogic": "AlwaysCopyActivatedAbilities",
+            "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

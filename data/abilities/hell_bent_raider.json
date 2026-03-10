@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "Gains": "white",
+          "SpellDescription": "CARDNAME gains protection from white until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Random>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Gains": "white",
+        "SpellDescription": "CARDNAME gains protection from white until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

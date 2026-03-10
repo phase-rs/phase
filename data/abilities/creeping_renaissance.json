@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "InvalidTypes": "Instant,Sorcery,Kindred",
+          "Type": "Card",
+          "SubAbility": "DBReturn",
+          "Defined": "You",
+          "SpellDescription": "Choose a permanent type. Return all cards of the chosen type from your graveyard to your hand."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "InvalidTypes": "Instant,Sorcery,Kindred",
+        "Type": "Card",
+        "SubAbility": "DBReturn",
+        "Defined": "You",
+        "SpellDescription": "Choose a permanent type. Return all cards of the chosen type from your graveyard to your hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

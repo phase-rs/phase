@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveCreatureTypes": "True",
+        "AddType": "Flagbearer",
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted creature is a Flagbearer."
+      }
+    },
+    {
+      "mode": {
+        "Other": "MustTarget"
+      },
+      "params": {
+        "ValidTarget": "Flagbearer",
+        "ValidSA": "Spell.OppCtrl,Activated.OppCtrl",
+        "ValidZone": "Battlefield",
+        "Description": "While an opponent is choosing targets as part of casting a spell they control or activating an ability they control, that player must choose at least one Flagbearer on the battlefield if able."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

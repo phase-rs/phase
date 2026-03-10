@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigBounce",
+        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, return that card to the battlefield under your control.",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.DamagedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

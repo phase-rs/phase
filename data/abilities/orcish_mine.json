@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigRemoveCounter",
+        "TriggerDescription": "At the beginning of your upkeep or whenever enchanted land becomes tapped, remove an ore counter from CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "Execute": "TrigRemoveCounter",
+        "ValidCard": "Card.AttachedBy",
+        "Secondary": "True",
+        "TriggerDescription": "At the beginning of your upkeep or whenever enchanted land becomes tapped, remove an ore counter from CARDNAME."
+      }
+    },
+    {
+      "mode": "CounterRemoved",
+      "params": {
+        "Execute": "DBDamage",
+        "CounterType": "ORE",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When the last ore counter is removed from CARDNAME, destroy enchanted land and CARDNAME deals 2 damage to that land's controller.",
+        "NewCounterAmount": "0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

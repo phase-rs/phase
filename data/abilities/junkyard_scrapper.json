@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Artifact.!token+YouCtrl",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever a nontoken artifact you control enters, exile a random nonland artifact card with lesser mana value from your library. You may cast that card until the end of your next turn.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

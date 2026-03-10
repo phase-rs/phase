@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target creature card in your graveyard",
+        "RememberChanged": "True",
+        "SorcerySpeed": "True",
+        "AILogic": "SacAndRetFromGrave",
+        "SpellDescription": "Return target creature card from your graveyard to your hand. It perpetually becomes a Spirit, has base power and toughness 1/1, and gains \"You may pay {W/B} rather than pay this spell's mana cost.\" Activate only as a sorcery.",
+        "SubAbility": "DBAnimate"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

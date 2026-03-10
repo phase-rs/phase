@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddKeyword": "Menace",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+2 and has menace. (It can't be blocked except by two or more creatures.)",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self+IsSaddled",
+        "TriggerDescription": "Whenever CARDNAME attacks while saddled, it gains +1/+2 until end of turn. Then you may return any number of creatures that saddled it this turn to their owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

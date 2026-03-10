@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "ETB & LTB",
+        "Description": "Commander creatures you own have \"When this creature enters or leaves the battlefield, draw a card.\"",
+        "Affected": "Creature.IsCommander+YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

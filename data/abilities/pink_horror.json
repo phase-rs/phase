@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Coruscating Flames — Whenever you cast an instant or sorcery spell, CARDNAME deals 2 damage to any target.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Split — When CARDNAME dies, create two 2/2 blue and red Demon Horror creature tokens named Blue Horror with \"Whenever you cast an instant or sorcery spell, this creature deals 1 damage to any target.\"",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

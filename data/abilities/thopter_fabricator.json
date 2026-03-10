@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Number": "2",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you draw your second card each turn, create a 1/1 colorless Thopter artifact creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Affected": "Creature.MultiColor+YouCtrl",
+        "Description": "Multicolored creatures you control have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

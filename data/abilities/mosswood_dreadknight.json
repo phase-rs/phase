@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigEffect",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME dies, you may cast it from your graveyard as an Adventure until the end of your next turn.",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBSLoseLife",
+            "SpellDescription": "You draw a card and you lose 1 life. (Then exile this card. You may cast the creature later from exile.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

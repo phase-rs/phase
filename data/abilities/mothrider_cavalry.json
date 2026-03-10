@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "This spell costs {2} less to cast if you have no other creature cards in hand or if the only other creature cards in your hand are named Mothrider Cavalry.",
+        "PresentZone": "Hand",
+        "Amount": "2",
+        "EffectZone": "All",
+        "IsPresent": "Creature.YouOwn+!namedMothrider Cavalry",
+        "Type": "Spell",
+        "PresentCompare": "EQ0"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other creatures you control get +1/+1.",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

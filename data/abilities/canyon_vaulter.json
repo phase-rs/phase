@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Saddled",
+      "params": {
+        "PlayerTurn": "True",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "Phase": "Main1,Main2",
+        "ValidCrew": "Card.Self",
+        "TriggerDescription": "Whenever this creature saddles a Mount or crews a Vehicle during your main phase, that Mount or Vehicle gains flying until end of turn."
+      }
+    },
+    {
+      "mode": "Crewed",
+      "params": {
+        "Secondary": "True",
+        "PlayerTurn": "True",
+        "Execute": "TrigPump",
+        "ValidCrew": "Card.Self",
+        "Phase": "Main1,Main2",
+        "TriggerDescription": "Whenever this creature saddles a Mount or crews a Vehicle during your main phase, that Mount or Vehicle gains flying until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for any number of cards named Legion Conquistador, reveal them, put them into your hand, then shuffle."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

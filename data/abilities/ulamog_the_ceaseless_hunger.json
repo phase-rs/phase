@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cast this spell, exile two target permanents."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, defending player exiles the top twenty cards of their library."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

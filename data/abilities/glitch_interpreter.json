@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "IsPresent": "Permanent.faceDown+YouCtrl",
+        "PresentCompare": "EQ0",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if you control no face-down permanents, return CARDNAME to its owner's hand and manifest dread."
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidSource": "Creature.Colorless+YouCtrl",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever one or more colorless creatures you control deal combat damage to a player, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

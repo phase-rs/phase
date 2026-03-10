@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on CARDNAME.",
+            "OptionalDecider": "You",
+            "Execute": "TrigPutCounter",
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Spirit,Arcane",
+            "ValidActivatingPlayer": "You"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "IsPresent": "Card.Self+counters_GE2_KI",
+            "Execute": "TrigFlip",
+            "TriggerDescription": "At the beginning of the end step, if there are two or more ki counters on CARDNAME, you may flip it.",
+            "Phase": "End of Turn",
+            "OptionalDecider": "You",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "GainControl",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "SubCounter<1/KI>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Gain control of target creature until end of turn.",
+            "LoseControl": "EOT"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

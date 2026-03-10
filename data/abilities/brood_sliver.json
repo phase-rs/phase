@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "ValidSource": "Sliver",
+        "TriggerDescription": "Whenever a Sliver deals combat damage to a player, its controller may create a 1/1 colorless Sliver creature token.",
+        "CombatDamage": "True",
+        "OptionalDecider": "TriggeredSourceController"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

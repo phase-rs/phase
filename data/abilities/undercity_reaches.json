@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "OptionalDecider": "TriggeredSourceController",
+        "CombatDamage": "True",
+        "ValidSource": "Creature",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature deals combat damage to a player, its controller may draw a card.",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, you have no maximum hand size for the rest of the game.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

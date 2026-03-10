@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigRearrange",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, you may look at the top three cards of your library, then put them back in any order.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

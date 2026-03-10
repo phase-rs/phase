@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes blocked, you may untap it and remove it from combat.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigUntap",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

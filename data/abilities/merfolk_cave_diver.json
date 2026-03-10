@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Explored",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerDescription": "Whenever a creature you control explores, CARDNAME gets +1/+0 until end of turn and can't be blocked this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBCleanup",
+        "ReplaceDyingDefined": "Remembered.Creature",
+        "SpellDescription": "CARDNAME deals X damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        "RememberDamaged": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPreventDamage"
+      },
+      "params": {
+        "SVarCompare": "EQ0",
+        "Description": "Hellbent — If you have no cards in hand, this spell can't be countered and the damage can't be prevented.",
+        "EffectZone": "Stack",
+        "ValidSource": "Spell.Self",
+        "CheckSVar": "Y"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "Y",
+        "SVarCompare": "EQ0",
+        "Secondary": "True",
+        "Description": "Hellbent — If you have no cards in hand, this spell can't be countered and the damage can't be prevented."
+      }
+    }
+  ],
+  "faces": []
+}

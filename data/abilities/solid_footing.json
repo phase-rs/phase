@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Enchanted creature gets +1/+1."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CombatDamageToughness"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy+withVigilance",
+        "Description": "As long as enchanted creature has vigilance, it assigns combat damage equal to its toughness rather than its power."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

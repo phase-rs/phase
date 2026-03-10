@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver",
+        "AddAbility": "Destroy",
+        "Description": "All Slivers have \"{3}, Sacrifice this permanent: Destroy target permanent.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

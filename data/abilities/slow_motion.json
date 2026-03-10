@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, that player sacrifices that creature unless they pay {2}.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUpkeep",
+        "ValidPlayer": "Player.EnchantedController"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, return CARDNAME to its owner's hand.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

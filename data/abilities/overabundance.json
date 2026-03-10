@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerDescription": "Whenever a player taps a land for mana, that player adds one mana of any type that land produced, and CARDNAME deals 1 damage to the player.",
+        "ValidCard": "Land",
+        "Execute": "TrigDmg",
+        "Static": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

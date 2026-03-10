@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this enchantment enters, draw two cards, then discard a card.",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigReturn",
+        "ValidCard": "Dragon.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When a Dragon you control enters, return this enchantment to its owner's hand.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigSurveil",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped.",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

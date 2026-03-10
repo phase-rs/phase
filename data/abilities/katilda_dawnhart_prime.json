@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+          "ValidCardsDesc": "creature you control",
+          "ValidCards": "Creature.YouCtrl",
+          "CounterType": "P1P1",
+          "CounterNum": "1"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4 G W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+        "ValidCardsDesc": "creature you control",
+        "ValidCards": "Creature.YouCtrl",
+        "CounterType": "P1P1",
+        "CounterNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Human+YouCtrl",
+        "AddAbility": "Mana",
+        "Description": "Human creatures you control have \"{T}: Add one mana of any of this creature's colors.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

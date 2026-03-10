@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE1_CHARGE",
+        "AddTrigger": "CombatTrig",
+        "Description": "STATION 1+ At the beginning of combat on your turn, put your choice of a +1/+1 counter or two charge counters on up to one other target artifact."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "STATION 8+ Flying,,,Other artifacts you control have hexproof and indestructible.",
+        "AddType": "Creature",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "AddKeyword": "Flying",
+        "AddStaticAbility": "DBStatic"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

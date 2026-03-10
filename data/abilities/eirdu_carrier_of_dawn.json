@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {B}. If you do, transform NICKNAME.",
+            "Phase": "Main1",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Convoke",
+            "Affected": "Card.Creature+YouCtrl+wasCast",
+            "AffectedZone": "Stack",
+            "Description": "Creature spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a creature spell pays for {1} or one mana of that creature's color.)"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {W}. If you do, transform NICKNAME.",
+            "Phase": "Main1",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Persist",
+            "Description": "Each other nontoken creature you control has persist. (When it dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+            "AffectedZone": "Battlefield",
+            "Affected": "Card.Creature+YouCtrl+!token+Other"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

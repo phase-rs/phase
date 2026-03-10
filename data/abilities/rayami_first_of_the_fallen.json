@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as an exiled creature card with a blood counter on it has flying, CARDNAME has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.",
+        "EffectZone": "Battlefield",
+        "SharedRestrictions": "Creature.counters_GE1_BLOOD",
+        "Affected": "Card.Self",
+        "SharedKeywordsZone": "Exile",
+        "AddKeyword": "Flying & First Strike & Double Strike & Deathtouch & Haste & Hexproof & Indestructible & Lifelink & Menace & Protection & Reach & Trample & Vigilance"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "Exile",
+        "ActiveZones": "Battlefield",
+        "ValidLKI": "Creature.!token",
+        "Origin": "Battlefield",
+        "Description": "If a nontoken creature would die, exile that card with a blood counter on it instead.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "faces": []
+}

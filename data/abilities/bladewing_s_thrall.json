@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerZones": "Graveyard",
+        "ValidCard": "Dragon",
+        "TriggerDescription": "When a Dragon enters, you may return CARDNAME from your graveyard to the battlefield.",
+        "Execute": "TrigReturn",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Dragon.YouCtrl",
+        "Description": "CARDNAME has flying as long as you control a Dragon.",
+        "AddKeyword": "Flying",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "Battle Cannon — When CARDNAME enters or dies, for each opponent, choose a nonland permanent that player controls. Destroy one of them chosen at random.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigRepeat",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Battle Cannon — When CARDNAME enters or dies, for each opponent, choose a nonland permanent that player controls. Destroy one of them chosen at random.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigRepeat",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

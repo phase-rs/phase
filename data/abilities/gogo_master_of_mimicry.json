@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "TgtPrompt": "Select target activated or triggered ability you control",
+          "ValidTgts": "Card,Emblem",
+          "CantCopy": "True",
+          "Amount": "X",
+          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+          "SpellDescription": "Copy target activated or triggered ability you control X times. You may choose new targets for the copies. This ability can't be copied and X can't be 0. (Mana abilities can't be targeted.)",
+          "MayChooseTarget": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "XMin1 X X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target activated or triggered ability you control",
+        "ValidTgts": "Card,Emblem",
+        "CantCopy": "True",
+        "Amount": "X",
+        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+        "SpellDescription": "Copy target activated or triggered ability you control X times. You may choose new targets for the copies. This ability can't be copied and X can't be 0. (Mana abilities can't be targeted.)",
+        "MayChooseTarget": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

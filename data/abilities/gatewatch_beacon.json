@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W",
+        "params": {
+          "SpellDescription": "Add {W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {W}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigMoveCounter",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a planeswalker you control enters, if CARDNAME has loyalty counters on it, you may move a loyalty counter from CARDNAME onto that planeswalker.",
+        "ValidCard": "Planeswalker.YouCtrl",
+        "IsPresent": "Card.Self+counters_GE1_LOYALTY",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of combat on your turn, you may pay {E}{E}{E}. If you do, put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, double its power until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigEnergy",
+        "ValidTarget": "Creature.wasDealtExcessDamageThisTurn",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, if that creature was dealt excess damage this turn, you get X {E}, where X is that excess damage."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

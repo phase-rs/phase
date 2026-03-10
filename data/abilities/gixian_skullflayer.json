@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentCompare": "GE3",
+        "TriggerZones": "Battlefield",
+        "PresentZone": "Graveyard",
+        "TriggerDescription": "At the beginning of your upkeep, if there are three or more creature cards in your graveyard, put a +1/+1 counter on CARDNAME.",
+        "Phase": "Upkeep",
+        "IsPresent": "Creature",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You",
+        "PresentPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

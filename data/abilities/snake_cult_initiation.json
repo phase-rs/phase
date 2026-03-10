@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Poisonous:3",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has poisonous 3. (Whenever it deals combat damage to a player, that player gets three poison counters. A player with ten or more poison counters loses the game.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

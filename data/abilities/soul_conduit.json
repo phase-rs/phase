@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeLife",
+        "params": {
+          "TargetMin": "2",
+          "TargetMax": "2",
+          "SpellDescription": "Two target players exchange life totals.",
+          "ValidTgts": "Player"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "6"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "2",
+        "TargetMax": "2",
+        "SpellDescription": "Two target players exchange life totals.",
+        "ValidTgts": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

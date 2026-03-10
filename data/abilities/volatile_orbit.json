@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Tapped": "True",
+          "SpellDescription": "Conjure a card of your choice from the Planets spellbook onto the battlefield tapped with eight charge counters on it. Activate only as a sorcery.",
+          "Spellbook": "Adagia; Windswept Bastion,Evendo; Waking Haven,Kavaron; Memorial World,Susur Secundi; Void Altar,Uthros; Titanic Godcore",
+          "WithCounter": "CHARGE",
+          "WithCounterNum": "8",
+          "Zone": "Battlefield",
+          "Conjure": "True",
+          "SorcerySpeed": "True",
+          "SpellbookName": "Planets"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R G"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Tapped": "True",
+        "SpellDescription": "Conjure a card of your choice from the Planets spellbook onto the battlefield tapped with eight charge counters on it. Activate only as a sorcery.",
+        "Spellbook": "Adagia; Windswept Bastion,Evendo; Waking Haven,Kavaron; Memorial World,Susur Secundi; Void Altar,Uthros; Titanic Godcore",
+        "WithCounter": "CHARGE",
+        "WithCounterNum": "8",
+        "Zone": "Battlefield",
+        "Conjure": "True",
+        "SorcerySpeed": "True",
+        "SpellbookName": "Planets"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDamage",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Planet.YouCtrl",
+        "TriggerDescription": "When this enchantment enters, if you control a Planet, this enchantment deals 4 damage to any target.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

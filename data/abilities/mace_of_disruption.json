@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature attacks, it perpetually gets +1/+0 if it has the same name as another creature you control or a creature card in your graveyard.",
+        "ValidCard": "Creature.EquippedBy",
+        "Execute": "TrigEffect"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +0/+2 and has protection from Demons and from Devils.",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2",
+        "AddKeyword": "Protection:Demon & Protection:Devil"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

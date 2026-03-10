@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TargetsValid": "Card.Self",
+        "Execute": "TrigPumpAll",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell that targets CARDNAME, creatures you control get +1/+0 until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

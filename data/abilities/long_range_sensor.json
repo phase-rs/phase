@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Discover",
+        "params": {
+          "Num": "4",
+          "SorcerySpeed": "True",
+          "SpellDescription": "Discover 4. Activate only as a sorcery. (Exile cards from the top of your library until you exile a nonland card with mana value 4 or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<2/CHARGE>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Num": "4",
+        "SorcerySpeed": "True",
+        "SpellDescription": "Discover 4. Activate only as a sorcery. (Exile cards from the top of your library until you exile a nonland card with mana value 4 or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "AttackedTarget": "Player",
+        "Execute": "TrigPutCounter",
+        "ValidAttackers": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack a player, put a charge counter on this artifact."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

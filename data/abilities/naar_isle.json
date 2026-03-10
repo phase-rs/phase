@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your upkeep, put a flame counter on CARDNAME, then CARDNAME deals damage to you equal to the number of flame counters on it.",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, CARDNAME deals 3 damage to target player or planeswalker.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

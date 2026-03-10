@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Graveyard",
+        "ActivationLimit": "1",
+        "ValidCards": "Creature.Other+YouCtrl,Artifact.Other+YouCtrl",
+        "TriggerDescription": "The Allagan Eye — Whenever one or more other creatures and/or artifacts you control die, draw a card. This ability triggers only once each turn.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDouble",
+        "TriggerDescription": "Paradox — Whenever you cast a spell from anywhere other than your hand, double the number of +1/+1 counters on CARDNAME.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.!wasCastFromYourHand"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

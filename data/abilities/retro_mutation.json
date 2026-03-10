@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature is a Turtle with base power and toughness 0/1. It can't attack and loses all abilities. (It also loses all other creature types.)"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Secondary": "True",
+        "Affected": "Creature.EnchantedBy",
+        "SetPower": "0",
+        "AddType": "Turtle",
+        "RemoveAllAbilities": "True",
+        "SetToughness": "1",
+        "Description": "Enchanted creature is a Turtle with base power and toughness 0/1. It can't attack and loses all abilities. (It also loses all other creature types.)",
+        "RemoveCreatureTypes": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

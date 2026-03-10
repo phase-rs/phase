@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "Revolt": "True",
+        "TriggerDescription": "Revolt — When CARDNAME enters, if a permanent you controlled left the battlefield this turn, draw a card.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

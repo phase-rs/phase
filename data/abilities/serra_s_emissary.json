@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You,Creature.YouCtrl",
+        "AddKeyword": "Protection:ChosenType",
+        "Description": "You and creatures you control have protection from the chosen card type."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "Execute": "TrigLife",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may have your life total become the number of charge counters on CARDNAME.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

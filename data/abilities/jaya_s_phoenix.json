@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDelayedTrigger",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or planeswalker, copy the next loyalty ability you activate this turn when you activate it. You may choose new targets for the copy.",
+        "ValidTarget": "Player,Planeswalker",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "Whenever you cast a planeswalker spell, you may return CARDNAME from your graveyard to the battlefield.",
+        "ValidCard": "Card.Planeswalker"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

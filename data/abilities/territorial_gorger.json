@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "CounterType": "ENERGY",
+        "TriggerDescription": "Whenever you get one or more {E} (energy counters), CARDNAME gets +2/+2 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

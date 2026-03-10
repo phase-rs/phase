@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "AddPower": "1",
+        "Description": "As long as you control a Desert or there is a Desert card in your graveyard, CARDNAME gets +1/+0 and has trample.",
+        "Affected": "Card.Self",
+        "Condition": "Desert"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

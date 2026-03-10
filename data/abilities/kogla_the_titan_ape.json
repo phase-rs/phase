@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Human.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target Human you control to its owner's hand. NICKNAME gains indestructible until end of turn.",
+        "SubAbility": "DBPump",
+        "TgtPrompt": "Choose target Human you control"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigFight",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, it fights up to one target creature you don't control."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever NICKNAME attacks, destroy target artifact or enchantment defending player controls.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

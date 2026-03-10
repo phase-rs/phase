@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "Another target creature with power 2 or less can't be blocked this turn.",
+          "ValidTgts": "Creature.Other+powerLE2",
+          "TgtPrompt": "Select another target creature with power 2 or less",
+          "StaticAbilities": "Unblockable",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "AILogic": "Pump"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "Another target creature with power 2 or less can't be blocked this turn.",
+        "ValidTgts": "Creature.Other+powerLE2",
+        "TgtPrompt": "Select another target creature with power 2 or less",
+        "StaticAbilities": "Unblockable",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "AILogic": "Pump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "TrigPumpAll",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more creatures attack, you may pay {1}{R}. If you do, creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.token+YouCtrl",
+        "AddKeyword": "Haste",
+        "Description": "Creature tokens you control have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

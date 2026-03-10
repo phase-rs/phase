@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player discards a card.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

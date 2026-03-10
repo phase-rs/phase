@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever NICKNAME enters or attacks, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
+            "Origin": "Any",
+            "Execute": "TrigSurveil",
+            "Destination": "Battlefield"
+          }
+        },
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigSurveil",
+            "Secondary": "True",
+            "TriggerDescription": "Whenever NICKNAME enters or attacks, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your end step, you may pay {4}{U}{U}{B}{B} and exile eight cards from your graveyard. If you do, transform NICKNAME.",
+            "ValidPlayer": "You",
+            "Phase": "End of Turn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "Time Compression — When this creature transforms into CARDNAME, take an extra turn after this one.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigAddTurn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

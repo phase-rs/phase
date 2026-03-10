@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME."
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME or another creature you control enters, you gain 1 life.",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+            "Origin": "Any",
+            "Execute": "TrigGainLife"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+            "Execute": "TrigDrain",
+            "TriggerDescription": "Whenever CARDNAME or another creature you control dies, target opponent loses 1 life and you gain 1 life.",
+            "Origin": "Battlefield",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

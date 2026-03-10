@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Card.EnchantedBy",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +1/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

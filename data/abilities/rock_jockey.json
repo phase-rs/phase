@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card.Self",
+        "CheckSVar": "XJockey",
+        "EffectZone": "All",
+        "Caster": "You",
+        "Description": "You can't cast this spell if you've played a land this turn."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPlayLand"
+      },
+      "params": {
+        "Description": "You can't play lands if you've cast CARDNAME this turn.",
+        "CheckSVar": "RockyX",
+        "Player": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

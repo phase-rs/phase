@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChoiceTitle": "Choose a creature card in your graveyard",
+        "Mandatory": "True",
+        "ChoiceZone": "Graveyard",
+        "Defined": "Opponent",
+        "SubAbility": "DBChangeZone",
+        "ControlledByPlayer": "Chooser",
+        "AILogic": "WorstCard",
+        "SpellDescription": "Each opponent chooses a creature card in their graveyard. Put those cards onto the battlefield under your control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddAbility": "ABChooseColor",
+        "AddSVar": "DBAnimate",
+        "Description": "Enchanted creature has \"{2}{U}: Target creature becomes the color of your choice until end of turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

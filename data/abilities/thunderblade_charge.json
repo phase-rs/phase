@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 3 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "PresentZone": "Graveyard",
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, if CARDNAME is in your graveyard, you may pay {2}{R}{R}{R}. If you do, you may cast it without paying its mana cost.",
+        "Execute": "TrigPlay",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl",
+        "IsPresent": "Card.StrictlySelf",
+        "ValidTarget": "Player",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

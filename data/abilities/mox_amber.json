@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ManaReflected",
+        "params": {
+          "ReflectProperty": "Is",
+          "SpellDescription": "Add one mana of any color among legendary creatures and planeswalkers you control.",
+          "ColorOrType": "Color",
+          "Valid": "Creature.Legendary+YouCtrl,Planeswalker.Legendary+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReflectProperty": "Is",
+        "SpellDescription": "Add one mana of any color among legendary creatures and planeswalkers you control.",
+        "ColorOrType": "Color",
+        "Valid": "Creature.Legendary+YouCtrl,Planeswalker.Legendary+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

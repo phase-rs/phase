@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, each opponent loses 1 life and you gain 1 life.",
+        "Destination": "Battlefield",
+        "Execute": "TrigDrain",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

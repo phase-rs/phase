@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control with a mana ability attacks, untap it.",
+        "ValidCard": "Creature.YouCtrl+hasManaAbility",
+        "Execute": "TrigUntap",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "TriggerDescription": "Whenever you cast a spell, if at least seven mana was spent to cast it, untap target creature. It gets +7/+7 and gains trample until end of turn.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidSA": "Spell.ManaSpent GE7",
+        "Execute": "TrigUntap2"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each creature you control with a mana ability gets +2/+2.",
+        "AddPower": "2",
+        "Affected": "Creature.YouCtrl+hasManaAbility",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

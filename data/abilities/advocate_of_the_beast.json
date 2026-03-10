@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, put a +1/+1 counter on target Beast creature you control.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

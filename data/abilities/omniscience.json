@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlayWithoutManaCost": "True",
+        "Description": "You may cast spells from your hand without paying their mana costs.",
+        "Affected": "Card.nonLand+YouOwn",
+        "MayPlay": "True",
+        "AffectedZone": "Hand"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

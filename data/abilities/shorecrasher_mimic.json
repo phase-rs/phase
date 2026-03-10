@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Whenever you cast a spell that's both green and blue, CARDNAME has base power and toughness 5/3 until end of turn and gains trample until end of turn.",
+        "ValidCard": "Card.Green+Blue",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

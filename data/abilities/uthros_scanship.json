@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When this Spacecraft enters, draw two cards, then discard a card.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "AddKeyword": "Flying",
+        "Description": "STATION 8+ Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

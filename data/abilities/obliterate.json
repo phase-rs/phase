@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy all artifacts, creatures, and lands. They can't be regenerated.",
+        "ValidCards": "Artifact,Creature,Land",
+        "NoRegen": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen",
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

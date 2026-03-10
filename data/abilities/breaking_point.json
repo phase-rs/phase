@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "NoRegen": "True",
+        "UnlessCost": "DamageYou<6>",
+        "UnlessPayer": "Player",
+        "SpellDescription": "Any player may have CARDNAME deal 6 damage to them. If no one does, destroy all creatures. Creatures destroyed this way can't be regenerated."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

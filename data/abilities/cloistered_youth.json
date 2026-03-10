@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "OptionalDecider": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your upkeep, you may transform CARDNAME.",
+            "Phase": "Upkeep",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of your end step, you lose 1 life.",
+            "Execute": "TrigLoseLife",
+            "TriggerZones": "Battlefield",
+            "Phase": "End of Turn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

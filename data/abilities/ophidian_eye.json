@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever enchanted creature deals damage to an opponent, you may draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.AttachedBy",
+        "Execute": "TrigDraw",
+        "ValidTarget": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

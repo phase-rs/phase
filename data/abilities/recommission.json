@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "ETBCreat",
+          "RememberObjects": "Targeted & Self",
+          "ExileOnMoved": "Graveyard,Stack",
+          "SubAbility": "DBReturn",
+          "SpellDescription": "Return target artifact or creature card with mana value 3 or less from your graveyard to the battlefield. If a creature enters this way, it enters with an additional +1/+1 counter on it."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "ETBCreat",
+        "RememberObjects": "Targeted & Self",
+        "ExileOnMoved": "Graveyard,Stack",
+        "SubAbility": "DBReturn",
+        "SpellDescription": "Return target artifact or creature card with mana value 3 or less from your graveyard to the battlefield. If a creature enters this way, it enters with an additional +1/+1 counter on it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

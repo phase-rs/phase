@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME enters, you gain 2 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't attack or block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

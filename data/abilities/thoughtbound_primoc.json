@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if a player controls more Wizards than each other player, the player who controls the most Wizards gains control of CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigGain",
+        "Phase": "Upkeep",
+        "CheckDefinedPlayer": "Player.withMostTypeWizardOnly"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

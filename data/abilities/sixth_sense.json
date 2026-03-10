@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, you may draw a card.\"",
+        "AddSVar": "SixthSenseDraw",
+        "AddTrigger": "SixthSenseTrigger"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

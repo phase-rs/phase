@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityTriggered",
+      "params": {
+        "ValidMode": "ChangesZone,ChangesZoneAll",
+        "TriggerDescription": "Whenever a permanent entering causes a triggered ability to trigger, counter that ability unless its controller pays {2}.",
+        "Execute": "TrigCounter",
+        "TriggerZones": "Battlefield",
+        "ValidDestination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigUnblockable",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, target creature can't be blocked this turn.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

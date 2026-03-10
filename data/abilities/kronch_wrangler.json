@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Creature.powerGE4+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature you control with power 4 or greater enters, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

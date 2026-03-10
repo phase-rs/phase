@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "Origin": "Any",
+        "CheckSVar": "TreasureCheck",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, if mana from a Treasure was spent to cast it, it gains first strike and haste until end of turn.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

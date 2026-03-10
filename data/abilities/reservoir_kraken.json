@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentDefined": "Self",
+        "Execute": "TrigTap",
+        "IsPresent": "Card.untapped",
+        "TriggerDescription": "At the beginning of each combat, if CARDNAME is untapped, any opponent may tap an untapped creature they control. If they do, tap CARDNAME and create a 1/1 blue Fish creature token with \"This creature can't be blocked.\"",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

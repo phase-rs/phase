@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackerBlocked",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigPump",
+            "TriggerDescription": "Whenever CARDNAME becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackerBlocked",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPump"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "Whenever a creature blocking CARDNAME dies, that creature's controller loses 1 life.",
+            "Destination": "Graveyard",
+            "ValidCard": "Creature.blockingSource",
+            "Execute": "TrigLoseLife",
+            "Origin": "Battlefield",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

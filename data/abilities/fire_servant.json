@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DmgTwice",
+        "ActiveZones": "Battlefield",
+        "Description": "If a red instant or sorcery spell you control would deal damage, it deals double that damage instead.",
+        "ValidSource": "Instant.YouCtrl,Sorcery.YouCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

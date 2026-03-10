@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Planeswalkers you control of the chosen type have hexproof.",
+        "AddKeyword": "Hexproof",
+        "Affected": "Planeswalker.YouCtrl+ChosenType"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "RemoveCounter"
+      },
+      "params": {
+        "ValidCard": "Planeswalker.YouCtrl+ChosenType",
+        "ValidCounterType": "LOYALTY",
+        "IsDamage": "True",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "ReduceLoss",
+        "Result": "LT1",
+        "IsPresent": "Creature.YouCtrl",
+        "Description": "As long as you control a creature, if damage dealt to a planeswalker you control of the chosen type would result in all loyalty counters being removed, instead remove all but one of those counters instead."
+      }
+    }
+  ],
+  "faces": []
+}

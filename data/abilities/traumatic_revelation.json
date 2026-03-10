@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBIncubate",
+        "RememberDiscarded": "True",
+        "SpellDescription": "Target opponent reveals their hand. You may choose a creature or battle card from it. If you do, that player discards that card.",
+        "Optional": "True",
+        "DiscardValid": "Creature,Battle",
+        "StackDescription": "REP Target opponent_{p:Targeted}",
+        "DiscardValidDesc": "creature or battle",
+        "Mode": "RevealYouChoose"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

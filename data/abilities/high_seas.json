@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "ValidCard": "Creature.Red,Creature.Green",
+        "Description": "Red creature spells and green creature spells cost {1} more to cast.",
+        "Amount": "1",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

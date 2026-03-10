@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapOrUntap",
+        "params": {
+          "ValidTgts": "Creature.Other",
+          "SpellDescription": "You may tap or untap another target creature.",
+          "TgtPrompt": "Select another target creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.Other",
+        "SpellDescription": "You may tap or untap another target creature.",
+        "TgtPrompt": "Select another target creature"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "OptionalDecider": "You",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may untap CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

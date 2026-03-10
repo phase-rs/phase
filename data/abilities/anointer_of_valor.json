@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigImmediateTrig",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature attacks, you may pay {3}. When you do, put a +1/+1 counter on that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

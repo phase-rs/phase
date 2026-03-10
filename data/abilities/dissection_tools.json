@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, manifest dread, then attach CARDNAME to that creature.",
+        "Execute": "TrigDread",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has +2/+2 and has deathtouch and lifelink.",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddKeyword": "Deathtouch & Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

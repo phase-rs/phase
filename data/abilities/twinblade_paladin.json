@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "GE25",
+        "Description": "As long as you have 25 or more life, CARDNAME has double strike. (It deals both first-strike and regular combat damage.)",
+        "AddKeyword": "Double Strike",
+        "Affected": "Card.Self",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigConnive",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever another Villain you control enters, NICKNAME connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Villain.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

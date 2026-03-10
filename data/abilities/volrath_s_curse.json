@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return CARDNAME to its owner's hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "Continuous,CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "ValidCard": "Card.EnchantedBy",
+        "Description": "Enchanted creature can't attack or block, and its activated abilities can't be activated. That creature's controller may sacrifice a permanent for that player to ignore this effect until end of turn.",
+        "IgnoreEffectCost": "Sac<1/Permanent>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

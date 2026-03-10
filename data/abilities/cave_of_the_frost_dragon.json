@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W",
+        "params": {
+          "SpellDescription": "Add {W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {W}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 4,
+        "types": [
+          "Creature",
+          "Dragon"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "OverwriteColors": "True",
+        "Colors": "White",
+        "Keywords": "Flying",
+        "SpellDescription": "CARDNAME becomes a 3/4 white Dragon creature with flying until end of turn. It's still a land."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "LandTapped",
+        "Destination": "Battlefield",
+        "Description": "If you control two or more other lands, CARDNAME enters tapped.",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

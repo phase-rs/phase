@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.Green+Other+YouCtrl",
+        "Description": "Other green creatures you control get +1/+1.",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.Blue+Other+YouCtrl",
+        "Description": "Other blue creatures you control get +1/+1."
+      }
+    },
+    {
+      "mode": {
+        "Other": "UntapOtherPlayer"
+      },
+      "params": {
+        "Description": "Untap all green and/or blue creatures you control during each other player's untap step.",
+        "ValidCard": "Creature.Green+YouCtrl,Creature.Blue+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

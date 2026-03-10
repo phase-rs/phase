@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card for each Shrine you control.",
+        "Execute": "TrigDraw1"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Shrine.Other+YouCtrl",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw2",
+        "TriggerDescription": "Whenever another Shrine you control enters, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

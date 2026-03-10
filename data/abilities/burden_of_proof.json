@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.",
+        "Affected": "Creature.EnchantedBy+Detective+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy+nonDetective,Creature.EnchantedBy+YouDontCtrl",
+        "SetPower": "1",
+        "Secondary": "True",
+        "SetToughness": "1",
+        "Description": "Enchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Secondary": "True",
+        "ValidBlocker": "Creature.EnchantedBy+nonDetective,Creature.EnchantedBy+YouDontCtrl",
+        "ValidAttacker": "Creature.Detective",
+        "Description": "Enchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

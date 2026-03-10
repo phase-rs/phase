@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Shapeshifter"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "ShapesharerCopy",
+        "SpellDescription": "Target Shapeshifter becomes a copy of target creature until your next turn.",
+        "AILogic": "Pump",
+        "StackDescription": "None",
+        "TgtPrompt": "Choose target Shapeshifter"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

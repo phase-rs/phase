@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "When NICKNAME enters, return target Villain card from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Description": "Villain spells you cast cost {1} less to cast.",
+        "Activator": "You",
+        "ValidCard": "Villain",
+        "Amount": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

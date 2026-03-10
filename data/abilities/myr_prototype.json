@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on CARDNAME.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttackUnless"
+      },
+      "params": {
+        "Description": "CARDNAME can't attack or block unless you pay {1} for each +1/+1 counter on it.",
+        "ValidCard": "Card.Self",
+        "Cost": "Y"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockUnless"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Cost": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "CONQUEROR",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "7"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a conqueror counter on NICKNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.nonBasic",
+        "IsPresent": "Card.Self+counters_GE1_CONQUEROR",
+        "AddType": "Mountain",
+        "Description": "As long as NICKNAME has a conqueror counter on him, nonbasic lands are Mountains. (They lose all other land types and abilities and have \"{T}: Add {R}.\")",
+        "RemoveLandTypes": "True"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "Nonbasic lands enter tapped.",
+        "ActiveZones": "Battlefield",
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Land.nonBasic",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

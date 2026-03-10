@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DiscardValidDesc": "creature or planeswalker",
+        "SpellDescription": "Target opponent reveals their hand. You choose a creature or planeswalker card from it. That player discards that card.",
+        "DiscardValid": "Creature,Planeswalker",
+        "Mode": "RevealYouChoose"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

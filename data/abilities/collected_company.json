@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 6,
+        "destination": "Battlefield"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ChangeValid": "Creature.cmcLE3",
+        "SpellDescription": "Look at the top six cards of your library. Put up to two creature cards with mana value 3 or less from among them onto the battlefield. Put the rest on the bottom of your library in any order.",
+        "ChangeNum": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

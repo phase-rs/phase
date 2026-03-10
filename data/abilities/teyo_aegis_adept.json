@@ -1,0 +1,90 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMin": "0",
+        "staticAbilities": "CanAttack",
+        "StackDescription": "REP Up to one target creature_{c:Targeted}",
+        "Duration": "Perpetual",
+        "TgtPrompt": "Select up to one target creature",
+        "TargetMax": "1",
+        "SpellDescription": "Up to one target creature's base power perpetually becomes equal to its toughness. It perpetually gains \"This creature can attack as though it didn't have defender.\""
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Name": "Lumbering Lightshield",
+          "Planeswalker": "True",
+          "Conjure": "True",
+          "Zone": "Battlefield",
+          "SpellDescription": "Conjure a Lumbering Lightshield card onto the battlefield."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Lumbering Lightshield",
+        "Planeswalker": "True",
+        "Conjure": "True",
+        "Zone": "Battlefield",
+        "SpellDescription": "Conjure a Lumbering Lightshield card onto the battlefield."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "EndStepTrig",
+          "Planeswalker": "True",
+          "Duration": "Permanent",
+          "Ultimate": "True",
+          "Name": "Emblem — Teyo, Aegis Adept",
+          "SpellDescription": "You get an emblem with \"At the beginning of your end step, return target white creature card from your graveyard to the battlefield. You gain life equal to its toughness.\""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "EndStepTrig",
+        "Planeswalker": "True",
+        "Duration": "Permanent",
+        "Ultimate": "True",
+        "Name": "Emblem — Teyo, Aegis Adept",
+        "SpellDescription": "You get an emblem with \"At the beginning of your end step, return target white creature card from your graveyard to the battlefield. You gain life equal to its toughness.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

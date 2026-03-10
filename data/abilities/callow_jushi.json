@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on CARDNAME.",
+            "OptionalDecider": "You",
+            "ValidActivatingPlayer": "You",
+            "Execute": "TrigPutCounter",
+            "ValidCard": "Spirit,Arcane"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigFlip",
+            "OptionalDecider": "You",
+            "TriggerDescription": "At the beginning of the end step, if there are two or more ki counters on CARDNAME, you may flip it.",
+            "TriggerZones": "Battlefield",
+            "IsPresent": "Card.Self+counters_GE2_KI",
+            "Phase": "End of Turn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Counter",
+            "target": {
+              "type": "Filtered",
+              "filter": "Card"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "SubCounter<1/KI>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target spell.",
+            "UnlessCost": "2",
+            "Destination": "Graveyard",
+            "SpellDescription": "Counter target spell unless its controller pays 2.",
+            "UnlessPayer": "TargetedController",
+            "TargetType": "Spell"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

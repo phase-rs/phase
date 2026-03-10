@@ -1,0 +1,93 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_a_powerstone",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a tapped Powerstone token. (It's an artifact with \"{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.\")",
+        "TokenTapped": "True",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseNumber",
+        "params": {
+          "Defined": "You",
+          "SpellDescription": "Pay any amount of mana. Look at that many cards from the top of your library, then put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+          "Planeswalker": "True",
+          "ChooseAnyNumber": "True",
+          "ListTitle": "amount of mana to pay",
+          "SubAbility": "DBDig"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Pay any amount of mana. Look at that many cards from the top of your library, then put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+        "Planeswalker": "True",
+        "ChooseAnyNumber": "True",
+        "ListTitle": "amount of mana to pay",
+        "SubAbility": "DBDig"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Ultimate": "True",
+          "Stackable": "False",
+          "AILogic": "Always",
+          "Planeswalker": "True",
+          "Duration": "Permanent",
+          "Name": "Emblem — Karn, Living Legacy",
+          "Abilities": "KarnPing",
+          "SpellDescription": "You get an emblem with \"Tap an untapped artifact you control: This emblem deals 1 damage to any target.\"",
+          "Image": "emblem_karn_living_legacy"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Stackable": "False",
+        "AILogic": "Always",
+        "Planeswalker": "True",
+        "Duration": "Permanent",
+        "Name": "Emblem — Karn, Living Legacy",
+        "Abilities": "KarnPing",
+        "SpellDescription": "You get an emblem with \"Tap an untapped artifact you control: This emblem deals 1 damage to any target.\"",
+        "Image": "emblem_karn_living_legacy"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

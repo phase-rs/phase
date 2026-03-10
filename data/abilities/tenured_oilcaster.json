@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, each player mills a card.",
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, each player mills a card.",
+        "Execute": "TrigMill"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "3",
+        "CheckSVar": "X",
+        "SVarCompare": "GE8",
+        "Description": "CARDNAME gets +3/+0 as long as an opponent has eight or more cards in their graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

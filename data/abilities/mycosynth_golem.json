@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Artifact creature spells you cast have affinity for artifacts. (They cost {1} less to cast for each artifact you control.)",
+        "AddKeyword": "Affinity:Artifact",
+        "Affected": "Artifact.Creature+wasCastByYou",
+        "AffectedZone": "Stack"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

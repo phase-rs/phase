@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Instant.YouOwn",
+          "Sorcery.YouOwn"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChoiceTitle": "Choose an instant or sorcery card in your hand or graveyard",
+        "SubAbility": "DBAnimate",
+        "StackDescription": "SpellDescription",
+        "ChoiceZone": "Hand,Graveyard",
+        "SpellDescription": "Choose an instant or sorcery card in your hand or graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "SetToughness": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power and toughness are each equal to the number of face-down creatures on the battlefield."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

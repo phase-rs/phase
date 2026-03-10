@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Indestructible",
+        "SpellDescription": "Creature tokens you control gain indestructible until end of turn.",
+        "ValidCards": "Creature.token+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "AttackingPlayer": "You",
+        "Execute": "TrigRepeat",
+        "ValidAttackers": "Card.Self,Card.IsCommander+YouOwn",
+        "TriggerDescription": "When you attack with this creature and/or your commander, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

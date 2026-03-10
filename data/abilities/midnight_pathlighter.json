@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, venture into the dungeon.",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigVenture"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.nonLegendary",
+        "Description": "Creatures you control can't be blocked except by legendary creatures.",
+        "ValidAttacker": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

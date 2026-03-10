@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "Constellation — Whenever an enchantment you control enters, create a 2/2 white Pegasus creature token with flying.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Enchantment.YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Lifelink",
+        "Description": "Pegasus creatures you control have lifelink.",
+        "Affected": "Creature.YouCtrl+Pegasus"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

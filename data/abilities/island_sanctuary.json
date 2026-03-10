@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "PlayerTurn": "True",
+        "ActivePhases": "Draw",
+        "Optional": "True",
+        "ValidPlayer": "You",
+        "Description": "If you would draw a card during your draw step, instead you may skip that draw. If you do, until your next turn, you can't be attacked except by creatures with flying and/or islandwalk.",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "SanctuaryEffect"
+      }
+    }
+  ],
+  "faces": []
+}

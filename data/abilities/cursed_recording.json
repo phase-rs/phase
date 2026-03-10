@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+          "Mode": "SpellCast",
+          "ValidCard": "Instant,Sorcery",
+          "Execute": "EffTrigCopy",
+          "AILogic": "SpellCopy",
+          "ThisTurn": "True",
+          "ValidActivatingPlayer": "You"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+        "Mode": "SpellCast",
+        "ValidCard": "Instant,Sorcery",
+        "Execute": "EffTrigCopy",
+        "AILogic": "SpellCopy",
+        "ThisTurn": "True",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, put a time counter on CARDNAME. Then if there are seven or more time counters on it, remove those counters and it deals 20 damage to you.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

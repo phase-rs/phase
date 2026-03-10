@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo B Chosen",
+        "params": {
+          "SpellDescription": "Add {B} or one mana of the chosen color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B} or one mana of the chosen color."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

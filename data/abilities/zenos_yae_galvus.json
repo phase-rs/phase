@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigChoose",
+            "TriggerDescription": "My First Friend — When CARDNAME enters, choose a creature an opponent controls. Until end of turn, creatures other than CARDNAME and the chosen creature get -2/-2.",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.ChosenCardStrict",
+            "Destination": "Any",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "When the chosen creature leaves the battlefield, transform CARDNAME.",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "LosesGame",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Burning Chains — When the chosen player loses the game, you win the game.",
+            "Execute": "TrigWinGame",
+            "ValidPlayer": "Player.Chosen"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": {
+            "Other": "Transform"
+          },
+          "params": {
+            "ValidCard": "Card.Self",
+            "Description": "As this creature transforms into NICKNAME, choose an opponent.",
+            "ReplaceWith": "DBChoose"
+          }
+        }
+      ]
+    }
+  ]
+}

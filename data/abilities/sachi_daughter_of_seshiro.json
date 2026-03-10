@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Other Snake creatures you control get +0/+1.",
+        "Affected": "Creature.Snake+Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Shaman+YouCtrl",
+        "AddAbility": "Mana",
+        "Description": "Shamans you control have \"{T}: Add {G}{G}.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

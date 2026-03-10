@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell.Creature",
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield",
+        "Description": "Creature spells can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

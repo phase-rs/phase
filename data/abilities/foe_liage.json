@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land",
+        "TriggerZones": "Battlefield",
+        "PlayerTurn": "True",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a land enters during your turn, put a +1/+1 counter on this creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

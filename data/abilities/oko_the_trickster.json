@@ -1,0 +1,95 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put two +1/+1 counters on up to one target creature you control.",
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "TgtPrompt": "Select target creature you control",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl",
+          "StackDescription": "SpellDescription",
+          "Planeswalker": "True",
+          "TgtPrompt": "Select target creature you control",
+          "SpellDescription": "Until end of turn, CARDNAME becomes a copy of target creature you control. Prevent all damage that would be dealt to him this turn.",
+          "Duration": "UntilEndOfTurn",
+          "SubAbility": "DBPrevent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl",
+        "StackDescription": "SpellDescription",
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Until end of turn, CARDNAME becomes a copy of target creature you control. Prevent all damage that would be dealt to him this turn.",
+        "Duration": "UntilEndOfTurn",
+        "SubAbility": "DBPrevent"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "AILogic": "CreatureAdvantage",
+          "SpellDescription": "Until end of turn, each creature you control has base power and toughness 10/10 and gains trample.",
+          "Planeswalker": "True",
+          "Power": "10",
+          "Keywords": "Trample",
+          "Ultimate": "True",
+          "Toughness": "10",
+          "ValidCards": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "CreatureAdvantage",
+        "SpellDescription": "Until end of turn, each creature you control has base power and toughness 10/10 and gains trample.",
+        "Planeswalker": "True",
+        "Power": "10",
+        "Keywords": "Trample",
+        "Ultimate": "True",
+        "Toughness": "10",
+        "ValidCards": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

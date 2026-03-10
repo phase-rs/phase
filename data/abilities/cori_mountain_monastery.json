@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SpellDescription": "Add {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile the top card of your library. Until the end of your next turn, you may play that card.",
+        "RememberChanged": "True",
+        "SubAbility": "DBEffect",
+        "Defined": "You",
+        "ChangeNum": "All"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "Description": "This land enters tapped unless you control a Plains or an Island.",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "LandTapped",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Ward:2",
+        "Description": "Each legendary permanent you control has ward {2}.",
+        "Affected": "Permanent.YouCtrl+Legendary"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

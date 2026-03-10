@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.YouCtrl,Creature.YouCtrl,Enchantment.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "SubAbility": "DBReturn",
+        "StackDescription": "Exile {c:Targeted},",
+        "SpellDescription": "Exile up to one target artifact, creature, or enchantment you control, then return it to the battlefield under its owner's control. Draw a card.",
+        "RememberTargets": "True",
+        "TargetMax": "1",
+        "TgtPrompt": "Select up to one target artifact, creature, or enchantment you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

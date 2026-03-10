@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a basic land card or Gate card, reveal it, put it into your hand, then shuffle.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigChange",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "IgnoreLegendRule"
+      },
+      "params": {
+        "Description": "The \"legend rule\" doesn't apply."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, you may return another target creature to its owner's hand.",
+        "Execute": "TrigBounce"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

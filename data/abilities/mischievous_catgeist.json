@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "ValidSource": "Card.Self",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigDraw",
+            "CombatDamage": "True",
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card.",
+            "ValidTarget": "Player"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, draw a card.\"",
+            "Affected": "Creature.EnchantedBy",
+            "AddTrigger": "TrigDamageDone"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Graveyard",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ReplaceWith": "Exile",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

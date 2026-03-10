@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigChangeZone",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may put a card an opponent owns from exile into that player's graveyard. If you do, return target creature to its owner's hand.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

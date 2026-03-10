@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "SpellDescription": "Prevent the next 1 damage that would be dealt to you this turn.",
+          "Amount": "1",
+          "Defined": "You"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromTop<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent the next 1 damage that would be dealt to you this turn.",
+        "Amount": "1",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "PayCumulativeUpkeep",
+      "params": {
+        "Paid": "False",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When a player doesn't pay CARDNAME's cumulative upkeep, that player exiles all cards from their library.",
+        "Execute": "TrigExileAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

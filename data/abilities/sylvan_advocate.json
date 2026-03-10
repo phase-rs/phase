@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Affected": "Card.Self,Creature.Land+YouCtrl",
+        "IsPresent": "Land.YouCtrl",
+        "PresentCompare": "GE6",
+        "Description": "As long as you control six or more lands, CARDNAME and land creatures you control get +2/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

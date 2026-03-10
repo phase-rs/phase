@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "When CARDNAME enters, it deals 3 damage to any target.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has first strike.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

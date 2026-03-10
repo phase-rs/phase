@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Enchanted creature gets +1/+1 for each creature you control.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy+Human",
+        "AddKeyword": "First Strike",
+        "Description": "As long as enchanted creature is a Human, it has first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

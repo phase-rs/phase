@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Devoured",
+      "params": {
+        "ValidDevoured": "Creature.YouCtrl",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever a creature you control is devoured, create an X/X green Ooze creature token, where X is the devoured creature's power.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

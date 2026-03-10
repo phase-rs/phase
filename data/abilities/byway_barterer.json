@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ManaExpend",
+      "params": {
+        "Player": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "Amount": "4",
+        "TriggerDescription": "Whenever you expend 4, you may discard your hand. If you do, draw two cards. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

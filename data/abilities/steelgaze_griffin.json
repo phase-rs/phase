@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Number": "2",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you draw your second card each turn, CARDNAME gets +2/+0 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature.YouCtrl+equipped"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may unattach an Equipment from a creature you control. If you do, tap that creature and it gains indestructible until end of turn.",
+        "SubAbility": "DBChooseEquip",
+        "ChoiceTitle": "Choose an equipped creature you control",
+        "RememberChosen": "True",
+        "StackDescription": "SpellDescription",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "ValidAttackers": "Creature.YouCtrl+equipped",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack a player with one or more equipped creatures, draw a card.",
+        "Execute": "TrigDraw",
+        "AttackedTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

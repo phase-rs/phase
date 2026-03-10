@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, create a tapped 2/2 black Zombie creature token for each creature that died this turn.",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigPayCost",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When NICKNAME dies, you may pay {1}. When you do, destroy all artifacts, creatures, and enchantments."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

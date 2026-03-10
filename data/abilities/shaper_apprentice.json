@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Merfolk.Other+YouCtrl",
+        "Affected": "Card.Self",
+        "AddKeyword": "Flying",
+        "Description": "CARDNAME has flying as long as you control another Merfolk."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

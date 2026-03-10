@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo Any",
+        "params": {
+          "Planeswalker": "True",
+          "Amount": "2",
+          "SpellDescription": "Add two mana in any combination of colors."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Amount": "2",
+        "SpellDescription": "Add two mana in any combination of colors."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 5,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "RememberChanged": "True",
+        "SubAbility": "DBEffect",
+        "ChangeNum": "All",
+        "SpellDescription": "Exile the top five cards of your library. Until the end of your next turn, you may cast an instant or sorcery spell from among those exiled cards."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<X/LOYALTY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "TargetMax": "2",
+        "SpellDescription": "CARDNAME deals X damage to each of up to two targets."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigCopySpell",
+        "ActivationLimit": "1",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, copy it. You may choose new targets for the copy. This ability triggers only once each turn.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

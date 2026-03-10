@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "Draw a card, then discard a card at random."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals damage equal to the number of cards in target player's hand to that player.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "SpellDescription": "Gain control of all creatures until end of turn. Untap them. They gain haste until end of turn.",
+        "Planeswalker": "True",
+        "LoseControl": "EOT",
+        "AddKWs": "Haste",
+        "AllValid": "Creature",
+        "Untap": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

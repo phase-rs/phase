@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose target opponent who had at least two more cards in hand than you did as you activated this ability. Draw a card.",
+        "ValidAfterStack": "Ability.IsTargeting Player.HasCardsInHand_Card_GEY",
+        "ValidTgts": "Opponent",
+        "TgtPrompt": "Choose target opponent with at least two more cards in hand than you",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

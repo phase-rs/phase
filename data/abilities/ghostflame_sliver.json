@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver",
+        "SetColor": "Colorless",
+        "Description": "All Slivers are colorless."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

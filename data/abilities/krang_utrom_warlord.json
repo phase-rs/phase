@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying & Trample & Indestructible & Haste",
+        "Affected": "Creature.Artifact+Other+YouCtrl",
+        "Description": "Other artifact creatures you control have flying, trample, indestructible, and haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

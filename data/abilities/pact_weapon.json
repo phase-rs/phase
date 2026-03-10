@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature attacks, draw a card and reveal it. The creature gets +X/+X until end of turn and you lose X life, where X is that card's mana value.",
+        "ValidCard": "Creature.EquippedBy",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "GameLoss"
+      },
+      "params": {
+        "Description": "As long as CARDNAME is attached to a creature, you don't lose the game for having 0 or less life.",
+        "ValidLoseReason": "LifeReachedZero",
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You",
+        "IsPresent": "Card.Self+AttachedTo Creature",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

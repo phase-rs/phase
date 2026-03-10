@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "TrigDamage",
+          "RememberObjects": "Targeted",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "Choose target Wall creature. Whenever that creature is dealt damage by an attacking creature this turn, you gain that much life.",
+          "TgtPrompt": "Select target Wall creature",
+          "ValidTgts": "Creature.Wall"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "TrigDamage",
+        "RememberObjects": "Targeted",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "Choose target Wall creature. Whenever that creature is dealt damage by an attacking creature this turn, you gain that much life.",
+        "TgtPrompt": "Select target Wall creature",
+        "ValidTgts": "Creature.Wall"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

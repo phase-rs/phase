@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "Affected": "Creature.EnchantedBy",
+        "AddTrigger": "VerdantTrig",
+        "Description": "Enchanted creature gets +3/+3 and has \"At the beginning of each upkeep, create a 1/1 green Saproling creature token.\"",
+        "AddSVar": "VerdantToken",
+        "AddToughness": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

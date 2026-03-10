@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, it becomes day.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigDay"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantChangeDayTime"
+      },
+      "params": {
+        "Description": "It can't become night.",
+        "NewTime": "Night"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "Your opponents can't cast spells with mana value greater than the number of turns they have begun.",
+        "Caster": "Opponent",
+        "cmcGT": "Turns",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

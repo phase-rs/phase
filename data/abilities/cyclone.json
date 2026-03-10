@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, put a wind counter on CARDNAME, then sacrifice CARDNAME unless you pay {G} for each wind counter on it. If you pay, CARDNAME deals damage equal to the number of wind counters on it to each creature and each player.",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

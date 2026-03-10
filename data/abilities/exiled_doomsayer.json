@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "ValidCard": "Creature.faceDown",
+        "Amount": "2",
+        "Description": "All morph costs cost {2} more. (This doesn't affect the cost to cast creature spells face down.)",
+        "ValidSpell": "Static.MorphUp"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

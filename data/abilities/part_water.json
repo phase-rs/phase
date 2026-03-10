@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "X",
+        "TgtPrompt": "Select X target creatures",
+        "KW": "Landwalk:Island",
+        "StackDescription": "SpellDescription",
+        "TargetMax": "X",
+        "SpellDescription": "X target creatures gain islandwalk until end of turn. (They can't be blocked as long as defending player controls an Island.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

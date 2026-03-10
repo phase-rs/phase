@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Dragon creatures get +1/+1 until end of turn.",
+        "ValidCards": "Creature.Dragon"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may return target Dragon permanent card from your graveyard to the battlefield.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

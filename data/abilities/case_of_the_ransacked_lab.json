@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "To solve — You've cast four or more instant and sorcery spells this turn. (If unsolved, solve at the beginning of your end step.)",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "SVarCompare": "GE4",
+        "Execute": "Solved",
+        "IsPresent": "Card.Self+!IsSolved",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "Count$ThisTurnCast_Instant.YouCtrl,Sorcery.YouCtrl"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "TriggerDescription": "Solved — Whenever you cast an instant or sorcery spell, draw a card.",
+        "Execute": "TrigDraw",
+        "IsPresent": "Card.Self+IsSolved",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "ValidCard": "Instant,Sorcery",
+        "Type": "Spell",
+        "Activator": "You",
+        "Description": "Instant and sorcery spells you cast cost {1} less to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

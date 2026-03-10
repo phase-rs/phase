@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each end step, you may have CARDNAME's base power and toughness each become equal to the greatest number of spells and abilities from different sources that were on the stack simultaneously that turn.",
+        "Phase": "End of Turn",
+        "Execute": "TrigGeo",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

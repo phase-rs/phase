@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, for each opponent, goad up to one target creature that opponent controls. Put X +1/+1 counters on CARDNAME, where X is the total power of creatures goaded this way.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGoad",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

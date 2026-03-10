@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
+        "ValidTarget": "Opponent",
+        "CombatDamage": "False",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a source you control deals noncombat damage to an opponent, you draw that many cards."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You have no maximum hand size.",
+        "Affected": "You",
+        "SetMaxHandSize": "Unlimited"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

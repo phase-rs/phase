@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigLoop",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, create a 4/4 gold Dragon creature token with flying and roll a d20 (a twenty-sided die). If you roll a 20, repeat this process.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+2 and has protection from Rogues and from Clerics.",
+        "AddPower": "2",
+        "AddKeyword": "Protection:Rogue & Protection:Cleric",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2",
+        "AddSVar": "SwordOfBodyAndMindCE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

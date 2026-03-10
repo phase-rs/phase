@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Creature",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Command",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you cast a creature spell, you may pay {1}. If you do, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

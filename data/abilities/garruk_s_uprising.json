@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if you control a creature with power 4 or greater, draw a card.",
+        "IsPresent": "Creature.YouCtrl+powerGE4",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control with power 4 or greater enters, draw a card.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "ValidCard": "Creature.powerGE4+YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Trample",
+        "Description": "Creatures you control have trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "FlipACoin",
+        "params": {
+          "TgtPrompt": "Select target artifact spell you control",
+          "ValidTgts": "Artifact.YouCtrl+IsRemembered",
+          "WinSubAbility": "DBDraw",
+          "LoseSubAbility": "DBCounter",
+          "SpellDescription": "Flip a coin. If you win the flip, draw a card. If you lose the flip, counter target artifact spell you control that isn't the target of an ability from another creature named Goblin Artisans.",
+          "TgtZone": "Stack",
+          "TargetType": "Spell"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact spell you control",
+        "ValidTgts": "Artifact.YouCtrl+IsRemembered",
+        "WinSubAbility": "DBDraw",
+        "LoseSubAbility": "DBCounter",
+        "SpellDescription": "Flip a coin. If you win the flip, draw a card. If you lose the flip, counter target artifact spell you control that isn't the target of an ability from another creature named Goblin Artisans.",
+        "TgtZone": "Stack",
+        "TargetType": "Spell"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Stack",
+        "Static": "True",
+        "ValidCard": "Artifact.YouCtrl",
+        "Origin": "Any",
+        "Execute": "DBRemember"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "Execute": "DBForget",
+        "ValidSource": "Activated.Creature+Other+namedGoblin Artisans",
+        "Static": "True",
+        "ValidTarget": "Spell"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBCleanup",
+        "ValidCard": "Artifact.YouCtrl+IsRemembered",
+        "Static": "True",
+        "Origin": "Stack",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

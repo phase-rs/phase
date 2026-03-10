@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.OppCtrl+!token,Creature.OppCtrl+!token,Enchantment.OppCtrl+!token"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nontoken artifact, creature, or enchantment an opponent controls",
+        "SubAbility": "DBChangeZone",
+        "SpellDescription": "Exile target nontoken artifact, creature, or enchantment an opponent controls."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

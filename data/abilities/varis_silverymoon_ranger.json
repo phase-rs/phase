@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigVenture",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Creature,Planeswalker",
+        "ActivationLimit": "1",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a creature or planeswalker spell, venture into the dungeon. This ability triggers only once each turn. (To venture into the dungeon, enter the first room or advance to the next room.)"
+      }
+    },
+    {
+      "mode": "DungeonCompleted",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you complete a dungeon, create a 2/2 green Wolf creature token.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

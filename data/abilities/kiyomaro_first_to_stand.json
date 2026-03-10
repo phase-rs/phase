@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "ValidSource": "Card.Self",
+        "SVarCompare": "GE7",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGain",
+        "TriggerDescription": "Whenever NICKNAME deals damage, if you have seven or more cards in hand, you gain 7 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the number of cards in your hand.",
+        "SetToughness": "X",
+        "CharacteristicDefining": "True",
+        "SetPower": "X"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Vigilance",
+        "SVarCompare": "GE4",
+        "Description": "As long as you have four or more cards in hand, NICKNAME has vigilance.",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

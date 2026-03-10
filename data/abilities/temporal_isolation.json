@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Shadow & Prevent all damage that would be dealt by CARDNAME.",
+        "Description": "Enchanted creature has shadow. Prevent all damage that would be dealt by enchanted creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

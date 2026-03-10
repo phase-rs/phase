@@ -1,0 +1,78 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "SpellDescription": "Create a token that's a copy of a card exiled with CARDNAME. It gains haste. Exile it at the beginning of the next end step.",
+          "AtEOT": "Exile",
+          "Choices": "Card",
+          "PumpKeywords": "Haste",
+          "AILogic": "MimicVat",
+          "Defined": "Imprinted.ExiledWithSource"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a token that's a copy of a card exiled with CARDNAME. It gains haste. Exile it at the beginning of the next end step.",
+        "AtEOT": "Exile",
+        "Choices": "Card",
+        "PumpKeywords": "Haste",
+        "AILogic": "MimicVat",
+        "Defined": "Imprinted.ExiledWithSource"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.!token",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Imprint — Whenever a nontoken creature dies, you may exile that card. If you do, return each other card exiled with CARDNAME to its owner's graveyard.",
+        "Destination": "Graveyard",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Static": "True",
+        "Execute": "DBForget",
+        "ValidCard": "Card.IsImprinted+ExiledWithSource",
+        "Origin": "Exile"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Execute": "DBCleanImprinted",
+        "Origin": "Battlefield",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

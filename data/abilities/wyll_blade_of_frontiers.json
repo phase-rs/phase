@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "RolledDieOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigPut",
+        "TriggerDescription": "Whenever you roll one or more dice, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "RollDice"
+      },
+      "params": {
+        "Description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+        "ValidPlayer": "You",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "PlusRoll"
+      }
+    }
+  ],
+  "faces": []
+}

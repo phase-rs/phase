@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "1",
+            "AddKeyword": "Flying",
+            "Affected": "Card.EnchantedBy",
+            "Description": "Enchanted creature gets +1/+1 and has flying.",
+            "AddPower": "1"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "Exile",
+            "Destination": "Graveyard",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

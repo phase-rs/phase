@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Creatures you control get +1/+0.",
+            "Affected": "Creature.YouCtrl",
+            "AddPower": "1"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ValidPlayer": "You",
+            "Execute": "TrigConjure",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When you unlock this door, conjure a duplicate of this card into your hand. When you do, target creature you control gains first strike until end of turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

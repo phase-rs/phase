@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+!token+Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigEndure",
+        "TriggerDescription": "Whenever another nontoken creature you control dies, NICKNAME endures 2. (Put two +1/+1 counters on it or create a 2/2 white Spirit creature token.)",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

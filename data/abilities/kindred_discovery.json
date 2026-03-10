@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "ValidCard": "Creature.ChosenType+YouCtrl",
+        "TriggerDescription": "Whenever a creature you control of the chosen type enters or attacks, draw a card.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Creature.ChosenType+YouCtrl",
+        "TriggerDescription": "Whenever a creature you control of the chosen type enters or attacks, draw a card.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,95 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "SpellDescription": "You may sacrifice an artifact or discard a card. If you do, draw a card.",
+          "Choices": "DBSacToDraw,DBDiscardToDraw",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may sacrifice an artifact or discard a card. If you do, draw a card.",
+        "Choices": "DBSacToDraw,DBDiscardToDraw",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_3_2_a_vehicle_crew_1",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 3/2 colorless Vehicle token with crew 1.",
+        "Planeswalker": "True",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "TrigChangesZone",
+          "Name": "Emblem — Chandra, Spark Hunter",
+          "AILogic": "Always",
+          "Duration": "Permanent",
+          "SpellDescription": "You get an emblem with \"Whenever an artifact you control enters, this emblem deals 3 damage to any target.\"",
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "Image": "emblem_chandra_spark_hunter"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "TrigChangesZone",
+        "Name": "Emblem — Chandra, Spark Hunter",
+        "AILogic": "Always",
+        "Duration": "Permanent",
+        "SpellDescription": "You get an emblem with \"Whenever an artifact you control enters, this emblem deals 3 damage to any target.\"",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "Image": "emblem_chandra_spark_hunter"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, choose up to one target Vehicle you control. Until end of turn, it becomes an artifact creature and gains haste.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAnimate"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

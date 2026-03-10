@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "You",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Card.OppCtrl,Emblem.OppCtrl",
+        "TriggerDescription": "Whenever a source an opponent controls deals damage to you, you may put that many +1/+1 counters on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

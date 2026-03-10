@@ -1,0 +1,95 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "SpellDescription": "Cast a copy of one of the following cards chosen at random—Ignorant Bliss, Crack the Earth, Blazing Volley.",
+          "RandomCopied": "True",
+          "WithoutManaCost": "True",
+          "AnySupportedCard": "Names:Ignorant Bliss,Crack the Earth,Blazing Volley",
+          "CopyCard": "True",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Cast a copy of one of the following cards chosen at random—Ignorant Bliss, Crack the Earth, Blazing Volley.",
+        "RandomCopied": "True",
+        "WithoutManaCost": "True",
+        "AnySupportedCard": "Names:Ignorant Bliss,Crack the Earth,Blazing Volley",
+        "CopyCard": "True",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Planeswalker": "True",
+          "RandomCopied": "True",
+          "WithoutManaCost": "True",
+          "SpellDescription": "Cast a copy of one of the following cards chosen at random—Seething Song, Dance with Devils, Flamebreak.",
+          "CopyCard": "True",
+          "AnySupportedCard": "Names:Seething Song,Dance with Devils,Flamebreak"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "RandomCopied": "True",
+        "WithoutManaCost": "True",
+        "SpellDescription": "Cast a copy of one of the following cards chosen at random—Seething Song, Dance with Devils, Flamebreak.",
+        "CopyCard": "True",
+        "AnySupportedCard": "Names:Seething Song,Dance with Devils,Flamebreak"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "SpellDescription": "Cast a copy of one of the following cards chosen at random—Hellion Eruption, Insurrection, Warp World.",
+          "RandomCopied": "True",
+          "CopyCard": "True",
+          "Ultimate": "True",
+          "AnySupportedCard": "Names:Hellion Eruption,Insurrection,Warp World",
+          "Planeswalker": "True",
+          "WithoutManaCost": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Cast a copy of one of the following cards chosen at random—Hellion Eruption, Insurrection, Warp World.",
+        "RandomCopied": "True",
+        "CopyCard": "True",
+        "Ultimate": "True",
+        "AnySupportedCard": "Names:Hellion Eruption,Insurrection,Warp World",
+        "Planeswalker": "True",
+        "WithoutManaCost": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

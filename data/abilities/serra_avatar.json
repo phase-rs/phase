@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library.",
+        "Execute": "TrigShuffle",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetToughness": "X",
+        "SetPower": "X",
+        "Description": "CARDNAME's power and toughness are each equal to your life total."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

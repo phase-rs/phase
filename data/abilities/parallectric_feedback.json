@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtZone": "Stack",
+        "TgtPrompt": "Select target spell",
+        "SubAbility": "DBDmg",
+        "SpellDescription": "CARDNAME deals damage to target spell's controller equal to that spell's mana value.",
+        "TargetType": "Spell",
+        "PumpZone": "Stack",
+        "StackDescription": "None"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

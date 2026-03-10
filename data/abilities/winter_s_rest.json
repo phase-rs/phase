@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigTap",
+        "TriggerDescription": "When this Aura enters, tap enchanted creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "IsPresent": "Permanent.Snow+Other+YouCtrl",
+        "Description": "As long as you control another snow permanent, enchanted creature doesn't untap during its controller's untap step.",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Creature.EnchantedBy",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

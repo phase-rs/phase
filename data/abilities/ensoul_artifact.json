@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "Description": "Enchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.",
+        "Affected": "Artifact.EnchantedBy",
+        "SetToughness": "5",
+        "SetPower": "5"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

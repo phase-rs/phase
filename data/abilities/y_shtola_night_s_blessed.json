@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "GE4",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of each end step, if a player lost 4 or more life this turn, you draw a card.",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.nonCreature+cmcGE3",
+        "Execute": "TrigDealDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a noncreature spell with mana value 3 or greater, NICKNAME deals 2 damage to each opponent and you gain 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

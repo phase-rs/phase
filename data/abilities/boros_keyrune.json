@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo R W",
+        "params": {
+          "SpellDescription": "Add {R} or {W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R} or {W}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 1,
+        "toughness": 1,
+        "types": [
+          "Artifact",
+          "Creature",
+          "Soldier"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveCreatureTypes": "True",
+        "Keywords": "Double Strike",
+        "Colors": "Red,White",
+        "SpellDescription": "CARDNAME becomes a 1/1 red and white Soldier artifact creature with double strike until end of turn.",
+        "Defined": "Self",
+        "OverwriteColors": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

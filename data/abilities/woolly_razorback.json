@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigRemoveCounter",
+        "TriggerDescription": "Whenever CARDNAME blocks, remove an ice counter from it.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as CARDNAME has an ice counter on it, it has defender.",
+        "Affected": "Card.Self+counters_GE1_ICE",
+        "AddKeyword": "Defender"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self+counters_GE1_ICE",
+        "Description": "As long as CARDNAME has an ice counter on it, prevent all combat damage it would deal.",
+        "Prevent": "True",
+        "IsCombat": "True"
+      }
+    }
+  ],
+  "faces": []
+}

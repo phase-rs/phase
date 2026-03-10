@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver.YouCtrl+Other",
+        "AddKeyword": "Outlast:2",
+        "Description": "Other Sliver creatures you control have outlast {2}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

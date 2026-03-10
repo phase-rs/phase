@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "IsPresent": "Creature.Wall+Other+sharesBlockingAssignmentWith",
+        "TriggerDescription": "Whenever CARDNAME blocks a creature, if at least one other Wall creature is blocking that creature and no non-Wall creatures are blocking that creature, CARDNAME gains banding until end of turn. (If any creatures with banding you control are blocking a creature, you divide that creature's combat damage, not its controller, among any of the creatures it's being blocked by.)",
+        "IsPresent2": "Creature.nonWall+sharesBlockingAssignmentWith",
+        "ValidCard": "Creature",
+        "Execute": "MakeEffective",
+        "ValidBlocker": "Card.Self",
+        "PresentCompare2": "EQ0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

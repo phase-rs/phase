@@ -1,0 +1,1877 @@
+{
+  "summary": {
+    "total": 32300,
+    "converted": 32274,
+    "errors": 26,
+    "warnings": 347
+  },
+  "errors": [
+    {
+      "source_path": "data/cardsfolder/r/rasaad_monk_of_selune.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/i/imoen_trickster_friend.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/g/gale_conduit_of_the_arcane.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/g/gut_fanatical_priestess.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/t/the_mightstone_and_weakstone.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sarevok_the_usurper.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/s/skanos_dragon_vassal.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/s/shadowheart_sharran_cleric.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/a/argoth_sanctum_of_nature.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/a/ambergris_citadel_agent.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/a/alora_rogue_companion.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/f/fang_fearless_lcie.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/h/hanweir_garrison.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/m/midnight_scavengers.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/j/jaheira_harper_emissary.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/v/viconia_nightsingers_disciple.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/v/vhal_eager_scholar.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bruna_the_fading_light.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/k/klement_novice_acolyte.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/k/karlach_raging_tiefling.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/l/laezel_githyanki_warrior.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/l/lukamina_moon_druid.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/l/lulu_forgetful_hollyphant.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/p/phyrexian_dragon_engine.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/w/wyll_pact_bound_duelist.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    },
+    {
+      "source_path": "data/cardsfolder/w/wilson_bear_comrade.txt",
+      "card_name": "",
+      "message": "Parse error: missing required field: name"
+    }
+  ],
+  "warnings": [
+    {
+      "source_path": "data/cardsfolder/r/raddic_tal_zealot.txt",
+      "card_name": "Raddic, Tal Zealot",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rite_of_the_raging_storm.txt",
+      "card_name": "Rite of the Raging Storm",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/reluctant_role_model.txt",
+      "card_name": "Reluctant Role Model",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rayami_first_of_the_fallen.txt",
+      "card_name": "Rayami, First of the Fallen",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rite_of_belzenlok.txt",
+      "card_name": "Rite of Belzenlok",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/r/rick_steadfast_leader.txt",
+      "card_name": "Rick, Steadfast Leader",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urzas_avenger.txt",
+      "card_name": "Urza's Avenger",
+      "message": "Oracle text mentions 'flying' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urzas_avenger.txt",
+      "card_name": "Urza's Avenger",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/u/urborg_scavengers.txt",
+      "card_name": "Urborg Scavengers",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/i/indominus_rex_alpha.txt",
+      "card_name": "Indominus Rex, Alpha",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/nirkana_cutthroat.txt",
+      "card_name": "Nirkana Cutthroat",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/niv_mizzet_guildpact.txt",
+      "card_name": "Niv-Mizzet, Guildpact",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/nazgul_battle_mace.txt",
+      "card_name": "Nazgûl Battle-Mace",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/najeela_the_blade_blossom.txt",
+      "card_name": "Najeela, the Blade-Blossom",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/new_new_york.txt",
+      "card_name": "New New York",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/nevinyrral_urborg_tyrant.txt",
+      "card_name": "Nevinyrral, Urborg Tyrant",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/niv_mizzet_supreme.txt",
+      "card_name": "Niv-Mizzet, Supreme",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/n/natures_blessing.txt",
+      "card_name": "Nature's Blessing",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/gideon_blackblade.txt",
+      "card_name": "Gideon Blackblade",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/ghirapur.txt",
+      "card_name": "Ghirapur",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/general_ferrous_rokiric.txt",
+      "card_name": "General Ferrous Rokiric",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/grand_master_of_flowers.txt",
+      "card_name": "Grand Master of Flowers",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/golem_artisan.txt",
+      "card_name": "Golem Artisan",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/gabriel_angelfire.txt",
+      "card_name": "Gabriel Angelfire",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/gabriel_angelfire.txt",
+      "card_name": "Gabriel Angelfire",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/goddric_cloaked_reveler.txt",
+      "card_name": "Goddric, Cloaked Reveler",
+      "message": "Oracle text mentions 'flying' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/garruks_harbinger.txt",
+      "card_name": "Garruk's Harbinger",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/gaeas_gift.txt",
+      "card_name": "Gaea's Gift",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/gaeas_gift.txt",
+      "card_name": "Gaea's Gift",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/galvanizing_sawship.txt",
+      "card_name": "Galvanizing Sawship",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/g/grimdancer.txt",
+      "card_name": "Grimdancer",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/z/zur_eternal_schemer.txt",
+      "card_name": "Zur, Eternal Schemer",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/thran_golem.txt",
+      "card_name": "Thran Golem",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/the_last_ronin.txt",
+      "card_name": "The Last Ronin",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/timber_paladin.txt",
+      "card_name": "Timber Paladin",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/t45_power_armor.txt",
+      "card_name": "T-45 Power Armor",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/there_and_back_again.txt",
+      "card_name": "There and Back Again",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/the_coming_of_galactus.txt",
+      "card_name": "The Coming of Galactus",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/thunderous_orator.txt",
+      "card_name": "Thunderous Orator",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/thunderous_orator.txt",
+      "card_name": "Thunderous Orator",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/thunderous_orator.txt",
+      "card_name": "Thunderous Orator",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/thunderous_orator.txt",
+      "card_name": "Thunderous Orator",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/thunderous_orator.txt",
+      "card_name": "Thunderous Orator",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/the_pit.txt",
+      "card_name": "The Pit",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/tribal_golem.txt",
+      "card_name": "Tribal Golem",
+      "message": "Oracle text mentions 'flying' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/tribal_golem.txt",
+      "card_name": "Tribal Golem",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/tribal_golem.txt",
+      "card_name": "Tribal Golem",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/titanic_ultimatum.txt",
+      "card_name": "Titanic Ultimatum",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/transcendent_master.txt",
+      "card_name": "Transcendent Master",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/triumph_of_gerrard.txt",
+      "card_name": "Triumph of Gerrard",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/the_night_of_the_doctor.txt",
+      "card_name": "The Night of the Doctor",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/t/tenacious_pup.txt",
+      "card_name": "Tenacious Pup",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/selective_adaptation.txt",
+      "card_name": "Selective Adaptation",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sporeweb_weaver.txt",
+      "card_name": "Sporeweb Weaver",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/steel_seraph.txt",
+      "card_name": "Steel Seraph",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sparkshaper_visionary.txt",
+      "card_name": "Sparkshaper Visionary",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/super_state.txt",
+      "card_name": "Super State",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/super_state.txt",
+      "card_name": "Super State",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sproutwatch_dryad.txt",
+      "card_name": "Sproutwatch Dryad",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sylvan_awakening.txt",
+      "card_name": "Sylvan Awakening",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/shay_cormac.txt",
+      "card_name": "Shay Cormac",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/scion_of_draco.txt",
+      "card_name": "Scion of Draco",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/scion_of_draco.txt",
+      "card_name": "Scion of Draco",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/scion_of_draco.txt",
+      "card_name": "Scion of Draco",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sarkhan_the_dragonspeaker.txt",
+      "card_name": "Sarkhan, the Dragonspeaker",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sparkspitter.txt",
+      "card_name": "Sparkspitter",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/synthesizer_labship.txt",
+      "card_name": "Synthesizer Labship",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/syr_ginger_the_meal_ender.txt",
+      "card_name": "Syr Ginger, the Meal Ender",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/saved_by_the_shell.txt",
+      "card_name": "Saved by the Shell",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sword_of_vengeance.txt",
+      "card_name": "Sword of Vengeance",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/sword_of_vengeance.txt",
+      "card_name": "Sword of Vengeance",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/song_of_freyalise.txt",
+      "card_name": "Song of Freyalise",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/shifting_ceratops.txt",
+      "card_name": "Shifting Ceratops",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/s/soulflayer.txt",
+      "card_name": "Soulflayer",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/aragorn_company_leader.txt",
+      "card_name": "Aragorn, Company Leader",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/aragorn_company_leader.txt",
+      "card_name": "Aragorn, Company Leader",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/angelic_skirmisher.txt",
+      "card_name": "Angelic Skirmisher",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akromas_memorial.txt",
+      "card_name": "Akroma's Memorial",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akromas_memorial.txt",
+      "card_name": "Akroma's Memorial",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akromas_memorial.txt",
+      "card_name": "Akroma's Memorial",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akromas_memorial.txt",
+      "card_name": "Akroma's Memorial",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/animus_of_predation.txt",
+      "card_name": "Animus of Predation",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_vision_of_ixidor.txt",
+      "card_name": "Akroma, Vision of Ixidor",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_vision_of_ixidor.txt",
+      "card_name": "Akroma, Vision of Ixidor",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_vision_of_ixidor.txt",
+      "card_name": "Akroma, Vision of Ixidor",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_vision_of_ixidor.txt",
+      "card_name": "Akroma, Vision of Ixidor",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_vision_of_ixidor.txt",
+      "card_name": "Akroma, Vision of Ixidor",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_vision_of_ixidor.txt",
+      "card_name": "Akroma, Vision of Ixidor",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_vision_of_ixidor.txt",
+      "card_name": "Akroma, Vision of Ixidor",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/argivian_avenger.txt",
+      "card_name": "Argivian Avenger",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/argivian_avenger.txt",
+      "card_name": "Argivian Avenger",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/angelfire_ignition.txt",
+      "card_name": "Angelfire Ignition",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/angelfire_ignition.txt",
+      "card_name": "Angelfire Ignition",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/angelfire_ignition.txt",
+      "card_name": "Angelfire Ignition",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/argothian_uprooting.txt",
+      "card_name": "Argothian Uprooting",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/ajani_steadfast.txt",
+      "card_name": "Ajani Steadfast",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/assassin_initiate.txt",
+      "card_name": "Assassin Initiate",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/aplan_mortarium.txt",
+      "card_name": "Aplan Mortarium",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/assaultron_dominator.txt",
+      "card_name": "Assaultron Dominator",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/arcane_archery.txt",
+      "card_name": "Arcane Archery",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akromas_will.txt",
+      "card_name": "Akroma's Will",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akromas_will.txt",
+      "card_name": "Akroma's Will",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/ashas_favor.txt",
+      "card_name": "Asha's Favor",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/atraxas_skitterfang.txt",
+      "card_name": "Atraxa's Skitterfang",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/atraxas_skitterfang.txt",
+      "card_name": "Atraxa's Skitterfang",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/atmospheric_greenhouse.txt",
+      "card_name": "Atmospheric Greenhouse",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/ardyn_the_usurper.txt",
+      "card_name": "Ardyn, the Usurper",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_angel_of_wrath_avatar.txt",
+      "card_name": "Akroma, Angel of Wrath Avatar",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_angel_of_wrath_avatar.txt",
+      "card_name": "Akroma, Angel of Wrath Avatar",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/a/akroma_angel_of_wrath_avatar.txt",
+      "card_name": "Akroma, Angel of Wrath Avatar",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/f/figure_of_destiny.txt",
+      "card_name": "Figure of Destiny",
+      "message": "Oracle text mentions 'flying' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/f/faerie_aerie.txt",
+      "card_name": "Faerie Aerie",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/f/flowstone_sculpture.txt",
+      "card_name": "Flowstone Sculpture",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/f/fell_gravship.txt",
+      "card_name": "Fell Gravship",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_blood_cursed.txt",
+      "card_name": "Odric, Blood-Cursed",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/on_serras_wings.txt",
+      "card_name": "On Serra's Wings",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/owen_grady_raptor_trainer.txt",
+      "card_name": "Owen Grady, Raptor Trainer",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/owen_grady_raptor_trainer.txt",
+      "card_name": "Owen Grady, Raptor Trainer",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/overprotect.txt",
+      "card_name": "Overprotect",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/o/odric_lunarch_marshal.txt",
+      "card_name": "Odric, Lunarch Marshal",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/h/human_torch.txt",
+      "card_name": "Human Torch",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/h/helm_of_kaldra.txt",
+      "card_name": "Helm of Kaldra",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/h/hearthhull_the_worldseed.txt",
+      "card_name": "Hearthhull, the Worldseed",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/h/hearthhull_the_worldseed.txt",
+      "card_name": "Hearthhull, the Worldseed",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/h/haunted_cloak.txt",
+      "card_name": "Haunted Cloak",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/h/hungry_for_more.txt",
+      "card_name": "Hungry for More",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/me_the_immortal.txt",
+      "card_name": "Me, the Immortal",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/me_the_immortal.txt",
+      "card_name": "Me, the Immortal",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/monoist_gravliner.txt",
+      "card_name": "Monoist Gravliner",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/monoist_gravliner.txt",
+      "card_name": "Monoist Gravliner",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mabel_heir_to_cragflame.txt",
+      "card_name": "Mabel, Heir to Cragflame",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/multiform_wonder.txt",
+      "card_name": "Multiform Wonder",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mechtitan_core.txt",
+      "card_name": "Mechtitan Core",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mechtitan_core.txt",
+      "card_name": "Mechtitan Core",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mechtitan_core.txt",
+      "card_name": "Mechtitan Core",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/multiclass_baldric.txt",
+      "card_name": "Multiclass Baldric",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/multiclass_baldric.txt",
+      "card_name": "Multiclass Baldric",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/majestic_myriarch.txt",
+      "card_name": "Majestic Myriarch",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/midnight_mayhem.txt",
+      "card_name": "Midnight Mayhem",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mutable_pupa.txt",
+      "card_name": "Mutable Pupa",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mardu_thunderkite.txt",
+      "card_name": "Mardu Thunderkite",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mwonvuli_beast_tracker.txt",
+      "card_name": "Mwonvuli Beast Tracker",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/m/mwonvuli_beast_tracker.txt",
+      "card_name": "Mwonvuli Beast Tracker",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/j/jodahs_avenger.txt",
+      "card_name": "Jodah's Avenger",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/chariot_of_victory.txt",
+      "card_name": "Chariot of Victory",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cultist_of_the_absolute.txt",
+      "card_name": "Cultist of the Absolute",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cairn_wanderer.txt",
+      "card_name": "Cairn Wanderer",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cairn_wanderer.txt",
+      "card_name": "Cairn Wanderer",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cairn_wanderer.txt",
+      "card_name": "Cairn Wanderer",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cairn_wanderer.txt",
+      "card_name": "Cairn Wanderer",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cairn_wanderer.txt",
+      "card_name": "Cairn Wanderer",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cairn_wanderer.txt",
+      "card_name": "Cairn Wanderer",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/cairn_wanderer.txt",
+      "card_name": "Cairn Wanderer",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/concerted_effort.txt",
+      "card_name": "Concerted Effort",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/concerted_effort.txt",
+      "card_name": "Concerted Effort",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/concerted_effort.txt",
+      "card_name": "Concerted Effort",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/crystalline_giant.txt",
+      "card_name": "Crystalline Giant",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/catalyst_stone.txt",
+      "card_name": "Catalyst Stone",
+      "message": "Oracle text mentions 'flash' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/case_of_the_shattered_pact.txt",
+      "card_name": "Case of the Shattered Pact",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/c/commander_mustard.txt",
+      "card_name": "Commander Mustard",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/daybreak_coronet.txt",
+      "card_name": "Daybreak Coronet",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/death_mask_duplicant.txt",
+      "card_name": "Death-Mask Duplicant",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/death_mask_duplicant.txt",
+      "card_name": "Death-Mask Duplicant",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/death_mask_duplicant.txt",
+      "card_name": "Death-Mask Duplicant",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/draconic_destiny.txt",
+      "card_name": "Draconic Destiny",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/dihada_binder_of_wills.txt",
+      "card_name": "Dihada, Binder of Wills",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/dragonbroods_relic.txt",
+      "card_name": "Dragonbroods' Relic",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/domri_rade.txt",
+      "card_name": "Domri Rade",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/domri_rade.txt",
+      "card_name": "Domri Rade",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/depthshaker_titan.txt",
+      "card_name": "Depthshaker Titan",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/d/denry_klin_editor_in_chief.txt",
+      "card_name": "Denry Klin, Editor in Chief",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/v/vronos_masked_inquisitor.txt",
+      "card_name": "Vronos, Masked Inquisitor",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/v/vivien_reid.txt",
+      "card_name": "Vivien Reid",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/v/volatile_stormdrake.txt",
+      "card_name": "Volatile Stormdrake",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/v/veteran_warleader.txt",
+      "card_name": "Veteran Warleader",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/v/viviens_stampede.txt",
+      "card_name": "Vivien's Stampede",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/esper.txt",
+      "card_name": "Esper",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/extinguisher_battleship.txt",
+      "card_name": "Extinguisher Battleship",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/entropic_battlecruiser.txt",
+      "card_name": "Entropic Battlecruiser",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/ezrim_agency_chief.txt",
+      "card_name": "Ezrim, Agency Chief",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/elenda_saint_of_dusk.txt",
+      "card_name": "Elenda, Saint of Dusk",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eradicator_valkyrie.txt",
+      "card_name": "Eradicator Valkyrie",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/elspeth_resplendent.txt",
+      "card_name": "Elspeth Resplendent",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/elspeth_resplendent.txt",
+      "card_name": "Elspeth Resplendent",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/enter_the_avatar_state.txt",
+      "card_name": "Enter the Avatar State",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/enter_the_avatar_state.txt",
+      "card_name": "Enter the Avatar State",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/eater_of_virtue.txt",
+      "card_name": "Eater of Virtue",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/e/escaped_shapeshifter.txt",
+      "card_name": "Escaped Shapeshifter",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bogardan_dragonheart.txt",
+      "card_name": "Bogardan Dragonheart",
+      "message": "Oracle text mentions 'flying' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/blast_from_the_past.txt",
+      "card_name": "Blast from the Past",
+      "message": "Oracle text mentions 'flash' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bleeding_effect.txt",
+      "card_name": "Bleeding Effect",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/butcher_of_the_horde.txt",
+      "card_name": "Butcher of the Horde",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/battle_at_the_helvault.txt",
+      "card_name": "Battle at the Helvault",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/bello_bard_of_the_brambles.txt",
+      "card_name": "Bello, Bard of the Brambles",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/biosynthic_burst.txt",
+      "card_name": "Biosynthic Burst",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/b/blink.txt",
+      "card_name": "Blink",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kamahls_will.txt",
+      "card_name": "Kamahl's Will",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kheru_lich_lord.txt",
+      "card_name": "Kheru Lich Lord",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kathril_aspect_warper.txt",
+      "card_name": "Kathril, Aspect Warper",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kargan_dragonlord.txt",
+      "card_name": "Kargan Dragonlord",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kaldra_compleat.txt",
+      "card_name": "Kaldra Compleat",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kaldra_compleat.txt",
+      "card_name": "Kaldra Compleat",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/ketria.txt",
+      "card_name": "Ketria",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kevin_questing_dragon.txt",
+      "card_name": "Kevin, Questing Dragon",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/knight_of_cliffhaven.txt",
+      "card_name": "Knight of Cliffhaven",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/k/kamahl_heart_of_krosa.txt",
+      "card_name": "Kamahl, Heart of Krosa",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/l/lumen_class_frigate.txt",
+      "card_name": "Lumen-Class Frigate",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/l/last_night_together.txt",
+      "card_name": "Last Night Together",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/l/legolass_quick_reflexes.txt",
+      "card_name": "Legolas's Quick Reflexes",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/l/leonardo_the_balance.txt",
+      "card_name": "Leonardo, the Balance",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/l/lunar_avenger.txt",
+      "card_name": "Lunar Avenger",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/y/yuna_hope_of_spira.txt",
+      "card_name": "Yuna, Hope of Spira",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/power_matrix.txt",
+      "card_name": "Power Matrix",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/path_of_mettle_metzali_tower_of_triumph.txt",
+      "card_name": "Path of Mettle",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/path_of_mettle_metzali_tower_of_triumph.txt",
+      "card_name": "Path of Mettle",
+      "message": "Oracle text mentions 'vigilance' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/phyrexian_splicer.txt",
+      "card_name": "Phyrexian Splicer",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/phyrexian_splicer.txt",
+      "card_name": "Phyrexian Splicer",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/peregrine_mask.txt",
+      "card_name": "Peregrine Mask",
+      "message": "Oracle text mentions 'flying' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'trample' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'lifelink' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'deathtouch' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'double strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'haste' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'reach' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/p/priest_of_possibility.txt",
+      "card_name": "Priest of Possibility",
+      "message": "Oracle text mentions 'indestructible' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/w/wingnut_bat_on_the_belfry.txt",
+      "card_name": "Wingnut, Bat on the Belfry",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/w/wake_the_dragon.txt",
+      "card_name": "Wake the Dragon",
+      "message": "Oracle text mentions 'menace' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/w/wrenn_and_realmbreaker.txt",
+      "card_name": "Wrenn and Realmbreaker",
+      "message": "Oracle text mentions 'hexproof' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/w/walking_sponge.txt",
+      "card_name": "Walking Sponge",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    },
+    {
+      "source_path": "data/cardsfolder/w/wedgelight_rammer.txt",
+      "card_name": "Wedgelight Rammer",
+      "message": "Oracle text mentions 'first strike' but keyword not in parsed keywords list"
+    }
+  ]
+}

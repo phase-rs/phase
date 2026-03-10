@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Domain — This spell costs {2} less to cast for each basic land type among lands you control.",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Amount": "X",
+        "EffectZone": "All"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each creature you control gains vigilance if it's white.",
+        "Affected": "Creature.White+YouCtrl",
+        "AddKeyword": "Vigilance"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Description": "Each creature you control gains hexproof if it's blue.",
+        "Affected": "Creature.Blue+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each creature you control gains lifelink if it's black.",
+        "AddKeyword": "Lifelink",
+        "Affected": "Creature.Black+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Red+YouCtrl",
+        "AddKeyword": "First Strike",
+        "Description": "Each creature you control gains first strike if it's red."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each creature you control gains trample if it's green.",
+        "AddKeyword": "Trample",
+        "Affected": "Creature.Green+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

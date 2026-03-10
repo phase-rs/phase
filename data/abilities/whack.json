@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": -4,
+        "toughness": -4,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "SpellDescription": "Target creature gets -4/-4 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Amount": "3",
+        "Description": "This spell costs {3} less to cast if it targets a white creature.",
+        "Type": "Spell",
+        "ValidTarget": "Creature.White"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

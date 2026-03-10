@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "Description": "Lieutenant — As long as you control your commander, CARDNAME gets +2/+2 and creatures you control have vigilance.",
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
+        "AddKeyword": "Vigilance"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

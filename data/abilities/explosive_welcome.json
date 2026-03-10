@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 5
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DamageMap": "True",
+        "SpellDescription": "CARDNAME deals 5 damage to any target and 3 damage to any other target. Add {R}{R}{R}.",
+        "SubAbility": "DBDealDamage",
+        "TgtPrompt": "Select any target (5 damage)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

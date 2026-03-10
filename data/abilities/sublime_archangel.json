@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "Description": "Other creatures you control have Exalted.",
+        "AddKeyword": "Exalted"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

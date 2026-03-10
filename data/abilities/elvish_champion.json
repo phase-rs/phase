@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Elf+Other",
+        "AddPower": "1",
+        "AddKeyword": "Landwalk:Forest",
+        "Description": "Other Elf creatures get +1/+1 and have forestwalk.",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,93 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library. If it's a nonland card, you may cast that card this turn.",
+            "Execute": "TrigExile",
+            "Phase": "Upkeep",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield"
+          }
+        },
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidActivatingPlayer": "You",
+            "OptionalDecider": "You",
+            "ValidCard": "Card.YouCtrl",
+            "ActivatorThisTurnCast": "EQ3",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "Whenever you cast your third spell in a turn, you may transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "R",
+            "params": {
+              "Amount": "1",
+              "SpellDescription": "Add {R}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "1",
+            "SpellDescription": "Add {R}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 3
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 R"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME deals 3 damage to any target."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

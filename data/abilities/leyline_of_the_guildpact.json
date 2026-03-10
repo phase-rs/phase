@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each nonland permanent you control is all colors.",
+        "SetColor": "All",
+        "Affected": "Permanent.nonLand+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "AllBasicLandType",
+        "Affected": "Land.YouCtrl",
+        "Description": "Lands you control are every basic land type in addition to their other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "SpellDescription": "Seek a card named Audacious Knuckleblade and put it onto the battlefield tapped.",
+          "Type": "Card.namedAudacious Knuckleblade",
+          "SubAbility": "DBPut",
+          "Exhaust": "True",
+          "RememberFound": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Seek a card named Audacious Knuckleblade and put it onto the battlefield tapped.",
+        "Type": "Card.namedAudacious Knuckleblade",
+        "SubAbility": "DBPut",
+        "Exhaust": "True",
+        "RememberFound": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Surveil",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBUntap",
+        "SpellDescription": "Surveil 2, then untap this creature.",
+        "Exhaust": "True",
+        "Amount": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Haste",
+        "Exhaust": "True",
+        "SpellDescription": "Creatures you control gain haste until end of turn.",
+        "ValidCards": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

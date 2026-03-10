@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile all graveyards.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigChangeZoneAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card",
+        "Description": "If a card or token would be put into a graveyard from anywhere, exile it instead.",
+        "ReplaceWith": "Exile",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

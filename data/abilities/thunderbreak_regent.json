@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Dragon.YouCtrl+inZoneBattlefield",
+        "TriggerDescription": "Whenever a Dragon you control becomes the target of a spell or ability an opponent controls, CARDNAME deals 3 damage to that player.",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "SpellAbility.OppCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

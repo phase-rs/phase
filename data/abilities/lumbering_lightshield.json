@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, target opponent reveals a nonland card at random from their hand. It perpetually gains \"This spell costs {1} more to cast.\"",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReveal",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land has indestructible.",
+        "Affected": "Land.EnchantedBy",
+        "AddKeyword": "Indestructible"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantAttach"
+      },
+      "params": {
+        "Target": "Land.EnchantedBy",
+        "ValidCard": "Aura.Other",
+        "Description": "Enchanted land can't be enchanted by other Auras."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

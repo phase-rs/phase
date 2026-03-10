@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target artifact you control.",
+        "TgtPrompt": "Choose target artifact you control"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "KW": "Flying",
+        "SpellDescription": "CARDNAME gains flying until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ValidCounterType": "P1P1",
+        "Description": "If a modular triggered ability would put one or more +1/+1 counters on a creature you control, that many plus one +1/+1 counters are put on it instead.",
+        "ReplaceWith": "AddOneMoreCounter",
+        "ActiveZones": "Battlefield",
+        "ValidCause": "Triggered.Modular",
+        "ValidCard": "Creature.YouCtrl+inZoneBattlefield"
+      }
+    }
+  ],
+  "faces": []
+}

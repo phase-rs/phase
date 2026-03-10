@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever a creature you control with toughness 4 or greater dies, you gain 4 life.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+toughnessGE4"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

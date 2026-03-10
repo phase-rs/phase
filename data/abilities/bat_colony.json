@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 black Bat creature token with flying for each mana from a Cave spent to cast it.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a Cave you control enters, put a +1/+1 counter on target creature you control.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Cave.YouCtrl",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

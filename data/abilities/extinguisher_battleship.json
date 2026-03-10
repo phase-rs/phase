@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When this Spacecraft enters, destroy target noncreature permanent. Then this Spacecraft deals 4 damage to each creature.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "AddKeyword": "Flying & Trample",
+        "Description": "STATION 5+ Flying, trample",
+        "Affected": "Card.Self+counters_GE5_CHARGE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

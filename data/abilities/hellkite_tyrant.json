@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, gain control of all artifacts that player controls."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE20",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if you control twenty or more artifacts, you win the game.",
+        "IsPresent": "Artifact.YouCtrl",
+        "Execute": "WinGame"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

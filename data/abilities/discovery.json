@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Surveil",
+            "count": 1
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "2",
+            "SubAbility": "DBDraw",
+            "SpellDescription": "Surveil 2, then draw a card."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "RepeatEach",
+            "params": {
+              "RepeatPlayers": "Player.Opponent",
+              "RepeatSubAbility": "TrigChooseReturn",
+              "SubAbility": "DBReturn",
+              "SpellDescription": "Each opponent returns a nonland permanent they control with the highest mana value among permanents they control to its owner's hand, then discards a card."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "RepeatPlayers": "Player.Opponent",
+            "RepeatSubAbility": "TrigChooseReturn",
+            "SubAbility": "DBReturn",
+            "SpellDescription": "Each opponent returns a nonland permanent they control with the highest mana value among permanents they control to its owner's hand, then discards a card."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

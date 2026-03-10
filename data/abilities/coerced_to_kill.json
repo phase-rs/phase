@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You control enchanted creature.",
+        "Affected": "Card.EnchantedBy",
+        "GainControl": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Assassin",
+        "SetPower": "1",
+        "SetToughness": "1",
+        "AddKeyword": "Deathtouch",
+        "Description": "Enchanted creature has base power and toughness 1/1, has deathtouch, and is an Assassin in addition to its other types.",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

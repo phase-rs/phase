@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatCards": "Aura.YouCtrl,Equipment.YouCtrl",
+          "SpellDescription": "For each Aura and Equipment you control, you may attach it to a creature you control.",
+          "RepeatSubAbility": "DBAttach"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatCards": "Aura.YouCtrl,Equipment.YouCtrl",
+        "SpellDescription": "For each Aura and Equipment you control, you may attach it to a creature you control.",
+        "RepeatSubAbility": "DBAttach"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

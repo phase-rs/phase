@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterType": "FADE",
+          "CounterNum": "1",
+          "SpellDescription": "Put a fade counter on each permanent with fading you control.",
+          "ValidCards": "Permanent.withFading+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterType": "FADE",
+        "CounterNum": "1",
+        "SpellDescription": "Put a fade counter on each permanent with fading you control.",
+        "ValidCards": "Permanent.withFading+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

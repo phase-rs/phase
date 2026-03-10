@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a player casts a Kithkin spell, you may have target player lose 1 life.",
+        "ValidCard": "Kithkin",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

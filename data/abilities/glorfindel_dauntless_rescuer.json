@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Scry",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCharm",
+        "TriggerDescription": "Whenever you scry, ABILITY",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

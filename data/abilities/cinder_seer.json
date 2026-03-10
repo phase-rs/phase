@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "Defined": "You",
+          "RememberRevealed": "True",
+          "RevealValid": "Card.Red",
+          "AnyNumber": "True",
+          "SpellDescription": "Reveal any number of red cards in your hand. CARDNAME deals X damage to any target, where X is the number of cards revealed this way.",
+          "SubAbility": "DBCinderDamage"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "RememberRevealed": "True",
+        "RevealValid": "Card.Red",
+        "AnyNumber": "True",
+        "SpellDescription": "Reveal any number of red cards in your hand. CARDNAME deals X damage to any target, where X is the number of cards revealed this way.",
+        "SubAbility": "DBCinderDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

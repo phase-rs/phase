@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddAbility": "SirenSongTap",
+        "Description": "Equipped creature has \"{2}, {T}: Tap target creature.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

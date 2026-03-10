@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigActivateManaAbility",
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you may have defending player activate a mana ability of each land they control and lose all unspent mana. If you do, CARDNAME assigns no combat damage this turn and at the beginning of your postcombat main phase, you add an amount of {C} equal to the amount of mana that player lost this way.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

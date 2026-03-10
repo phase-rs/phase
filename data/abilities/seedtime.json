@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "PlayerTurn": "True",
+          "NumTurns": "1",
+          "SpellDescription": "Cast this spell only during your turn. Take an extra turn after this one if an opponent cast a blue spell this turn.",
+          "ConditionCheckSVar": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "PlayerTurn": "True",
+        "NumTurns": "1",
+        "SpellDescription": "Cast this spell only during your turn. Take an extra turn after this one if an opponent cast a blue spell this turn.",
+        "ConditionCheckSVar": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

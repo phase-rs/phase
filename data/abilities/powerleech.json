@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "Execute": "TrigGain",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "Whenever an artifact an opponent controls becomes tapped or an opponent activates an artifact's ability without {T} in its activation cost, you gain 1 life.",
+        "ValidCard": "Artifact",
+        "ValidSA": "Activated.!hasTapCost",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "Execute": "TrigGain",
+        "ValidCard": "Artifact.OppCtrl",
+        "TriggerDescription": "Whenever an artifact an opponent controls becomes tapped or an opponent activates an artifact's ability without {T} in its activation cost, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

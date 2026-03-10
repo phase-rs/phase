@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "EffectZone": "Graveyard",
+        "RaiseCost": "PayLife<2> Sac<1/Artifact;Creature/artifact or creature>",
+        "Description": "You may cast this card from your graveyard by paying 2 life and sacrificing an artifact or creature in addition to paying its other costs.",
+        "Affected": "Card.Self",
+        "AffectedZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

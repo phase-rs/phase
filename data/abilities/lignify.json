@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature is a Treefolk with base power and toughness 0/4 and loses all abilities.",
+        "Affected": "Card.EnchantedBy",
+        "SetToughness": "4",
+        "RemoveAllAbilities": "True",
+        "SetPower": "0",
+        "RemoveCreatureTypes": "True",
+        "AddType": "Treefolk"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

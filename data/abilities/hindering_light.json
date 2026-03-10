@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "TgtPrompt": "Select target spell",
+        "TargetType": "Spell",
+        "TargetValidTargeting": "Permanent.YouCtrl+inRealZoneBattlefield,You",
+        "SpellDescription": "Counter target spell that targets you or a permanent you control. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "AILogic": "DmgAllCreaturesAndPlayers",
+        "SpellDescription": "CARDNAME deals 1 damage to each creature and each player.",
+        "ValidPlayers": "Player",
+        "ValidDescription": "each creature and each player."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Creature",
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of the end step, if no creatures are on the battlefield, sacrifice CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

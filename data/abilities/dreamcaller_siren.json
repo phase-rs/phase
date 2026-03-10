@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "IsPresent": "Creature.Pirate+Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigTap",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, if you control another Pirate, tap up to two target nonland permanents."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can block only creatures with flying.",
+        "ValidBlocker": "Creature.Self",
+        "ValidAttacker": "Creature.withoutFlying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

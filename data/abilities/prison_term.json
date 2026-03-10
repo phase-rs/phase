@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature an opponent controls enters, you may attach CARDNAME to that creature.",
+        "Execute": "TrigAttach",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't attack or block and its activated abilities can't be activated."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

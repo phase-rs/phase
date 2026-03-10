@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X X G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Monstrosity": "X",
+        "AILogic": "Polukranos"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "BecomeMonstrous",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "When CARDNAME becomes monstrous, it deals X damage divided as you choose among any number of target creatures your opponents control. Each of those creatures deals damage equal to its power to NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "ExileSelf",
+        "ValidCard": "Card.cmcGE4",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell with mana value 4 or greater, you may exile the top card of your library. If you do, you may play that card until you exile another card with this creature."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup2",
+        "ValidCard": "Card.Self",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

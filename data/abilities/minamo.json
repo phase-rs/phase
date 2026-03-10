@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever a player casts a spell, that player may draw a card.",
+        "ValidActivatingPlayer": "Player"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, each player may return a blue card from their graveyard to their hand.",
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

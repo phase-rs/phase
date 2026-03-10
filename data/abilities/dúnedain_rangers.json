@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "PresentCompare": "EQ0",
+        "Destination": "Battlefield",
+        "IsPresent": "Card.YouCtrl+IsRingbearer",
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTempt",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, if you don't control a Ring-bearer, the Ring tempts you."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

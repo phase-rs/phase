@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "As long as enchanted permanent is a creature, it gets +1/+0 and has haste.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Haste"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Equipment.EnchantedBy",
+        "AddStaticAbility": "RuneSpeedST",
+        "Description": "As long as enchanted permanent is an Equipment, it has \"Equipped creature gets +1/+0 and has haste.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

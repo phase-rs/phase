@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, create that many Blood tokens.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerDescription": "Whenever a noncreature artifact is sacrificed or destroyed, NICKNAME deals 1 damage to each opponent.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Artifact.nonCreature",
+        "Execute": "TrigDamage"
+      }
+    },
+    {
+      "mode": "Destroyed",
+      "params": {
+        "Secondary": "True",
+        "Execute": "TrigDamage",
+        "ValidCard": "Artifact.nonCreature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a noncreature artifact is sacrificed or destroyed, NICKNAME deals 1 damage to each opponent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

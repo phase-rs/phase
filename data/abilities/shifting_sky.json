@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent.nonLand",
+        "SetColor": "ChosenColor",
+        "Description": "All nonland permanents are the chosen color."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

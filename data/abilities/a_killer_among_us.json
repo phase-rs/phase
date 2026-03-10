@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.token+attacking"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          {
+            "type": "Mana",
+            "cost": "RevealChosen<Type/creature type>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Targeted.ChosenType",
+        "TgtPrompt": "Select target attacking creature token",
+        "SpellDescription": "If target attacking creature token is the chosen type, put three +1/+1 counters on it and it gains deathtouch until end of turn.",
+        "AITgts": "Creature.token+attacking+ChosenType",
+        "StackDescription": "REP target attacking creature token_{c:Targeted} & put_{p:You} puts",
+        "SubAbility": "DBPump"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 white Human creature token, a 1/1 blue Merfolk creature token, and a 1/1 red Goblin creature token. Then secretly choose Human, Merfolk, or Goblin.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

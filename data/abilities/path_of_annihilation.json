@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this creature: Add {C}.\"",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever you cast a creature spell with mana value 7 or greater, you gain 4 life.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.cmcGE7"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "AnyMana",
+        "Affected": "Eldrazi.YouCtrl",
+        "Description": "Eldrazi you control have \"{T}: Add one mana of any color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

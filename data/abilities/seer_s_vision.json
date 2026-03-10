@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at target player's hand and choose a card from it. That player discards that card. Activate only as a sorcery.",
+        "Mode": "LookYouChoose",
+        "SorcerySpeed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "Player",
+        "Description": "Your opponents play with their hands revealed.",
+        "AffectedZone": "Hand",
+        "Affected": "Card.OppOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player mills a card. (They each put the top card of their library in their graveyard.)",
+        "Defined": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.nonLand+milledThisTurn+YouOwn",
+        "MayPlayLimit": "1",
+        "Description": "Once during each of your turns, you may cast a spell from among cards in your graveyard that were milled this turn.",
+        "AffectedZone": "Graveyard",
+        "Condition": "PlayerTurn",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

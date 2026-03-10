@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ValidCard": "Card.Self",
+            "ThisDoor": "True",
+            "TriggerDescription": "When you unlock this door, this Room deals damage equal to the number of cards in your hand to target creature an opponent controls.",
+            "ValidPlayer": "You",
+            "Execute": "TrigDamage"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "End of Turn",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your end step, draw a card.",
+            "Execute": "TrigDraw"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "You have no maximum hand size.",
+            "SetMaxHandSize": "Unlimited",
+            "Affected": "You"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

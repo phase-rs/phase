@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Pump",
+          "ExileOnMoved": "Battlefield",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "SpellDescription": "Target creature can't be blocked this turn.",
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature",
+          "StaticAbilities": "Unblockable"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Pump",
+        "ExileOnMoved": "Battlefield",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "SpellDescription": "Target creature can't be blocked this turn.",
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature",
+        "StaticAbilities": "Unblockable"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

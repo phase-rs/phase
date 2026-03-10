@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "ValidDefender": "You,Planeswalker.YouCtrl",
+        "TriggerDescription": "Whenever a creature attacks and isn't blocked, if you're the defending player, create a 0/1 green Plant creature token that's blocking that creature.",
+        "ValidCard": "Creature",
+        "TriggerZones": "Command",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "DelTrigEOC",
+        "AttackedTarget": "You",
+        "CheckSVar": "NatureShields",
+        "SVarCompare": "GE4",
+        "TriggerZones": "Command",
+        "TriggerDescription": "When four or more creatures attack you, abandon this scheme at end of combat.",
+        "NoResolvingCheck": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

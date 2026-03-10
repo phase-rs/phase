@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, creatures you control get +1/+1 until end of turn.",
+        "Execute": "TrigPumpAll"
+      }
+    },
+    {
+      "mode": "SpellCopy",
+      "params": {
+        "Execute": "TrigPumpAll",
+        "Secondary": "True",
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, creatures you control get +1/+1 until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an equipped creature you control dies, draw a card.",
+        "ValidCard": "Creature.YouCtrl+equipped"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Equipped creatures you control get +1/+1.",
+        "Affected": "Creature.YouCtrl+equipped",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

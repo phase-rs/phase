@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another creature or artifact you control is put into a graveyard from the battlefield, put an oil counter on CARDNAME.",
+        "ValidCard": "Creature.YouCtrl+Other,Artifact.YouCtrl+Other",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigImmediateTrig",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may remove two oil counters from it. When you do, target creature can't block this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

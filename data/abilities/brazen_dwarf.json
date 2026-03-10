@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "RolledDieOnce",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you roll one or more dice, CARDNAME deals 1 damage to each opponent.",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter target spell unless its controller pays {2}.",
+        "UnlessPayer": "ThisTargetedController",
+        "TargetType": "Spell",
+        "UnlessCost": "2",
+        "TgtPrompt": "Select target spell",
+        "SubAbility": "DBSuspect"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

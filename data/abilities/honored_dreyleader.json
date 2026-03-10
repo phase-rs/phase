@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on it for each other Squirrel and/or Food you control.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter1"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigPutCounter2",
+        "TriggerDescription": "Whenever another Squirrel or Food you control enters, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Squirrel.Other+YouCtrl,Food.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

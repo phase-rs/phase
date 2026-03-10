@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Waterbend<3>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "Defined": "Self",
+        "SpellDescription": "This Vehicle becomes an artifact creature. Put three +1/+1 counters on it.",
+        "SubAbility": "DBPutCounter",
+        "Exhaust": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this Vehicle enters, return up to one other target nonland permanent to its owner's hand.",
+        "Execute": "TrigChange",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

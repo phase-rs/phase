@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create two 1/1 black Rat creature tokens with \"This creature can't block.\" Then if you control five or more Rats, each Rat you control gets +2/+0 until end of turn.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create two 1/1 black Rat creature tokens with \"This creature can't block.\" Then if you control five or more Rats, each Rat you control gets +2/+0 until end of turn.",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

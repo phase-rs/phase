@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as CARDNAME is paired with another creature, each of those creatures gets +4/+4.",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired",
+        "AddToughness": "4",
+        "AddPower": "4"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

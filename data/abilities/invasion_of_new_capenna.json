@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigImmediateTrig",
+            "TriggerDescription": "When CARDNAME enters, you may sacrifice an artifact or creature. When you do, exile target artifact or creature an opponent controls.",
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigPutCounters",
+            "ValidCard": "Creature.EquippedBy",
+            "TriggerDescription": "Whenever equipped creature attacks, put a +1/+1 counter on that creature and each other creature you control that shares a creature type with it."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.EquippedBy",
+            "AddSVar": "AE"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

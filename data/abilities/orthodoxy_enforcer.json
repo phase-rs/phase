@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +2/+0 as long as you control two or more artifacts.",
+        "Affected": "Card.Self",
+        "PresentCompare": "GE2",
+        "AddPower": "2",
+        "IsPresent": "Artifact.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

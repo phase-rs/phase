@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard. If a card is exiled this way, you may conjure a duplicate of that card into the top five cards of your library at random.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard. If a card is exiled this way, you may conjure a duplicate of that card into the top five cards of your library at random."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

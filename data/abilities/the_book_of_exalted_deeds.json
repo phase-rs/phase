@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "ENLIGHTENED",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Angel"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W W W"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put an enlightened counter on target Angel. It gains \"You can't lose the game and your opponents can't win the game.\" Activate only as a sorcery.",
+        "TgtPrompt": "Select target Angel",
+        "SorcerySpeed": "True",
+        "SubAbility": "DBAnimate"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "SVarCompare": "GE3",
+        "CheckSVar": "LifeGained",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if you gained 3 or more life this turn, create a 3/3 white Angel creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

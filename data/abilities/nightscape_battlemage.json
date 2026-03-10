@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+kicked 1",
+        "Origin": "Any",
+        "Execute": "TrigKicker",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked with its {2}{U} kicker, return up to two target nonblack creatures to their owners' hands."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+kicked 2",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked with its {2}{R} kicker, destroy target land.",
+        "Execute": "TrigKicker2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

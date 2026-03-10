@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, create a token that's a copy of enchanted creature, except it's a 1/1.",
+        "Execute": "TrigCopy",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.EnchantedBy+Horror",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When enchanted creature dies, if that creature was a Horror, return CARDNAME to its owner's hand.",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

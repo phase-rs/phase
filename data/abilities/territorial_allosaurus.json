@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigKicker",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, it fights another target creature.",
+        "ValidCard": "Card.Self+kicked"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

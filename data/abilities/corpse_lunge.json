@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/Card.Creature/creature card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "As an additional cost to cast this spell, exile a creature card from your graveyard.",
+        "SpellDescription": "CARDNAME deals damage equal to the exiled card's power to target creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

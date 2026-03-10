@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if its prowl cost was paid, search target opponent's library for three cards and exile them. Then that player shuffles.",
+        "Origin": "Stack",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self+prowled",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

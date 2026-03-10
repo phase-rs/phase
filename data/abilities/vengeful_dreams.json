@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attacking"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W W"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<X/Card/card(s)>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "As an additional cost to cast this spell, discard X cards.",
+        "TargetMax": "X",
+        "TgtPrompt": "Select X target attacking creatures",
+        "StackDescription": "Exile {c:Targeted}.",
+        "SpellDescription": "Exile X target attacking creatures.",
+        "TargetMin": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

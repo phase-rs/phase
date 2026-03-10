@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMana",
+        "Static": "True",
+        "TriggerDescription": "Whenever enchanted Forest is tapped for mana, its controller adds an additional one mana of the chosen color."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

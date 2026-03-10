@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "CARDNAME attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Artifact.YouCtrl+Other",
+        "Affected": "Card.Self",
+        "AddPower": "2",
+        "Description": "CARDNAME gets +2/+0 as long as you control another artifact."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

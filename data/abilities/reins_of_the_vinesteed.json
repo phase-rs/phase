@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.EnchantedBy",
+        "OptionalDecider": "You",
+        "Destination": "Graveyard",
+        "Execute": "DBReturn",
+        "TriggerDescription": "When enchanted creature dies, you may return CARDNAME from your graveyard to the battlefield attached to a creature that shares a creature type with that creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +2/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

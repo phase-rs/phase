@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+2."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "ValidCard": "Card.EquippedBy+withDefender",
+        "Description": "As long as equipped creature has defender, it can attack as though it didn't have defender."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

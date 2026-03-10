@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigDig",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, look at the top ten cards of your library, then exile any number of them and put the rest back on top of your library in any order."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigShuffle",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, shuffle your library.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SpellDescription": "Each player shuffles the cards from their hand into their library, then draws that many cards.",
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "ShuffleHand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player shuffles the cards from their hand into their library, then draws that many cards.",
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "ShuffleHand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

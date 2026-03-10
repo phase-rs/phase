@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate enchanted creature.",
+          "Defined": "Enchanted"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate enchanted creature.",
+        "Defined": "Enchanted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Description": "Enchanted creature gets +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

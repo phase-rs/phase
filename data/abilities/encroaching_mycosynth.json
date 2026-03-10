@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent.nonLand+YouCtrl",
+        "Description": "Nonland permanents you control are artifacts in addition to their other types. The same is true for permanent spells you control and nonland permanent cards you own that aren't on the battlefield.",
+        "AddType": "Artifact",
+        "AffectedZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

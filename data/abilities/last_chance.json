@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "ExtraTurnDelayedTrigger": "DBDelTrig",
+          "NumTurns": "1",
+          "ExtraTurnDelayedTriggerExcute": "TrigLose",
+          "SpellDescription": "Take an extra turn after this one. At the beginning of that turn's end step, you lose the game."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ExtraTurnDelayedTrigger": "DBDelTrig",
+        "NumTurns": "1",
+        "ExtraTurnDelayedTriggerExcute": "TrigLose",
+        "SpellDescription": "Take an extra turn after this one. At the beginning of that turn's end step, you lose the game."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

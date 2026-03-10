@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for an Aurochs card, reveal it, put it into your hand, then shuffle.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, it gets +1/+0 until end of turn for each other attacking Aurochs.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

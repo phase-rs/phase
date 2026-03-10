@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a Vampire you control attacks, each opponent loses 1 life and you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Vampire+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

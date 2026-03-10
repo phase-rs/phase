@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, put that many +1/+1 counters on it.",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

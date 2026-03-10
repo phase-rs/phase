@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "RPrevent",
+          "SpellDescription": "Prevent all combat damage that would be dealt this turn by creatures without trample.",
+          "AILogic": "Fog"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "RPrevent",
+        "SpellDescription": "Prevent all combat damage that would be dealt this turn by creatures without trample.",
+        "AILogic": "Fog"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

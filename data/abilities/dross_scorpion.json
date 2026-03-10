@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Artifact.Creature+Other,Card.Self",
+        "Destination": "Graveyard",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever CARDNAME or another artifact creature dies, you may untap target artifact."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

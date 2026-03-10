@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a land you control enters from anywhere other than your hand or you cast a spell from anywhere other than your hand, create 3/3 red Spawn creature token.",
+        "ExcludedOrigins": "Hand",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Hand",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever a land you control enters from anywhere other than your hand or you cast a spell from anywhere other than your hand, create 3/3 red Spawn creature token.",
+        "ValidCard": "Land.YouCtrl+YouDontOwn",
+        "Secondary": "True",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigToken",
+        "Secondary": "True",
+        "ValidCard": "Card.!wasCastFromYourHand",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever a land you control enters from anywhere other than your hand or you cast a spell from anywhere other than your hand, create 3/3 red Spawn creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Execute": "TrigGainLife",
+            "TriggerDescription": "When CARDNAME enters, you may sacrifice another creature. If you do, you gain X life and draw X cards, where X is that creature's power.",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "G",
+            "params": {
+              "SpellDescription": "Add {G}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {G}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "ReplacementResult": "Updated",
+            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+            "ReplaceWith": "DBTap"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.!wasCastFromYourHandByYou+Self",
+        "TriggerDescription": "When CARDNAME enters, if you didn't cast it from your hand, you lose the game.",
+        "Execute": "TrigYouLose"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDestroy",
+        "ValidTarget": "Creature",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a creature, destroy that creature. It can't be regenerated.",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, that player loses the game.",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigTheyLose"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

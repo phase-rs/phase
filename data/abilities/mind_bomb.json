@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SpellDescription": "Each player may discard up to three cards. CARDNAME deals damage to each player equal to 3 minus the number of cards they discarded this way.",
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "DBChoose",
+          "DamageMap": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player may discard up to three cards. CARDNAME deals damage to each player equal to 3 minus the number of cards they discarded this way.",
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "DBChoose",
+        "DamageMap": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

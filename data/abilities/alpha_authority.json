@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Hexproof",
+        "Description": "Enchanted creature has hexproof and can't be blocked by more than one creature."
+      }
+    },
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Secondary": "True",
+        "Max": "1",
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't be blocked by more than one creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "RemoveType": "Creature",
+        "SVarCompare": "LT7",
+        "CheckSVar": "X",
+        "Description": "As long as your devotion to green and blue is less than seven, NICKNAME isn't a creature."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "SetMaxHandSize": "Unlimited",
+        "Description": "You have no maximum hand size."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "LoseMana"
+      },
+      "params": {
+        "ReplaceWith": "ConvertMana",
+        "ValidPlayer": "You",
+        "ActiveZones": "Battlefield",
+        "ReplacementResult": "Replaced",
+        "Description": "If you would lose unspent mana, that mana becomes colorless instead."
+      }
+    }
+  ],
+  "faces": []
+}

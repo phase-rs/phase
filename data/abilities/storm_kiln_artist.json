@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCastOrCopy",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "Execute": "TrigToken",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, create a Treasure token.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +1/+0 for each artifact you control.",
+        "Affected": "Card.Self",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

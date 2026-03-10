@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Swamp",
+        "SpellDescription": "Search your library for a Swamp card, reveal it, put it into your hand, then shuffle.",
+        "Planeswalker": "True",
+        "NumCards": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "Target creature gets +X/+X or -X/-X until end of turn, where X is the number of Swamps you control.",
+        "SubAbility": "ABChoice",
+        "Planeswalker": "True",
+        "SpellDescription": "Target creature gets +X/+X or -X/-X until end of turn, where X is the number of Swamps you control."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Ultimate": "True",
+          "Stackable": "False",
+          "SpellDescription": "You get an emblem with \"Swamps you control have '{T}: Add {B}{B}{B}{B}.'\"",
+          "StaticAbilities": "SwampBoost",
+          "Planeswalker": "True",
+          "Name": "Emblem — Liliana Of The Dark Realms",
+          "Image": "emblem_liliana_of_the_dark_realms",
+          "Duration": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Stackable": "False",
+        "SpellDescription": "You get an emblem with \"Swamps you control have '{T}: Add {B}{B}{B}{B}.'\"",
+        "StaticAbilities": "SwampBoost",
+        "Planeswalker": "True",
+        "Name": "Emblem — Liliana Of The Dark Realms",
+        "Image": "emblem_liliana_of_the_dark_realms",
+        "Duration": "Permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

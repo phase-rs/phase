@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAdded",
+      "params": {
+        "CounterType": "P1P1",
+        "Execute": "FathomDraw",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever a +1/+1 counter is put on CARDNAME, you may draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Adapt": "2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "CounterType": "P1P1",
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, return target permanent card from your graveyard to your hand.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

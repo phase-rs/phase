@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Vote",
+        "params": {
+          "Defined": "Player",
+          "SpellDescription": "Will of the Council — Starting with you, each player votes for time or knowledge. If time gets more votes, take an extra turn after this one. If knowledge gets more votes or the vote is tied, draw three cards.",
+          "VoteTiedAbility": "DBDrawThree",
+          "Choices": "DBAddTurn,DBDrawThree",
+          "AILogic": "Always"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Player",
+        "SpellDescription": "Will of the Council — Starting with you, each player votes for time or knowledge. If time gets more votes, take an extra turn after this one. If knowledge gets more votes or the vote is tied, draw three cards.",
+        "VoteTiedAbility": "DBDrawThree",
+        "Choices": "DBAddTurn,DBDrawThree",
+        "AILogic": "Always"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

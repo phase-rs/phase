@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another creature you control dies, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, each opponent gets a number of rad counters equal to its power.",
+        "Execute": "TrigRadiation",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

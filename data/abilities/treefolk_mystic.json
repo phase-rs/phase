@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, destroy all Auras attached to that creature.",
+        "ValidCard": "Creature",
+        "Execute": "TrigDestroyBlocked"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDestroyBlocker",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, destroy all Auras attached to that creature.",
+        "ValidBlocker": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

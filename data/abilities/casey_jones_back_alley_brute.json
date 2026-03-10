@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME attacks, put a +1/+1 counter on target attacking creature.",
+        "ValidCard": "Creature.Self",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "ValidSource": "You",
+        "TriggerZones": "Battlefield",
+        "CounterType": "P1P1",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you put one or more +1/+1 counters on a creature you control, NICKNAME deals that much damage to target opponent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

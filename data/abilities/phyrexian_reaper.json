@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes blocked by a green creature, destroy that creature. It can't be regenerated.",
+        "ValidBlocker": "Creature.Green",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDestroyBlocker"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

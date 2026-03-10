@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidSpell": "Activated.Cycling",
+        "Description": "Cycling abilities you activate cost you up to {2} less to activate.",
+        "Amount": "2",
+        "ValidCard": "Card",
+        "Activator": "You",
+        "UpTo": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

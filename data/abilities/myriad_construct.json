@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "When CARDNAME becomes the target of a spell, sacrifice it and create a number of 1/1 colorless Construct artifact creature tokens equal to its power.",
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Spell"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self+kicked",
+        "ReplaceWith": "DBPutCounter",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "If CARDNAME was kicked, it enters with a +1/+1 counter on it for each nonbasic land your opponents control."
+      }
+    }
+  ],
+  "faces": []
+}

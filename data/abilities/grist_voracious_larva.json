@@ -1,0 +1,123 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Graveyard",
+            "Destination": "Battlefield",
+            "Execute": "TrigTransform",
+            "ValidCard": "Card.Self,Creature.YouCtrl",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "When CARDNAME or another creature you control enters, if it entered from your graveyard or you cast it from your graveyard, you may pay {G}. If you do, exile NICKNAME, then return it to the battlefield transformed under its owner's control."
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Execute": "TrigTransform",
+            "ValidCard": "Card.Self+wasCastFromYourGraveyardByYou,Creature.YouCtrl+wasCastFromYourGraveyardByYou",
+            "TriggerDescription": "When CARDNAME or another creature you control enters, if it entered from your graveyard or you cast it from your graveyard, you may pay {G}. If you do, exile NICKNAME, then return it to the battlefield transformed under its owner's control.",
+            "Secondary": "True",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "bg_1_1_insect",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": 1
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "SpellDescription": "Create a 1/1 black and green Insect creature token, then mill two cards. Put a deathtouch counter on the token if a black card was milled this way.",
+            "TokenOwner": "You",
+            "SubAbility": "DBMill",
+            "ImprintTokens": "True"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Destroy",
+            "target": {
+              "type": "Filtered",
+              "filter": "Artifact,Enchantment"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -2
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "SpellDescription": "Destroy target artifact or enchantment.",
+            "TgtPrompt": "Select target artifact or enchantment"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "CopyPermanent",
+            "params": {
+              "Defined": "ValidGraveyard Creature.YouOwn",
+              "SpellDescription": "For each creature card in your graveyard, create a token that's a copy of it, except it's a 1/1 black and green Insect.",
+              "SetPower": "1",
+              "SetColor": "Black,Green",
+              "SetCreatureTypes": "Insect",
+              "AILogic": "DuplicatePerms",
+              "Planeswalker": "True",
+              "Ultimate": "True",
+              "SetToughness": "1"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -6
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "ValidGraveyard Creature.YouOwn",
+            "SpellDescription": "For each creature card in your graveyard, create a token that's a copy of it, except it's a 1/1 black and green Insect.",
+            "SetPower": "1",
+            "SetColor": "Black,Green",
+            "SetCreatureTypes": "Insect",
+            "AILogic": "DuplicatePerms",
+            "Planeswalker": "True",
+            "Ultimate": "True",
+            "SetToughness": "1"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

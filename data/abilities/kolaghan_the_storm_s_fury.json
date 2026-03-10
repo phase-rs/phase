@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a Dragon you control attacks, creatures you control get +1/+0 until end of turn.",
+        "ValidCard": "Dragon.YouCtrl",
+        "Execute": "TrigPumpAll",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

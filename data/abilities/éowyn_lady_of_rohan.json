@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, target creature gains your choice of first strike or vigilance until end of turn. If that creature is equipped, it gains first strike and vigilance until end of turn instead."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidSpell": "Activated.Equip",
+        "Description": "Equip abilities you activate cost {1} less to activate.",
+        "Activator": "You",
+        "Amount": "1",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

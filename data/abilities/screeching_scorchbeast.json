@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, each player gets two rad counters.",
+        "Execute": "TrigRadiation"
+      }
+    },
+    {
+      "mode": "MilledAll",
+      "params": {
+        "ResolvedLimit": "1",
+        "ValidCard": "Card.nonLand",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever one or more nonland cards are milled, you may create that many 2/2 black Zombie Mutant creature tokens. Do this only once each turn.",
+        "Execute": "TrigToken",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, create a token that's a copy of target nontoken creature.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigCopy",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, exile the token."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsRemembered",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When the token leaves the battlefield, sacrifice CARDNAME.",
+        "Execute": "TrigSac"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {U}{U}.",
+        "Execute": "TrigUpkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

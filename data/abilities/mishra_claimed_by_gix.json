@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackersDeclared",
+          "params": {
+            "Execute": "TrigDrain",
+            "AttackingPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever you attack, each opponent loses X life and you gain X life, where X is the number of attacking creatures. If CARDNAME and a creature named Phyrexian Dragon Engine are attacking, and you both own and control them, exile them, then meld them into Mishra, Lost to Phyrexia. It enters tapped and attacking."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigCharm",
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, ABILITY",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, ABILITY",
+            "Execute": "TrigCharm",
+            "TriggerZones": "Battlefield",
+            "Secondary": "True",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

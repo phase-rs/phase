@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "SpellDescription": "All lands become 2/2 creatures until end of turn. They're still lands.",
+          "Power": "2",
+          "Toughness": "2",
+          "Types": "Creature",
+          "ValidCards": "Land"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "All lands become 2/2 creatures until end of turn. They're still lands.",
+        "Power": "2",
+        "Toughness": "2",
+        "Types": "Creature",
+        "ValidCards": "Land"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPump",
+        "CheckSVar": "X",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Coven — At the beginning of combat on your turn, if you control three or more creatures with different powers, CARDNAME gains lifelink until end of turn.",
+        "SVarCompare": "GE3",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

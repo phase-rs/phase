@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "If a source would deal damage to an opponent or a permanent an opponent controls, that source deals double that damage to that player or permanent instead.",
+        "ReplaceWith": "DmgTwice",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Card,Emblem",
+        "ValidTarget": "Opponent,Permanent.OppCtrl"
+      }
+    },
+    {
+      "event": "DamageDone",
+      "params": {
+        "PreventionEffect": "True",
+        "ReplaceWith": "DBReplace",
+        "ValidTarget": "You,Permanent.YouCtrl",
+        "Description": "If a source would deal damage to you or a permanent you control, prevent half that damage, rounded up.",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

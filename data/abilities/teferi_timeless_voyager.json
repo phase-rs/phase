@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Draw a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "LibraryPosition": "0",
+        "SpellDescription": "Put target creature on top of its owner's library."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Phases",
+        "params": {
+          "RememberValids": "True",
+          "SpellDescription": "Each creature target opponent controls phases out.",
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "ValidTgts": "Opponent",
+          "AllValid": "Creature.TargetedPlayerCtrl",
+          "SubAbility": "DBEffect"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberValids": "True",
+        "SpellDescription": "Each creature target opponent controls phases out.",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "ValidTgts": "Opponent",
+        "AllValid": "Creature.TargetedPlayerCtrl",
+        "SubAbility": "DBEffect"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

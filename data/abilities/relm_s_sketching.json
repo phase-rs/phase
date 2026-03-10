@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Artifact,Creature,Land",
+          "TgtPrompt": "Select target artifact, creature, or land",
+          "SpellDescription": "Create a token that's a copy of target artifact, creature, or land."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Artifact,Creature,Land",
+        "TgtPrompt": "Select target artifact, creature, or land",
+        "SpellDescription": "Create a token that's a copy of target artifact, creature, or land."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

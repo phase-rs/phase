@@ -1,0 +1,99 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "SubAbility": "DBChangeZone",
+          "Planeswalker": "True",
+          "RevealOptional": "True",
+          "SpellDescription": "Look at the top card of your library. If it's a creature card, you may reveal it and put it into your hand.",
+          "RememberRevealed": "True",
+          "AILogic": "Main2",
+          "PeekAmount": "1",
+          "RevealValid": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChangeZone",
+        "Planeswalker": "True",
+        "RevealOptional": "True",
+        "SpellDescription": "Look at the top card of your library. If it's a creature card, you may reveal it and put it into your hand.",
+        "RememberRevealed": "True",
+        "AILogic": "Main2",
+        "PeekAmount": "1",
+        "RevealValid": "Creature"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "None",
+        "AILogic": "Fight",
+        "Planeswalker": "True",
+        "SpellDescription": "Target creature you control fights another target creature.",
+        "TgtPrompt": "Choose target creature you control",
+        "SubAbility": "DomriFight"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Ultimate": "True",
+          "AILogic": "Always",
+          "Duration": "Permanent",
+          "StaticAbilities": "STDomri",
+          "Planeswalker": "True",
+          "Stackable": "False",
+          "Name": "Emblem — Domri Rade",
+          "Image": "emblem_domri_rade",
+          "SpellDescription": "You get an emblem with \"Creatures you control have double strike, trample, hexproof and haste.\""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "AILogic": "Always",
+        "Duration": "Permanent",
+        "StaticAbilities": "STDomri",
+        "Planeswalker": "True",
+        "Stackable": "False",
+        "Name": "Emblem — Domri Rade",
+        "Image": "emblem_domri_rade",
+        "SpellDescription": "You get an emblem with \"Creatures you control have double strike, trample, hexproof and haste.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

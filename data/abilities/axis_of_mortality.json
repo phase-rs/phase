@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you may have two target players exchange life totals.",
+        "TriggerZones": "Battlefield",
+        "Execute": "DBExchangeLife",
+        "OptionalDecider": "You",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

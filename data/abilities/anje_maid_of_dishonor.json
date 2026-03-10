@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each opponent loses 2 life and you gain 2 life.",
+        "SubAbility": "DBGainLife",
+        "Defined": "Player.Opponent"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1",
+        "ValidCards": "Vampire.YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME and/or one or more other Vampires you control enter, create a Blood token. This ability triggers only once per turn. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

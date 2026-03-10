@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Imprint — When CARDNAME enters, exile target land.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.sharesNameWith Imprinted+OppCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever a land with the same name as the exiled card enters under an opponent's control, CARDNAME deals 2 damage to that player."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "Destination": "Any",
+        "Static": "True",
+        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "SpellDescription": "Prevent the next 4 damage that would be dealt to any target this turn.",
+          "Amount": "4",
+          "ValidTgts": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent the next 4 damage that would be dealt to any target this turn.",
+        "Amount": "4",
+        "ValidTgts": "Any"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

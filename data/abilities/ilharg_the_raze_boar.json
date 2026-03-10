@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, you may put a creature card from your hand onto the battlefield tapped and attacking. Return that creature to your hand at the beginning of the next end step.",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TriReturn",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard,Exile",
+        "TriggerDescription": "When CARDNAME dies or is put into exile from the battlefield, you may put it into its owner's library third from the top."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

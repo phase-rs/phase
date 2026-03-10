@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAdded",
+      "params": {
+        "ActivationLimit": "1",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl",
+        "CounterType": "P1P1",
+        "Execute": "TrigSeek",
+        "TriggerDescription": "Whenever a +1/+1 counter is put on a creature you control, seek a creature card. That card perpetually gets +1/+1. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

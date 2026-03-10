@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigCharm",
+        "TriggerDescription": "Whenever one or more Dragons you control deal combat damage to an opponent, ABILITY",
+        "CombatDamage": "True",
+        "ValidSource": "Dragon.YouCtrl",
+        "ValidTarget": "Opponent",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

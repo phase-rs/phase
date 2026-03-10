@@ -1,0 +1,98 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigTransform",
+            "Destination": "Graveyard",
+            "TriggerDescription": "When NICKNAME dies, return it to the battlefield tapped and transformed under its owner's control."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": {
+            "Other": "CreateToken"
+          },
+          "params": {
+            "ReplaceWith": "TripleToken",
+            "ActiveZones": "Battlefield",
+            "Description": "If one or more creature tokens would be created under your control, three times that many of those tokens are created instead.",
+            "ValidToken": "Creature.YouCtrl"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "W",
+            "params": {
+              "SpellDescription": "Add {W}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {W}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "Mode": "Transform",
+              "CheckSVar": "X",
+              "SpellDescription": "Transform CARDNAME. Activate only if you attacked with three or more creatures this turn and only as a sorcery.",
+              "SVarCompare": "GE3",
+              "SorcerySpeed": "True"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 W"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "Mode": "Transform",
+            "CheckSVar": "X",
+            "SpellDescription": "Transform CARDNAME. Activate only if you attacked with three or more creatures this turn and only as a sorcery.",
+            "SVarCompare": "GE3",
+            "SorcerySpeed": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

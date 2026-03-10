@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "GainControlVariant",
+        "params": {
+          "AllValid": "Permanent.nonLand",
+          "ChangeController": "Random",
+          "SubAbility": "DBUntap",
+          "SpellDescription": "For each nonland permanent, choose a player at random. Then each player gains control of each permanent for which they were chosen. Untap those permanents."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AllValid": "Permanent.nonLand",
+        "ChangeController": "Random",
+        "SubAbility": "DBUntap",
+        "SpellDescription": "For each nonland permanent, choose a player at random. Then each player gains control of each permanent for which they were chosen. Untap those permanents."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

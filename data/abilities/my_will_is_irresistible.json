@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerZones": "Command",
+        "ValidCard": "Card.Self",
+        "Execute": "DBChoosePerms",
+        "TriggerDescription": "When you set this scheme in motion, choose up to three nonland permanents you don't control. Target opponent chooses one of those permanents. You gain control of the rest."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

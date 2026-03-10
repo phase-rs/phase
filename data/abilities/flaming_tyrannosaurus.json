@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.!wasCastFromYourHand",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Paradox — Whenever you cast a spell from anywhere other than your hand, CARDNAME deals 3 damage to any target. Then put a +1/+1 counter on CARDNAME.",
+        "ValidActivatingPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamageDies",
+        "TriggerDescription": "When CARDNAME dies, it deals damage equal to its power to each opponent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

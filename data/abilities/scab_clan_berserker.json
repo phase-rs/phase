@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "IsPresent": "Card.Self+IsRenowned",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigDmg",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a noncreature spell, if CARDNAME is renowned, CARDNAME deals 2 damage to that player."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

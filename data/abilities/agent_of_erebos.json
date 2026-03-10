@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self,Enchantment.YouCtrl",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, exile target player's graveyard.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLoot",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME or another non-Human creature you control enters, you may draw a card. If you do, discard a card.",
+        "ValidCard": "Card.Self,Creature.nonHuman+Other+YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

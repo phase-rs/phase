@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Mill"
+      },
+      "params": {
+        "ValidPlayer": "Player.Opponent",
+        "ReplaceWith": "MillTwice",
+        "ActiveZones": "Battlefield",
+        "Description": "If an opponent would mill one or more cards, they mill twice that many cards instead. (To mill a card, a player puts the top card of their library into their graveyard.)"
+      }
+    }
+  ],
+  "faces": []
+}

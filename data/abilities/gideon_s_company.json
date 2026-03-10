@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "LOYALTY",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Planeswalker.Gideon"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a loyalty counter on target Gideon planeswalker.",
+        "TgtPrompt": "Select target Gideon planeswalker."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you gain life, you put two +1/+1 counters on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

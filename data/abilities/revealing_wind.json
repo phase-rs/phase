@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Fog",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Prevent all combat damage that would be dealt this turn. You may look at each face-down creature that's attacking or blocking.",
+          "SubAbility": "DBRepeatLook"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Prevent all combat damage that would be dealt this turn. You may look at each face-down creature that's attacking or blocking.",
+        "SubAbility": "DBRepeatLook"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 2,
+        "toughness": 2,
+        "types": [
+          "Artifact",
+          "Creature",
+          "Assembly-Worker"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveCreatureTypes": "True",
+        "SpellDescription": "CARDNAME becomes a 2/2 Assembly-Worker artifact creature until end of turn. It's still a land.",
+        "Defined": "Self"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Assembly-Worker+attacking"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target attacking Assembly-Worker creature gets +2/+2 until end of turn.",
+        "TgtPrompt": "Select target attacking Assembly-Worker creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

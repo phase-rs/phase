@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_1_1_spirit",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/Indestructible>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenAmount": "X",
+        "SpellDescription": "Create a 1/1 colorless Spirit creature token for each permanent you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

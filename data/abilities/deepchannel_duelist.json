@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, untap target Merfolk you control.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Merfolk.Other+YouCtrl",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Other Merfolk you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

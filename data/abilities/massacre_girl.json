@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMassacre",
+        "TriggerDescription": "When CARDNAME enters, each other creature gets -1/-1 until end of turn. Whenever a creature dies this turn, each creature other than CARDNAME gets -1/-1 until end of turn.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

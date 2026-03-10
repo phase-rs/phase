@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Black",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you cast a black spell, put a +1/+1 counter on CARDNAME.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "For each {B} in a cost, you may pay 2 life rather than pay that mana.",
+        "AddKeyword": "PayLifeInsteadOf:B",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

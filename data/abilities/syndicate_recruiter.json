@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, mill four cards. Then if there are five or more mana values among cards in your graveyard, conjure a card named Dig Up the Body into your hand.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

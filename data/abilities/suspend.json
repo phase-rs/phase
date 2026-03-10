@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target creature and put two time counters on it. If it doesn't have suspend, it gains suspend.",
+        "RememberChanged": "True",
+        "WithCountersType": "TIME",
+        "SubAbility": "DBPump",
+        "StackDescription": "Exile {c:Targeted} and put two time counters on it.",
+        "WithCountersAmount": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

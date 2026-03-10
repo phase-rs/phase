@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.nonCreature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
+        "TgtPrompt": "Select target noncreature artifact"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Artifact"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact creature",
+        "SpellDescription": "Target artifact creature gains deathtouch and lifelink until end of turn.",
+        "KW": "Deathtouch & Lifelink"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

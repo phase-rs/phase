@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "Execute": "TrigFight",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may have it fight target creature you don't control. (Each deals damage equal to its power to the other.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

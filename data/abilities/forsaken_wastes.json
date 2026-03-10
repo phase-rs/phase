@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's upkeep, that player loses 1 life.",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "TrigLoseLife"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife5",
+        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell, that spell's controller loses 5 life.",
+        "ValidSource": "Spell",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "Description": "Players can't gain life.",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

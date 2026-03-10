@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, target Mouse you control gains your choice of double strike or trample until end of turn.",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

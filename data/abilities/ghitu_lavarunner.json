@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Haste",
+        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
+        "AddPower": "1",
+        "PresentCompare": "GE2",
+        "PresentZone": "Graveyard",
+        "Description": "As long as there are two or more instant and/or sorcery cards in your graveyard, CARDNAME gets +1/+0 and has haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

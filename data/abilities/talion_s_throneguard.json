@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigReturn",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, return up to one target spell or nonland permanent to its owner's hand. If CARDNAME was bargained, that card perpetually gains \"This spell costs {2} more to cast.\""
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

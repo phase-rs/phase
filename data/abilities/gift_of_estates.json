@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionCompare": "LTX",
+        "ChangeType": "Plains",
+        "ChangeNum": "3",
+        "SpellDescription": "If an opponent controls more lands than you, search your library for up to three Plains cards and put them into your hand.",
+        "ConditionPresent": "Land.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

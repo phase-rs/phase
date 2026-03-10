@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's upkeep, if that player controls a Plains, they gain 1 life.",
+        "IsPresent": "Plains.ActivePlayerCtrl",
+        "Execute": "TrigGainLife",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

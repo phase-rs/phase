@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever enchanted creature attacks, put a +1/+1 counter on it. Then if it has three or more +1/+1 counters on it, sacrifice CARDNAME.",
+        "ValidCard": "Card.AttachedBy"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When you sacrifice CARDNAME, search your library for up to two basic land cards, put them onto the battlefield tapped, then shuffle.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AE",
+        "Affected": "Creature.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

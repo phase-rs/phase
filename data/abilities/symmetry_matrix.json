@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control with power equal to its toughness enters, you may pay {1}. If you do, draw a card.",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "ValidCard": "Creature.equalPT+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

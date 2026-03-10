@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo Any",
+        "params": {
+          "RestrictValid": "Spell.wasCastFromGraveyard+withFlashback",
+          "Amount": "2",
+          "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast spells with flashback from a graveyard."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.wasCastFromGraveyard+withFlashback",
+        "Amount": "2",
+        "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast spells with flashback from a graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

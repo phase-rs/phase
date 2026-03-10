@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability an opponent controls, you may draw a card.",
+        "Execute": "TrigDraw",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Amount": "1",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Desert.YouCtrl",
+        "Description": "This spell costs {1} less to cast if you control a Desert."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has first strike as long as it's attacking.",
+        "Affected": "Card.Self+attacking",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDiscard",
+            "TriggerDescription": "When CARDNAME enters, discard any number of cards, then draw that many cards plus one.",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You.descended",
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "At the beginning of your end step, if you descended this turn, put a bore counter on CARDNAME. Then if there are three or more bore counters on it, remove those counters and transform it. (You descended if a permanent card was put into your graveyard from anywhere.)",
+            "Phase": "End of Turn",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "R",
+            "params": {
+              "SpellDescription": "Add {R}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {R}."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigDiscover",
+            "ValidSA": "Spell.ManaFromCard.StrictlySelf",
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Permanent",
+            "TriggerDescription": "Whenever you cast a permanent spell using mana produced by CARDNAME, discover X, where X is that spell's mana value."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 4 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigReturn",
+        "CheckSVar": "OppHand",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "At the beginning of your upkeep, if an opponent has no cards in hand, you may return CARDNAME from your graveyard to your hand.",
+        "SVarCompare": "EQ0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

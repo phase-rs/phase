@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Elf.YouCtrl",
+        "KW": "Deathtouch",
+        "SpellDescription": "Elves you control get +2/+2 and gain deathtouch until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Battlefield",
+        "ActivationLimit": "1",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever one or more other Elves you control enter, create a 1/1 green Elf Warrior creature token. This ability triggers only once each turn.",
+        "ValidCards": "Elf.Other+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

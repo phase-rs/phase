@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter target spell.",
+        "TargetType": "Spell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "CheckSVar": "OppCastThisTurn",
+        "Amount": "1",
+        "Color": "U",
+        "Description": "This spell costs {U} less to cast if an opponent cast two or more spells this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

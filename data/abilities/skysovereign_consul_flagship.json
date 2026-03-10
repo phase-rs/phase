@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, it deals 3 damage to target creature or planeswalker an opponent controls.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBDmg",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, it deals 3 damage to target creature or planeswalker an opponent controls.",
+        "Execute": "DBDmg",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has flying.",
+        "AddKeyword": "Flying"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.YouCtrl+equipped",
+        "Description": "Creatures you control that are equipped get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

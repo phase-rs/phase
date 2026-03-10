@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Graveyard",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "BottomOfLibrary",
+        "SubAbility": "DBChangeZone",
+        "RememberChanged": "True",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Put the bottom card of your library into your graveyard. If it's a creature card with power less than or equal to NICKNAME's power, put it onto the battlefield."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "X",
+          "SpellDescription": "Add X mana of any one color.",
+          "PrecostDesc": "Devouring Monster —"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<X/P1P1>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "X",
+        "SpellDescription": "Add X mana of any one color.",
+        "PrecostDesc": "Devouring Monster —"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Rapacious Hunger — Whenever another creature dies, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

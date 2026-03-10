@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has \"{1}, {T}: Tap target creature. Return CARDNAME to its owner's hand.\"",
+        "Affected": "Creature.EquippedBy",
+        "AddAbility": "BoomerangTap"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

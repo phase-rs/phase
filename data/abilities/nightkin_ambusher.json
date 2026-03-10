@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigRadiation",
+        "TriggerDescription": "When CARDNAME enters, target player gets four rad counters.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidDefender": "Player.Condition Counters.RAD",
+        "Description": "CARDNAME can't be blocked as long as defending player has a rad counter.",
+        "ValidAttacker": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

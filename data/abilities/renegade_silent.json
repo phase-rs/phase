@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigGoad",
+        "TriggerDescription": "At the beginning of your end step, goad up to one target creature you don't control and put a +1/+1 counter on CARDNAME. CARDNAME phases out. (Treat it and anything attached to it as though they don't exist until your next turn.)",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

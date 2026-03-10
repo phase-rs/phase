@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if you control two or more nonland, nontoken permanents with the same name as one another, create a 4/4 colorless Construct artifact creature token.",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "SVarCompare": "GE2",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

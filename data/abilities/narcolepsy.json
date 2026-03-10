@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigTap",
+        "ValidPlayer": "Player",
+        "IsPresent": "Creature.AttachedBy+untapped",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each upkeep, if enchanted creature is untapped, tap it.",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ1",
+        "IsCurse": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

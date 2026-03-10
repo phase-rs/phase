@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "BuildCounter",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a +1/+1 counter on target creature you control.",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Command",
+        "OptionalDecider": "You",
+        "Execute": "ChargeCounter",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a charge counter on target permanent you control.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

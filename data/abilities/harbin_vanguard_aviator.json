@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackersAmount": "GE5",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "Creature.Soldier",
+        "TriggerDescription": "Whenever you attack with five or more Soldiers, creatures you control get +1/+1 and gain flying until end of turn.",
+        "AttackingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

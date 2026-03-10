@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMonarch",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by creatures the monarch controls.",
+        "ValidBlocker": "Creature.ControlledBy Player.isMonarch",
+        "ValidAttacker": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

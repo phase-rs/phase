@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Permanent.OppCtrl",
+          "StackDescription": "SpellDescription",
+          "RemoveKeywords": "Hexproof & Indestructible",
+          "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Permanent.OppCtrl",
+        "StackDescription": "SpellDescription",
+        "RemoveKeywords": "Hexproof & Indestructible",
+        "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Equipped creature gets +1/+1 for each counter on it, and has trample and lifelink.",
+        "AddKeyword": "Trample & Lifelink",
+        "Affected": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveType": "Planeswalker",
+        "Affected": "Permanent.EquippedBy",
+        "Description": "Equipped permanent isn't a planeswalker and is a creature in addition to its other types. (Loyalty abilities can still be activated.)",
+        "AddType": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigGainLife",
+            "TriggerDescription": "When this creature enters, you gain 5 life."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 5
+            },
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.withoutFlying"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME deals 5 damage to target creature without flying. (Then shuffle this card into its owner's library.)",
+            "TgtPrompt": "Select target creature without flying"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

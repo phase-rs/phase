@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 B G U"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/CARDNAME/this card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBCounter",
+        "PrecostDesc": "Renew —",
+        "ActivationZone": "Graveyard",
+        "SpellDescription": "Put two +1/+1 counters and a flying counter on target creature. Activate only as a sorcery.",
+        "SorcerySpeed": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "PlayerTurn": "True",
+        "Execute": "TrigToken",
+        "ValidCards": "Card.YouOwn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more cards leave your graveyard during your turn, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+        "Destination": "Any",
+        "Origin": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

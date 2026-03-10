@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, target player loses life equal to the number of cards in their hand.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "Player",
+        "Description": "Players play with the top card of their libraries revealed.",
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary",
+        "EffectZone": "Command"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "Spells that share a card type with the top card of a library can't be cast.",
+        "ValidCard": "Card.sharesCardTypeWith EachTopLibrary",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "Execute": "TrigDamageAll",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you set this scheme in motion, it deals damage equal to your commander's mana value to each noncommander creature your opponents control.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

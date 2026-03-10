@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Creature.inZoneBattlefield",
+        "TriggerDescription": "Whenever a creature deals damage to CARDNAME, CARDNAME deals that much damage to that creature.",
+        "ValidTarget": "Card.Self",
+        "Execute": "TrigDealDamage1"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "ValidSource": "Instant,Sorcery",
+        "Execute": "TrigDealDamage2",
+        "TriggerDescription": "Whenever a spell deals damage to CARDNAME, CARDNAME deals that much damage to that spell's controller."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

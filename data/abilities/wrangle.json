@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.powerLE4"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Gain control of target creature with power 4 or less until end of turn. Untap that creature. It gains haste until end of turn.",
+        "TgtPrompt": "Select target creature with power 4 or less",
+        "Untap": "True",
+        "AddKWs": "Haste",
+        "LoseControl": "EOT"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

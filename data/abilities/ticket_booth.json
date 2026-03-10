@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ThisDoor": "True",
+            "Execute": "TrigDread",
+            "TriggerDescription": "When you unlock this door, manifest dread.",
+            "ValidPlayer": "You",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackersDeclared",
+          "params": {
+            "AttackingPlayer": "You",
+            "TriggerDescription": "Whenever you attack, target attacking creature gains double strike until end of turn.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPump"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

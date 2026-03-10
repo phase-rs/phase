@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.DamagedBy",
+        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, return it to the battlefield under your control. That creature is a black Zombie in addition to its other colors and types.",
+        "Origin": "Battlefield",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

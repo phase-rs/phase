@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLimitBlock",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks, each opponent can't block with more than one creature this combat."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AttackRestrict"
+      },
+      "params": {
+        "MaxAttackers": "1",
+        "ValidDefender": "You",
+        "Description": "As long as CARDNAME is tapped, no more than one creature can attack you each combat.",
+        "IsPresent": "Card.Self+tapped"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

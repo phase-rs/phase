@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigSac",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player sacrifices a creature. If the player can't, sacrifice CARDNAME.",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +2/+2."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Flying",
+        "Description": "Enchanted creature has flying as long as you control a red or white permanent.",
+        "IsPresent": "Permanent.Red+YouCtrl,Permanent.White+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

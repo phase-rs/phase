@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "Execute": "TrigAnimate",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, nonland cards in your hand perpetually gain \"This spell {1} costs less to cast.\"",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

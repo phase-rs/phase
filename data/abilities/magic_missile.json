@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "1",
+        "DividedAsYouChoose": "3",
+        "SpellDescription": "CARDNAME deals 3 damage divided as you choose among one, two, or three targets.",
+        "TargetMax": "3",
+        "TgtPrompt": "Select any target to distribute damage to"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Description": "This spell can't be countered.",
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

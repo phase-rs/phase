@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Permanent",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever a permanent is returned to a player's hand, that player discards a card.",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Destination": "Hand"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

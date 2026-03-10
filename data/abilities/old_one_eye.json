@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create a 5/5 green Tyranid creature token.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigReturn",
+        "ValidPlayer": "You",
+        "Phase": "Main1",
+        "PresentPlayer": "You",
+        "PresentZone": "Graveyard",
+        "TriggerDescription": "Fast Healing — At the beginning of your first main phase, you may discard two cards. If you do, return CARDNAME from your graveyard to your hand.",
+        "IsPresent": "Card.StrictlySelf"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other creatures you control have trample.",
+        "AddKeyword": "Trample",
+        "Affected": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

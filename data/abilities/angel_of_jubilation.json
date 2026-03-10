@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other nonblack creatures you control get +1/+1.",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Affected": "Creature.nonBlack+Other+YouCtrl"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPayLife"
+      },
+      "params": {
+        "Description": "Players can't pay life or sacrifice creatures to cast spells or activate abilities.",
+        "ValidPlayer": "Player",
+        "ValidCause": "Spell,Activated",
+        "ForCost": "True"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantSacrifice"
+      },
+      "params": {
+        "ForCost": "True",
+        "ValidCard": "Creature",
+        "Description": "Players can't pay life or sacrifice creatures to cast spells or activate abilities.",
+        "ValidCause": "Spell,Activated",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

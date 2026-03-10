@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "CheckSVar": "OpponentSmallest",
+        "TriggerDescription": "When an opponent has 10 or less life, if CARDNAME is an enchantment, CARDNAME becomes a 3/2 Jackal creature.",
+        "IsPresent": "Card.Self+Enchantment",
+        "ResolvingCheck": "IsPresent",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLurkingJackalsAnimate",
+        "SVarCompare": "LE10"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

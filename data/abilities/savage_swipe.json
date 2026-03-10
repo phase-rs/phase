@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionDefined": "ThisTargetedCard",
+        "SpellDescription": "Target creature you control gets +2/+2 until end of turn if its power is 2. It fights target creature you don't control.",
+        "AILogic": "Fight",
+        "TgtPrompt": "Select target creature you control",
+        "ConditionPresent": "Creature.powerEQ2",
+        "AITgts": "Creature.YouCtrl+powerEQ2",
+        "SubAbility": "DBFight"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

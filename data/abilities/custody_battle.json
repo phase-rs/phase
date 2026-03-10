@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.AttachedBy",
+        "AddTrigger": "TrigCustodyBattlePhase",
+        "Description": "Enchanted creature has \"At the beginning of your upkeep, target opponent gains control of this creature unless you sacrifice a land.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

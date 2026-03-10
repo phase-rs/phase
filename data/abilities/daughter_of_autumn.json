@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "DamageEvent",
+          "Duration": "UntilHostLeavesPlayOrEOT",
+          "ExileOnMoved": "Battlefield",
+          "TgtPrompt": "Select target white creature to redirect damage from",
+          "ValidTgts": "Creature.White",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "The next 1 damage that would be dealt to target white creature this turn is dealt to CARDNAME instead."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "DamageEvent",
+        "Duration": "UntilHostLeavesPlayOrEOT",
+        "ExileOnMoved": "Battlefield",
+        "TgtPrompt": "Select target white creature to redirect damage from",
+        "ValidTgts": "Creature.White",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "The next 1 damage that would be dealt to target white creature this turn is dealt to CARDNAME instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

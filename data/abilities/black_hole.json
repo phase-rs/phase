@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature and up to X other target creatures, where X is the number of Attractions you're visited this turn",
+        "TargetMin": "1",
+        "TargetMax": "X",
+        "SpellDescription": "Destroy target creature and up to X other target creatures, where X is the number of Attractions you've visited this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

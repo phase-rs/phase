@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Scry",
+      "params": {
+        "TriggerDescription": "Whenever you scry or surveil, draw a card. (Draw after you scry or surveil.)",
+        "ValidPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Surveil",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you scry or surveil, draw a card. (Draw after you scry or surveil.)",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

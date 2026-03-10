@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, you and target opponent each create a Treasure token."
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent sacrifices a noncreature token, that player gets two poison counters.",
+        "ValidCard": "Permanent.token+nonCreature",
+        "Execute": "TrigPoison",
+        "ValidPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

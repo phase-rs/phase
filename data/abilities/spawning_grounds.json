@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddAbility": "SpawningGroundsToken",
+        "Description": "Enchanted land has \"{T}: Create a 5/5 green Beast creature token with trample.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

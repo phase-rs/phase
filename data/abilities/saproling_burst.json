@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_x_x_saproling_burst",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/FADE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberSource": "True",
+        "TokenOwner": "You",
+        "ImprintTokens": "True",
+        "SpellDescription": "Create a green Saproling creature token. It has \"This creature's power and toughness are each equal to the number of fade counters on CARDNAME.\""
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "DestroyRemembered",
+        "Destination": "Any",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, destroy all tokens created with CARDNAME. They can't be regenerated."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your first main phase, you may discard a card. When you do, target creature can't block this turn.",
+        "Execute": "DBImmediateTrig",
+        "Phase": "Main1"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.OppCtrl",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Sonic Blast — Whenever a creature an opponent controls dies, NICKNAME deals 1 damage to that player.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

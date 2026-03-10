@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainsAbilitiesOf": "Permanent.Other",
+        "EffectZone": "Battlefield",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has all activated abilities of each other permanent on the battlefield."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

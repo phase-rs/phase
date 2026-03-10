@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigDelayedTrig",
+        "TriggerDescription": "Whenever a Curse is put into your graveyard from the battlefield, return it to the battlefield attached to you at the beginning of the next end step.",
+        "Origin": "Battlefield",
+        "ValidCard": "Curse.YouOwn"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you may attach a Curse attached to you to one of your opponents. If you do, draw two cards.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigChooseCurse"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

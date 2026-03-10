@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "EffectZone": "All",
+        "Cost": "BeholdExile<1/Kithkin>",
+        "Description": "As an additional cost to cast this spell, behold a Kithkin and exile it. (Exile a Kithkin you control or a Kithkin card from your hand.)",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Activator": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Kithkin.Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other Kithkin you control get +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

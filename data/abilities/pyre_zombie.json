@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R R"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "It deals 2 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.StrictlySelf",
+        "PresentZone": "Graveyard",
+        "Execute": "TrigReturn",
+        "PresentPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may pay {1}{B}{B}. If you do, return CARDNAME to your hand.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Graveyard",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigChange",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this Case enters, search your library for a basic land card, reveal it, put it into your hand, then shuffle."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSolve",
+        "SVarCompare": "GE5",
+        "TriggerDescription": "To solve — There are five colors among permanents you control. (If unsolved, solve at the beginning of your end step.)",
+        "IsPresent": "Card.Self+!IsSolved"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "Solved — At the beginning of combat on your turn, target creature you control gains flying, double strike, and vigilance until end of turn.",
+        "IsPresent": "Card.Self+IsSolved",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

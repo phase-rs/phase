@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+withDeathtouch",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control with deathtouch attacks, each opponent loses 1 life and you gain 1 life.",
+        "Execute": "TrigLoseLife"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Creature.YouCtrl+withDeathtouch",
+        "TriggerDescription": "Whenever a creature you control with deathtouch deals damage to a planeswalker, destroy that planeswalker.",
+        "ValidTarget": "Planeswalker",
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

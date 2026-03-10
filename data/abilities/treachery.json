@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, untap up to five lands.",
+        "Destination": "Battlefield",
+        "Execute": "TrigUntap",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "GainControl": "You",
+        "Description": "You control enchanted creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

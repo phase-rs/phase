@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.withHorsemanship",
+        "Description": "CARDNAME can't be blocked by creatures with horsemanship."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

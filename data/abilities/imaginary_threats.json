@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Imaginary Threats's Effect — Must Attack",
+          "SpellDescription": "Creatures target player controls attack this turn if able.",
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "MustAttack",
+          "ValidTgts": "Opponent",
+          "SubAbility": "DBEffect"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Imaginary Threats's Effect — Must Attack",
+        "SpellDescription": "Creatures target player controls attack this turn if able.",
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "MustAttack",
+        "ValidTgts": "Opponent",
+        "SubAbility": "DBEffect"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

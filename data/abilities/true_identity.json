@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1",
+        "TriggerDescription": "Whenever CARDNAME or another permanent you control is turned face up, scry 1, then draw a card. This ability triggers only once each turn.",
+        "Execute": "TrigScry",
+        "ValidCard": "Card.Self,Permanent.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

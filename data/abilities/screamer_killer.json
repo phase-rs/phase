@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature.cmcGE5",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Bio-Plasmic Scream — Whenever you cast a creature spell with mana value 5 or greater, CARDNAME deals 5 damage to any target.",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

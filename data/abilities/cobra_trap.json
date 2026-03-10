@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "g_1_1_snake",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenAmount": "4",
+        "TokenOwner": "You",
+        "StackDescription": "{p:You} creates four 1/1 green Snake creature tokens.",
+        "SpellDescription": "Create four 1/1 green Snake creature tokens."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Destroyed",
+      "params": {
+        "ValidCauser": "Player.Opponent",
+        "Static": "True",
+        "Execute": "TrackValidDestroy",
+        "ValidCard": "Permanent.nonCreature+YouCtrl"
+      }
+    },
+    {
+      "mode": "TurnBegin",
+      "params": {
+        "Execute": "TrigReset",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "CheckSVar": "SetTrap",
+        "ValidSA": "Spell.Self",
+        "Description": "If a noncreature permanent under your control was destroyed this turn by a spell or ability an opponent controlled, you may pay {G} rather than pay this spell's mana cost.",
+        "Cost": "G"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

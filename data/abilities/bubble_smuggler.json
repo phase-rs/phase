@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "AddCounters",
+        "ActiveZones": "Battlefield",
+        "Description": "As CARDNAME is turned face up, put four +1/+1 counters on it."
+      }
+    }
+  ],
+  "faces": []
+}

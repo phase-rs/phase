@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerDescription": "When you cycle CARDNAME, Soldier creatures get +1/+1 and gain first strike until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "IgnoreLegendRule"
+      },
+      "params": {
+        "ValidCard": "Permanent.YouCtrl+Legendary+namedSyr Joshua and Syr Saxon",
+        "IsPresent": "Permanent.Legendary+YouCtrl+namedSyr Joshua and Syr Saxon",
+        "PresentCompare": "EQ2",
+        "Description": "If you control exactly two legendary permanents named Syr Joshua and Syr Saxon, the \"legend rule\" doesn't apply to them."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+Other+namedSyr Joshua and Syr Saxon",
+        "Description": "Each other creature you control named Syr Joshua and Syr Saxon has battle cry.",
+        "AddKeyword": "Battle Cry"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

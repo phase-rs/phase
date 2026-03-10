@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPutCounter",
+            "OptionalDecider": "You",
+            "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on CARDNAME.",
+            "ValidCard": "Spirit,Arcane",
+            "ValidActivatingPlayer": "You"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of the end step, if there are two or more ki counters on CARDNAME, you may flip it.",
+            "OptionalDecider": "You",
+            "IsPresent": "Card.Self+counters_GE2_KI",
+            "Execute": "TrigFlip",
+            "Phase": "End of Turn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 2,
+            "toughness": 2,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "SubCounter<1/KI>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Target creature gets +2/+2 until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "AddPower": "1",
+        "Description": "Enchanted permanent gets +1/+1 and has vigilance.",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Max speed — You may cast this card from your graveyard.",
+        "Affected": "Card.Self",
+        "AddStaticAbility": "MaxSpeedStatic",
+        "AffectedZone": "Graveyard",
+        "Condition": "MaxSpeed",
+        "EffectZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

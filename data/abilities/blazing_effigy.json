@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "BlazeDmg",
+        "TriggerDescription": "When CARDNAME dies, it deals X damage to target creature, where X is 3 plus the amount of damage dealt to CARDNAME this turn by other sources named Blazing Effigy.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

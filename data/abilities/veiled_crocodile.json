@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "EQ0",
+        "ResolvingCheck": "IsPresent",
+        "IsPresent": "Card.Self+Enchantment",
+        "TriggerDescription": "When a player has no cards in hand, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Crocodile creature.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigVCAnimate"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

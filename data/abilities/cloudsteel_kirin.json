@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddReplacementEffect": "YouCantLose & OppCantWin",
+        "AddKeyword": "Flying",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has flying and \"You can't lose the game and your opponents can't win the game.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

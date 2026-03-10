@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Permanent.YouCtrl",
+          "SpellDescription": "Until end of turn, permanents you control gain \"{T}: This permanent deals 1 damage to any target.\"",
+          "Abilities": "ABDamage"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Permanent.YouCtrl",
+        "SpellDescription": "Until end of turn, permanents you control gain \"{T}: This permanent deals 1 damage to any target.\"",
+        "Abilities": "ABDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

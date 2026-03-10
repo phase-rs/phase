@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "TrigToken",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When NICKNAME leaves the battlefield, create a 1/1 green and white Human Citizen creature token.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "During your turn, NICKNAME has flying.",
+        "AddKeyword": "Flying",
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

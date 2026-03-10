@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Mana",
+            "cost": "Reveal<1/Creature.Colorless>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionSVarCompare": "LEY",
+        "SpellDescription": "Exile target creature if its power is less than or equal to the revealed card's power.",
+        "ConditionCheckSVar": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

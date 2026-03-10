@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RemoveFromCombat",
+        "params": {
+          "TgtPrompt": "Select target creature defending player controls",
+          "ValidTgts": "Creature.DefendingPlayerCtrl",
+          "UnblockCreaturesBlockedOnlyBy": "Targeted",
+          "SubAbility": "ChooseAttacker",
+          "SpellDescription": "Remove target creature defending player controls from combat. Creatures it was blocking that had become blocked by only that creature this combat become unblocked.",
+          "ActivationPhases": "Declare Blockers",
+          "Defined": "Targeted",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature defending player controls",
+        "ValidTgts": "Creature.DefendingPlayerCtrl",
+        "UnblockCreaturesBlockedOnlyBy": "Targeted",
+        "SubAbility": "ChooseAttacker",
+        "SpellDescription": "Remove target creature defending player controls from combat. Creatures it was blocking that had become blocked by only that creature this combat become unblocked.",
+        "ActivationPhases": "Declare Blockers",
+        "Defined": "Targeted",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

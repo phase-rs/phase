@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Land"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/FADE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target land."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, each player returns to the battlefield all cards they own exiled with CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

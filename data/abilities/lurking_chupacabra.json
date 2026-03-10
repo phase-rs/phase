@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Explored",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerDescription": "Whenever a creature you control explores, target creature an opponent controls gets -2/-2 until end of turn.",
+        "Execute": "TrigDebuff",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

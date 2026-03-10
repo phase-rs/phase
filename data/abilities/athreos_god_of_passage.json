@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another creature you own dies, return it to your hand unless target opponent pays 3 life.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.YouOwn+Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "LT7",
+        "RemoveType": "Creature",
+        "CheckSVar": "X",
+        "Description": "As long as your devotion to white and black is less than seven, NICKNAME isn't a creature.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

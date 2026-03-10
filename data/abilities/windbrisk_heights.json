@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W",
+        "params": {
+          "SpellDescription": "Add {W}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {W}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Optional": "True",
+          "Amount": "All",
+          "ConditionCheckSVar": "X",
+          "Controller": "You",
+          "ConditionSVarCompare": "GE3",
+          "PlayerTurn": "True",
+          "Defined": "ExiledWith",
+          "WithoutManaCost": "True",
+          "SpellDescription": "You may play the exiled card without paying its mana cost if you attacked with three or more creatures this turn."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "Amount": "All",
+        "ConditionCheckSVar": "X",
+        "Controller": "You",
+        "ConditionSVarCompare": "GE3",
+        "PlayerTurn": "True",
+        "Defined": "ExiledWith",
+        "WithoutManaCost": "True",
+        "SpellDescription": "You may play the exiled card without paying its mana cost if you attacked with three or more creatures this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "Description": "CARDNAME enters tapped.",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

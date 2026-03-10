@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target creature.",
+        "Planeswalker": "true"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "IgnoreHexproof",
+      "params": {
+        "Description": "Your opponents and permanents your opponents control with hexproof can be the targets of spells and abilities you control as though they didn't have hexproof.",
+        "Activator": "You",
+        "ValidEntity": "Permanent.OppCtrl,Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

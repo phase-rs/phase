@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Player.Opponent",
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Each opponent loses 1 life. You gain life equal to the life lost this way.",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

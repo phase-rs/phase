@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you gain life, you may put that many +1/+1 counters on each creature you control. Do this only once each turn.",
+        "Execute": "TrigPutCounterAll",
+        "TriggerZones": "Battlefield",
+        "ResolvedLimit": "1",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

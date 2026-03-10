@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may sacrifice another creature or artifact. If you do, put a +1/+1 counter on CARDNAME and it gains menace until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "Execute": "TrigDestroyCreature",
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you may sacrifice it. If you do, destroy target creature and target land.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

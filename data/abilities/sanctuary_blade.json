@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddKeyword": "Protection:Card.ChosenColor:chosenColor",
+        "Description": "Equipped creature gets +2/+0 and has protection from the last chosen color.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Attached"
+      },
+      "params": {
+        "ValidTarget": "Creature",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Description": "As CARDNAME becomes attached to a creature, choose a color.",
+        "ReplaceWith": "ChooseColor"
+      }
+    }
+  ],
+  "faces": []
+}

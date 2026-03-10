@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, each opponent loses 1 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Description": "Spells your opponents cast cost {2} more to cast.",
+        "Type": "Spell",
+        "Amount": "2",
+        "Activator": "Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

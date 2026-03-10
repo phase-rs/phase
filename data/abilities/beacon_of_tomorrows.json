@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "ValidTgts": "Player",
+          "NumTurns": "1",
+          "SubAbility": "DBShuffle",
+          "SpellDescription": "Target player takes an extra turn after this one. Shuffle CARDNAME into its owner's library."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "NumTurns": "1",
+        "SubAbility": "DBShuffle",
+        "SpellDescription": "Target player takes an extra turn after this one. Shuffle CARDNAME into its owner's library."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

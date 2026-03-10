@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self,Creature.EquippedBy",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME or equipped creature attacks, you get {E}, then it gets +X/+X until end of turn, where X is the amount of {E} you have."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

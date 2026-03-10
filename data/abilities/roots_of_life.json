@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerDescription": "Whenever a land of the chosen type an opponent controls becomes tapped, you may gain 1 life.",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.ChosenType+OppCtrl",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

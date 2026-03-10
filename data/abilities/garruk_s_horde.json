@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "Player",
+        "AffectedZone": "Library",
+        "Description": "Play with the top card of your library revealed."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "AffectedZone": "Library",
+        "Affected": "Creature.TopLibrary+YouCtrl+nonLand",
+        "Description": "You may cast creature spells from the top of your library. (Do this only any time you could cast that creature spell. You still pay the spell's costs.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Amount": "2",
+          "RestrictValid": "Activated",
+          "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "RestrictValid": "Activated",
+        "SpellDescription": "Add {C}{C}. Spend this mana only to activate abilities."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "AILogic": "SpellCopy",
+          "SpellDescription": "When you next activate an exhaust ability that isn't a mana ability this turn, copy it. You may choose new targets for the copy.",
+          "Mode": "AbilityCast",
+          "Execute": "EffTrigCopy",
+          "ValidActivatingPlayer": "You",
+          "ThisTurn": "True",
+          "ValidSA": "Activated.Exhaust+!ManaAbility"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "SpellCopy",
+        "SpellDescription": "When you next activate an exhaust ability that isn't a mana ability this turn, copy it. You may choose new targets for the copy.",
+        "Mode": "AbilityCast",
+        "Execute": "EffTrigCopy",
+        "ValidActivatingPlayer": "You",
+        "ThisTurn": "True",
+        "ValidSA": "Activated.Exhaust+!ManaAbility"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

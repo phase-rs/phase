@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "DBChoosePermanent",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME deals damage to a player, choose an artifact, creature, or land you control. That player gains control of that permanent.",
+        "StackDescription": "None"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

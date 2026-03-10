@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, create a Blood token for each opponent you have. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Equipment",
+        "AddStaticAbility": "BloodEquip",
+        "AddKeyword": "Equip:2",
+        "Description": "Blood tokens you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0\" and equip {2}.",
+        "Affected": "Blood.token+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

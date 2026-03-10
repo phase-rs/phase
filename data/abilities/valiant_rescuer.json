@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "FirstTime": "True",
+        "ValidCard": "Card.Other",
+        "ValidPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you cycle another card for the first time each turn, create a 1/1 white Human Soldier creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

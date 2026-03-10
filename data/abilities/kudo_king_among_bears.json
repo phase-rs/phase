@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Bear",
+        "SetPower": "2",
+        "Description": "Other creatures have base power and toughness 2/2 and are Bears in addition to their other types.",
+        "SetToughness": "2",
+        "Affected": "Creature.Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

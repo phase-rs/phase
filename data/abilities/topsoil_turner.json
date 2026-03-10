@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigAnimateAll",
+        "TriggerDescription": "When this creature enters, each Forest and Treefolk card in your hand perpetually gains \"{T}: Add {G}{G}.\""
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

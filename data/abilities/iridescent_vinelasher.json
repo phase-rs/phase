@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, this creature deals 1 damage to target opponent.",
+        "Origin": "Any",
+        "Execute": "TrigDmg"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature.TargetedPlayerCtrl+cmcEQX",
+          "Planeswalker.TargetedPlayerCtrl+cmcEQX"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Mandatory": "True",
+        "StackDescription": "REP Target opponent_{p:Targeted}",
+        "SubAbility": "DBExile",
+        "SpellDescription": "Target opponent exiles a creature or planeswalker they control with the greatest mana value among creatures and planeswalkers they control.",
+        "ChoiceTitle": "Choose a creature or planeswalker with the highest mana value among creatures and planeswalkers you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

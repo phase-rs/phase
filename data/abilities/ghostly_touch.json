@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "TrigTapUnTap",
+        "AddTrigger": "AttackTrigger",
+        "Description": "Enchanted creature has \"Whenever this creature attacks, you may tap or untap target permanent.\"",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Championed",
+      "params": {
+        "Execute": "TrigTapAll",
+        "ValidCard": "Faerie",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When a Faerie is championed with CARDNAME, tap all lands target player controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

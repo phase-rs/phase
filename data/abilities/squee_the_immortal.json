@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Exile,Graveyard",
+        "MayPlay": "True",
+        "EffectZone": "Exile,Graveyard",
+        "Description": "You may cast CARDNAME from your graveyard or from exile.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

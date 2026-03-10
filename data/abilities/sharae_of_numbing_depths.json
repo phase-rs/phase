@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTap",
+        "TriggerDescription": "When CARDNAME enters, tap target creature an opponent controls and put a stun counter on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerDescription": "Whenever you tap one or more untapped creatures your opponents control, draw a card. This ability triggers only once each turn.",
+        "Execute": "TrigDraw",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

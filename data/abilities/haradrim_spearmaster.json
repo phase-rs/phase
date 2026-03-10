@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, another target creature you control gets +1/+0 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "Execute": "TrigPump",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

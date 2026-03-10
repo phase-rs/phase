@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "ValidTgts": "Player",
+          "DelayedTriggerDefinedPlayer": "Targeted",
+          "Static": "True",
+          "Execute": "TrigEffect",
+          "Phase": "Upkeep->",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "During target player's next turn, creatures that player controls attack you if able.",
+          "Mode": "Phase"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "DelayedTriggerDefinedPlayer": "Targeted",
+        "Static": "True",
+        "Execute": "TrigEffect",
+        "Phase": "Upkeep->",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "During target player's next turn, creatures that player controls attack you if able.",
+        "Mode": "Phase"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

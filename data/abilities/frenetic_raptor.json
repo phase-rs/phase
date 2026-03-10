@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "Beasts can't block.",
+        "ValidCard": "Creature.Beast"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

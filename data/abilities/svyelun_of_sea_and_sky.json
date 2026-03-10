@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME attacks, draw a card.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you control two other Merfolk, CARDNAME has indestructible. (Damage and effects that say \"destroy\" don't destroy it.)",
+        "PresentCompare": "GE2",
+        "Affected": "Card.Self",
+        "AddKeyword": "Indestructible",
+        "IsPresent": "Merfolk.Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Merfolk.Other+YouCtrl",
+        "Description": "Other Merfolk you control have ward {1}. (Whenever another Merfolk you control becomes the target of a spell or ability an opponent controls, counter it unless that player pays {1}.)",
+        "AddKeyword": "Ward:1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

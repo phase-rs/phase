@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for an Assembly-Worker creature card, reveal it, put it into your hand, then shuffle.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

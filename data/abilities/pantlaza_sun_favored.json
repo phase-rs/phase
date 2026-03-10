@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ResolvedLimit": "1",
+        "ValidCard": "Card.Self,Dinosaur.YouCtrl+Other",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME or another Dinosaur you control enters, you may discover X, where X is that creature's toughness. Do this only once each turn. (Exile cards from the top of your library until you exile a nonland card with that mana value or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)",
+        "Execute": "TrigDiscover"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

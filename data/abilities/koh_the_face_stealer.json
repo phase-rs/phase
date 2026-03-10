@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature.ExiledWithSource"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayLife<1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose a creature card exiled with Koh.",
+        "Mandatory": "True",
+        "Defined": "You",
+        "Amount": "1",
+        "ChoiceTitle": "Choose an exiled card exiled with NICKNAME",
+        "ChoiceZone": "Exile"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile1",
+        "TriggerDescription": "When NICKNAME enters, exile up to one other target creature.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigExile2",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever another nontoken creature dies, you may exile it.",
+        "ValidCard": "Creature.!token+Other"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "NICKNAME has all activated and triggered abilities of the last chosen card.",
+        "GainsTriggerAbsOf": "Card.ChosenCard",
+        "Affected": "Card.Self",
+        "EffectZone": "Battlefield",
+        "GainsAbilitiesOf": "Card.ChosenCard",
+        "GainsAbilitiesOfZones": "Exile"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

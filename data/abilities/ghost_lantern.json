@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Battlefield",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever a creature you control dies, put a +1/+1 counter on equipped creature.",
+            "Destination": "Graveyard",
+            "Execute": "TrigGainCounter",
+            "ValidCard": "Creature.YouCtrl"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Hand",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target creature in your graveyard",
+            "SpellDescription": "Return target creature card from your graveyard to your hand."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

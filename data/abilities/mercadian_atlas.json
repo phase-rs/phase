@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "AtlasDraw",
+        "OptionalDecider": "You",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if you didn't play a land this turn, you may draw a card.",
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield",
+        "SVarCompare": "EQ0",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "TapDmg",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has \"{T}: This creature deals damage equal to its power to target attacking or blocking creature.\"",
+        "AddSVar": "SinstrikerCount"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

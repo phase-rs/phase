@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Creature",
+          "Elemental"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl,Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "HiddenKeywords": "CARDNAME must be blocked if able.",
+        "Keywords": "Haste",
+        "TgtPrompt": "Select target creature or land you control",
+        "SpellDescription": "Target creature or land you control becomes a 4/4 Elemental creature with haste in addition to its other types until end of turn. It must be blocked this turn if able."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

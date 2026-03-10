@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Sideboard",
+            "destination": "Library",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ChangeType": "Card.YouOwn",
+            "Hidden": "True",
+            "SpellDescription": "Shuffle up to four cards you own from outside the game into your library.",
+            "StackDescription": "{p:You} shuffles up to four cards they own from outside the game into their library.",
+            "Shuffle": "True",
+            "ChangeNum": "4"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "Repeat",
+            "params": {
+              "SpellDescription": "Create a 3/1 red Elemental creature token unless any opponent has you draw a card. Repeat this process two more times.",
+              "StackDescription": "SpellDescription",
+              "MaxRepeat": "3",
+              "RepeatSubAbility": "DBToken"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create a 3/1 red Elemental creature token unless any opponent has you draw a card. Repeat this process two more times.",
+            "StackDescription": "SpellDescription",
+            "MaxRepeat": "3",
+            "RepeatSubAbility": "DBToken"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

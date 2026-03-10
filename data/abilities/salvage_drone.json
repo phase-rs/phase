@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigLoot",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, you may draw a card. If you do, discard a card.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

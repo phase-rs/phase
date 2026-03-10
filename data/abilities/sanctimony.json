@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever an opponent taps a Mountain for mana, you may gain 1 life.",
+        "ValidCard": "Mountain",
+        "Activator": "Opponent",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

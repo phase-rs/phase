@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control enters, it gets +2/+0 and gains haste until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

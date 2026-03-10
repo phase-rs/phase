@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a Mount or Vehicle you control attacks, put a +1/+1 counter on it.",
+        "ValidCard": "Mount.YouCtrl,Vehicle.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Affected": "Mount.YouCtrl,Vehicle.YouCtrl",
+        "Description": "During your turn, Mounts and Vehicles you control have hexproof.",
+        "Condition": "PlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

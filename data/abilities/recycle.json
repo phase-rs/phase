@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you play a card, draw a card.",
+        "ValidCard": "Card",
+        "ValidActivatingPlayer": "You"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "TrigDraw",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you play a card, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "Your maximum hand size is 2.",
+        "SetMaxHandSize": "2"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "Phase": "Draw",
+        "Skip": "True",
+        "ValidPlayer": "You",
+        "ActiveZones": "Battlefield",
+        "Description": "Skip your draw step."
+      }
+    }
+  ],
+  "faces": []
+}

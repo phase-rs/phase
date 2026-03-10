@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, draw two cards, then discard a card.",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, draw two cards, then discard a card.",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever you discard a card, target creature an opponent controls gets -X/-0 until your next turn, where X is the number of different mana values among cards in your graveyard.",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

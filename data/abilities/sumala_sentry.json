@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Permanent.YouCtrl",
+        "TriggerDescription": "Whenever a face-down permanent you control is turned face up, put a +1/+1 counter on it and a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

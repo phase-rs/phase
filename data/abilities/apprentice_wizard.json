@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "AILogic": "ManaRitual",
+          "SpellDescription": "Add {C}{C}{C}.",
+          "AINoRecursiveCheck": "True",
+          "Amount": "3"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "ManaRitual",
+        "SpellDescription": "Add {C}{C}{C}.",
+        "AINoRecursiveCheck": "True",
+        "Amount": "3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

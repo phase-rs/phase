@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Heavy Power Hammer — Whenever CARDNAME deals combat damage to a player, destroy target artifact or enchantment that player controls.",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

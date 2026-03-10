@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackedTarget": "Player.EnchantedBy",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever enchanted player is attacked, you gain 2 life. Each opponent attacking that player does the same.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

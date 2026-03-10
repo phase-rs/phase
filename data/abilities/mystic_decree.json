@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature",
+        "RemoveKeyword": "Flying & Landwalk:Island",
+        "Description": "All creatures lose flying and islandwalk."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

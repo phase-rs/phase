@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap",
+        "Alone": "True",
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, tap target creature you don't control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

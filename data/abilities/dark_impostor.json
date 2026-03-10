@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 B B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBCounter",
+        "SpellDescription": "Exile target creature and put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has all activated abilities of all creature cards exiled with it.",
+        "EffectZone": "Battlefield",
+        "Affected": "Card.Self",
+        "GainsAbilitiesOf": "Creature.ExiledWithSource",
+        "GainsAbilitiesOfZones": "Exile"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

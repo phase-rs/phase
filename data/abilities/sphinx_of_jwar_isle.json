@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may look at the top card of your library any time.",
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

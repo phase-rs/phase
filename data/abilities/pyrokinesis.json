@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DividedAsYouChoose": "4",
+        "TargetMax": "4",
+        "TargetMin": "0",
+        "TgtPrompt": "Select any number of target creatures to distribute damage to",
+        "SpellDescription": "CARDNAME deals 4 damage divided as you choose among any number of target creatures."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "ExileFromHand<1/Card.Red+Other>",
+        "Description": "You may exile a red card from your hand rather than pay this spell's mana cost.",
+        "EffectZone": "All",
+        "ValidSA": "Spell.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

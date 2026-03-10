@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Damage",
+        "Affected": "Sliver",
+        "Description": "All Slivers have \"{T}: This permanent deals 1 damage to target attacking or blocking creature.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

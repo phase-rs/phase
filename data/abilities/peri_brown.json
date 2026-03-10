@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Historic+YouCtrl",
+        "AffectedZone": "Stack",
+        "AddKeyword": "Convoke",
+        "Description": "The first historic spell you cast each turn has convoke. (Your creatures can help cast it. Each creature you tap while casting it pays for {1} or one mana of that creature's color.)",
+        "CheckSVar": "X",
+        "SVarCompare": "EQ0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

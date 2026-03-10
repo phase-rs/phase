@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a creature spell, create a 4/4 black Zombie Warrior creature token with vigilance.",
+        "ValidCard": "Creature",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TriReturn",
+        "TriggerDescription": "When CARDNAME dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.",
+        "Destination": "Graveyard,Exile",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

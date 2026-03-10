@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W U B R G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "ChangeType": "Permanent.Legendary+cmcLTY",
+        "SpellDescription": "Search your library for a legendary permanent card with mana value less than NICKNAME's power, put that card onto the battlefield, then shuffle."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Description": "CARDNAME gets +1/+1 for each color among other legendary permanents you control.",
+        "Affected": "Card.Self",
+        "AddToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "All damage that would be dealt to you is dealt to enchanted creature instead.",
+        "ValidTarget": "You",
+        "DamageTarget": "Enchanted",
+        "ReplaceWith": "DmgEnchanted",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerZones": "Command",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you set this scheme in motion, add {U}{B}{R}.",
+        "Execute": "DBAddMana"
+      }
+    },
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerZones": "Command",
+        "SVarCompare": "GE6",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you set this scheme in motion, if you control six or more lands, you may search your library for a card with mana value 6 or greater, reveal it, put it into your hand, then shuffle.",
+        "Execute": "DBSearch",
+        "OptionalDecider": "You",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

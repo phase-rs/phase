@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigAttach",
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerDescription": "Whenever a creature an opponent controls enters, attach CARDNAME to that creature.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You control enchanted creature.",
+        "Affected": "Card.EnchantedBy",
+        "GainControl": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

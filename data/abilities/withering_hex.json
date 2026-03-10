@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player cycles a card, put a plague counter on CARDNAME.",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "-X",
+        "Description": "Enchanted creature gets -1/-1 for each plague counter on CARDNAME.",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "-X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

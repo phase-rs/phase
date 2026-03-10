@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerDescription": "When you set this scheme in motion, draw two cards. You may play an additional land this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "DBDraw",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

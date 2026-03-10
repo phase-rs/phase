@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddAbility": "HostileAct",
+        "Description": "Enchanted creature has \"{T}: Target creature can't block this turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

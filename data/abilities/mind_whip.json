@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player.EnchantedController",
+        "Execute": "TrigDmg",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of the upkeep of enchanted creature's controller, that player may pay {3}. If they don't, CARDNAME deals 2 damage to that player and you tap that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

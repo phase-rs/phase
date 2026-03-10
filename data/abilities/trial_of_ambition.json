@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSacrifice",
+        "TriggerDescription": "When CARDNAME enters, target opponent sacrifices a creature."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Cartouche.YouCtrl",
+        "TriggerDescription": "When a Cartouche you control enters, return CARDNAME to its owner's hand.",
+        "Origin": "Any",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

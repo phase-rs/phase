@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "Cost": "Exert<1/CARDNAME>",
+        "IsPresent": "Creature.Self+notExertedThisTurn",
+        "Trigger": "TrigUntapAll",
+        "Description": "If CARDNAME hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase. (An exerted creature won't untap during your next untap step.)",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

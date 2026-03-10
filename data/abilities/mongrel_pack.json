@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies during combat, create four 1/1 green Dog creature tokens.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Phase": "BeginCombat->EndCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

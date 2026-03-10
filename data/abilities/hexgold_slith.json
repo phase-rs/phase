@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigEnergy",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you get {E}{E} (two energy counters)."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {E}{E}. If you do, it gains first strike until end of turn."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it.",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

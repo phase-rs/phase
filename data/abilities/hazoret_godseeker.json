@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Target creature with power 2 or less can't be blocked this turn.",
+          "AILogic": "Pump",
+          "RememberObjects": "Targeted",
+          "ExileOnMoved": "Battlefield",
+          "TgtPrompt": "Select target creature with power 2 or less",
+          "ValidTgts": "Creature.powerLE2",
+          "StaticAbilities": "Unblockable",
+          "StackDescription": "{c:Targeted} can't be blocked this turn."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature with power 2 or less can't be blocked this turn.",
+        "AILogic": "Pump",
+        "RememberObjects": "Targeted",
+        "ExileOnMoved": "Battlefield",
+        "TgtPrompt": "Select target creature with power 2 or less",
+        "ValidTgts": "Creature.powerLE2",
+        "StaticAbilities": "Unblockable",
+        "StackDescription": "{c:Targeted} can't be blocked this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "NICKNAME can't attack or block unless you have max speed.",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "PlayerCountPropertyYou$HasPropertyMaxSpeed",
+        "SVarCompare": "NE1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

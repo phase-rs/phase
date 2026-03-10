@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.cmcGE1,Creature.cmcGE1"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact or creature with mana value 1 or greater",
+        "SpellDescription": "The owner of target artifact or creature with mana value 1 or greater shuffles it into their library.",
+        "Shuffle": "True",
+        "SubAbility": "DBDiscover",
+        "StackDescription": "{p:TargetedOwner} shuffles {c:Targeted} into their library."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

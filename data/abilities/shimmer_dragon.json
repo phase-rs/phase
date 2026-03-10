@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<2/Artifact>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Artifact.YouCtrl",
+        "AddKeyword": "Hexproof",
+        "Affected": "Card.Self",
+        "PresentCompare": "GE4",
+        "Description": "As long as you control four or more artifacts, CARDNAME has hexproof."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

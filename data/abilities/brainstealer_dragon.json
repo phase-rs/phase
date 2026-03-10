@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigExile",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, exile the top card of each opponent's library. You may play those cards for as long as they remain exiled. If you cast a spell this way, you may spend mana as though it were mana of any color to cast it."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Permanent.OppOwn+YouCtrl+nonLand",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a nonland permanent an opponent owns enters the battlefield under your control, they lose life equal to its mana value."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

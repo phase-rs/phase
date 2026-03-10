@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": "Battlefield"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "SubAbility": "DBAnimate",
+        "Optional": "True",
+        "SpellDescription": "Reveal the top four cards of your library. You may put a creature card from among them onto the battlefield. It gains \"At the beginning of your end step, return this creature to its owner's hand.\" Then put the rest of the cards revealed this way on the bottom of your library in any order.",
+        "ChangeNum": "1",
+        "RememberChanged": "True",
+        "StackDescription": "SpellDescription",
+        "ChangeValid": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "TriggerDescription": "Whenever another creature you control enters, if that creature has greater power or toughness than CARDNAME, put an oil counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Condition": "Evolve",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +1/+1 for each oil counter on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

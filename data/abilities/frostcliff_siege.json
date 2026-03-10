@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeJeskai",
+        "AddTrigger": "JeskaiTrigger",
+        "Description": "• Jeskai — Whenever one or more creatures you control deal combat damage to a player, draw a card."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeTemur",
+        "AddStaticAbility": "TemurStatic",
+        "Description": "• Temur — Creatures you control get +1/+0 and have trample and haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

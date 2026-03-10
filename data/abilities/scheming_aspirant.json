@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Proliferate",
+      "params": {
+        "Execute": "LoseGain",
+        "TriggerDescription": "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

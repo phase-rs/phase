@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.EquippedBy",
+        "Execute": "TrigPutCounter",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever equipped creature dies, put a soul counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Description": "Equipped creature gets +1/+1 for each soul counter on CARDNAME.",
+        "AddToughness": "X",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

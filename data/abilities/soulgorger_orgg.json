@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLoseLife",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you lose all but 1 life."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME leaves the battlefield, you gain life equal to the life you lost when it entered.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "Destination": "Any",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+HasCounters",
+        "Execute": "TrigPutCounter",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control leaves the battlefield, if it had counters on it, put those counters on CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigMoveCounter",
+        "TriggerDescription": "At the beginning of combat on your turn, if CARDNAME has counters on it, you may move all counters from CARDNAME onto target creature.",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+HasCounters",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

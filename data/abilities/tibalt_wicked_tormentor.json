@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "Planeswalker": "True",
+          "SpellDescription": "Add {R}{R}. Draft a card from CARDNAME's spellbook, then exile it. Until end of turn, you may cast that card.",
+          "StackDescription": "REP Add_{p:You} adds & Draft_{p:You} drafts & then exile_then they exile & you may_{p:You} may",
+          "SubAbility": "DBDraft",
+          "Amount": "2"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Add {R}{R}. Draft a card from CARDNAME's spellbook, then exile it. Until end of turn, you may cast that card.",
+        "StackDescription": "REP Add_{p:You} adds & Draft_{p:You} drafts & then exile_then they exile & you may_{p:You} may",
+        "SubAbility": "DBDraft",
+        "Amount": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature or planeswalker",
+        "UnlessCost": "DamageYou<4>",
+        "Planeswalker": "True",
+        "UnlessPayer": "TargetedController",
+        "StackDescription": "CARDNAME deals 4 damage to {c:Targeted} unless {p:TargetedController} has NICKNAME deal 4 damage to them.",
+        "SubAbility": "DBDiscardDraw",
+        "SpellDescription": "CARDNAME deals 4 damage to target creature or planeswalker unless its controller has NICKNAME deal 4 damage to them.",
+        "UnlessResolveSubs": "WhenPaid"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "r_1_1_devil_burn",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<X/LOYALTY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create X 1/1 red Devil creature tokens with \"When this creature dies, it deals 1 damage to any target.\"",
+        "TokenAmount": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

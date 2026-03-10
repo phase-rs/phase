@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "SVarCompare": "GE4",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Descend 4 — When CARDNAME enters, if there are four or more permanent cards in your graveyard return up to one target nonland permanent other than CARDNAME to its owner's hand.",
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

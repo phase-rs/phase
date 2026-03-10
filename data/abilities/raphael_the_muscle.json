@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME enters, create a Mutagen token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Creature.YouCtrl+HasCounters",
+        "ReplaceWith": "DmgTwice",
+        "Description": "Double all damage that creatures you control with counters on them would deal.",
+        "ValidTarget": "Permanent,Player"
+      }
+    }
+  ],
+  "faces": []
+}

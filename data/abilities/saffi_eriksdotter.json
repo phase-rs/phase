@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ForgetOnMoved": "Graveyard",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "When target creature is put into your graveyard this turn, return that card to the battlefield.",
+          "ValidTgts": "Creature",
+          "Triggers": "TrigChangesZone"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ForgetOnMoved": "Graveyard",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "When target creature is put into your graveyard this turn, return that card to the battlefield.",
+        "ValidTgts": "Creature",
+        "Triggers": "TrigChangesZone"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

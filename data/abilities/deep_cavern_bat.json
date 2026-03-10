@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReveal",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, look at target opponent's hand. You may exile a nonland card from it until CARDNAME leaves the battlefield.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

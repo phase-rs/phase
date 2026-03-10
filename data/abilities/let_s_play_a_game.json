@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "CharmNum": "Count$Delirium.3.1",
+          "PrecostDesc": "Delirium —",
+          "Choices": "DBPumpAll,DBDiscard,DBLoseLife",
+          "MinCharmNum": "1",
+          "AdditionalDescription": ". If there are four or more card types among cards in your graveyard, choose one or more instead."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "CharmNum": "Count$Delirium.3.1",
+        "PrecostDesc": "Delirium —",
+        "Choices": "DBPumpAll,DBDiscard,DBLoseLife",
+        "MinCharmNum": "1",
+        "AdditionalDescription": ". If there are four or more card types among cards in your graveyard, choose one or more instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

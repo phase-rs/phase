@@ -1,0 +1,73 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, draw a card.",
+            "Execute": "TrigDraw",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "Execute": "TrigTransform",
+            "Phase": "Upkeep",
+            "WerewolfTransformCondition": "True"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "CharacteristicDefining": "True",
+            "SetToughness": "X",
+            "SetPower": "X",
+            "Description": "CARDNAME's power and toughness are each equal to the number of cards in your hand."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "WerewolfUntransformCondition": "True",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetToughness": "Y",
+            "Description": "CARDNAME's power and toughness are each equal to the total number of cards in all players' hands.",
+            "SetPower": "Y",
+            "CharacteristicDefining": "True"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

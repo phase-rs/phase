@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Affected": "Card.Self",
+        "Description": "This creature gets +1/+0 for each artifact you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

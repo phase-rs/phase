@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All Slivers have \"When this permanent enters, destroy target artifact or enchantment.\"",
+        "Affected": "Sliver",
+        "AddTrigger": "HarmonicETB"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

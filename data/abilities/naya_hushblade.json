@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you control another multicolored permanent, CARDNAME gets +1/+1 and has shroud. (It can't be the target of spells or abilities.)",
+        "AddToughness": "1",
+        "AddKeyword": "Shroud",
+        "AddPower": "1",
+        "Affected": "Card.Self",
+        "IsPresent": "Permanent.MultiColor+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "NissaChosenRep",
+        "ValidCard": "Card.Self",
+        "Description": "If CARDNAME would die, put it on the bottom of its owner's library instead.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "faces": []
+}

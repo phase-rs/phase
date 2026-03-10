@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "ThisTargetedCard",
+          "TgtPrompt": "Select target creature that can't block this creature this turn",
+          "ForgetOnMoved": "Battlefield",
+          "SpellDescription": "Target creature can't block CARDNAME this turn.",
+          "StackDescription": "{c:Targeted} can't block CARDNAME this turn.",
+          "IsCurse": "True",
+          "StaticAbilities": "KWPump",
+          "Duration": "UntilHostLeavesPlayOrEOT",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "C"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "ThisTargetedCard",
+        "TgtPrompt": "Select target creature that can't block this creature this turn",
+        "ForgetOnMoved": "Battlefield",
+        "SpellDescription": "Target creature can't block CARDNAME this turn.",
+        "StackDescription": "{c:Targeted} can't block CARDNAME this turn.",
+        "IsCurse": "True",
+        "StaticAbilities": "KWPump",
+        "Duration": "UntilHostLeavesPlayOrEOT",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

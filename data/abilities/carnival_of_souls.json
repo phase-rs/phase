@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a creature enters, you lose 1 life and add {B}."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

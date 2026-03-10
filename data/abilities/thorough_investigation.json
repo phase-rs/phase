@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "TriggerDescription": "Whenever you attack, investigate."
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "Execute": "TrigVenture",
+        "TriggerDescription": "Whenever you sacrifice a Clue, venture into the dungeon.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Clue.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

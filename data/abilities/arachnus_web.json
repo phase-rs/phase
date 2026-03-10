@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "At the beginning of the end step, if enchanted creature's power is 4 or greater, destroy CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature.EnchantedBy+powerGE4",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't attack or block and its activated abilities can't be activated."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

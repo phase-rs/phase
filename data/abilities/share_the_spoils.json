@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or an opponent loses the game, exile the top card of each player's library.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "LosesGame",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or an opponent loses the game, exile the top card of each player's library.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player.Opponent",
+        "Execute": "TrigExile",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "Secondary": "True",
+        "TriggerDescription": "When they do, exile the top card of their library.",
+        "Execute": "TrigExileTop",
+        "TriggerZones": "Battlefield",
+        "ValidSA": "Spell.MayPlaySource"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "ValidSA": "SpellAbility.MayPlaySource",
+        "Execute": "TrigExileTop",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land",
+        "TriggerDescription": "When they do, exile the top card of their library."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlayLimit": "1",
+        "AffectedZone": "Exile",
+        "MayPlay": "True",
+        "Affected": "Card.ExiledWithSource",
+        "MayPlayPlayer": "ActivePlayer",
+        "EffectZone": "Battlefield",
+        "Description": "During each player's turn, that player may play a land or cast a spell from among cards exiled with CARDNAME, and they may spend mana as though it were mana of any color to cast that spell. When they do, exile the top card of their library.",
+        "MayPlayIgnoreColor": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

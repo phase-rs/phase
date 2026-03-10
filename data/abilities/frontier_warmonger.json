@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "Execute": "TrigPumpAll",
+        "AttackedTarget": "Opponent,Planeswalker.OppCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more creatures attack one of your opponents or a planeswalker they control, those creatures gain menace until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

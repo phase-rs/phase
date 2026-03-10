@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "IsPresent": "Creature.attacking+Other",
+        "NoResolvingCheck": "True",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE2",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, creatures you control gain first strike and trample until end of turn and can't be blocked by creature tokens this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

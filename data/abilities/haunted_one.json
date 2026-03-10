@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.IsCommander+YouOwn",
+        "Description": "Commander creatures you own have \"Whenever this creature becomes tapped, it and other creatures you control that share a creature type with it each get +2/+0 and gain undying until end of turn.\"",
+        "AddTrigger": "BecomesTapped"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

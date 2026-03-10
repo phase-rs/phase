@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "The chosen player's maximum hand size is four.",
+        "SetMaxHandSize": "4",
+        "Affected": "Player.Chosen"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

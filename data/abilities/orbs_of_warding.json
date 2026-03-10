@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You have hexproof. (You can't be the target of spells or abilities your opponents control.)",
+        "Affected": "You",
+        "AddKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "You",
+        "Description": "If a creature would deal damage to you, prevent 1 of that damage.",
+        "PreventionEffect": "True",
+        "ValidSource": "Creature.inZoneBattlefield",
+        "ReplaceWith": "DBReplace",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

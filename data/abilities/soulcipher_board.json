@@ -1,0 +1,90 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 2,
+            "destination": "Graveyard"
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1 U"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "NoReveal": "True",
+            "SpellDescription": "Look at the top two cards of your library. Put one of them into your graveyard.",
+            "StackDescription": "{p:You} looks at the top two cards of their library, and puts one of them into their graveyard.",
+            "LibraryPosition2": "0"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigRemoveCounter",
+            "TriggerDescription": "Whenever a creature card is put into your graveyard from anywhere, remove an omen counter from CARDNAME. Then if it has no omen counters on it, transform it.",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Creature+!token+YouOwn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 2
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 U"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "StackDescription": "{p:You} draws two cards,",
+            "SubAbility": "DBDiscard",
+            "SpellDescription": "Draw two cards, then discard a card."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "ValidBlocker": "Creature.Self",
+            "ValidAttacker": "Creature.withoutFlying",
+            "Description": "CARDNAME can block only creatures with flying."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

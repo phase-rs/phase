@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.OppOwn"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 W B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBToken",
+        "SpellDescription": "Exile target card from an opponent's graveyard. If it was a creature card, you create a 1/1 white and black Spirit creature token with flying."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Creatures you control get +1/+1."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.OppCtrl",
+        "AddPower": "-1",
+        "AddToughness": "-1",
+        "Description": "Creatures your opponents control get -1/-1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

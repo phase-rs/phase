@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, draw a card, then you may cast a spell from your hand with mana value less than or equal to that damage without paying its mana cost.",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "Affected": "Creature.EquippedBy",
+        "AddSVar": "BusterSwordCE",
+        "Description": "Equipped creature gets +3/+2.",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

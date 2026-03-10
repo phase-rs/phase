@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.YouCtrl+cmcGE6+wasCast",
+        "AddKeyword": "Cascade",
+        "Description": "Spells you cast with mana value 6 or greater have cascade.",
+        "AffectedZone": "Stack"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

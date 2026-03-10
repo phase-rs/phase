@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "Description": "As CARDNAME enters, sacrifice any number of permanents. NICKNAME enters with that many +1/+1 counters on it.",
+        "Destination": "Battlefield",
+        "ReplaceWith": "TrigSac",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

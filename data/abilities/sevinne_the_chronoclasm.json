@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigCopy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast your first instant or sorcery spell from your graveyard each turn, copy that spell. You may choose new targets for the copy.",
+        "ValidCard": "Instant.YouCtrl+wasCastFromYourGraveyard,Sorcery.YouCtrl+wasCastFromYourGraveyard",
+        "ActivatorThisTurnCast": "EQ1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

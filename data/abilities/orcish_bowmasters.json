@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters and whenever an opponent draws a card except the first one they draw in each of their draw steps, CARDNAME deals 1 damage to any target. Then amass Orcs 1.",
+        "Execute": "TrigDamage"
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters and whenever an opponent draws a card except the first one they draw in each of their draw steps, CARDNAME deals 1 damage to any target. Then amass Orcs 1.",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "FirstCardInDrawStep": "False",
+        "Execute": "TrigDamage",
+        "ValidCard": "Card.OppOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

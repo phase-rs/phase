@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBBranch",
+        "NoShuffle": "True",
+        "RememberChanged": "True",
+        "StackDescription": "Search your library for a creature card with mana value X or less, reveal it, put it into your hand, then shuffle. If this spell's additional cost was paid and the revealed card is the chosen type, put that card onto the battlefield instead of putting it into your hand.",
+        "ChangeNum": "1",
+        "ChangeType": "Creature.cmcLEX"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "Cost": "ChooseCreatureType<1> Behold<2/Creature.ChosenType>",
+        "Description": "As an additional cost to cast this spell, you may choose a creature type and behold two creatures of that type.",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

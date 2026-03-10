@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "SubAbility": "DBDelay",
+          "Types": "Card.YouOwn+cmcLE2,Card.YouOwn+cmcGE3",
+          "SpellDescription": "Seek a card with mana value 2 or less and a card with mana value 3 or greater. Discard those cards at the beginning of your next turn's end step.",
+          "RememberFound": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDelay",
+        "Types": "Card.YouOwn+cmcLE2,Card.YouOwn+cmcGE3",
+        "SpellDescription": "Seek a card with mana value 2 or less and a card with mana value 3 or greater. Discard those cards at the beginning of your next turn's end step.",
+        "RememberFound": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

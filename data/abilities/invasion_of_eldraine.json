@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, target opponent discards two cards.",
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "Execute": "TrigDiscard"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigDmg",
+            "ValidPlayer": "Opponent",
+            "CheckSVar": "TrigCount",
+            "SVarCompare": "LE2",
+            "TriggerDescription": "At the beginning of each opponent's upkeep, if that player has two or fewer cards in hand, CARDNAME deals 2 damage to them.",
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

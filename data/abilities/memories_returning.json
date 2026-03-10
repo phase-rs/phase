@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 5,
+        "destination": "Hand"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SkipReorder": "True",
+        "SubAbility": "DBOppDigOne",
+        "DestinationZone2": "Library",
+        "LibraryPosition2": "0",
+        "Reveal": "True",
+        "ChangeNum": "1",
+        "StackDescription": "SpellDescription",
+        "ChangeValid": "Card",
+        "SpellDescription": "Reveal the top five cards of your library. Put one of them into your hand. Then choose an opponent. They put one on the bottom of your library. Then you put one into your hand. Then they put one on the bottom of your library. Put the other into your hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

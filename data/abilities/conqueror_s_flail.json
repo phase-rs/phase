@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Equipped creature gets +1/+1 for each color among permanents you control.",
+        "Affected": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "As long as CARDNAME is attached to a creature, your opponents can't cast spells during your turn.",
+        "Condition": "PlayerTurn",
+        "ValidCard": "Card",
+        "Caster": "Opponent",
+        "IsPresent": "Card.Self+AttachedTo Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Command Protocols — Other artifact creatures you control get +1/+0 and have menace.",
+        "AddPower": "1",
+        "AddKeyword": "Menace",
+        "Affected": "Creature.Artifact+YouCtrl+Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

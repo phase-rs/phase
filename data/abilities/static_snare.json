@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When this enchantment enters, exile target artifact or creature an opponent controls until this enchantment leaves the battlefield."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "X",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Description": "This spell costs {1} less to cast for each attacking creature.",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

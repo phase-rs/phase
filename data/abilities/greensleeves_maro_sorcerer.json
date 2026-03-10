@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, create a 3/3 green Badger creature token.",
+        "ValidCard": "Land.YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
+        "SetToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

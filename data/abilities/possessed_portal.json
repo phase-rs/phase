@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSacrifice",
+        "TriggerDescription": "At the beginning of each end step, each player sacrifices a permanent unless they discard a card.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "Prevent": "True",
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "Player",
+        "Description": "If a player would draw a card, that player skips that draw instead."
+      }
+    }
+  ],
+  "faces": []
+}

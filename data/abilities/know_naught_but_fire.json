@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you set this scheme in motion, it deals damage to each opponent equal to the number of cards in that player's hand.",
+        "Execute": "DmgAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

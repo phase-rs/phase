@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Token",
+            "name": "w_4_4_angel_warrior_flying",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TokenAmount": "2",
+            "SubAbility": "DBPumpAll",
+            "SpellDescription": "Create two 4/4 white Angel Warrior creature tokens with flying. Non-Angel creatures you control gain indestructible until your next turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "W",
+            "params": {
+              "SpellDescription": "Add {W}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {W}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplacementResult": "Updated",
+            "ReplaceWith": "DBTap",
+            "ValidCard": "Card.Self",
+            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+            "Destination": "Battlefield"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Prevent": "True",
+        "ValidTarget": "You,Permanent.YouCtrl+Other",
+        "ValidSource": "Spell",
+        "Description": "If a spell would deal damage to you or another permanent you control, prevent that damage."
+      }
+    },
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "Permanent.OppCtrl,Opponent",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Spell",
+        "ReplaceWith": "DmgPlus1",
+        "Description": "If a spell would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 1 instead."
+      }
+    }
+  ],
+  "faces": []
+}

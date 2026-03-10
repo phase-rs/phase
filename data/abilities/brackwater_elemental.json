@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "When CARDNAME attacks or blocks, sacrifice it at the beginning of the next end step.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "When CARDNAME attacks or blocks, sacrifice it at the beginning of the next end step."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

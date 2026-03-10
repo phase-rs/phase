@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Valid Aura.AttachedTo Targeted",
+          "ImprintCards": "Targeted",
+          "ValidTgts": "Creature",
+          "SubAbility": "DBExile",
+          "Duration": "Permanent",
+          "StackDescription": "SpellDescription",
+          "Triggers": "LeavesPlay,Untap",
+          "SpellDescription": "Exile target creature and all Auras attached to it. Note the number and kind of counters that were on that creature. When CARDNAME leaves the battlefield or becomes untapped, return that exiled card to the battlefield under its owner's control tapped with the noted number and kind of counters on it. If you do, return the other exiled cards to the battlefield under their owner's control attached to that permanent.",
+          "NoteCounterDefined": "Targeted"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Valid Aura.AttachedTo Targeted",
+        "ImprintCards": "Targeted",
+        "ValidTgts": "Creature",
+        "SubAbility": "DBExile",
+        "Duration": "Permanent",
+        "StackDescription": "SpellDescription",
+        "Triggers": "LeavesPlay,Untap",
+        "SpellDescription": "Exile target creature and all Auras attached to it. Note the number and kind of counters that were on that creature. When CARDNAME leaves the battlefield or becomes untapped, return that exiled card to the battlefield under its owner's control tapped with the noted number and kind of counters on it. If you do, return the other exiled cards to the battlefield under their owner's control attached to that permanent.",
+        "NoteCounterDefined": "Targeted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

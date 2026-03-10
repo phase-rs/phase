@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "PrecostDesc": "Parley —",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Parley — Whenever CARDNAME attacks, each player reveals the top card of their library. For each nonland card revealed this way, you investigate. Then each player draws a card.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPeek"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigUntap",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your end step, you may untap all lands you control. If you do, you can't cast spells until your next turn.",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

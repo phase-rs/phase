@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DiscardedAll",
+      "params": {
+        "Execute": "TrigDealDamage1",
+        "TriggerDescription": "Whenever you discard one or more cards, this creature deals that much damage to each opponent.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerDescription": "When you cycle this card, it deals 1 damage to each opponent.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDealDamage2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

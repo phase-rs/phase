@@ -1,0 +1,91 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 2,
+            "toughness": 0,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "SpellDescription": "CARDNAME gets +2/+0 until end of turn."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "DamageDoneOnce",
+          "params": {
+            "Execute": "TrigDamage",
+            "TriggerZones": "Battlefield",
+            "ValidTarget": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME is dealt damage, it deals that much damage to any target."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 2,
+            "toughness": 0,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME gets +2/+0 until end of turn.",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "DamageDoneOnce",
+          "params": {
+            "Execute": "TrigDamage",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever a permanent you control is dealt damage, CARDNAME deals that much damage to any target.",
+            "ValidTarget": "Permanent.YouCtrl"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddSVar": "CE",
+            "Affected": "Permanent.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

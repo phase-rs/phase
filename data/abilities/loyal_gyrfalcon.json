@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.White",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a white spell, CARDNAME loses defender until end of turn.",
+        "Execute": "TrigDebuff",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

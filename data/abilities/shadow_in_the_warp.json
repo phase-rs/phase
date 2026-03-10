@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts their first noncreature spell each turn, CARDNAME deals 2 damage to that player.",
+        "ValidCard": "Card.nonCreature",
+        "ActivatorThisTurnCast": "EQ1",
+        "ValidActivatingPlayer": "Player.Opponent"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "Battlefield",
+        "Amount": "2",
+        "Description": "The first creature spell you cast each turn costs {2} less to cast.",
+        "Type": "Spell",
+        "Activator": "You",
+        "ValidCard": "Card.Creature",
+        "OnlyFirstSpell": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

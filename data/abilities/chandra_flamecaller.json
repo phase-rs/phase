@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "r_3_1_elemental_haste",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AtEOT": "Exile",
+        "SpellDescription": "Create two 3/1 red Elemental creature tokens with haste. Exile them at the beginning of the next end step.",
+        "Planeswalker": "True",
+        "TokenAmount": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Mode": "Hand",
+        "RememberDiscarded": "True",
+        "SpellDescription": "Discard all the cards in your hand, then draw that many cards plus one.",
+        "Planeswalker": "True",
+        "SubAbility": "DBDraw",
+        "Defined": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<X/LOYALTY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals X damage to each creature.",
+        "Planeswalker": "True",
+        "ValidDescription": "each creature.",
+        "ValidCards": "Creature",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

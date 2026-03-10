@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Phases",
+        "params": {
+          "PhaseInOrOut": "True",
+          "SpellDescription": "Simultaneously, all phased-out creatures phase in and all creatures with phasing phase out.",
+          "AllValid": "Creature.hasKeywordPhasing,Card.phasedOutCreature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "PhaseInOrOut": "True",
+        "SpellDescription": "Simultaneously, all phased-out creatures phase in and all creatures with phasing phase out.",
+        "AllValid": "Creature.hasKeywordPhasing,Card.phasedOutCreature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

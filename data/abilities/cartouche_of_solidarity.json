@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 white Warrior creature token with vigilance."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "1",
+        "AddKeyword": "First Strike",
+        "Description": "Enchanted creature gets +1/+1 and has first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, each player discards a nonland card.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "DBDiscard"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever a player discards a card during your turn, they choose another player. That player conjures a duplicate of that card into their hand. It perpetually gains \"You may spend mana as though it were mana of any color to cast this spell.\"",
+        "TriggerController": "TriggeredCardController",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChoosePlayer",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

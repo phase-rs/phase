@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, defending player may pay {4}. If that player doesn't, CARDNAME can't be blocked this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigUnblockable"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

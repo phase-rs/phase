@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "IgnoreLegendRule"
+      },
+      "params": {
+        "Description": "The \"legend rule\" doesn't apply to creature tokens you control.",
+        "ValidCard": "Creature.YouCtrl+token"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantSacrifice"
+      },
+      "params": {
+        "ValidCard": "Creature.YouCtrl+token",
+        "Description": "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
+        "ValidCause": "Triggered.YouCtrl",
+        "ForCost": "False"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantExile"
+      },
+      "params": {
+        "ForCost": "False",
+        "ValidCause": "Triggered.YouCtrl",
+        "Description": "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
+        "ValidCard": "Creature.YouCtrl+token",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

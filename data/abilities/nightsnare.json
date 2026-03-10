@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "RememberRevealed": "True",
+          "SpellDescription": "Target opponent reveals their hand.",
+          "ValidTgts": "Opponent",
+          "SubAbility": "DBChoose"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberRevealed": "True",
+        "SpellDescription": "Target opponent reveals their hand.",
+        "ValidTgts": "Opponent",
+        "SubAbility": "DBChoose"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

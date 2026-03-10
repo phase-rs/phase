@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE10_CHARGE",
+        "AddTrigger": "AttackTrig",
+        "Description": "STATION 10+ Whenever you attack, NICKNAME deals 100 damage to up to one target creature or planeswalker."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "AddKeyword": "Flying",
+        "Description": "STATION 20+ Flying",
+        "Affected": "Card.Self+counters_GE20_CHARGE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

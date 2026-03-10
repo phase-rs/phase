@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Equipment",
+        "AddStaticAbility": "EquipPump",
+        "RemoveArtifactTypes": "True",
+        "Description": "Each noncreature, non-Equipment artifact is an Equipment with equip {X} and \"Equipped creature gets +X/+0,\" where X is that artifact's mana value.",
+        "AddKeyword": "Equip:X:::XAlternative$ Number$ConvertedManaCost",
+        "Affected": "Artifact.nonCreature+nonEquipment"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

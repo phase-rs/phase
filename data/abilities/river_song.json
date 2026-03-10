@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Scry",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
+        "ValidPlayer": "Opponent"
+      }
+    },
+    {
+      "mode": "Surveil",
+      "params": {
+        "TriggerDescription": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
+        "ValidPlayer": "Opponent",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "SearchedLibrary",
+      "params": {
+        "ValidPlayer": "Opponent",
+        "TriggerDescription": "Spoilers — Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on CARDNAME. Then CARDNAME deals damage to that player equal to its power.",
+        "TriggerZones": "Battlefield",
+        "SearchOwnLibrary": "True",
+        "Execute": "TrigPutCounter",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Meet in Reverse — You draw cards from the bottom of your library rather than the top.",
+        "AddKeyword": "You draw cards from the bottom of your library instead of the top of your library.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "When you next activate an ability that isn't a mana ability this turn by spending four or more mana to activate it, copy that ability. You may choose new targets for the copy.",
+          "Triggers": "ActivateTrig"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "When you next activate an ability that isn't a mana ability this turn by spending four or more mana to activate it, copy that ability. You may choose new targets for the copy.",
+        "Triggers": "ActivateTrig"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "ActivateAbilityAsIfHaste"
+      },
+      "params": {
+        "Description": "You may activate abilities of other creatures you control as though those creatures had haste.",
+        "ValidCard": "Creature.Other+YouCtrl+inZoneBattlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

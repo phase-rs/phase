@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerDescription": "Whenever you attack, you may sacrifice another creature. When you do, ABILITY",
+        "TriggerZones": "Battlefield",
+        "AttackingPlayer": "You",
+        "Execute": "TrigImmediateTrig"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

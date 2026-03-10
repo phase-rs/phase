@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Landwalk:Swamp",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has swampwalk. (It can't be blocked as long as defending player controls a Swamp.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

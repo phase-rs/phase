@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.YouOwn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "5",
+        "SubAbility": "DBTwoPiles",
+        "StackDescription": "{p:You} exiles {c:ThisTargetedCard} from their graveyard",
+        "SpellDescription": "Exile up to five target permanent cards from your graveyard",
+        "TgtPrompt": "Select up to five target permanent cards from your graveyard",
+        "TargetMin": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

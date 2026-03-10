@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to target creature instead.",
+          "TgtPrompt": "Select target creature to redirect the damage to",
+          "Duration": "UntilHostLeavesPlayOrEOT",
+          "ValidTgts": "Creature",
+          "ReplacementEffects": "Zealous",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to target creature instead.",
+        "TgtPrompt": "Select target creature to redirect the damage to",
+        "Duration": "UntilHostLeavesPlayOrEOT",
+        "ValidTgts": "Creature",
+        "ReplacementEffects": "Zealous",
+        "ExileOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

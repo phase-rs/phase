@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature",
+        "Attacked": "Player.EnchantedBy",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature attacks enchanted player, put a +1/+1 counter on it.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

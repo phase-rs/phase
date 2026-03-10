@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you set this scheme in motion, draw four cards. You have no maximum hand size until your next turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "GreatMind"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

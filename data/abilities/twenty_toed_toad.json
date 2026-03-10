@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackersAmount": "GE2",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "Creature",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack with two or more creatures, put a +1/+1 counter on CARDNAME and draw a card."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigWinGame",
+        "TriggerDescription": "Whenever CARDNAME attacks, you win the game if there are twenty or more counters on it or you have twenty or more cards in hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "SetMaxHandSize": "20",
+        "Description": "Your maximum hand size is twenty."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

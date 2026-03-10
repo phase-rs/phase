@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you set this scheme in motion, search your library for a planeswalker card and put that card onto the battlefield, then shuffle your library.",
+        "ValidCard": "Card.Self",
+        "Execute": "DarkEffect"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

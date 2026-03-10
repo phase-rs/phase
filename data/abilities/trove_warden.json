@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, exile target permanent card with mana value 3 or less from your graveyard.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, put each permanent card exiled with it onto the battlefield under the control of that card's owner.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigReturn",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

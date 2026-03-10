@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigCharm",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, ABILITY",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, ABILITY",
+        "Secondary": "True",
+        "Execute": "TrigCharm",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "AddKeyword": "Ward:3",
+        "Description": "Other creatures you control have ward {3}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

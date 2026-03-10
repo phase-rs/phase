@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ProtectionAll",
+        "params": {
+          "ActivationZone": "Graveyard",
+          "ValidCards": "Creature.YouCtrl",
+          "Gains": "Choice",
+          "Choices": "AnyColor",
+          "SpellDescription": "Choose a color. Creatures you control gain protection from the chosen color until end of turn. Activate only if CARDNAME is in your graveyard."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Graveyard",
+        "ValidCards": "Creature.YouCtrl",
+        "Gains": "Choice",
+        "Choices": "AnyColor",
+        "SpellDescription": "Choose a color. Creatures you control gain protection from the chosen color until end of turn. Activate only if CARDNAME is in your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

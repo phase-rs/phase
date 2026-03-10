@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ElementalBend",
+          "params": {
+            "ValidPlayer": "You",
+            "TriggerDescription": "Whenever you waterbend, earthbend, firebend, or airbend, draw a card. Then if you've done all four this turn, transform CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigDraw"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "OptionalDecider": "You",
+            "TriggerDescription": "At the beginning of each upkeep, you may transform CARDNAME. If you do, you gain 4 life, draw four cards, put four +1/+1 counters on him, and he deals 4 damage to each opponent.",
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Color": "W U B R G",
+            "Type": "Spell",
+            "Description": "Spells you cast cost {W}{U}{B}{R}{G} less to cast. (This can reduce generic costs.)",
+            "ValidCard": "Card",
+            "Activator": "You",
+            "Amount": "1"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

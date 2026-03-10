@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigUntapRemove",
+        "TriggerDescription": "Whenever a creature you control becomes blocked, you may untap that creature and remove it from combat.",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

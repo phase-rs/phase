@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature.wasCastFromYourLibrary",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Whenever you cast a creature spell from your library, it becomes a black Bird in addition to its other colors and types, has flying, and has base power and toughness 1/1.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may look at the top card of your library any time.",
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Description": "You may cast creature spells from the top of your library.",
+        "Affected": "Creature.TopLibrary+YouCtrl",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

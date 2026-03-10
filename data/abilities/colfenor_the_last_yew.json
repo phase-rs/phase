@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control dies, return up to one other target creature card with lesser toughness from your graveyard to your hand.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

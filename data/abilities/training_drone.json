@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "ValidCard": "Card.Self+!equipped",
+        "Description": "CARDNAME can't attack or block unless it's equipped."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

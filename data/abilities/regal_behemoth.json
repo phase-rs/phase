@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigMonarch",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Land",
+        "TriggerDescription": "Whenever you tap a land for mana while you're the monarch, add an additional one mana of any color.",
+        "Activator": "You",
+        "TriggerZones": "Battlefield",
+        "CheckDefinedPlayer": "You.isMonarch",
+        "Execute": "TrigMana",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

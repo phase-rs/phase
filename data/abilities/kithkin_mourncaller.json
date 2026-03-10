@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever an attacking Kithkin or Elf is put into your graveyard from the battlefield, you may draw a card.",
+        "Execute": "TrigDraw",
+        "ValidCard": "Creature.Kithkin+YouOwn+attacking,Creature.Elf+YouOwn+attacking",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

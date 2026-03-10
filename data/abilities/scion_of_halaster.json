@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.IsCommander+YouOwn",
+        "Description": "Commander creatures you own have \"The first time you would draw a card each turn, instead look at the top two cards of your library. Put one of them into your graveyard and the other back on top of your library. Then draw a card.\"",
+        "AddReplacementEffect": "Draw"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

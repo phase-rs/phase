@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Vehicles you control have menace. (They can't be blocked except by two or more creatures.)",
+            "AddKeyword": "Menace",
+            "Affected": "Vehicle.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

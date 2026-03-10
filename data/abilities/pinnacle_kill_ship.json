@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "Origin": "Any",
+        "TriggerDescription": "When this Spacecraft enters, it deals 10 damage to up to one target creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "AddKeyword": "Flying",
+        "Description": "STATION 7+ Flying",
+        "Affected": "Card.Self+counters_GE7_CHARGE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

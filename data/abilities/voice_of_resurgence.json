@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "ValidActivatingPlayer": "Opponent",
+        "PlayerTurn": "True",
+        "TriggerDescription": "Whenever an opponent casts a spell during your turn, or whenever CARDNAME dies, create a green and white Elemental creature token with \"This creature's power and toughness are each equal to the number of creatures you control.\"",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever an opponent casts a spell during your turn, or whenever CARDNAME dies, create a green and white Elemental creature token with \"This creature's power and toughness are each equal to the number of creatures you control.\"",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

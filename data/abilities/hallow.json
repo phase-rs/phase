@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "TgtZone": "Stack",
+          "ReplacementEffects": "PreventDmg",
+          "RememberObjects": "TargetedSource",
+          "TargetType": "Spell",
+          "TgtPrompt": "Select target spell to prevent damage from",
+          "SpellDescription": "Prevent all damage target spell would deal this turn. You gain life equal to the damage prevented this way.",
+          "Triggers": "TargetMoved",
+          "ValidTgts": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtZone": "Stack",
+        "ReplacementEffects": "PreventDmg",
+        "RememberObjects": "TargetedSource",
+        "TargetType": "Spell",
+        "TgtPrompt": "Select target spell to prevent damage from",
+        "SpellDescription": "Prevent all damage target spell would deal this turn. You gain life equal to the damage prevented this way.",
+        "Triggers": "TargetMoved",
+        "ValidTgts": "Card"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

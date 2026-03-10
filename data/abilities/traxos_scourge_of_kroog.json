@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.Historic",
+        "Execute": "TrigUntap",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a historic spell, untap NICKNAME. (Artifacts, legendaries, and Sagas are historic.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "Description": "NICKNAME enters tapped."
+      }
+    },
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "NICKNAME doesn't untap during your untap step.",
+        "Layer": "CantHappen",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

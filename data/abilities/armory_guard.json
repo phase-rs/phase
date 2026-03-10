@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Affected": "Card.Self",
+        "IsPresent": "Gate.YouCtrl",
+        "Description": "CARDNAME has vigilance as long as you control a Gate."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Warlocks you control have menace.",
+        "AddKeyword": "Menace",
+        "Affected": "Warlock.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "ABMana",
+        "SetPower": "1",
+        "SetToughness": "2",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE4_LEVEL",
+        "Description": "LEVEL 1-4 1/2 {T}: Add {G}{G}.",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "1",
+        "SetToughness": "4",
+        "IsPresent": "Card.Self+counters_GE5_LEVEL",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Elf.YouCtrl",
+        "IsPresent": "Card.Self+counters_GE5_LEVEL",
+        "Description": "LEVEL 5+ 1/4 Elves you control have \"{T}: Add {G}{G}.\"",
+        "AddAbility": "ABMana"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

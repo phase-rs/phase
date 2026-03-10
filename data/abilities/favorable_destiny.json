@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +1/+2 as long as it's white.",
+        "Affected": "Creature.EnchantedBy+White",
+        "AddPower": "1",
+        "AddToughness": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "GE2",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Shroud",
+        "Description": "Enchanted creature has shroud as long as its controller controls another creature. (It can't be the target of spells or abilities.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

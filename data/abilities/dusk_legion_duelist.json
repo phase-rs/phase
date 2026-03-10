@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "CounterType": "P1P1",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, draw a card. This ability triggers only once each turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

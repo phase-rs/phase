@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Rabbit.Other+YouCtrl,Bat.Other+YouCtrl,Bird.Other+YouCtrl,Mouse.Other+YouCtrl",
+        "TriggerDescription": "Whenever one or more other Rabbits, Bats, Birds, and/or Mice you control enter, scry 1.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigScry"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Rabbit.Other+YouCtrl,Bat.Other+YouCtrl,Bird.Other+YouCtrl,Mouse.Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other Rabbits, Bats, Birds, and Mice you control get +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

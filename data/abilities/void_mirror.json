@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever a player casts a spell, if no colored mana was spent to cast it, counter that spell.",
+        "TriggerZones": "Battlefield",
+        "NoColoredMana": "True",
+        "ValidActivatingPlayer": "Player",
+        "ValidCard": "Card",
+        "Execute": "TrigCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

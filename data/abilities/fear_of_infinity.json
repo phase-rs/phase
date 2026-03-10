@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Graveyard",
+        "Origin": "Any",
+        "ValidCard": "Enchantment.YouCtrl",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, you may return CARDNAME from your graveyard to your hand.",
+        "Execute": "TrigChange",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "OptionalDecider": "You",
+        "Secondary": "True",
+        "TriggerZones": "Graveyard",
+        "ValidPlayer": "You",
+        "ValidCard": "Card.Room",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, you may return CARDNAME from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

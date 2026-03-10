@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature.withMutate",
+        "TriggerDescription": "Whenever you cast a creature spell, if it has mutate, draw a card, then discard a card.",
+        "Execute": "TrigLoot",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Type": "Spell",
+        "Description": "Each creature spell you cast costs {1} less to cast if it has mutate.",
+        "ValidCard": "Creature.withMutate",
+        "Amount": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

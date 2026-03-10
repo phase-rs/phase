@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "Origin": "Any",
+        "TriggerDescription": "When this Spacecraft enters, it deals 3 damage to any target.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "AddAbility": "CrusherPump",
+        "Description": "STATION 8+ Flying,,,{1}{R}: This Spacecraft gets +2/+0 until end of turn.",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

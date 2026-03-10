@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, if you control a tapped creature, seek a nonland permanent card with mana value X or less, where X is the number of tapped creatures you control. Put that card onto the battlefield.",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "IsPresent": "Creature.tapped+YouCtrl",
+        "Execute": "TrigSeek"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

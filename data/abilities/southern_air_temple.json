@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounterAll1",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, put X +1/+1 counters on each creature you control, where X is the number of Shrines you control.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounterAll2",
+        "Origin": "Any",
+        "ValidCard": "Shrine.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Shrine you control enters, put a +1/+1 counter on each creature you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

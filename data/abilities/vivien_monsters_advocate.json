@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_3_3_beast",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "RememberTokens": "True",
+        "SpellDescription": "Create a 3/3 green Beast creature token. Put your choice of a vigilance counter, a reach counter, or a trample counter on it.",
+        "SubAbility": "DBCounter",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "When you cast your next creature spell this turn, search your library for a creature card with lesser mana value, put it onto the battlefield, then shuffle.",
+          "Planeswalker": "True",
+          "AILogic": "WillCastCreature",
+          "Ultimate": "True",
+          "Triggers": "TrigSearch"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "When you cast your next creature spell this turn, search your library for a creature card with lesser mana value, put it onto the battlefield, then shuffle.",
+        "Planeswalker": "True",
+        "AILogic": "WillCastCreature",
+        "Ultimate": "True",
+        "Triggers": "TrigSearch"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "MayLookAt": "You",
+        "Description": "You may look at the top card of your library any time.",
+        "Affected": "Card.TopLibrary+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.TopLibrary+YouCtrl",
+        "MayPlay": "True",
+        "AffectedZone": "Library",
+        "Description": "You may cast creature spells from the top of your library."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

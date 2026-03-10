@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "AddTypes": "Artifact",
+          "SpellDescription": "Until end of turn, CARDNAME becomes a copy of target creature you control of the chosen type, except it's an artifact in addition to its other types.",
+          "TgtPrompt": "Select target creature you control of the chosen type",
+          "ValidTgts": "Creature.ChosenType+YouCtrl",
+          "Duration": "UntilEndOfTurn"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AddTypes": "Artifact",
+        "SpellDescription": "Until end of turn, CARDNAME becomes a copy of target creature you control of the chosen type, except it's an artifact in addition to its other types.",
+        "TgtPrompt": "Select target creature you control of the chosen type",
+        "ValidTgts": "Creature.ChosenType+YouCtrl",
+        "Duration": "UntilEndOfTurn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Beast.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigDealDamage",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever a Beast you control enters, you may have it deal 4 damage to target opponent or planeswalker."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

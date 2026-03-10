@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Execute": "TrigChange",
+        "OptionalDecider": "TriggeredCardController",
+        "TriggerDescription": "When CARDNAME dies, you may search your library for an Elf card, reveal that card, put it into your hand, then shuffle.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

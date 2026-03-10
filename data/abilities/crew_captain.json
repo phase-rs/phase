@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ThisTurnEntered",
+        "Description": "CARDNAME has indestructible as long as it entered this turn.",
+        "AddKeyword": "Indestructible"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

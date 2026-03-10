@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "TriggerDescription": "Sorcerous Elixir — Whenever CARDNAME deals combat damage to a player, copy the next instant or sorcery spell you cast this turn when you cast it. You may choose new targets for the copy.",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDelayedTrigger"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

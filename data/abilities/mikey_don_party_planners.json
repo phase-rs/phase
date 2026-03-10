@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "Static": "True",
+        "TriggerDescription": "If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.",
+        "ValidSA": "Spell.MayPlaySource",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigEffect"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "You",
+        "AffectedZone": "Library",
+        "Description": "You may look at the top card of your library any time.",
+        "Affected": "Card.TopLibrary+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.TopLibrary+YouOwn,Mutant.TopLibrary+YouOwn,Ninja.TopLibrary+YouOwn,Turtle.TopLibrary+YouOwn",
+        "MayPlay": "True",
+        "AffectedZone": "Library",
+        "Description": "You may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

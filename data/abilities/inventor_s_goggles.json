@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Permanent.Artificer+YouCtrl",
+        "Execute": "TrigAttach",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever an Artificer you control enters, you may attach CARDNAME to it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +1/+2.",
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

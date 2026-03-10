@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "SpellDescription": "Roll a six-sided die."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "6"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Roll a six-sided die."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "RolledDie",
+      "params": {
+        "ValidResult": "GE3",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you roll a 3 or higher, CARDNAME gains first strike until end of turn. If the roll was 4 or higher, it gains menace until end of turn. If the roll was 5 or higher, it gains lifelink until end of turn.",
+        "Execute": "Pump1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

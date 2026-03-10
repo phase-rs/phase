@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Execute": "TrigMana",
+        "Static": "True",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.Basic",
+        "TriggerDescription": "Whenever a player taps a basic land for mana, that player adds one mana of any type that land produced."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Affected": "Creature",
+        "Description": "All creatures have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

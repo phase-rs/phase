@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 0
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain life equal to its power."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Destination": "Graveyard",
+        "ValidCard": "Artifact.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another artifact you control is put into a graveyard from the battlefield, put a +1/+1 counter on NICKNAME and scry 1."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample & Hexproof & Haste",
+        "Affected": "Card.Self",
+        "IsPresent": "Planeswalker.OppCtrl",
+        "Description": "CARDNAME has trample, hexproof, and haste as long as an opponent controls a planeswalker."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

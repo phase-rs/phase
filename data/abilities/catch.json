@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "GainControl",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "LoseControl": "EOT",
+            "Untap": "True",
+            "AddKWs": "Haste",
+            "SpellDescription": "Gain control of target permanent until end of turn. Untap it. It gains haste until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Each player sacrifices an artifact, a creature, an enchantment, a land, and a planeswalker.",
+            "SacValid": "Artifact & Creature & Enchantment & Land & Planeswalker",
+            "Defined": "Player",
+            "SacEachValid": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

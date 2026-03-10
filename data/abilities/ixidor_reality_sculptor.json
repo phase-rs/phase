@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetState",
+        "params": {
+          "Mode": "TurnFaceUp",
+          "SpellDescription": "Turn target face-down creature face up.",
+          "TgtPrompt": "Select target face-down creature.",
+          "ValidTgts": "Creature.faceDown"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Mode": "TurnFaceUp",
+        "SpellDescription": "Turn target face-down creature face up.",
+        "TgtPrompt": "Select target face-down creature.",
+        "ValidTgts": "Creature.faceDown"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.faceDown",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Face-Down creatures get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature",
+        "AddToughness": "1",
+        "EffectZone": "Command",
+        "Description": "All creatures get +1/+1 and have haste.",
+        "AddPower": "1",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

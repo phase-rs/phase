@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantChangeLife"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "Description": "Your life total can't change. (You can't gain or lose life. You can't pay any amount of life except 0.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

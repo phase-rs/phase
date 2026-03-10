@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each Sliver card in each player's hand has slivercycling {3}.",
+        "Affected": "Sliver",
+        "EffectZone": "Battlefield",
+        "AffectedZone": "Hand",
+        "AddKeyword": "TypeCycling:Sliver:3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

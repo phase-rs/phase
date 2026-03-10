@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When enchanted permanent leaves the battlefield, if it was historic, draw two cards. (Artifacts, legendaries, and Sagas are historic.)",
+        "ValidCard": "Card.AttachedBy+Historic"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted permanent has hexproof.",
+        "AddKeyword": "Hexproof",
+        "Affected": "Permanent.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

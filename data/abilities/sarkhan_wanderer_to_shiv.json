@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "Zone": "Hand",
+          "staticAbilities": "DragonReduceCost,DragonAltCost",
+          "Planeswalker": "True",
+          "Duration": "Perpetual",
+          "ValidCards": "Dragon.YouOwn",
+          "SpellDescription": "Dragon cards in your hand perpetually gain \"This spell costs {1} less to cast,\" and \"You may pay {X} rather than pay this spell's mana cost, where X is its mana value.\""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Zone": "Hand",
+        "staticAbilities": "DragonReduceCost,DragonAltCost",
+        "Planeswalker": "True",
+        "Duration": "Perpetual",
+        "ValidCards": "Dragon.YouOwn",
+        "SpellDescription": "Dragon cards in your hand perpetually gain \"This spell costs {1} less to cast,\" and \"You may pay {X} rather than pay this spell's mana cost, where X is its mana value.\""
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Name": "Shivan Dragon",
+          "Zone": "Hand",
+          "Conjure": "True",
+          "SpellDescription": "Conjure a Shivan Dragon card into your hand.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Shivan Dragon",
+        "Zone": "Hand",
+        "Conjure": "True",
+        "SpellDescription": "Conjure a Shivan Dragon card into your hand.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "CARDNAME deals 3 damage to target creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

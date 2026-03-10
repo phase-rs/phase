@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you gain or lose life during your turn, CARDNAME gets +1/+0 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "PlayerTurn": "True",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "LifeLost",
+      "params": {
+        "PlayerTurn": "True",
+        "Execute": "TrigPump",
+        "Secondary": "True",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you gain or lose life during your turn, CARDNAME gets +1/+0 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

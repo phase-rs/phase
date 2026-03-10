@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "When combat damage is dealt to you, create a 4/4 colorless Scarecrow artifact creature token with vigilance, then abandon this scheme.",
+        "TriggerZones": "Command",
+        "ValidTarget": "You",
+        "Execute": "TrigToken",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You and permanents you control have hexproof.",
+        "AddKeyword": "Hexproof",
+        "EffectZone": "Command",
+        "Affected": "You,Permanent.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

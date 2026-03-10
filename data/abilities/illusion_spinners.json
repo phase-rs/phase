@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Description": "You may cast this spell as though it had flash if you control a Faerie.",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Faerie.YouCtrl",
+        "Caster": "You",
+        "ValidSA": "Spell",
+        "EffectZone": "All"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Description": "This creature has hexproof as long as it's untapped.",
+        "Affected": "Card.Self+untapped"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

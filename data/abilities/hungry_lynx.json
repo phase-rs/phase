@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, target opponent creates a 1/1 black Rat creature token with deathtouch.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a Rat dies, put a +1/+1 counter on each Cat you control.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Rat",
+        "Execute": "TrigPutCounters"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Cat+YouCtrl",
+        "AddKeyword": "Protection:Rat",
+        "Description": "Cats you control have protection from Rats. (They can't be blocked, targeted, or dealt damage by Rats.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

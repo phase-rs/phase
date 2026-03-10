@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Shuffle",
+        "params": {
+          "SubAbility": "DBDigUntil",
+          "StackDescription": "{p:You} shuffles their library,",
+          "SpellDescription": "Shuffle your library,"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDigUntil",
+        "StackDescription": "{p:You} shuffles their library,",
+        "SpellDescription": "Shuffle your library,"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

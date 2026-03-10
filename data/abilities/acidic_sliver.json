@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver",
+        "AddAbility": "Damage",
+        "Description": "All Slivers have \"{2}, Sacrifice this permanent: This permanent deals 2 damage to any target.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

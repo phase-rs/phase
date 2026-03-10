@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.cmcEQX"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature with mana value X",
+        "RememberLKI": "True",
+        "SpellDescription": "Destroy target creature with mana value X. If that creature dies this way, CARDNAME deals damage equal to the creature's power to the creature's controller.",
+        "SubAbility": "DBDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChoice",
+        "TriggerDescription": "When CARDNAME enters, return an enchantment card from your graveyard to your hand or unlock a locked door of a Room you control.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, create a 3/1 white Spirit creature token with flying.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Enchantment.YouCtrl",
+        "Origin": "Any",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Card.Room",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, create a 3/1 white Spirit creature token with flying.",
+        "Execute": "TrigToken",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

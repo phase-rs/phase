@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Green creatures have \"Cumulative upkeep {1}.\"",
+        "Affected": "Creature.Green",
+        "AddKeyword": "Cumulative upkeep:1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

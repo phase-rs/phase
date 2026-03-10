@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DayTimeChanges",
+      "params": {
+        "TriggerDescription": "Whenever day becomes night or night becomes day, you may pay {1}{R}. If you do, return CARDNAME from your graveyard to the battlefield tapped.",
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "DayTime": "Neither",
+        "ReplaceWith": "DoDay",
+        "Description": "If it's neither day nor night, it becomes day as CARDNAME enters.",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, put a +1/+1 counter on enchanted creature.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted creature attacks or blocks, sacrifice CARDNAME.",
+        "Execute": "TrigSac"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "When enchanted creature attacks or blocks, sacrifice CARDNAME.",
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigSac",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

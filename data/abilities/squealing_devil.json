@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may pay {X}. If you do, target creature gets +X/+0 until end of turn.",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigSac",
+        "ValidCard": "Card.Self",
+        "ManaNotSpent": "B",
+        "TriggerDescription": "When CARDNAME enters, sacrifice it unless {B} was spent to cast it.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Description": "As long as CARDNAME is untapped, it gets +0/+2.",
+        "Affected": "Card.Self+untapped"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

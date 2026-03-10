@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigCopy",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, create a token that's a copy of CARDNAME.",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

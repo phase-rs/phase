@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Dinosaur.YouCtrl+wasCast",
+        "AffectedZone": "Stack",
+        "Description": "Dinosaur spells you cast have prowl {2}{R}. (You may cast a spell for its prowl cost if you dealt combat damage to a player this turn with a creature with any of its creature types.)",
+        "AddKeyword": "Prowl:2 R"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

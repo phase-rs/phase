@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDamage",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may have CARDNAME deal damage to target creature equal to the number of Allies you control.",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

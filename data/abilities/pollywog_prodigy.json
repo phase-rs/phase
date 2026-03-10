@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.nonCreature+cmcLTX",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a noncreature spell with mana value less than CARDNAME's power, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

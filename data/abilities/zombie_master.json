@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Landwalk:Swamp",
+        "Description": "Other Zombie creatures have swampwalk. (They can't be blocked as long as defending player controls a Swamp.)",
+        "Affected": "Creature.Zombie+Other"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Zombie+Other",
+        "Description": "Other Zombies have \"{B}: Regenerate this permanent.\"",
+        "AddAbility": "Regenerate"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

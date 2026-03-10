@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Main1",
+        "ValidPlayer": "You",
+        "Execute": "TrigExile",
+        "TriggerDescription": "At the beginning of your first main phase, you may discard a card. If you do, exile the top two cards of your library, then choose one of them. You may play that card this turn."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.YouCtrl+nonCreature+wasCastFromExile",
+        "Description": "Noncreature spells you cast from exile have convoke. (Each creature you tap while casting a noncreature spell from exile pays for {1} or one mana of that creature's color.)",
+        "AffectedZone": "Stack",
+        "AddKeyword": "Convoke"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

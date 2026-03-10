@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "UnlessCost": "X",
+        "TgtPrompt": "Select target spell",
+        "TargetType": "Spell",
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Counter target spell unless its controller pays {X}. You gain X life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

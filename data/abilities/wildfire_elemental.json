@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigPumpAll",
+        "TriggerDescription": "Whenever an opponent is dealt noncombat damage, creatures you control get +1/+0 until end of turn.",
+        "ValidSource": "Card",
+        "CombatDamage": "False",
+        "ValidTarget": "Opponent",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

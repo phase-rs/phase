@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attached",
+      "params": {
+        "Execute": "TrigCopy",
+        "TriggerDescription": "Whenever CARDNAME becomes attached to a creature, for as long as CARDNAME remains attached to it, you may have that creature become a copy of another target creature you control.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

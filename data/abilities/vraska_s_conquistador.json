@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Planeswalker.Vraska+YouCtrl",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, if you control a Vraska planeswalker, target opponent loses 2 life and you gain 2 life.",
+        "Execute": "TrigDrain"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, if you control a Vraska planeswalker, target opponent loses 2 life and you gain 2 life.",
+        "IsPresent": "Planeswalker.Vraska+YouCtrl",
+        "Execute": "TrigDrain",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

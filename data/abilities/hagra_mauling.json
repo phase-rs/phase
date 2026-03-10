@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Destroy",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Destroy target creature."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Type": "Spell",
+            "ValidCard": "Card.Self",
+            "EffectZone": "All",
+            "CheckSVar": "X",
+            "Description": "This spell costs {1} less to cast if an opponent controls no basic lands.",
+            "Amount": "1",
+            "SVarCompare": "EQ0"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "ETBTapped",
+            "Description": "CARDNAME enters tapped.",
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "Destination": "Battlefield"
+          }
+        }
+      ]
+    }
+  ]
+}

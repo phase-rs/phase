@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigExile",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.Enchantment+YouCtrl",
+        "TriggerDescription": "Whenever one or more enchantment creatures you control deal combat damage to a player, exile a random creature card from that player's library. Create a token that's a copy of that card, except it's a 1/1 enchantment creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Enchantment+YouCtrl",
+        "AddKeyword": "Menace",
+        "Description": "Enchantment creatures you control have menace."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

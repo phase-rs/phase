@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Card.Self",
+        "Description": "CARDNAME attacks each combat if able."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "AlwaysReplace": "True",
+        "ActiveZones": "Battlefield",
+        "Description": "If damage would be dealt to CARDNAME while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from it.",
+        "ValidTarget": "Card.Self+counters_GE1_P1P1",
+        "ReplaceWith": "DBRemoveCounters",
+        "PreventionEffect": "True"
+      }
+    }
+  ],
+  "faces": []
+}

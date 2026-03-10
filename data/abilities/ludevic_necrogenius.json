@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "Defined": "Self",
+              "SorcerySpeed": "True",
+              "SpellDescription": "Transform NICKNAME. X can't be zero. Activate only as a sorcery."
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "XMin1 X U U B B"
+              },
+              {
+                "type": "Mana",
+                "cost": "ExileFromGrave<X/Creature/creature cards>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "Defined": "Self",
+            "SorcerySpeed": "True",
+            "SpellDescription": "Transform NICKNAME. X can't be zero. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigMill",
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, mill a card."
+          }
+        },
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME enters or attacks, mill a card.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigMill",
+            "Secondary": "True"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": {
+            "Other": "Transform"
+          },
+          "params": {
+            "Description": "As this creature transforms into CARDNAME, it becomes a copy of a creature card exiled with it, except its name is Olag, Ludevic's Hubris, it's 4/4, and it's a legendary blue and black Zombie in addition to its other colors and types. Put a number of +1/+1 counters on NICKNAME equal to the number of creature cards exiled with it.",
+            "ReplaceWith": "Copy",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

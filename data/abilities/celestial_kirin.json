@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Spirit,Arcane",
+        "Execute": "TrigDestroyAll",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, destroy all permanents with that spell's mana value."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

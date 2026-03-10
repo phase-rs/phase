@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "Affected": "Creature.Kobold+Other+YouCtrl",
+        "Description": "Other Kobold creatures you control have first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

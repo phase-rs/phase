@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AttackRequirement"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self",
+        "Description": "If a creature you control attacks, this creature also attacks if able.",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

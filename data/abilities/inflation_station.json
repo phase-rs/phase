@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever you crank CARDNAME, target creature gets +3/+3 until end of turn.",
+        "Execute": "TrigCrank"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

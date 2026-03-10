@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_2_1_e_cleric",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 W W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 2/1 white Cleric enchantment creature token."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "Description": "As long as your devotion to white is less than 5, NICKNAME isn't a creature. (Each {W} in the mana costs of permanents you control counts towards your devotion to white.)",
+        "RemoveType": "Creature",
+        "Affected": "Card.Self",
+        "SVarCompare": "LT5"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "AddKeyword": "Vigilance",
+        "Description": "Other creatures you control have vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

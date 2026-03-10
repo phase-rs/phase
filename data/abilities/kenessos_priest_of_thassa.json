@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Battlefield"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 GU"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ForceRevealToController": "True",
+        "Optional": "True",
+        "AILogic": "AlwaysConfirm",
+        "ChangeValid": "Creature.Kraken,Creature.Leviathan,Creature.Octopus,Creature.Serpent",
+        "LibraryPosition2": "0",
+        "ChangeNum": "1",
+        "RememberMovedToZone": "2",
+        "SubAbility": "DBBottom",
+        "StackDescription": "{p:You} looks at the top card of their library. If it's a Kraken, Leviathan, Octopus, or Serpent creature card, they may put it onto the battlefield.",
+        "SpellDescription": "Look at the top card of your library. If it's a Kraken, Leviathan, Octopus, or Serpent creature card, you may put it onto the battlefield."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Scry"
+      },
+      "params": {
+        "ReplaceWith": "ScryP1",
+        "Description": "If you would scry a number of cards, scry that many cards plus one instead.",
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "faces": []
+}

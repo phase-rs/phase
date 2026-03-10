@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a face-down permanent you control enters and whenever CARDNAME or another permanent you control is turned face up, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Permanent.faceDown+YouCtrl"
+      }
+    },
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Secondary": "True",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a face-down permanent you control enters and whenever CARDNAME or another permanent you control is turned face up, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Card.Self,Permanent.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

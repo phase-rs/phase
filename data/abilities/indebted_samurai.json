@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Samurai.YouCtrl",
+        "TriggerDescription": "Whenever a Samurai you control dies, you may put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

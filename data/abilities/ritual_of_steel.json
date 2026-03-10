@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, draw a card at the beginning of the next turn's upkeep.",
+        "Origin": "Any",
+        "Execute": "DelTrigSlowtrip"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +0/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

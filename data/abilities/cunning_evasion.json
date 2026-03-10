@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control becomes blocked, you may return it to its owner's hand.",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigBounce"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

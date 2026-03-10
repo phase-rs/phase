@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "When CARDNAME enters, untap enchanted creature. It gains hexproof until end of turn. If it's suspected, it's no longer suspected.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +2/+2 and can't become suspected.",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBeSuspected"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2 and can't become suspected.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

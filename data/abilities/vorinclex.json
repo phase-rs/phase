@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "6 G G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBReturn",
+            "RememberChanged": "True",
+            "StackDescription": "SpellDescription",
+            "SorcerySpeed": "True",
+            "SpellDescription": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChange",
+            "Origin": "Any",
+            "TriggerDescription": "When CARDNAME enters, search your library for up to two Forest cards, reveal them, put them into your hand, then shuffle."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

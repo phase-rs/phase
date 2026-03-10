@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "Amount": "7",
+          "SubAbility": "DBEffect",
+          "SpellDescription": "Add seven {R}. You can cast only one more spell this turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "7",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Add seven {R}. You can cast only one more spell this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

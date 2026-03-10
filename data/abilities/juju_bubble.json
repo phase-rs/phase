@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 1 life.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "When you play a card, sacrifice CARDNAME.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigSac",
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Secondary": "True",
+        "TriggerDescription": "When you play a card, sacrifice CARDNAME.",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

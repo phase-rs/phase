@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Command",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever your commander is put into the command zone from anywhere, draw a card.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "Type": "Spell",
+        "Amount": "AffectedX",
+        "Description": "Your commander costs {1} less to cast for each time it's been cast from the command zone this game."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

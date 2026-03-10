@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "PreventionEffect": "True",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "ExecuteMode": "PerSource",
+        "Description": "If a source would deal damage to CARDNAME, prevent that damage. The source's controller draws cards equal to the damage prevented this way.",
+        "ReplaceWith": "DBDraw"
+      }
+    }
+  ],
+  "faces": []
+}

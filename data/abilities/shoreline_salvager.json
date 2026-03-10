@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, if you control an Island, you may draw a card.",
+        "IsPresent": "Island.YouCtrl",
+        "ValidTarget": "Player",
+        "OptionalDecider": "You",
+        "CombatDamage": "True",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

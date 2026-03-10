@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, destroy all permanents at the beginning of the next end step.",
+        "Execute": "DelTrigLeaves"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

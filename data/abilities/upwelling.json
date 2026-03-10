@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "UnspentMana"
+      },
+      "params": {
+        "Description": "Players don't lose unspent mana as steps and phases end."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

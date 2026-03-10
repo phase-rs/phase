@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayEnergy<2>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "PayEnergyConservatively",
+        "SpellDescription": "Put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigEnergy",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you get {E}{E} (two energy counters)."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

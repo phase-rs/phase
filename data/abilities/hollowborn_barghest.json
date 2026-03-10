@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if you have no cards in hand, each opponent loses 2 life.",
+        "Execute": "TrigLoseLifeEachOpp",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0",
+        "IsPresent": "Card.YouCtrl",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "PresentZone": "Hand"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "PresentCompare": "EQ0",
+        "ValidPlayer": "Opponent",
+        "PresentZone": "Hand",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "At the beginning of each opponent's upkeep, if that player has no cards in hand, they lose 2 life.",
+        "IsPresent": "Card.ActivePlayerCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

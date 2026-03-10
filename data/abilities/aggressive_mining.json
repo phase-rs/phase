@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationLimit": "1",
+        "SpellDescription": "Draw two cards. Activate only once each turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPlayLand"
+      },
+      "params": {
+        "Player": "You",
+        "Description": "You can't play lands."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_1_1_human_monk_g",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 G"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Channel —",
+        "SpellDescription": "Create a 1/1 green Human Monk creature token with \"{T}: Add {G}.\"",
+        "ActivationZone": "Hand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "3",
+        "AddKeyword": "Reach",
+        "AddAbility": "ABManaGG",
+        "Description": "As long as enchanted permanent is a creature, it gets +1/+3 and has reach and \"{T}: Add {G}{G}.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player.Chosen",
+        "ActiveZones": "Battlefield",
+        "Execute": "TrigLoseLifeRemembered",
+        "TriggerDescription": "Whenever damage is dealt to one of the chosen players, the other chosen player also loses that much life."
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Secondary": "True",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Player.IsRemembered",
+        "Execute": "TrigLoseLifeChosen",
+        "TriggerDescription": "Whenever damage is dealt to one of the chosen players, the other chosen player also loses that much life."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup",
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "r_1_1_devil_burn",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 red Devil creature token with \"When this creature dies, it deals 1 damage to any target.\"",
+        "TokenOwner": "You",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "ValidPlayer": "Opponent",
+        "Description": "Your opponents can't gain life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

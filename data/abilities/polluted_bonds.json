@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a land enters under an opponent's control, that player loses 2 life and you gain 2 life.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDrain",
+        "ValidCard": "Land.OppCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

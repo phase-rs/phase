@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapAll",
+        "params": {
+          "ValidCards": "Creature",
+          "SpellDescription": "Tap all creatures."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "SpellDescription": "Tap all creatures."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "Return<2/Island>",
+        "Description": "You may return two Islands you control to their owner's hand rather than pay this spell's mana cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigUntap",
+        "ValidCard": "Creature.Other",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature enters, untap CARDNAME.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

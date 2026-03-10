@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PayCumulativeUpkeep",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Paid": "True",
+        "Execute": "TrigSearch",
+        "TriggerDescription": "Whenever you pay CARDNAME's cumulative upkeep, you may search your library for a creature card with mana value equal to the number of age counters on CARDNAME, put it onto the battlefield, then shuffle."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

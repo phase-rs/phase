@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Wall creatures you control get +1/+0 and have banding.",
+        "AddPower": "1",
+        "Affected": "Creature.YouCtrl+Wall",
+        "AddKeyword": "Banding"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

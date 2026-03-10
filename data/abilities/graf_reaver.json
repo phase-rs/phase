@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME exploits a creature, destroy target planeswalker.",
+        "ValidSource": "Card.Self",
+        "ValidCard": "Creature",
+        "Execute": "TrigDestroy"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 1 damage to you.",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

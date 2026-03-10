@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPumpAll",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME dies, all creatures get -5/-5 until end of turn.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Spirit,Arcane",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a Spirit or Arcane spell, CARDNAME deals 2 damage to that player.",
+        "Execute": "TrigDamage",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

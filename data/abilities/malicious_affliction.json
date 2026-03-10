@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target nonblack creature.",
+        "TgtPrompt": "Select target nonblack creature"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "CheckSVar": "Morbid",
+        "TriggerDescription": "Morbid — When you cast this spell, if a creature died this turn, you may copy CARDNAME and may choose a new target for the copy.",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

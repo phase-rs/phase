@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "Execute": "TrigRepeat",
+        "TriggerDescription": "When CARDNAME enters, you may put a land card from your hand onto the battlefield tapped. If you do, draw a card and repeat this process."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
+        "SetPower": "X",
+        "SetToughness": "X",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

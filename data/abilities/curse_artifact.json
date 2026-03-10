@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of the upkeep of enchanted artifact's controller, CARDNAME deals 2 damage to that player unless they sacrifice that artifact.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Player.EnchantedController",
+        "Execute": "TrigCurseArtifactSacrifice",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

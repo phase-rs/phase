@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a source an opponent controls deals damage to you or a permanent you control, you may have CARDNAME deal 1 damage to that source's controller.",
+        "ValidTarget": "You,Permanent.YouCtrl",
+        "ValidSource": "Card.OppCtrl,Emblem.OppCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

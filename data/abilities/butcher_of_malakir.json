@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSac",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control dies, each opponent sacrifices a creature.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

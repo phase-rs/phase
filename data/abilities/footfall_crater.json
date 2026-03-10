@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.AttachedBy",
+        "Description": "Enchanted land has \"{T}: Target creature gains trample and haste until end of turn.\"",
+        "AddAbility": "DBPump"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "PutCounterAll",
+            "params": {
+              "CounterNum": "1",
+              "ValidCards": "Creature.ThisTurnEntered+EnteredUnder You",
+              "CounterType": "P1P1",
+              "SpellDescription": "Put a +1/+1 counter on each creature that entered the battlefield under your control this turn."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "CounterNum": "1",
+            "ValidCards": "Creature.ThisTurnEntered+EnteredUnder You",
+            "CounterType": "P1P1",
+            "SpellDescription": "Put a +1/+1 counter on each creature that entered the battlefield under your control this turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 1,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.Other"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Put a +1/+1 counter on another target creature, then CARDNAME deals 2 damage to that creature.",
+            "SubAbility": "DBDmg",
+            "TgtPrompt": "Select another target creature"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "Whenever a creature you control with a +1/+1 counter on it dies, draw a card.",
+            "Origin": "Battlefield",
+            "TriggerZones": "Battlefield",
+            "Destination": "Graveyard",
+            "Execute": "TrigDraw",
+            "ValidCard": "Creature.YouCtrl+counters_GE1_P1P1"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

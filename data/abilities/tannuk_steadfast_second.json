@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Description": "Other creatures you control have haste.",
+        "Affected": "Creature.YouCtrl+Other"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Warp:2 R",
+        "EffectZone": "Battlefield",
+        "Affected": "Artifact.YouOwn,Creature.Red+YouOwn",
+        "AffectedZone": "Hand",
+        "Description": "Artifact cards and red creature cards in your hand have warp {2}{R}. (You may cast a card from your hand for its warp cost. Exile that permanent at the beginning of the next end step, then you may cast it from exile on a later turn.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

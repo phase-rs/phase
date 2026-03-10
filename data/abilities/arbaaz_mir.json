@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Permanent.!token+Historic+Other+YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another nontoken historic permanent you control enters, CARDNAME deals 1 damage to each opponent and you gain 1 life. (Artifacts, legendaries, and Sagas are historic.)",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

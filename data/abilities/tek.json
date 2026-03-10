@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +0/+2 as long as you control a Plains.",
+        "AddToughness": "2",
+        "IsPresent": "Plains.YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Island.YouCtrl",
+        "Description": "CARDNAME has flying as long as you control an Island.",
+        "AddKeyword": "Flying",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +2/+0 as long as you control a Swamp.",
+        "Affected": "Card.Self",
+        "IsPresent": "Swamp.YouCtrl",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "IsPresent": "Mountain.YouCtrl",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has first strike as long as you control a Mountain."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has trample as long as you control a Forest.",
+        "AddKeyword": "Trample",
+        "IsPresent": "Forest.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

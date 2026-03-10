@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "TriggerDescription": "If CARDNAME leaves the battlefield, this effect continues until end of turn.",
+        "Origin": "Battlefield",
+        "Execute": "TrigEffect",
+        "Static": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "AffectedX",
+        "Affected": "Artifact.nonCreature",
+        "Description": "Each noncreature artifact loses all abilities and is an artifact creature with power and toughness each equal to its mana value.",
+        "AddType": "Artifact & Creature",
+        "RemoveCardTypes": "True",
+        "SetPower": "AffectedX",
+        "RemoveAllAbilities": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

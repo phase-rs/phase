@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Exile up to two target cards from graveyards. You gain 1 life for each creature card exiled this way.",
+        "TargetMin": "0",
+        "RememberChanged": "True",
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select up to two target cards in graveyards",
+        "TargetMax": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetToughness": "X",
+        "Description": "NICKNAME's toughness is equal to your devotion to black."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

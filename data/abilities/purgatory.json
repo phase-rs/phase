@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.!token+YouOwn",
+        "Origin": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a nontoken creature is put into your graveyard from the battlefield, exile that card."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may pay {4} and 2 life. If you do, return a card exiled with CARDNAME to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

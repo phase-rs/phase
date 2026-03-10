@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TabernacleTrig",
+        "Affected": "Creature",
+        "AddSVar": "TabernacleDestroy",
+        "Description": "All creatures have \"At the beginning of your upkeep, destroy this creature unless you pay {1}.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

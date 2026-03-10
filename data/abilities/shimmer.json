@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each land of the chosen type has phasing. (It phases in or out before its controller untaps during each of their untap steps. While it's phased out, it's treated as though it doesn't exist.)",
+        "Affected": "Land.ChosenType",
+        "AddKeyword": "Phasing"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

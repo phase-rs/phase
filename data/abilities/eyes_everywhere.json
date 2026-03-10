@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeControl",
+        "params": {
+          "ValidTgts": "Permanent.nonLand",
+          "SorcerySpeed": "True",
+          "Defined": "Self",
+          "SpellDescription": "Exchange control of CARDNAME and target nonland permanent. Activate only as a sorcery.",
+          "TgtPrompt": "Select target nonland permanent"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Permanent.nonLand",
+        "SorcerySpeed": "True",
+        "Defined": "Self",
+        "SpellDescription": "Exchange control of CARDNAME and target nonland permanent. Activate only as a sorcery.",
+        "TgtPrompt": "Select target nonland permanent"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigScry",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, scry 1."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Amount": "X",
+        "Description": "Vivid — This spell costs {1} less to cast for each color among permanents you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

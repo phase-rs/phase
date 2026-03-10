@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME is also a Cleric, Rogue, Warrior, and Wizard.",
+        "AddType": "Cleric & Rogue & Warrior & Wizard",
+        "Affected": "Card.Self",
+        "CharacteristicDefining": "True"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Type": "Spell",
+        "Description": "This spell costs {1} less to cast for each creature in your party.",
+        "ValidCard": "Card.Self",
+        "Amount": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

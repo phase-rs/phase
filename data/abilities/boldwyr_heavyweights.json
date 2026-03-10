@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, each opponent may search their library for a creature card and put it onto the battlefield. Then each player who searched their library this way shuffles."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, conjure a random card from CARDNAME's spellbook into exile face down with three egg counters on it. It gains \"At the beginning of your upkeep, if this card is exiled, remove an egg counter from it. Then if it has no egg counters on it, put it onto the battlefield.\"",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "Execute": "TrigDraft",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

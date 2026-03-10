@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter all spells your opponents control and all abilities your opponents control. Create a 1/1 blue and black Faerie creature token with flying for each spell and ability countered this way.",
+        "SubAbility": "DBToken",
+        "Defined": "ValidStack Spell.OppCtrl,Activated.OppCtrl,Triggered.OppCtrl",
+        "RememberCounteredSA": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

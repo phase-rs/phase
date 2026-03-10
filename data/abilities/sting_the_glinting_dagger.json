@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "At the beginning of each combat, untap equipped creature.",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +1/+1 and has haste.",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Haste"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has first strike as long as it's blocking or blocked by a Goblin or Orc.",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "First Strike",
+        "IsPresent": "Creature.EquippedBy+blockingValid Goblin,Creature.EquippedBy+blockingValid Orc,Goblin.blockingValid Creature.EquippedBy,Orc.blockingValid Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

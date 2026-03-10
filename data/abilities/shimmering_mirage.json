@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Defined": "You",
+          "SubAbility": "DBAnimate",
+          "SpellDescription": "Target land becomes the basic land type of your choice until end of turn. Draw a card.",
+          "Type": "Basic Land"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SubAbility": "DBAnimate",
+        "SpellDescription": "Target land becomes the basic land type of your choice until end of turn. Draw a card.",
+        "Type": "Basic Land"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

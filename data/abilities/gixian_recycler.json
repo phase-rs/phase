@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When CARDNAME dies or is put into your graveyard from your hand or library, conjure a card named Gixian Recycler into your graveyard.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigConjure",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Origin": "Hand,Library",
+        "TriggerDescription": "When CARDNAME dies or is put into your graveyard from your hand or library, conjure a card named Gixian Recycler into your graveyard."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

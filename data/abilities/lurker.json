@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantTarget"
+      },
+      "params": {
+        "ValidTarget": "Card.Self+!attackedThisTurn+!blockedThisTurn",
+        "Description": "CARDNAME can't be the target of spells unless it attacked or blocked this turn.",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

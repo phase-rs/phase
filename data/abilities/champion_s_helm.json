@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+2.",
+        "Affected": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)",
+        "Affected": "Card.EquippedBy+Legendary",
+        "AddKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigDraw",
+        "ValidCards": "Creature.Other",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1",
+        "TriggerDescription": "Whenever one or more other creatures die, draw a card. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

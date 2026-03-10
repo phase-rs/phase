@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "TgtPrompt": "Select another target creature with power 2 or less",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "RememberObjects": "Targeted",
+          "AILogic": "Pump",
+          "SpellDescription": "Another target creature with power 2 or less can't be blocked this turn.",
+          "ValidTgts": "Creature.Other+powerLE2",
+          "StaticAbilities": "Unblockable"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "TgtPrompt": "Select another target creature with power 2 or less",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "RememberObjects": "Targeted",
+        "AILogic": "Pump",
+        "SpellDescription": "Another target creature with power 2 or less can't be blocked this turn.",
+        "ValidTgts": "Creature.Other+powerLE2",
+        "StaticAbilities": "Unblockable"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "Damage",
+          "SpellDescription": "Until end of turn, whenever a creature you control with power 2 or less deals combat damage to a player, draw a card."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Hand>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "Damage",
+        "SpellDescription": "Until end of turn, whenever a creature you control with power 2 or less deals combat damage to a player, draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

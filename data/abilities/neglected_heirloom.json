@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "When equipped creature transforms, transform CARDNAME.",
+            "ValidCard": "Creature.EquippedBy",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "1",
+            "Description": "Equipped creature gets +1/+1.",
+            "AddToughness": "1",
+            "Affected": "Creature.EquippedBy"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "3",
+            "AddKeyword": "First Strike",
+            "Affected": "Creature.EquippedBy",
+            "Description": "Equipped creature gets +3/+3 and has first strike.",
+            "AddToughness": "3"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

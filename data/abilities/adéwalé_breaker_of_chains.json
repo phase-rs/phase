@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDig",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, reveal the top six cards of your library. Put an Assassin, Pirate, or Vehicle card from among them into your hand and the rest on the bottom of your library in a random order."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigChange",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a Vehicle you control deals combat damage to a player, you may return NICKNAME from your graveyard to your hand.",
+        "TriggerZones": "Graveyard",
+        "ValidSource": "Vehicle.YouCtrl",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

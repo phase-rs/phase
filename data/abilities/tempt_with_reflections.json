@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl",
+          "StackDescription": "SpellDescription",
+          "SubAbility": "DBRepeat",
+          "TgtPrompt": "Select target creature you control",
+          "SpellDescription": "Tempting offer — Choose target creature you control. Create a token that's a copy of that creature. Each opponent may create a token that's a copy of that creature. For each opponent who does, create a token that's a copy of that creature."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl",
+        "StackDescription": "SpellDescription",
+        "SubAbility": "DBRepeat",
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Tempting offer — Choose target creature you control. Create a token that's a copy of that creature. Each opponent may create a token that's a copy of that creature. For each opponent who does, create a token that's a copy of that creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

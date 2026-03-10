@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "UntapAll",
+        "params": {
+          "Planeswalker": "True",
+          "ValidCards": "Creature.YouCtrl",
+          "SubAbility": "DBPumpAll",
+          "SpellDescription": "Untap all creatures you control. Those creatures get +1/+1 until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ValidCards": "Creature.YouCtrl",
+        "SubAbility": "DBPumpAll",
+        "SpellDescription": "Untap all creatures you control. Those creatures get +1/+1 until end of turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 5,
+        "toughness": 5,
+        "types": [
+          "Creature",
+          "Human",
+          "Soldier"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Keywords": "Indestructible",
+        "SpellDescription": "Until end of turn, CARDNAME becomes a 5/5 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
+        "SubAbility": "GideonPrevent",
+        "Defined": "Self"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBTapAll",
+        "SpellDescription": "Creatures you control get +2/+2 until end of turn. Tap all creatures your opponents control.",
+        "ValidCards": "Creature.YouCtrl",
+        "Planeswalker": "True",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

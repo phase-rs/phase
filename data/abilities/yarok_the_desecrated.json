@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "Description": "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+        "Destination": "Battlefield",
+        "ValidMode": "ChangesZone,ChangesZoneAll",
+        "ValidCard": "Permanent.YouCtrl",
+        "ValidCause": "Permanent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

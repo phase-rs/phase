@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "ABDamageOther",
+        "Affected": "Sliver",
+        "Description": "All Sliver creatures have \"{T}: This creature deals 2 damage to any target and 3 damage to itself.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

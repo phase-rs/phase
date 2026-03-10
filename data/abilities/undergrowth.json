@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Fog",
+        "params": {
+          "ConditionOptionalPaid": "False",
+          "StackDescription": "SpellDescription",
+          "Condition": "OptionalCost",
+          "SubAbility": "DBEffect",
+          "SpellDescription": "Prevent all combat damage that would be dealt this turn. If this spell's additional cost was paid, this effect doesn't affect combat damage that would be dealt by red creatures."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionOptionalPaid": "False",
+        "StackDescription": "SpellDescription",
+        "Condition": "OptionalCost",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Prevent all combat damage that would be dealt this turn. If this spell's additional cost was paid, this effect doesn't affect combat damage that would be dealt by red creatures."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "ValidSA": "Spell",
+        "Description": "As an additional cost to cast this spell, you may pay {2}{R}.",
+        "Cost": "2 R"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

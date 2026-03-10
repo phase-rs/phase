@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Description": "As long as CARDNAME is paired with another creature, both creatures have flying.",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigPumpAll",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, creatures you control gain indestructible until end of turn."
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Creature.nonAngel+YouCtrl",
+            "Destination": "Graveyard",
+            "TriggerDescription": "When a non-Angel creature you control dies, transform CARDNAME at the beginning of the next upkeep.",
+            "Execute": "TrigDelayTransform",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "Execute": "TrigDamageAll",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever this creature transforms into CARDNAME, it deals 3 damage to each other creature and each opponent."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

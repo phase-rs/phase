@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "AttackTax",
+          "SetChosenNumber": "X",
+          "SpellDescription": "This turn, creatures can't attack unless their controller pays {X} for each attacking creature they control."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "AttackTax",
+        "SetChosenNumber": "X",
+        "SpellDescription": "This turn, creatures can't attack unless their controller pays {X} for each attacking creature they control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

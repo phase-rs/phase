@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature",
+        "Execute": "TrigPump",
+        "ActivatorThisTurnCast": "EQ1",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast your first creature spell each turn, that spell gains mobilize 1.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Attacking tokens you control get +1/+0.",
+        "Affected": "Creature.token+attacking+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

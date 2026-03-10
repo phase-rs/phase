@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever NICKNAME or another creature or artifact you control enters, you gain 1 life.",
+        "Execute": "TrigGainLife",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl,Artifact.Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, draw a card if you've gained 3 or more life this turn.",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

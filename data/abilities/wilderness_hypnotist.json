@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": -2,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Red,Creature.Green"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target red or green creature gets -2/-0 until end of turn.",
+        "TgtPrompt": "Select target red or green creature",
+        "IsCurse": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

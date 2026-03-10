@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "CheckSVar": "LifeGained",
+        "TriggerDescription": "At the beginning of each end step, if you gained 3 or more life this turn, draw a card.",
+        "SVarCompare": "GE3"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "ThisTargetedCard",
+          "ValidTgts": "Creature",
+          "TgtPrompt": "Select target creature that can't block this creature this turn",
+          "StackDescription": "{c:Targeted} can't block CARDNAME this turn.",
+          "ForgetOnMoved": "Battlefield",
+          "IsCurse": "True",
+          "SpellDescription": "Target creature can't block CARDNAME this turn.",
+          "StaticAbilities": "KWPump",
+          "Duration": "UntilHostLeavesPlayOrEOT"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "UR"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "ThisTargetedCard",
+        "ValidTgts": "Creature",
+        "TgtPrompt": "Select target creature that can't block this creature this turn",
+        "StackDescription": "{c:Targeted} can't block CARDNAME this turn.",
+        "ForgetOnMoved": "Battlefield",
+        "IsCurse": "True",
+        "SpellDescription": "Target creature can't block CARDNAME this turn.",
+        "StaticAbilities": "KWPump",
+        "Duration": "UntilHostLeavesPlayOrEOT"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a red spell, remove a -1/-1 counter from CARDNAME.",
+        "Execute": "TrigRemoveCounter",
+        "ValidCard": "Card.Red",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a blue spell, remove a -1/-1 counter from CARDNAME.",
+        "ValidCard": "Card.Blue",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRemoveCounter",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

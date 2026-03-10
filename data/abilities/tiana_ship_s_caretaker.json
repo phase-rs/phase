@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Equipment.YouCtrl,Aura.YouCtrl",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an Aura or Equipment you control is put into a graveyard from the battlefield, you may return that card to its owner's hand at the beginning of the next end step.",
+        "Origin": "Battlefield",
+        "Execute": "DelayedTrig"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

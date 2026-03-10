@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Number": "2",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you draw your second card each turn, create a 2/2 white and blue Detective creature token."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "As long as you have the city's blessing, Detectives you control can't be blocked.",
+        "Condition": "Blessing",
+        "ValidAttacker": "Detective.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Constellation — Whenever an enchantment you control enters, target creature gets +1/+1 until end of turn.",
+        "Origin": "Any",
+        "ValidCard": "Enchantment.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

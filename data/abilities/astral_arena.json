@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, CARDNAME deals 2 damage to each creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AttackRestrict"
+      },
+      "params": {
+        "EffectZone": "Command",
+        "Description": "No more than one creature can attack each combat.",
+        "MaxAttackers": "1"
+      }
+    },
+    {
+      "mode": {
+        "Other": "BlockRestrict"
+      },
+      "params": {
+        "EffectZone": "Command",
+        "MaxBlockers": "1",
+        "Description": "No more than one creature can block each combat."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

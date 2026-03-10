@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/CARDNAME>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select up to two target cards in graveyards",
+        "TargetMin": "0",
+        "TargetMax": "2",
+        "SpellDescription": "Exile up to two target cards from graveyards.",
+        "ActivationZone": "Hand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "HIDDEN CARDNAME can't block.",
+        "RememberTargets": "True",
+        "SubAbility": "DBDestroy",
+        "SpellDescription": "Up to three target creatures can't block this turn.",
+        "IsCurse": "True",
+        "StackDescription": "REP Up to three target creatures_{c:Targeted}",
+        "TgtPrompt": "Select up to three target creatures",
+        "TargetMin": "0",
+        "TargetMax": "3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

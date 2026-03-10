@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player may draw up to two cards. For each card less than two a player draws this way, that player gains 2 life.",
+        "AILogic": "GainLife",
+        "Upto": "True",
+        "Defined": "Player",
+        "SubAbility": "DBRepeat",
+        "RememberDrawn": "AllReplaced"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, you draw a card and each opponent discards a card."
+      }
+    },
+    {
+      "mode": "Surveil",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBounce",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you surveil, return CARDNAME to its owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

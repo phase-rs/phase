@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Command",
+        "Execute": "BuildPressure",
+        "TriggerDescription": "At the beginning of your end step, put a pressure counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "PlaneswalkedFrom",
+      "params": {
+        "Execute": "Eruption",
+        "ValidCard": "Plane.Self",
+        "TriggerDescription": "When you planeswalk away from CARDNAME, it deals damage equal to the number of pressure counters on it to each creature and each planeswalker."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, prevent all damage that planes named Mount Keralia would deal this game to permanents you control.",
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

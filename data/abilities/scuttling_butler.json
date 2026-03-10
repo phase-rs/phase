@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPump",
+        "Phase": "BeginCombat",
+        "IsPresent": "Permanent.MultiColor+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE2",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, if you control two or more multicolored permanents, CARDNAME gains double strike until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

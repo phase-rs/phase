@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or another creature dies, put a +1/+1 counter on each Vampire you control.",
+        "ValidCard": "Creature.Other,Card.Self",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Execute": "TrigPutCounters"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

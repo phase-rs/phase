@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "UnlessDefender": "!controlsCreature.untapped+powerLE2",
+        "Description": "CARDNAME can't attack if defending player controls an untapped creature with power 2 or less."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

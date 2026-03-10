@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChooseType",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this creature enters, choose a creature type. Other permanents you control of that type gain hexproof and indestructible until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

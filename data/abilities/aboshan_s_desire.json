@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has flying.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Flying"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Shroud",
+        "Affected": "Creature.EnchantedBy",
+        "Condition": "Threshold",
+        "Description": "Threshold — Enchanted creature has shroud as long as there are seven or more cards in your graveyard. (It can't be the target of spells or abilities.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

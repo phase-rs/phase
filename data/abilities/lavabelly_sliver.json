@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Sliver creatures you control have \"When this creature enters, it deals 1 damage to target player or planeswalker and you gain 1 life.\"",
+        "AddTrigger": "LavabellyETB",
+        "Affected": "Creature.Sliver+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

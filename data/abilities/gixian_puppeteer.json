@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Number": "2",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "LoseGain",
+        "TriggerDescription": "Whenever you draw your second card each turn, each opponent loses 2 life and you gain 2 life.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, return another target creature card with mana value 3 or less from your graveyard to the battlefield.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

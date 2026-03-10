@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DestinationAlternative": "Library",
+        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
+        "TgtPrompt": "Select target nonland permanent",
+        "LibraryPositionAlternative": "-1",
+        "SpellDescription": "The owner of target nonland permanent puts it on the top or bottom of their library.",
+        "AlternativeDecider": "TargetedOwner"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

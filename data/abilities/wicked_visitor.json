@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Enchantment.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an enchantment you control is put into a graveyard from the battlefield, each opponent loses 1 life.",
+        "Origin": "Battlefield",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Alliance — Whenever another creature you control enters, CARDNAME get +1/+0 until end of turn.",
+        "Origin": "Any",
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Execute": "TrigPump",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attack, exile up to one target creature you own, then return it to the battlefield under your control tapped and attacking.",
+        "Execute": "TrigExile",
+        "ValidCard": "Creature.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

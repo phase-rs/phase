@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Defined": "ExiledCards",
+          "ValidSA": "Spell",
+          "SorcerySpeed": "True",
+          "SpellDescription": "You may play it. Activate only as a sorcery and only if there are eight or more permanent cards in your graveyard.",
+          "PrecostDesc": "Descend 8",
+          "IsPresent": "Permanent.YouOwn",
+          "PresentZone": "Graveyard",
+          "PresentCompare": "GE8"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromGrave<1/Permanent>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "ExiledCards",
+        "ValidSA": "Spell",
+        "SorcerySpeed": "True",
+        "SpellDescription": "You may play it. Activate only as a sorcery and only if there are eight or more permanent cards in your graveyard.",
+        "PrecostDesc": "Descend 8",
+        "IsPresent": "Permanent.YouOwn",
+        "PresentZone": "Graveyard",
+        "PresentCompare": "GE8"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, choose target creature card in your graveyard. Conjure a duplicate of it into your graveyard.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "Execute": "TrigConjure"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

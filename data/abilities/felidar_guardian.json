@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may exile another target permanent you control, then return that card to the battlefield under your control.",
+        "Execute": "RestorationExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

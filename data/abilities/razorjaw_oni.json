@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "Black creatures can't block.",
+        "ValidCard": "Creature.Black"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

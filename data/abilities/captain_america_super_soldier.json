@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "IsPresent": "Card.Self+counters_GE1_SHIELD",
+        "Affected": "You,Hero.Other+YouCtrl",
+        "Description": "As long as NICKNAME has a shield counter on him, you and other Heroes you control have hexproof."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

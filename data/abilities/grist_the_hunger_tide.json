@@ -1,0 +1,100 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Repeat",
+        "params": {
+          "RepeatCheckSVar": "MilledInsect",
+          "Planeswalker": "True",
+          "RepeatSVarCompare": "EQ1",
+          "SpellDescription": "Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on NICKNAME and repeat this process.",
+          "SubAbility": "DBCleanup",
+          "StackDescription": "SpellDescription",
+          "RepeatSubAbility": "CleanupBegin"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatCheckSVar": "MilledInsect",
+        "Planeswalker": "True",
+        "RepeatSVarCompare": "EQ1",
+        "SpellDescription": "Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on NICKNAME and repeat this process.",
+        "SubAbility": "DBCleanup",
+        "StackDescription": "SpellDescription",
+        "RepeatSubAbility": "CleanupBegin"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ImmediateTrigger",
+        "params": {
+          "Execute": "TrigDestroy",
+          "Planeswalker": "True",
+          "UnlessCost": "Sac<1/Creature>",
+          "UnlessSwitched": "True",
+          "AILogic": "WeakerCreature",
+          "SpellDescription": "You may sacrifice a creature. When you do, destroy target creature or planeswalker.",
+          "UnlessPayer": "You"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Execute": "TrigDestroy",
+        "Planeswalker": "True",
+        "UnlessCost": "Sac<1/Creature>",
+        "UnlessSwitched": "True",
+        "AILogic": "WeakerCreature",
+        "SpellDescription": "You may sacrifice a creature. When you do, destroy target creature or planeswalker.",
+        "UnlessPayer": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 0
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Each opponent loses life equal to the number of creature cards in your graveyard.",
+        "Defined": "Player.Opponent",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature & Insect",
+        "ExcludeZone": "Battlefield",
+        "SetPower": "1",
+        "Affected": "Card.Self",
+        "SetToughness": "1",
+        "Description": "As long as CARDNAME isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

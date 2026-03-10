@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseNumber",
+        "params": {
+          "Min": "0",
+          "Max": "6",
+          "Defined": "You",
+          "Random": "True",
+          "SubAbility": "DBPump",
+          "StackDescription": "None",
+          "SpellDescription": "Target creature gets +X/+0 until end of turn, where X is a number from 0 to 6 chosen at random."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Min": "0",
+        "Max": "6",
+        "Defined": "You",
+        "Random": "True",
+        "SubAbility": "DBPump",
+        "StackDescription": "None",
+        "SpellDescription": "Target creature gets +X/+0 until end of turn, where X is a number from 0 to 6 chosen at random."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

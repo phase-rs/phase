@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "Execute": "TrigDestroy",
+        "ValidTarget": "Creature.inZoneBattlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature becomes the target of a spell or ability, destroy that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When CARDNAME enters, you may destroy another target creature. If a creature is destroyed this way, you gain life equal to its toughness."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

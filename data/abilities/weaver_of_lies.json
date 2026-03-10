@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, turn any number of target creatures with morph abilities other than CARDNAME face down.",
+        "Execute": "DBWeaverofLiesSetState",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

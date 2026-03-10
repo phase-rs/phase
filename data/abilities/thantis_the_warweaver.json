@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DragonWake",
+        "Attacked": "You,Planeswalker.YouCtrl",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature attacks you or a planeswalker you control, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Creature",
+        "Description": "All creatures attack each combat if able."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

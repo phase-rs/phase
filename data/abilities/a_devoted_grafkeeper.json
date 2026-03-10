@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Execute": "TrigMill",
+            "TriggerDescription": "When CARDNAME enters, mill four cards.",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield"
+          }
+        },
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigTap",
+            "TriggerZones": "Battlefield",
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Card.wasCastFromYourGraveyardByYou",
+            "TriggerDescription": "Whenever you cast a spell from your graveyard, tap target creature you don't control."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "ReplaceWith": "Exile",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead."
+          }
+        }
+      ]
+    }
+  ]
+}

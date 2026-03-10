@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.Self+attackedThisTurn,Card.Self+blockedThisTurn",
+        "Phase": "End of Turn",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "At the beginning of each end step, if CARDNAME attacked or blocked this turn, its owner shuffles it into their library.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

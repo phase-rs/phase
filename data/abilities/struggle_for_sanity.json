@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "ValidTgts": "Opponent",
+          "RememberTargets": "True",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Target opponent reveals their hand. That player exiles a card from it, then you exile a card from it. Repeat this process until all cards in that hand have been exiled. That player returns the cards they exiled this way to their hand and puts the rest into their graveyard.",
+          "RememberRevealed": "True",
+          "SubAbility": "DBRepeatChoose"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "RememberTargets": "True",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Target opponent reveals their hand. That player exiles a card from it, then you exile a card from it. Repeat this process until all cards in that hand have been exiled. That player returns the cards they exiled this way to their hand and puts the rest into their graveyard.",
+        "RememberRevealed": "True",
+        "SubAbility": "DBRepeatChoose"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SpellDescription": "Add an amount of {R} equal to the greatest power among creatures you control that entered this turn.",
+          "Amount": "X"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add an amount of {R} equal to the greatest power among creatures you control that entered this turn.",
+        "Amount": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

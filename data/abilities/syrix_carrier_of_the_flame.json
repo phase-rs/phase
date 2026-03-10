@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "Execute": "TrigPhoenix",
+        "Phase": "End of Turn",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each end step, if a creature card left your graveyard this turn, target Phoenix you control deals damage equal to its power to any target."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Phoenix.Other+YouCtrl",
+        "Execute": "TrigPlay",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever another Phoenix you control dies, you may cast CARDNAME from your graveyard.",
+        "TriggerZones": "Graveyard",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

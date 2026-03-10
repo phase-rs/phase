@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "When this Aura enters, enchanted creature deals damage equal to its power to any other target.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever enchanted creature is dealt damage, it deals that much damage to each opponent.",
+        "Execute": "TrigDamageAll",
+        "ValidTarget": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

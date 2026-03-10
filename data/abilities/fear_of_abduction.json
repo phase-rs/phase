@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {}
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4 W W"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/Creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {}
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile target creature an opponent controls.",
+        "Origin": "Any",
+        "Execute": "TrigExile"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, put each card exiled with it into its owner's hand.",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

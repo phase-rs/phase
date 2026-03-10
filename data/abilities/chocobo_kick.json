@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDealDamage",
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Target creature you control deals damage equal to its power to target creature an opponent control. If this spell was kicked, the creature you control deals twice that much damage instead.",
+        "StackDescription": "None",
+        "AILogic": "PowerDmg"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, target opponent creates a 2/4 white Ox creature token and you draw a card.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigToken",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, target opponent creates a 2/4 white Ox creature token and you draw a card.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by Oxen.",
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.Ox"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

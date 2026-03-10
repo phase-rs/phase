@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSearch",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME exploits a creature, you may search your library for a card, put it into your hand, then shuffle.",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

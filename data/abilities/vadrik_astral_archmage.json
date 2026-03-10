@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DayTimeChanges",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever day becomes night or night becomes day, put a +1/+1 counter on NICKNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "X",
+        "Activator": "You",
+        "ValidCard": "Instant,Sorcery",
+        "Description": "Instant and sorcery spells you cast cost {X} less to cast, where X is NICKNAME's power."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "DoDay",
+        "Description": "If it's neither day nor night, it becomes day as CARDNAME enters.",
+        "ValidCard": "Card.Self",
+        "DayTime": "Neither",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigLoseLife",
+        "Origin": "Battlefield",
+        "ValidCard": "Vampire.Other+YouCtrl,Card.Self",
+        "TriggerDescription": "Whenever CARDNAME or another Vampire you control dies, you may pay {B}. If you do, target player loses 2 life and you gain 2 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

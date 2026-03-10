@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, creatures you control gain haste until end of turn.",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

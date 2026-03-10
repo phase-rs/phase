@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "4",
+        "Description": "LEVEL 4-6 2/4",
+        "IsPresent": "Card.Self+counters_GE4_LEVEL+counters_LE6_LEVEL",
+        "Affected": "Card.Self",
+        "SetPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TriggerExtraTurn",
+        "SetToughness": "5",
+        "IsPresent": "Card.Self+counters_GE7_LEVEL",
+        "Description": "LEVEL 7+ 3/5 At the beginning of each end step, if it's not your turn, take an extra turn after this one.",
+        "Affected": "Card.Self",
+        "SetPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.EquippedBy",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever equipped creature attacks, destroy target creature an opponent controls."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "7",
+        "AddToughness": "7",
+        "Description": "Equipped creature gets +7/+7.",
+        "AddSVar": "AE",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

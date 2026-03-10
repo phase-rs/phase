@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Creature.Other",
+        "TriggerDescription": "Whenever another creature dies, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDamage",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When NICKNAME dies, it deals damage equal to its power divided as you choose among any number of targets.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Ward:1",
+        "Affected": "Warrior.YouCtrl+Other",
+        "AddToughness": "1",
+        "Description": "Other Warriors you control get +1/+1 and have ward {1}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

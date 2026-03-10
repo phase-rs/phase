@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerDescription": "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, the player sacrifices two creatures. If the player chooses others, each of your other opponents sacrifices a creature.",
+        "ValidCard": "Card.Self",
+        "Execute": "DBChoose",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

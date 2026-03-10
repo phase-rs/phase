@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted creature loses all abilities and is a black Skeleton creature with base power and toughness 1/1. (It loses all other card types and creature types.)",
+        "SetPower": "1",
+        "AddType": "Creature & Skeleton",
+        "RemoveCreatureTypes": "True",
+        "RemoveAllAbilities": "True",
+        "SetColor": "Black",
+        "RemoveCardTypes": "True",
+        "SetToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

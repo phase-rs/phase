@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you may have it deal 1 damage to target creature. If you do, prevent all combat damage CARDNAME would deal this turn.",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

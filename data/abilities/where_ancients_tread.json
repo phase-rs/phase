@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigDamage",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a creature you control with power 5 or greater enters, you may have CARDNAME deal 5 damage to any target.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.powerGE5+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

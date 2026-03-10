@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PhaseCount": "2",
+        "PresentDefined": "Self",
+        "Execute": "TrigChangeZone",
+        "IsPresent": "Card.tapped",
+        "TriggerZones": "Battlefield",
+        "Phase": "Main",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, exile up to one target card from a graveyard."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "AddToughness": "3",
+        "AddKeyword": "Hexproof",
+        "Affected": "Card.Self",
+        "SVarCompare": "GE3",
+        "Description": "As long as there are three or more cards exiled with CARDNAME, it gets +3/+3 and has hexproof. (It can't be the target of spells or abilities your opponents control.)",
+        "AddPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Cascade",
+        "Affected": "Card.IsCommander+YouCtrl+wasCast",
+        "AffectedZone": "Stack",
+        "Description": "Commander spells you cast have cascade. (Whenever you cast a commander, exile cards from the top of your library until you exile a nonland card with lesser mana value. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

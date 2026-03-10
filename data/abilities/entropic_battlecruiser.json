@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE1_CHARGE",
+        "Description": "STATION 1+ Whenever an opponent discards a card, they lose 3 life.",
+        "AddTrigger": "DiscardTrig"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying & Deathtouch",
+        "AddType": "Creature",
+        "AddTrigger": "AttackTrig",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "Description": "STATION 8+ Flying, deathtouch,,,Whenever this Spacecraft attacks, each opponent discards a card. Each opponent who can't loses 3 life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

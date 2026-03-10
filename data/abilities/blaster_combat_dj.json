@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "CounterAddedOnce",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigConvert",
+            "TriggerDescription": "Whenever you put one or more +1/+1 counters on NICKNAME, convert it.",
+            "CounterType": "P1P1",
+            "ValidSource": "You"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Modular:1",
+            "Affected": "Artifact.Creature+Other+YouCtrl+!token,Vehicle.Other+YouCtrl+!token",
+            "Description": "Other nontoken artifact creatures and Vehicles you control have modular 1. (They enter with an additional +1/+1 counter on them. When they die, you may put their +1/+1 counters on target artifact creature.)"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "MoveCounter",
+            "params": {
+              "ValidTgts": "Artifact.Other",
+              "CounterType": "P1P1",
+              "CounterNum": "X",
+              "Source": "Self",
+              "TgtPrompt": "Select another target artifact to get counters",
+              "SorcerySpeed": "True",
+              "SpellDescription": "Move X +1/+1 counters from NICKNAME onto another target artifact. Activate only as a sorcery.",
+              "SubAbility": "DBPump"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "X"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidTgts": "Artifact.Other",
+            "CounterType": "P1P1",
+            "CounterNum": "X",
+            "Source": "Self",
+            "TgtPrompt": "Select another target artifact to get counters",
+            "SorcerySpeed": "True",
+            "SpellDescription": "Move X +1/+1 counters from NICKNAME onto another target artifact. Activate only as a sorcery.",
+            "SubAbility": "DBPump"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigProliferate",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or dies, proliferate."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player or dies, proliferate.",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigProliferate"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by creatures with power 2 or less.",
+        "ValidBlocker": "Creature.powerLE2",
+        "ValidAttacker": "Creature.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

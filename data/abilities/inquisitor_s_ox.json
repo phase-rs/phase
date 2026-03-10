@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Condition": "Delirium",
+        "AddPower": "1",
+        "Description": "Delirium — CARDNAME gets +1/+0 and has vigilance as long as there are four or more card types among cards in your graveyard.",
+        "AddKeyword": "Vigilance"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

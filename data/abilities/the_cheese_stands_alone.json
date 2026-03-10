@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "Execute": "TrigWin",
+        "PresentPlayer": "You",
+        "PresentPlayer2": "You",
+        "IsPresent": "Card.Other",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0",
+        "PresentZone2": "Hand",
+        "TriggerDescription": "When you control no permanents other than CARDNAME and have no cards in hand, you win the game.",
+        "PresentZone": "Battlefield",
+        "IsPresent2": "Card",
+        "PresentCompare2": "EQ0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

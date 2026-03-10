@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this creature enters, each noncreature artifact you control becomes a 4/4 artifact creature until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAnimate",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.Creature+YouCtrl+Other",
+        "Description": "Other artifact creatures you control have flying.",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

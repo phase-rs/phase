@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X X G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Monstrosity": "X"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "BecomeMonstrous",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME becomes monstrous, create X X/X green Hydra creature tokens.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

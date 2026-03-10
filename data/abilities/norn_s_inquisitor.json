@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigIncubate",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, incubate 2.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Transformed",
+      "params": {
+        "TriggerDescription": "Whenever a permanent you control transforms into a Phyrexian, put a +1/+1 counter on it.",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Phyrexian.YouCtrl+inZoneBattlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

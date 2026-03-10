@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSuspect",
+        "TriggerDescription": "When CARDNAME enters, suspect it. (It has menace and can't block.)"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigChoose",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more other creatures you control enter, if CARDNAME is suspected, you may suspect one of the other creatures. If you do, CARDNAME is no longer suspected.",
+        "CheckSVar": "Count$ValidSelf Card.IsSuspected",
+        "ValidCards": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "Planeswalker": "True",
+          "ValidCards": "Card.nonLand",
+          "StackDescription": "SpellDescription",
+          "Defined": "You",
+          "SubAbility": "DBDig",
+          "SpellDescription": "Choose a nonland card name, then reveal the top four cards of your library. Put all cards with the chosen name from among them into your hand and the rest into your graveyard."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ValidCards": "Card.nonLand",
+        "StackDescription": "SpellDescription",
+        "Defined": "You",
+        "SubAbility": "DBDig",
+        "SpellDescription": "Choose a nonland card name, then reveal the top four cards of your library. Put all cards with the chosen name from among them into your hand and the rest into your graveyard."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target card from your graveyard to your hand.",
+        "Planeswalker": "True",
+        "TgtPrompt": "Choose target card in your graveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantDiscard"
+      },
+      "params": {
+        "Description": "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
+        "ForCost": "False",
+        "ValidPlayer": "You",
+        "ValidCause": "SpellAbility.OppCtrl"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantSacrifice"
+      },
+      "params": {
+        "ValidCause": "SpellAbility.OppCtrl",
+        "Secondary": "True",
+        "Description": "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
+        "ValidCard": "Card.YouCtrl",
+        "ForCost": "False"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

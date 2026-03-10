@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, target player mills X cards, where X is the number of Allies you control.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

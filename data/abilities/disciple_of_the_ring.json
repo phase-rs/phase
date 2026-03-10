@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "CostDesc": "{1}, Exile an instant or sorcery card from your graveyard:",
+          "Choices": "DBCounter,DBPump,DBTap,DBUntap"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/Instant;Sorcery>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "{1}, Exile an instant or sorcery card from your graveyard:",
+        "Choices": "DBCounter,DBPump,DBTap,DBUntap"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

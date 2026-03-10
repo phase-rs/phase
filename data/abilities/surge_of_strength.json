@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R G"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card.Green;Card.Red>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Trample",
+        "SpellDescription": "Target creature gains trample and gets +X/+0 until end of turn, where X is that creature's mana value.",
+        "CostDesc": "As an additional cost to cast this spell, discard a red or green card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

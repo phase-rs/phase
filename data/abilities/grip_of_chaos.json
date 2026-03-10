@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellAbilityCast",
+      "params": {
+        "TriggerDescription": "Whenever a spell or ability is put onto the stack, if it has a single target, reselect its target at random. (Select from among all legal targets.)",
+        "ValidSA": "SpellAbility.!ManaAbility",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChangeTarget",
+        "IsSingleTarget": "True"
+      }
+    },
+    {
+      "mode": "SpellAbilityCopy",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsSingleTarget": "True",
+        "Secondary": "True",
+        "Execute": "TrigChangeTarget",
+        "TriggerDescription": "Whenever a spell or ability is put onto the stack, if it has a single target, reselect its target at random. (Select from among all legal targets.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

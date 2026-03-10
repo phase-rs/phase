@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "SpellDescription": "Counter target spell."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "Cost": "Discard<1/Island> Discard<1/Card.Other>",
+        "Description": "You may discard an Island card and another card rather than pay this spell's mana cost.",
+        "ValidSA": "Spell.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

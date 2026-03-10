@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPut",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, put an indestructible counter on another target creature you control. Draw a card if that creature's power is 2 or less."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "TriggeredCardController",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME dies, you may draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

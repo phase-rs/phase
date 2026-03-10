@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSpellAbilities": "Spell.OppCtrl,Activated.OppCtrl,Triggered.OppCtrl",
+          "RepeatSubAbility": "DBCounterUnless",
+          "SpellDescription": "For each spell and ability your opponents control, counter it unless its controller pays {4}."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSpellAbilities": "Spell.OppCtrl,Activated.OppCtrl,Triggered.OppCtrl",
+        "RepeatSubAbility": "DBCounterUnless",
+        "SpellDescription": "For each spell and ability your opponents control, counter it unless its controller pays {4}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

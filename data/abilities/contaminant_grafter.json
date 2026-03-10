@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageAll",
+      "params": {
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to one or more players, proliferate.",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigProliferate"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "SVarCompare": "GE3",
+        "Execute": "TrigDraw",
+        "CheckSVar": "X",
+        "TriggerDescription": "Corrupted — At the beginning of your end step, if an opponent has three or more poison counters, draw a card, then you may put a land card from your hand onto the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

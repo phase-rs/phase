@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "PresentCompare": "EQX",
+        "Execute": "TrigPump",
+        "AttackingPlayer": "You",
+        "IsPresent": "Creature.YouCtrl+attacking+nonWall",
+        "TriggerDescription": "Whenever all non-Wall creatures you control attack, enchanted creature gets +X/+0 until end of turn, where X is the number of attacking creatures.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Trample",
+        "Description": "Enchanted creature has trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

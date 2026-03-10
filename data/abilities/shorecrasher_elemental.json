@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile CARDNAME, then return it to the battlefield face down under its owner's control.",
+        "SubAbility": "DBReturn",
+        "Defined": "Self"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "Choices": "PumpAtt,PumpDef",
+          "SpellDescription": "CARDNAME gets +1/-1 or -1/+1 until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "PumpAtt,PumpDef",
+        "SpellDescription": "CARDNAME gets +1/-1 or -1/+1 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

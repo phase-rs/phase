@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChoosePlayer",
+        "params": {
+          "ChoiceTitle": "Choose a player",
+          "SubAbility": "DBMana",
+          "Defined": "You",
+          "SpellDescription": "A player of your choice adds {C}.",
+          "Choices": "Player"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChoiceTitle": "Choose a player",
+        "SubAbility": "DBMana",
+        "Defined": "You",
+        "SpellDescription": "A player of your choice adds {C}.",
+        "Choices": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "UntapOtherPlayer"
+      },
+      "params": {
+        "Description": "Untap CARDNAME during each other player's untap step.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

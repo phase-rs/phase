@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouOwn",
+        "TriggerDescription": "Whenever a creature is put into your graveyard from the battlefield, return it to your hand.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigEnduringBounce",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Hand",
+        "MayLookAt": "Player",
+        "Description": "Play with your hand revealed.",
+        "Affected": "Card.YouOwn"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "EnduringRevealTop",
+        "ValidPlayer": "You",
+        "Description": "If you would draw a card, reveal the top card of your library instead. If it's a creature card, put it into your graveyard. Otherwise, draw a card."
+      }
+    }
+  ],
+  "faces": []
+}

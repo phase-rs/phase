@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MustBlock",
+        "params": {
+          "AILogic": "AllowNonLethal",
+          "ValidTgts": "Creature",
+          "SpellDescription": "Target creature blocks CARDNAME this turn if able."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AllowNonLethal",
+        "ValidTgts": "Creature",
+        "SpellDescription": "Target creature blocks CARDNAME this turn if able."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, tap that creature and it doesn't untap during its controller's next untap step.",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Creature",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

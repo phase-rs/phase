@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "Execute": "TrigGain",
+        "ValidSource": "Sliver.inZoneBattlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a Sliver deals damage, its controller gains that much life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

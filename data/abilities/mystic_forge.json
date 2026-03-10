@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<1>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "All",
+        "SpellDescription": "Exile the top card of your library.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may look at the top card of your library any time.",
+        "MayLookAt": "You",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "AffectedZone": "Library"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may cast artifact spells and colorless spells from the top of your library.",
+        "Affected": "Artifact.TopLibrary+YouCtrl+nonLand,Card.TopLibrary+Colorless+YouCtrl+nonLand",
+        "AffectedZone": "Library",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

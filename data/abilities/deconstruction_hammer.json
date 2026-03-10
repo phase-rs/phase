@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +1/+1 and has \"{3}, {T}, Sacrifice CARDNAME: Destroy target artifact or enchantment.\"",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddAbility": "ABDestroy",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

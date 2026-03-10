@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "Prevent all combat damage that would be dealt by target creature this turn.",
+          "ValidTgts": "Creature",
+          "ReplacementEffects": "RPrevent",
+          "RememberObjects": "Targeted"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W B"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "Prevent all combat damage that would be dealt by target creature this turn.",
+        "ValidTgts": "Creature",
+        "ReplacementEffects": "RPrevent",
+        "RememberObjects": "Targeted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

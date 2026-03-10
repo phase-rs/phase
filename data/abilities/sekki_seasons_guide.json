@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Graveyard",
+        "SpellDescription": "Return NICKNAME from your graveyard to the battlefield.",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "AlwaysReplace": "True",
+        "ReplaceWith": "SekkiCounters",
+        "PreventionEffect": "True",
+        "Description": "If damage would be dealt to NICKNAME, prevent that damage, remove that many +1/+1 counters from NICKNAME, and create that many 1/1 colorless Spirit creature tokens."
+      }
+    }
+  ],
+  "faces": []
+}

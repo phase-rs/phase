@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for an Aura card, reveal it, put it into your hand, then shuffle.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

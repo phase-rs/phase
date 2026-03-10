@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAirbend",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, airbend another target creature. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever one or more creatures you control leave the battlefield without dying, you get an experience counter.",
+        "Destination": "Ante,Command,Exile,Hand,Library",
+        "ValidCards": "Creature.YouCtrl",
+        "Execute": "TrigExperience"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your upkeep, create a 1/1 white Ally creature token for each experience counter you have.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

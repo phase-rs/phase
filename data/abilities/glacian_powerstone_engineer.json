@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<X/Artifact/artifacts you control>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "DestinationZone2": "Graveyard",
+        "SubAbility": "DBStackDesc",
+        "ChangeNum": "1",
+        "SpellDescription": "Look at the top X cards of your library. Put one of those cards into your hand and the rest into your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

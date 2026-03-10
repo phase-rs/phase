@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Permanent.!token+Legendary+Other+YouCtrl",
+        "Execute": "TrigCopy",
+        "TriggerDescription": "Whenever another nontoken legendary permanent you control enters, you may pay {1}. If you do, create a token that's a copy of it. That token gains haste. Sacrifice it at the beginning of the next end step.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "IgnoreLegendRule"
+      },
+      "params": {
+        "Description": "The \"legend rule\" doesn't apply to tokens you control.",
+        "ValidCard": "Permanent.token+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

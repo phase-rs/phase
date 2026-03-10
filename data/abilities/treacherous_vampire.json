@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice it unless you exile a card from your graveyard.",
+        "Execute": "TrigSac"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice it unless you exile a card from your graveyard.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSac",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and has \"When CARDNAME dies, you lose 6 life.\"",
+        "Condition": "Threshold",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Affected": "Card.Self",
+        "AddTrigger": "Dies"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

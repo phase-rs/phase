@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile an instant card from your hand.",
+        "OptionalDecider": "You",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSpell",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may copy the exiled card. If you do, you may cast the copy without paying its mana cost.",
+        "ValidSource": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Static": "True",
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBForget",
+        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
+        "Origin": "Exile",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

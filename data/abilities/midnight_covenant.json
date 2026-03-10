@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddAbility": "Pump",
+        "Description": "Enchanted creature has \"{B}: This creature gets +1/+1 until end of turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

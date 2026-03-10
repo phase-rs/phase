@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "UntapAll",
+        "params": {
+          "SpellDescription": "Simultaneously untap all tapped creatures and tap all untapped creatures.",
+          "ValidCards": "Creature.tapped",
+          "SubAbility": "DBTap",
+          "RememberUntapped": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Simultaneously untap all tapped creatures and tap all untapped creatures.",
+        "ValidCards": "Creature.tapped",
+        "SubAbility": "DBTap",
+        "RememberUntapped": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddOrRemoveCounter",
+        "params": {
+          "CounterNum": "1",
+          "ConditionDefined": "Targeted",
+          "TgtPrompt": "Choose target permanent you control or suspended card you own",
+          "TgtZone": "Battlefield,Exile",
+          "ConditionPresent": "Card.counters_GE1_TIME",
+          "ValidTgts": "Permanent.inZoneBattlefield+YouCtrl,Card.suspended+YouOwn",
+          "CounterType": "TIME",
+          "SpellDescription": "Choose target permanent you control or suspended card you own. If that permanent or card has a time counter on it, you may remove a time counter from it or put another time counter on it."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterNum": "1",
+        "ConditionDefined": "Targeted",
+        "TgtPrompt": "Choose target permanent you control or suspended card you own",
+        "TgtZone": "Battlefield,Exile",
+        "ConditionPresent": "Card.counters_GE1_TIME",
+        "ValidTgts": "Permanent.inZoneBattlefield+YouCtrl,Card.suspended+YouOwn",
+        "CounterType": "TIME",
+        "SpellDescription": "Choose target permanent you control or suspended card you own. If that permanent or card has a time counter on it, you may remove a time counter from it or put another time counter on it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

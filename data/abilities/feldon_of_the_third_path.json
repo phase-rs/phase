@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "AtEOT": "Sacrifice",
+          "ValidTgts": "Creature.YouOwn",
+          "TgtPrompt": "Select target creature card in your graveyard",
+          "AddTypes": "Artifact",
+          "SpellDescription": "Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types. It gains haste. Sacrifice it at the beginning of the next end step.",
+          "TgtZone": "Graveyard",
+          "PumpKeywords": "Haste"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AtEOT": "Sacrifice",
+        "ValidTgts": "Creature.YouOwn",
+        "TgtPrompt": "Select target creature card in your graveyard",
+        "AddTypes": "Artifact",
+        "SpellDescription": "Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types. It gains haste. Sacrifice it at the beginning of the next end step.",
+        "TgtZone": "Graveyard",
+        "PumpKeywords": "Haste"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

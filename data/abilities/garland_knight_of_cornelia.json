@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 B B R R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "ActivationZone": "Graveyard",
+            "SorcerySpeed": "True",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Return NICKNAME from your graveyard to the battlefield transformed. Activate only as a sorcery.",
+            "Transformed": "True"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidCard": "Card.nonCreature",
+            "Execute": "TrigSurveil",
+            "TriggerDescription": "Whenever you cast a noncreature spell, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChange",
+            "TriggerDescription": "Whenever NICKNAME dies, put it on the bottom of its owner's library."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

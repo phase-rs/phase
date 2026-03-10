@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if you have more cards in hand than each opponent, you may sacrifice a Swamp. If you do, return CARDNAME from your graveyard to the battlefield.",
+        "ValidPlayer": "You",
+        "CheckSVar": "X",
+        "SVarCompare": "GTY",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

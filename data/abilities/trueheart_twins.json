@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exerted",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerDescription": "Whenever you exert a creature, creatures you control get +1/+0 until end of turn.",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "Description": "You may exert CARDNAME as it attacks. (It won't untap during your next untap step.)",
+        "Cost": "Exert<1/CARDNAME>",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

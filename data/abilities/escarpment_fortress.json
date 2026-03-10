@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack with two or more creatures, draw a card.",
+        "Execute": "TrigDraw",
+        "ValidAttackers": "Creature",
+        "ValidAttackersAmount": "GE2"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.Other+YouCtrl",
+        "Description": "Other creatures you control get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetPower": "4",
+        "SetToughness": "2",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE3_LEVEL",
+        "Description": "LEVEL 1-3 4/2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetPower": "7",
+        "Description": "LEVEL 4+ 7/3 {B}: Regenerate CARDNAME.",
+        "AddAbility": "Regen",
+        "IsPresent": "Card.Self+counters_GE4_LEVEL",
+        "SetToughness": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

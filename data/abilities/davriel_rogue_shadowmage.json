@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player discards a card.",
+        "Mode": "TgtChoose",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "SVarCompare": "LE1",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "ValidPlayer": "Opponent",
+        "TriggerDescription": "At the beginning of each opponent's upkeep, if that player has one or fewer cards in hand, CARDNAME deals 2 damage to them.",
+        "CheckSVar": "CardsInHand"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

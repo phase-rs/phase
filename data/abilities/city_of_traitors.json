@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Amount": "2",
+          "SpellDescription": "Add {C}{C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "SpellDescription": "Add {C}{C}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "When you play another land, sacrifice CARDNAME.",
+        "ValidCard": "Land.Other+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

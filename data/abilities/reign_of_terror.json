@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "Defined": "You",
+          "Choices": "DestroyWhite,DestroyGreen",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Destroy all white or green creatures. They can't be regenerated. You lose 2 life for each creature that died this way."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "Choices": "DestroyWhite,DestroyGreen",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Destroy all white or green creatures. They can't be regenerated. You lose 2 life for each creature that died this way."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

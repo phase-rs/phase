@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature",
+        "Origin": "Any",
+        "TriggerZones": "Command",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a creature enters, it gains double strike and haste until end of turn.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, exile target nontoken creature you control, then return it to the battlefield under your control.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

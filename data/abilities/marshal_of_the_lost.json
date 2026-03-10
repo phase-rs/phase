@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack, target creature gets +X/+X until end of turn, where X is the number of attacking creatures.",
+        "Execute": "TrigPump",
+        "AttackingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

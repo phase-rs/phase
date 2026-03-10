@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "SorcerySpeed": "True",
+          "Choices": "Card.Creature+ExiledWithSource",
+          "TgtPrompt": "Select target creature you control",
+          "ChoiceTitle": "Choose a card exiled with Reflection Net",
+          "GameActivationLimit": "1",
+          "CloneTarget": "Targeted",
+          "ChoiceZone": "Exile",
+          "ValidTgts": "Creature.YouCtrl",
+          "SpellDescription": "Target creature you control becomes a copy of a creature card exiled with CARDNAME. Activate only as a sorcery and only once."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "Choices": "Card.Creature+ExiledWithSource",
+        "TgtPrompt": "Select target creature you control",
+        "ChoiceTitle": "Choose a card exiled with Reflection Net",
+        "GameActivationLimit": "1",
+        "CloneTarget": "Targeted",
+        "ChoiceZone": "Exile",
+        "ValidTgts": "Creature.YouCtrl",
+        "SpellDescription": "Target creature you control becomes a copy of a creature card exiled with CARDNAME. Activate only as a sorcery and only once."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile target creature until CARDNAME leaves the battlefield.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Exile",
+        "destination": "Graveyard",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "6 W W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card.ExiledWithSource",
+        "SpellDescription": "Put each card exiled with this artifact into its owner's graveyard, then create a 2/2 colorless Robot artifact creature token for each card put into a graveyard this way. Sacrifice this artifact.",
+        "RememberChanged": "True",
+        "SubAbility": "DBToken"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this artifact enters, exile all artifacts and creatures with mana value 2 or less until this artifact leaves the battlefield.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

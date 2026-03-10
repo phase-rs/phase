@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "Execute": "TrigReturn",
+            "ValidCard": "Card.Self",
+            "ThisDoor": "True",
+            "ValidPlayer": "You",
+            "TriggerDescription": "When you unlock this door, return up to one target creature to its owner's hand."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDoneOnce",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidSource": "Creature.YouCtrl",
+            "CombatDamage": "True",
+            "ValidTarget": "Player",
+            "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, draw a card.",
+            "Execute": "TrigDraw"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

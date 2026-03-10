@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetState",
+        "params": {
+          "SubAbility": "DBCounter",
+          "SpellDescription": "Turn all cards exiled with CARDNAME face up. Counter all spells with those names.",
+          "Defined": "ExiledWithSource",
+          "Mode": "TurnFaceUp"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBCounter",
+        "SpellDescription": "Turn all cards exiled with CARDNAME face up. Counter all spells with those names.",
+        "Defined": "ExiledWithSource",
+        "Mode": "TurnFaceUp"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME becomes tapped, exile the top three cards of target opponent's library face down."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.ExiledWithSource",
+        "MayLookAt": "You",
+        "AffectedZone": "Exile",
+        "Description": "You may look at cards exiled with CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

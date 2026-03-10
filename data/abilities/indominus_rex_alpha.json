@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When NICKNAME enters, draw a card for each counter on it.",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "As CARDNAME enters, discard any number of creature cards. It enters with a flying counter on it if a card discarded this way has flying. The same is true for first strike, double strike, deathtouch, hexproof, haste, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "Discard",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

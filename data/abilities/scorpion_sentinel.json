@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "Affected": "Card.Self",
+        "PresentCompare": "GE7",
+        "Description": "As long as you control seven or more lands, this creature gets +3/+0.",
+        "IsPresent": "Land.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

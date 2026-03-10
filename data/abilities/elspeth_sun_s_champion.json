@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_soldier",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create three 1/1 white Soldier creature tokens.",
+        "Planeswalker": "True",
+        "TokenOwner": "You",
+        "TokenAmount": "3"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.powerGE4",
+        "Planeswalker": "True",
+        "SpellDescription": "Destroy all creatures with power 4 or greater."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "You get an emblem with \"Creatures you control get +2/+2 and have flying.\"",
+          "Duration": "Permanent",
+          "StaticAbilities": "STFlying",
+          "Image": "emblem_elspeth_suns_champion",
+          "Name": "Emblem — Elspeth, Sun's Champion",
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "AILogic": "Always"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You get an emblem with \"Creatures you control get +2/+2 and have flying.\"",
+        "Duration": "Permanent",
+        "StaticAbilities": "STFlying",
+        "Image": "emblem_elspeth_suns_champion",
+        "Name": "Emblem — Elspeth, Sun's Champion",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "AILogic": "Always"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

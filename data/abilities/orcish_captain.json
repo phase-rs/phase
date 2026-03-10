@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "FlipACoin",
+        "params": {
+          "AILogic": "KillOrcs",
+          "TgtPrompt": "Select target Orc creature",
+          "ValidTgts": "Creature.Orc",
+          "LoseSubAbility": "DBPumpMinus",
+          "SpellDescription": "Flip a coin. If you win the flip, target Orc creature gets +2/+0 until end of turn. If you lose the flip, it gets -0/-2 until end of turn.",
+          "WinSubAbility": "DBPumpPlus"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "KillOrcs",
+        "TgtPrompt": "Select target Orc creature",
+        "ValidTgts": "Creature.Orc",
+        "LoseSubAbility": "DBPumpMinus",
+        "SpellDescription": "Flip a coin. If you win the flip, target Orc creature gets +2/+0 until end of turn. If you lose the flip, it gets -0/-2 until end of turn.",
+        "WinSubAbility": "DBPumpPlus"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDestroyA",
+        "Destination": "Battlefield",
+        "PresentCompare": "GE2",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Mountains, you may destroy target artifact.",
+        "IsPresent": "Mountain.YouCtrl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "IsPresent": "Plains.YouCtrl",
+        "PresentCompare": "GE2",
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Plains, you may destroy target enchantment.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDestroyE",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

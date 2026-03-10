@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your end step, create a green Ooze creature token with \"This creature's power is equal to the number of card types among cards in your graveyard and its toughness is equal to that number plus 1.\"",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power is equal to the number of creature cards in all graveyards and its toughness is equal to that number plus 1.",
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "SetToughness": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

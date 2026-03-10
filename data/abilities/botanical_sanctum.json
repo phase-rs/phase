@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo G U",
+        "params": {
+          "SpellDescription": "Add {G} or {U}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G} or {U}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "LandTapped",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "Description": "CARDNAME enters tapped unless you control two or fewer other lands.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

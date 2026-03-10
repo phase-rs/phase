@@ -1,0 +1,73 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Untap up to one target artifact or creature.",
+        "TgtPrompt": "Choose target artifact or creature",
+        "Planeswalker": "True",
+        "TargetMax": "1",
+        "TargetMin": "0"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "Planeswalker": "True",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "You gain 2 life and draw two cards."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "Planeswalker": "True",
+          "SpellDescription": "Take an extra turn after this one.",
+          "Ultimate": "True",
+          "NumTurns": "1"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Take an extra turn after this one.",
+        "Ultimate": "True",
+        "NumTurns": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

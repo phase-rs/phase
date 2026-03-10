@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "Defined": "You",
+          "SpellDescription": "Choose a card name other than a basic land card name. Reveal the top seven cards of your library and put all of them with that name into your hand. Exile the rest.",
+          "SubAbility": "DBDig",
+          "ValidCards": "Card.nonBasic",
+          "ValidDescription": "card other than a basic land"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Choose a card name other than a basic land card name. Reveal the top seven cards of your library and put all of them with that name into your hand. Exile the rest.",
+        "SubAbility": "DBDig",
+        "ValidCards": "Card.nonBasic",
+        "ValidDescription": "card other than a basic land"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

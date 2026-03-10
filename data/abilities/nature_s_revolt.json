@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All lands are 2/2 creatures that are still lands.",
+        "Affected": "Land",
+        "SetPower": "2",
+        "SetToughness": "2",
+        "AddType": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "EachDamage",
+        "params": {
+          "EachToItself": "True",
+          "SpellDescription": "Each creature deals damage to itself equal to its power.",
+          "NumDmg": "Count$CardPower",
+          "StackDescription": "SpellDescription",
+          "ValidCards": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "EachToItself": "True",
+        "SpellDescription": "Each creature deals damage to itself equal to its power.",
+        "NumDmg": "Count$CardPower",
+        "StackDescription": "SpellDescription",
+        "ValidCards": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

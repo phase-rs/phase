@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U U"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<X/Card/card(s)>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select X target nonland permanents",
+        "CostDesc": "As an additional cost to cast this spell, discard X cards.",
+        "SpellDescription": "Return X target nonland permanents to their owners' hands.",
+        "TargetMax": "X",
+        "TargetMin": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_soldier",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PresentCompare": "EQ0",
+        "SpellDescription": "Create a 1/1 white Soldier creature token. Activate only if you control no creatures and only once each turn.",
+        "ActivationLimit": "1",
+        "TokenOwner": "You",
+        "IsPresent": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

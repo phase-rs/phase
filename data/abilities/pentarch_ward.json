@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Protection:Card.ChosenColor:chosenColor:Card.CardUID_HostCardUID",
+        "Description": "Enchanted creature has protection from the chosen color. This effect doesn't remove CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

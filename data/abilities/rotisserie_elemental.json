@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a skewer counter on CARDNAME. Then you may sacrifice it. If you do, exile the top X cards of your library, where X is the number of skewer counters on CARDNAME. You may play those cards this turn.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

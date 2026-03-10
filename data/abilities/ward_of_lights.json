@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection:Card.ChosenColor:chosenColor:Card.CardUID_HostCardUID",
+        "Description": "Enchanted creature has protection from the chosen color. This effect doesn't remove CARDNAME.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

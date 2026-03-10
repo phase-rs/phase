@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you're dealt damage, put that many vitality counters on CARDNAME."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "At the beginning of your upkeep, you may remove a vitality counter from CARDNAME. If you do, you gain 1 life.",
+        "IsPresent": "Card.Self+counters_GE1_VITALITY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChangeTargets",
+        "params": {
+          "TargetType": "Spell.singleTarget",
+          "TgtPrompt": "Select target spell with a single target",
+          "SpellDescription": "Change the target of target spell with a single target.",
+          "ValidTgts": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell.singleTarget",
+        "TgtPrompt": "Select target spell with a single target",
+        "SpellDescription": "Change the target of target spell with a single target.",
+        "ValidTgts": "Card"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "ExileFromHand<1/Card.Blue+Other>",
+        "Description": "You may exile a blue card from your hand rather than pay this spell's mana cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

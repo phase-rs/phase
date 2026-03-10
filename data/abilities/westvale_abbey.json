@@ -1,0 +1,110 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "C",
+            "params": {
+              "SpellDescription": "Add {C}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {C}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "wb_1_1_human_cleric",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "5"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Mana",
+                "cost": "PayLife<1>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TokenOwner": "You",
+            "SpellDescription": "Create a 1/1 white and black Human Cleric creature token."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SubAbility": "DBUntap",
+              "Defined": "Self",
+              "Mode": "Transform",
+              "SpellDescription": "Transform CARDNAME, then untap it."
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "5"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBUntap",
+            "Defined": "Self",
+            "Mode": "Transform",
+            "SpellDescription": "Transform CARDNAME, then untap it."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

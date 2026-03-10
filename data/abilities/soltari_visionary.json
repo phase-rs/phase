@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals damage to a player, destroy target enchantment that player controls.",
+        "ValidTarget": "Player",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

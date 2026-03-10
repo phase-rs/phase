@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "CheckSVar": "X",
+        "Description": "This creature gets +1/+0 and has trample as long as you control a land creature or a land entered the battlefield under your control this turn.",
+        "AddPower": "1",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

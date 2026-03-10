@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another black creature you control enters, target creature gains intimidate until end of turn.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.Other+YouCtrl+Black",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

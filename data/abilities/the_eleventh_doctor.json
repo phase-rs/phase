@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "Unblockable",
+          "ValidTgts": "Creature.powerLE3",
+          "SpellDescription": "Target creature with power 3 or less can't be blocked this turn.",
+          "TgtPrompt": "Select target creature with power 3 or less",
+          "ExileOnMoved": "Battlefield",
+          "AILogic": "Pump"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "Unblockable",
+        "ValidTgts": "Creature.powerLE3",
+        "SpellDescription": "Target creature with power 3 or less can't be blocked this turn.",
+        "TgtPrompt": "Select target creature with power 3 or less",
+        "ExileOnMoved": "Battlefield",
+        "AILogic": "Pump"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "I. AM. TALKING! — Whenever CARDNAME deals combat damage to a player, you may exile a card from your hand with a number of time counters on it equal to its mana value. If it doesn't have suspend, it gains suspend.",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

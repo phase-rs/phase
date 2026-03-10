@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Life Drain — Whenever a creature dealt damage by CARDNAME this turn dies, create a tapped 2/2 black Zombie creature token and exile that card.",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.DamagedBy",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped.",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

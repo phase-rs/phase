@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "Execute": "TrigCrank",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever you crank CARDNAME, add {G}. Until end of turn, you don't lose this mana as steps and phases end."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

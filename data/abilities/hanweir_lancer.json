@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.PairedWith,Creature.Self+Paired",
+        "AddKeyword": "First Strike",
+        "Description": "As long as CARDNAME is paired with another creature, both creature have first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRepeat",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME attacks, each creature you control attacking a player gets +1/+0 until end of turn for each creature that player controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

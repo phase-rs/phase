@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME dies, you may cast it from your graveyard as an Adventure until the end of your next turn.",
+            "Destination": "Graveyard",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigEffect"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.token+YouCtrl",
+            "AddPower": "1",
+            "Description": "Creature tokens you control get +1/+1.",
+            "AddToughness": "1"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Token",
+            "name": "b_2_2_zombie",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create a 2/2 black Zombie creature token. (Then exile this card. You may cast the creature later from exile.)",
+            "TokenOwner": "You"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

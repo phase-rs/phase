@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card.",
+        "ValidCard": "Card",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSetLife",
+        "TriggerDescription": "At the beginning of your end step, your life total becomes half your starting life total, rounded up.",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

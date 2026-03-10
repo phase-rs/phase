@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Legendary+OppCtrl",
+        "TriggerDescription": "When a legendary creature an opponent controls dies, put CARDNAME on the bottom of its owner's library.",
+        "Destination": "Graveyard",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

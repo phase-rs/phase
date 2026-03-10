@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "TgtZone": "Exile",
+          "SetToughness": "0",
+          "GainThisAbility": "True",
+          "TgtPrompt": "Select target creature card exiled with CARDNAME",
+          "ValidTgts": "Creature.ExiledWithSource",
+          "SpellDescription": "NICKNAME becomes a copy of target creature card exiled with it, except it's 0/0 and has this ability.",
+          "SetPower": "0"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtZone": "Exile",
+        "SetToughness": "0",
+        "GainThisAbility": "True",
+        "TgtPrompt": "Select target creature card exiled with CARDNAME",
+        "ValidTgts": "Creature.ExiledWithSource",
+        "SpellDescription": "NICKNAME becomes a copy of target creature card exiled with it, except it's 0/0 and has this ability.",
+        "SetPower": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "DBChangeZone",
+        "Description": "As NICKNAME enters, exile up to X creature cards from your graveyard. It enters with three +1/+1 counters on it for each creature card exiled this way.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

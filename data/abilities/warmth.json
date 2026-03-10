@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever an opponent casts a red spell, you gain 2 life.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Red",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_0_1_eldrazi_spawn_sac",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create two 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this creature: Add {C}.\"",
+        "TokenAmount": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Controller": "You",
+          "Amount": "All",
+          "ValidZone": "Sideboard",
+          "SpellDescription": "Cast any number of Eldrazi spells from among cards you own outside the game without paying their mana costs.",
+          "WithoutManaCost": "True",
+          "Valid": "Card.Eldrazi+YouOwn",
+          "Optional": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "20"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Controller": "You",
+        "Amount": "All",
+        "ValidZone": "Sideboard",
+        "SpellDescription": "Cast any number of Eldrazi spells from among cards you own outside the game without paying their mana costs.",
+        "WithoutManaCost": "True",
+        "Valid": "Card.Eldrazi+YouOwn",
+        "Optional": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

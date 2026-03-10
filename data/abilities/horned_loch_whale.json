@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "LandTapped",
+            "ReplacementResult": "Updated",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "Description": "CARDNAME enters tapped unless it's your turn."
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Library",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.attacking+YouDontCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target attacking creature you don't control",
+            "DestinationAlternative": "Library",
+            "SpellDescription": "The owner of target attacking creature you don't control puts it on the top or bottom of their library.",
+            "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
+            "LibraryPositionAlternative": "-1",
+            "AlternativeDecider": "TargetedOwner"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "3",
+          "RestrictValid": "Spell.Creature",
+          "SpellDescription": "Add three mana of any one color. Spend this mana only to cast creature spells."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "3",
+        "RestrictValid": "Spell.Creature",
+        "SpellDescription": "Add three mana of any one color. Spend this mana only to cast creature spells."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

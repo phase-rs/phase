@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAttach",
+        "ValidCard": "Hamster.YouCtrl,Mouse.YouCtrl,Rat.YouCtrl,Squirrel.YouCtrl",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever a Hamster, Mouse, Rat, or Squirrel you control enters, you may attach CARDNAME to that creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Equipped creature gets +1/+1 for each creature you control with base power or toughness 1.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

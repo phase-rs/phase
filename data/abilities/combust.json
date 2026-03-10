@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 5
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.White,Creature.Blue"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 5 damage to target white or blue creature. The damage can't be prevented.",
+        "NoPrevention": "True",
+        "TgtPrompt": "Select target white or blue creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

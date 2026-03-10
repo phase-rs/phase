@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a nontoken creature you control with power 4 or greater enters, populate. (Create a token that's a copy of a creature token you control.)",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.powerGE4+YouCtrl+!token",
+        "Execute": "TrigPopulate",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

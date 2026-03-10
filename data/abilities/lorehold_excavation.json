@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "rw_3_2_spirit",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "5"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/Creature/creature card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a tapped 3/2 red and white Spirit creature token.",
+        "TokenTapped": "True",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, mill a card. If a land card was milled this way, you gain 1 life. Otherwise, CARDNAME deals 1 damage to each opponent. (To mill a card, put the top card of your library into your graveyard.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

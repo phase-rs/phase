@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, double the power of each other creature you control until end of turn. Those creatures gain vigilance until end of turn.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDoublePower"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.",
+        "OptionalDecider": "You",
+        "Execute": "TriReturn",
+        "Destination": "Graveyard,Exile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

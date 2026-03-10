@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigChange",
+        "Number": "3",
+        "TriggerDescription": "When you draw your third card in a turn, return CARDNAME from your graveyard to the battlefield tapped.",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

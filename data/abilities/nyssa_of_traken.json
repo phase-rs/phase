@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigImmediateTrig",
+        "TriggerDescription": "Sonic Booster — Whenever CARDNAME attacks, sacrifice any number artifacts. When you sacrifice one or more artifacts this way, tap up to that many target creatures and draw that many cards.",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "SetMaxHandSize": "Unlimited",
+        "Description": "You have no maximum hand size."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

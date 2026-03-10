@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_3_3_a_golem",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<3/CHARGE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 3/3 colorless Golem artifact creature token.",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an artifact spell, you may put a charge counter on CARDNAME.",
+        "ValidCard": "Artifact",
+        "Execute": "TrigPutCounter",
+        "ValidActivatingPlayer": "You",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

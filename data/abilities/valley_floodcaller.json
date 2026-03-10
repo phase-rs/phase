@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.nonCreature",
+        "TriggerDescription": "Whenever you cast a noncreature spell, Birds, Frogs, Otters, and Rats you control get +1/+1 until end of turn. Untap them.",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Caster": "You",
+        "ValidCard": "Card.nonCreature",
+        "Description": "You may cast noncreature spells as though they had flash.",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

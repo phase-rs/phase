@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.cmcLE3"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Tap target creature with mana value 3 or less.",
+        "TgtPrompt": "Select target creature with mana value 3 or less"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever another creature enters, untap this creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidCard": "Card.Self",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

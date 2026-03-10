@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "Triggers": "TrigDamage",
+          "SpellDescription": "Until end of turn, whenever a creature you control deals combat damage to a player, put a loyalty counter on CARDNAME.",
+          "RememberObjects": "Self"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Triggers": "TrigDamage",
+        "SpellDescription": "Until end of turn, whenever a creature you control deals combat damage to a player, put a loyalty counter on CARDNAME.",
+        "RememberObjects": "Self"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_1_1_a_thopter_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Create a 1/1 colorless Thopter artifact creature token with flying.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 10,
+        "destination": "Hand"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "3",
+        "SpellDescription": "Look at the top ten cards of your library. Put three of them into your hand and the rest on the bottom of your library in a random order.",
+        "LibraryPosition": "-1",
+        "RestRandomOrder": "True",
+        "DestinationZone2": "Library",
+        "Ultimate": "True",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, return target creature card with no abilities from your graveyard to your hand.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, return target creature card with no abilities from your graveyard to your hand.",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control with no abilities get +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Creature.NoAbilities+YouCtrl",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": {
+        "Other": "AssignCombatDamageAsUnblocked"
+      },
+      "params": {
+        "Optional": "True",
+        "Description": "For each creature you control with no abilities, you may have that creature assign its combat damage as though it weren't blocked.",
+        "ValidCard": "Creature.NoAbilities+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME enters, you may pay 1 life. When you do, each player discards a card and sacrifices a creature.",
+        "Execute": "DBTrigger"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player discards a card, NICKNAME perpetually gets +1/+0.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "Description": "NICKNAME has lifelink and haste as long as an opponent controls no creatures.",
+        "EffectZone": "Battlefield",
+        "Affected": "Card.Self",
+        "AddKeyword": "Lifelink & Haste",
+        "SVarCompare": "EQ0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

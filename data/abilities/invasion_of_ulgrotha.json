@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDrain",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, it deals 3 damage to any other target and you gain 3 life."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Creature.OppCtrl",
+            "TriggerZones": "Battlefield",
+            "Execute": "DeathGift",
+            "TriggerDescription": "Whenever a creature an opponent controls dies, put a +1/+1 counter on CARDNAME and you gain 1 life.",
+            "Origin": "Battlefield",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

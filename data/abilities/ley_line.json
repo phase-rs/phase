@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player may put a +1/+1 counter on target creature of their choice.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "OptionalDecider": "TriggeredPlayer"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

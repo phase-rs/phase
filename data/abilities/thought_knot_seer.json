@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, target opponent reveals their hand. You choose a nonland card from it and exile that card.",
+        "Origin": "Any",
+        "Execute": "TrigReveal"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, target opponent draws a card.",
+        "ValidCard": "Card.Self",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

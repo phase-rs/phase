@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.IsCommander+YouOwn",
+        "AddTrigger": "Damage",
+        "Description": "Commander creatures you own have \"Whenever one or more nontoken creatures you control deal combat damage to a player, you create a 1/1 blue Faerie Dragon creature token with flying.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

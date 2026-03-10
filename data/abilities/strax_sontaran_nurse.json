@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChoosePlayer",
+        "params": {
+          "Random": "True",
+          "Choices": "Player",
+          "PrecostDesc": "Grenades! —",
+          "SubAbility": "DBImmediateTrig",
+          "SpellDescription": "Choose a player at random. When you do, NICKNAME fights another target creature that player controls.",
+          "Defined": "You"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Random": "True",
+        "Choices": "Player",
+        "PrecostDesc": "Grenades! —",
+        "SubAbility": "DBImmediateTrig",
+        "SpellDescription": "Choose a player at random. When you do, NICKNAME fights another target creature that player controls.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Glory of Battle — Whenever NICKNAME deals damage to a creature, put a +1/+1 counter on NICKNAME.",
+        "ValidTarget": "Creature",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

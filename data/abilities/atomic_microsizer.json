@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature attacks, choose up to one target creature. That creature can't be blocked this turn and has base power and toughness 1/1 until end of turn.",
+        "Execute": "TrigUnblockable"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Hellbent Whenever CARDNAME deals combat damage to a player, if you have no cards in hand, that player discards a card at random.",
+        "Hellbent": "True",
+        "Execute": "TrigDiscard",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

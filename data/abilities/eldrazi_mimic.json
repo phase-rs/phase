@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Whenever another colorless creature you control enters, you may change CARDNAME's base power and toughness to that creature's power and toughness until end of turn.",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAnimate",
+        "ValidCard": "Creature.Other+Colorless+YouCtrl",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

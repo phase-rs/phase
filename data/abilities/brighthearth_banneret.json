@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "Description": "Elemental spells and Warrior spells you cast cost {1} less to cast.",
+        "Activator": "You",
+        "Type": "Spell",
+        "ValidCard": "Elemental,Warrior"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigChange",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of the end step, CARDNAME's owner shuffles it into their library.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

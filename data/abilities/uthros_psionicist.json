@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "SVarCompare": "EQ1",
+        "CheckSVar": "YouCastThisTurn",
+        "Activator": "You",
+        "ValidCard": "Card",
+        "Description": "The second spell you cast each turn costs {2} less to cast.",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

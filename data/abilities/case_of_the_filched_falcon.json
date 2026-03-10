@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 4,
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.nonCreature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Solved —",
+        "TgtPrompt": "Select target noncreature artifact",
+        "Activation": "Solved",
+        "SubAbility": "DBAnimate",
+        "SpellDescription": "Put four +1/+1 counters on target noncreature artifact. It becomes a 0/0 Bird creature with flying in addition to its other types."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this Case enters, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Artifact.YouCtrl",
+        "PresentCompare": "GE3",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "Execute": "SolveFalcon",
+        "TriggerDescription": "To solve — You control three or more artifacts. (If unsolved, solve at the beginning of your end step.)",
+        "IsPresent2": "Card.Self+!IsSolved",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

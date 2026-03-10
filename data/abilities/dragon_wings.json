@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Creature.cmcGE6",
+        "TriggerZones": "Graveyard",
+        "Destination": "Battlefield",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When a creature with mana value 6 or greater enters, you may return CARDNAME from your graveyard to the battlefield attached to that creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Description": "Enchanted creature has flying.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

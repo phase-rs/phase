@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "ValidTgts": "Player",
+          "SubAbility": "Damage",
+          "SpellDescription": "Target player reveals their hand. CARDNAME deals damage to that player equal to the number of white cards in their hand.",
+          "RememberRevealed": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "SubAbility": "Damage",
+        "SpellDescription": "Target player reveals their hand. CARDNAME deals damage to that player equal to the number of white cards in their hand.",
+        "RememberRevealed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

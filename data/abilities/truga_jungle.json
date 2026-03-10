@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, reveal the top three cards of your library. Put all land cards revealed this way into your hand and the rest on the bottom of your library in any order.",
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "AffectedZone": "Battlefield",
+        "Affected": "Land",
+        "AddAbility": "AnyMana",
+        "Description": "All lands have \"{T}: Add one mana of any color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

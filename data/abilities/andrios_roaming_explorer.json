@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W U B R G",
+        "params": {
+          "TriggersWhenSpent": "TrigChange",
+          "SpellDescription": "Add {W}{U}{B}{R}{G}. Creature spells you spend this mana to cast have their base power and toughness become 4/3."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TriggersWhenSpent": "TrigChange",
+        "SpellDescription": "Add {W}{U}{B}{R}{G}. Creature spells you spend this mana to cast have their base power and toughness become 4/3."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "16",
+        "IsPresent": "Card.Self+attacking",
+        "Description": "As long as NICKNAME is attacking, tapped creatures you control with base power and toughness 4/3 have base power and toughness 16/9.",
+        "SetToughness": "9",
+        "Affected": "Creature.basePowerEQ4+baseToughnessEQ3+tapped+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

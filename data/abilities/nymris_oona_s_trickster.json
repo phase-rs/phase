@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDig",
+        "ActivatorThisTurnCast": "EQ1",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "OpponentTurn": "True",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast your first spell during each opponent's turn, look at the top two cards of your library. Put one of those cards into your hand and the other into your graveyard."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, if you control an artifact and an enchantment, create a 2/2 white Samurai creature token with vigilance.",
+        "IsPresent": "Artifact.YouCtrl",
+        "IsPresent2": "Enchantment.YouCtrl",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "IsPresent2": "Enchantment.YouCtrl",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, if you control an artifact and an enchantment, create a 2/2 white Samurai creature token with vigilance.",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Artifact.YouCtrl",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

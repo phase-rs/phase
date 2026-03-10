@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME attacks, exile the top four cards of your library. Until end of turn, you may cast noncreature cards exiled with CARDNAME this turn without paying their mana costs.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

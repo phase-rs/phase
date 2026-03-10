@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMill",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, target player mills three cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

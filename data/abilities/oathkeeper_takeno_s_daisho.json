@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, exile equipped creature.",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigReturn",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature dies, return that card to the battlefield under your control if it's a Samurai card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +3/+1.",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "AddPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

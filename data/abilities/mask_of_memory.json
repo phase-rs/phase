@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigLoot",
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.AttachedBy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may draw two cards. If you do, discard a card.",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

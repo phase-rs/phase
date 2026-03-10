@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All Slivers have \"{T}: Tap target permanent.\"",
+        "Affected": "Sliver",
+        "AddAbility": "Tap"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

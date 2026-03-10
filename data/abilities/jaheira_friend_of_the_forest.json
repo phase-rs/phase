@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Tokens you control have \"{T}: Add {G}.\"",
+        "Affected": "Card.token+YouCtrl",
+        "AddAbility": "Mana"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

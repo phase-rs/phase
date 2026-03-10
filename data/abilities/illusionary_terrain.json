@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.Basic+ChosenType",
+        "AddType": "ChosenType2",
+        "Description": "Basic lands of the first chosen type are the second chosen type.",
+        "RemoveLandTypes": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

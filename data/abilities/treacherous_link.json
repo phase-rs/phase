@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "DamageTarget": "ReplacedTargetController",
+        "Description": "All damage that would be dealt to enchanted creature is dealt to its controller instead.",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Card.EnchantedBy",
+        "ReplaceWith": "DmgEnchanted"
+      }
+    }
+  ],
+  "faces": []
+}

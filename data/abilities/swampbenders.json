@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of Swamps on the battlefield.",
+        "SetPower": "X",
+        "CharacteristicDefining": "True"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.YouCtrl",
+        "Description": "Lands you control are Swamps in addition to their other types.",
+        "AddType": "Swamp"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

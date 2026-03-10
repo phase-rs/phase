@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Knight.YourTeamCtrl",
+        "AddKeyword": "Flying & Haste",
+        "Description": "Knights your team controls have flying and haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

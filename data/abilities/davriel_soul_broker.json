@@ -1,0 +1,91 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "Name": "Davriel, Soul Broker's Effect — +1 Attack Tax",
+          "Duration": "UntilYourNextTurn",
+          "AILogic": "Main2",
+          "Triggers": "AttackTrigger",
+          "SpellDescription": "Until your next turn, whenever an opponent attacks you and/or planeswalkers you control, they discard a card. If they can't, they sacrifice an attacking creature."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Name": "Davriel, Soul Broker's Effect — +1 Attack Tax",
+        "Duration": "UntilYourNextTurn",
+        "AILogic": "Main2",
+        "Triggers": "AttackTrigger",
+        "SpellDescription": "Until your next turn, whenever an opponent attacks you and/or planeswalkers you control, they discard a card. If they can't, they sacrifice an attacking creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "Planeswalker": "True",
+          "NumRandomChoices": "3",
+          "Choices": "Draw3,Conjure,Return2,ReturnBig,EmblemBuff,EmblemReduceCost,EmblemDavrielPW,EmblemDrawGain",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Accept one of NICKNAME's offers, then accept one of NICKNAME's conditions.",
+          "ChoicePrompt": "Choose an offer",
+          "SubAbility": "DBCondition"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "NumRandomChoices": "3",
+        "Choices": "Draw3,Conjure,Return2,ReturnBig,EmblemBuff,EmblemReduceCost,EmblemDavrielPW,EmblemDrawGain",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Accept one of NICKNAME's offers, then accept one of NICKNAME's conditions.",
+        "ChoicePrompt": "Choose an offer",
+        "SubAbility": "DBCondition"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": -3,
+        "toughness": -3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature an opponent controls perpetually gets -3/-3.",
+        "IsCurse": "True",
+        "Duration": "Perpetual",
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target creature an opponent controls",
+        "StackDescription": "REP Target creature an opponent controls_{c:Targeted}"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

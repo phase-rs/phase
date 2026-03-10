@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigNantukoDiscardLand",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you may discard any number of land cards. Put that many +1/+1 counters on CARDNAME and draw that many cards.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

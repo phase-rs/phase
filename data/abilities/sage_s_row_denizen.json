@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever another blue creature you control enters, target player mills two cards.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.Blue+YouCtrl+Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

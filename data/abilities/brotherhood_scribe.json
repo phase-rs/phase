@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "ENERGY",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Metalcraft —",
+        "Defined": "You",
+        "SpellDescription": "You get {E} (an energy counter).",
+        "Activation": "Metalcraft"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "PlayerTurn": "True",
+        "CounterType": "ENERGY",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPumpAll",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you get one or more {E} during your turn, creatures you control get +1/+1 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

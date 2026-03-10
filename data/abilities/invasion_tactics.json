@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigPumpAll",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this enchantment enters, creatures you control get +2/+2 until end of turn.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "ValidSource": "Ally.YouCtrl",
+        "TriggerDescription": "Whenever one or more Allies you control deal combat damage to a player, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

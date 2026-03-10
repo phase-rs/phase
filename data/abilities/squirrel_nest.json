@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.AttachedBy",
+        "Description": "Enchanted land has \"{T}: Create a 1/1 green Squirrel creature token.\"",
+        "AddAbility": "Token"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

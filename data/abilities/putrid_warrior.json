@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "Execute": "TrigCharm",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals damage, ABILITY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

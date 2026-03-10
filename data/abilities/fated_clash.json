@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPumpOpp",
+        "KW": "Indestructible",
+        "SpellDescription": "Target creature you control and target creature an opponent controls each gain indestructible until end of turn.",
+        "TgtPrompt": "Select target creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "IsPresent2": "Creature.blocking",
+        "IsPresent": "Creature.attacking",
+        "Caster": "You",
+        "ValidSA": "Spell",
+        "Description": "You may cast this spell as though it had flash if a creature is attacking and a creature is blocking."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

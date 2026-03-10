@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl",
+          "AddTriggers": "TrigFight",
+          "NumCopies": "X",
+          "AddSVars": "TrigFight,TrigFightBis",
+          "TgtPrompt": "Select target creature you control",
+          "SpellDescription": "Create X tokens that are copies of target creature you control, except they have \"When this creature enters, it fights up to one target creature you don't control.\""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl",
+        "AddTriggers": "TrigFight",
+        "NumCopies": "X",
+        "AddSVars": "TrigFight,TrigFightBis",
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Create X tokens that are copies of target creature you control, except they have \"When this creature enters, it fights up to one target creature you don't control.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

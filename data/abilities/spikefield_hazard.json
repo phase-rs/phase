@@ -1,0 +1,72 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBCleanup",
+            "SpellDescription": "CARDNAME deals 1 damage to any target. If a permanent dealt damage this way would die this turn, exile it instead.",
+            "RememberDamaged": "True",
+            "ReplaceDyingDefined": "Remembered"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "R",
+            "params": {
+              "SpellDescription": "Add {R}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {R}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Battlefield",
+            "ReplaceWith": "ETBTapped",
+            "Description": "CARDNAME enters tapped.",
+            "ReplacementResult": "Updated",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

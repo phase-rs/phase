@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Vibro-Shock Gauntlets — When NICKNAME enters, he deals 2 damage to target creature and 2 damage to that creature's controller.",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "During your turn, NICKNAME has first strike.",
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

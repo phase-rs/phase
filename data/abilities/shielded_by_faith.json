@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAttach",
+        "Origin": "Any",
+        "ValidCard": "Creature",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a creature enters, you may attach CARDNAME to that creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has indestructible."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

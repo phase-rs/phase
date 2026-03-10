@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<1/SUPPLY>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "ValidSource": "You",
+        "CounterType": "P1P1",
+        "TriggerDescription": "Whenever you put one or more +1/+1 counters on a creature you control, put a supply counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

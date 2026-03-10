@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.cmcGE4",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCounter",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell with mana value 4 or greater, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

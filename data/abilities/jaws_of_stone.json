@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "OrigMountains"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "TgtPrompt": "Select any target to distribute damage to",
+        "DividedAsYouChoose": "OrigMountains",
+        "SpellDescription": "CARDNAME deals X damage divided as you choose among any number of targets, where X is the number of Mountains you control as you cast this spell.",
+        "TargetMax": "OrigMountains"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

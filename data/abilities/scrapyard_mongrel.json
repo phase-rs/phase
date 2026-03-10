@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "As long as you control an artifact, CARDNAME gets +2/+0 and has trample.",
+        "AddKeyword": "Trample",
+        "IsPresent": "Artifact.YouCtrl",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield.",
+        "ActivationZone": "Graveyard"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield,Graveyard",
+        "ValidCards": "Creature.Other",
+        "Destination": "Graveyard",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever one or more other creatures die, CARDNAME perpetually gets +1/+1. This ability also triggers if CARDNAME is in your graveyard.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

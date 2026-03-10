@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "PresentCompare": "GE2",
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Forests, you may gain 3 life.",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Forest.YouCtrl",
+        "OptionalDecider": "You",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "PresentCompare": "GE2",
+        "IsPresent": "Island.YouCtrl",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Islands, you may return target tapped creature to its owner's hand.",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigBounce"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

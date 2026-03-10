@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "IsPresent": "Card.Self+OwnerDoesntControl",
+        "TriggerDescription": "When a player other than CARDNAME's owner controls it, that player sacrifices it. If the player does, CARDNAME deals 7 damage to the player.",
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

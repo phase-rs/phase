@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "Indestructible",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 RP RP"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<2/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put an indestructible counter on CARDNAME. ({R/P} can be paid with either {R} or 2 life.)",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
+        "ActiveZones": "Battlefield",
+        "IsCombat": "False",
+        "Description": "If a source you control would deal noncombat damage to an opponent or a permanent an opponent controls, it deals double that damage to that player or permanent instead.",
+        "ValidTarget": "Permanent.OppCtrl,Opponent",
+        "ReplaceWith": "DmgTwice"
+      }
+    }
+  ],
+  "faces": []
+}

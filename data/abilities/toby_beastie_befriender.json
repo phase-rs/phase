@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create a 4/4 white Beast creature token with \"This creature can't attack or block alone.\"",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "PresentCompare": "GE4",
+        "Affected": "Creature.token+YouCtrl",
+        "AddKeyword": "Flying",
+        "IsPresent": "Creature.token+YouCtrl",
+        "Description": "As long as you control four or more creature tokens, creature tokens you control have flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

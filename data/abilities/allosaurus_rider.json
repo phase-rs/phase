@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to 1 plus the number of lands you control.",
+        "SetPower": "X",
+        "CharacteristicDefining": "True"
+      }
+    },
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "You may exile two green cards from your hand rather than pay this spell's mana cost.",
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "ExileFromHand<2/Card.Green>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

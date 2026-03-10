@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control with mana value 5 or greater enters, you may attach this Equipment to it.",
+        "ValidCard": "Creature.YouCtrl+cmcGE5",
+        "Execute": "TrigAttach",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +4/+4.",
+        "AddToughness": "4",
+        "AddPower": "4"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

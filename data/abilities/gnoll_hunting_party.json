@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {1} less to cast for each creature you attacked with this turn.",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Amount": "X",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self",
+        "AddKeyword": "First Strike",
+        "Description": "As long as it's your turn, CARDNAME has first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

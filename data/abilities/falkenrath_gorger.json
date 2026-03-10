@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each Vampire creature card you own that isn't on the battlefield has madness. The madness cost is equal to its mana cost. (If you discard a card with madness, discard it into exile. When you do, cast it for its madness cost or put it into your graveyard.)",
+        "AddKeyword": "Madness:ManaCost",
+        "AffectedZone": "Hand,Library,Graveyard,Exile,Command,Stack",
+        "Affected": "Creature.YouOwn+Vampire"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

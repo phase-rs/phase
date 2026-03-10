@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.withoutFlying",
+        "StackDescription": "SpellDescription",
+        "ValidPlayers": "Player",
+        "RememberDamaged": "True",
+        "SubAbility": "DBNoRegen",
+        "SpellDescription": "CARDNAME deals 3 damage to each creature without flying and each player. Creatures dealt damage this way can't be regenerated this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

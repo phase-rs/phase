@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "Whenever one or more artifacts you control enter, CARDNAME deals that much damage to each opponent.",
+        "ValidCards": "Artifact.YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "LifeTotal": "ActivePlayer",
+        "LifeAmount": "LE5",
+        "Execute": "TrigDamage",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player",
+        "TriggerDescription": "At the beginning of each player's end step, if that player has 5 or less life, CARDNAME deals 2 damage to that player."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

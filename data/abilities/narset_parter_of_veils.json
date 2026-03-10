@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ForceRevealToController": "True",
+        "Planeswalker": "True",
+        "ChangeValid": "Card.nonCreature+nonLand",
+        "ChangeValidDesc": "noncreature, nonland",
+        "RestRandomOrder": "True",
+        "SpellDescription": "Look at the top four cards of your library. You may reveal a noncreature, nonland card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantDraw",
+      "params": {
+        "ValidPlayer": "Opponent",
+        "Description": "Each opponent can't draw more than one card each turn.",
+        "DrawLimit": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

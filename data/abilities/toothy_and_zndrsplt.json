@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "FlippedCoin",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you win a coin flip, put a +1/+1 counter on CARDNAME.",
+        "ValidResult": "Win",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigFlip",
+        "TriggerDescription": "At the beginning of combat on your turn, flip a coin until you lose a flip.",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, draw a card for each +1/+1 counter on it.",
+        "ValidCard": "Card.Self",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

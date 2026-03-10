@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "You can't cast more than one spell each turn.",
+        "ValidCard": "Card",
+        "NumLimitEachTurn": "1",
+        "Caster": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Graveyard",
+        "MayPlay": "True",
+        "Description": "You may play lands and cast spells from your graveyard.",
+        "Affected": "Card.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "If a card would be put into your graveyard from anywhere, exile it instead.",
+        "Destination": "Graveyard",
+        "ReplaceWith": "Exile",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Card.!token+YouOwn"
+      }
+    }
+  ],
+  "faces": []
+}

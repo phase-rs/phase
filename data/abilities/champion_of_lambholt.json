@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another creature you control enters, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.YouDontCtrl+powerLTX",
+        "ValidAttacker": "Creature.YouCtrl",
+        "Description": "Creatures with power less than CARDNAME's power can't block creatures you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "Execute": "TrigMill",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, mill three cards.",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "Execute": "TrigMill",
+        "Secondary": "True",
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, mill three cards.",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "PlaneswalkedFrom",
+      "params": {
+        "ValidCard": "Plane.Self",
+        "Execute": "TrigChangeZoneAll",
+        "TriggerDescription": "When you planeswalk away from CARDNAME, each player returns all land cards from their graveyard to the battlefield tapped."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, return target nonland card from your graveyard to your hand.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

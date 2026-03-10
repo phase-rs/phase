@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, create a 2/2 red Dragon creature token with flying. It has \"{R}: This creature gets +1/+0 until end of turn\".",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigHumanToken",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 white Human Soldier creature tokens."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "TriggerDescription": "At the beginning of your end step, if another Human died under your control this turn, create a Food token.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigFoodToken",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

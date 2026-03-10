@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "WortETB",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 red and green Goblin Warrior creature tokens.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Battlefield",
+        "AffectedZone": "Stack",
+        "Description": "Each red or green instant or sorcery spell you cast has conspire. (As you cast the spell, you may tap two untapped creatures you control that share a color with it. When you do, copy it and you may choose new targets for the copy.)",
+        "AddKeyword": "Conspire",
+        "Affected": "Instant.Green+YouCtrl+wasCast,Instant.Red+YouCtrl+wasCast,Sorcery.Red+YouCtrl+wasCast,Sorcery.Green+YouCtrl+wasCast"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

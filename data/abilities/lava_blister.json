@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.nonBasic"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonbasic land",
+        "UnlessCost": "DamageYou<6>",
+        "SpellDescription": "Destroy target nonbasic land unless its controller has CARDNAME deal 6 damage to them.",
+        "UnlessPayer": "TargetedController"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

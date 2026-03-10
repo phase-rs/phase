@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, draw a card.",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidAttackersAmount": "EQ1",
+        "ValidAttackers": "Creature.YouCtrl",
+        "TriggerDescription": "Whenever a creature you control attacks a player, if no other creatures are attacking that player, ABILITY",
+        "AttackedTarget": "Player",
+        "Execute": "TrigCharm"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

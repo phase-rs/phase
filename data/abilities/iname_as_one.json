@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.wasCastFromYourHandByYou+Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand, you may search your library for a Spirit permanent card, put it onto the battlefield, then shuffle.",
+        "Execute": "TrigSearch",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "OptionalDecider": "TriggeredCardController",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, you may exile it. If you do, return target Spirit permanent card from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

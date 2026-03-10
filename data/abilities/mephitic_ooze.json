@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Creature",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, destroy that creature. It can't be regenerated."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +1/+0 for each artifact you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

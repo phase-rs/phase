@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever you discard a nonland card, you may cast it from your graveyard.",
+        "ValidPlayer": "You",
+        "ValidCard": "Card.nonLand",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPlay"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Amount": "X",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each different mana value among cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

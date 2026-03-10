@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile target nonland permanent an opponent controls until CARDNAME leaves the battlefield.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "X",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each creature in your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

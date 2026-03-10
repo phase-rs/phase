@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCounter",
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put your choice of a vigilance, menace, or trample counter on target creature you control."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigCounter",
+        "Phase": "Upkeep",
+        "TriggerZones": "Command",
+        "Secondary": "True",
+        "ValidPlayer": "You",
+        "TriggerDescription": "When you planeswalk to CARDNAME and at the beginning of your upkeep, put your choice of a vigilance, menace, or trample counter on target creature you control."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, exile cards from the top of your library until you exile a nonland permanent card. Put that card onto the battlefield or into your hand.",
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

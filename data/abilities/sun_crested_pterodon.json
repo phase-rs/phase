@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has vigilance as long as you control another Dinosaur.",
+        "AddKeyword": "Vigilance",
+        "IsPresent": "Permanent.Dinosaur+YouCtrl+Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

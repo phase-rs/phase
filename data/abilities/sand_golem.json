@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "Execute": "DelTrig",
+        "TriggerDescription": "When a spell or ability an opponent controls causes you to discard CARDNAME, return CARDNAME from your graveyard to the battlefield with a +1/+1 counter on it at the beginning of the next end step.",
+        "ValidCause": "SpellAbility.OppCtrl",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

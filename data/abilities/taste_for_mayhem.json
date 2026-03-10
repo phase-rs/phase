@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +2/+0.",
+        "AddPower": "2",
+        "Affected": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "Hellbent",
+        "AddPower": "2",
+        "Description": "Hellbent — Enchanted creature gets an additional +2/+0 as long as you have no cards in hand.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

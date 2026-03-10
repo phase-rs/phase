@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each end step, if CARDNAME dealt damage to an opponent this turn, put a +1/+1 counter on it.",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "Execute": "TrigPutCounter",
+        "IsPresent": "Card.Self+dealtDamageToOppThisTurn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

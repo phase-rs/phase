@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Creature.EnchantedBy",
+        "Description": "Enchanted creature attacks each combat if able."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

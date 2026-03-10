@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, target opponent loses 2 life and you gain 2 life.",
+        "Origin": "Any",
+        "Execute": "TrigDrain",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "Execute": "TrigExile",
+        "TriggerDescription": "At the beginning of your end step you may exile NICKNAME. If you do, return it to the battlefield under it's owner's control at the beginning of your next upkeep. It gains haste.",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "Execute": "TrigInvestigate",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on NICKNAME, investigate that many times.",
+        "CounterType": "P1P1",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Clue.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you sacrifice a Clue, put a +1/+1 counter on another target creature you control.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

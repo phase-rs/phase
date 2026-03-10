@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigLose",
+        "ValidCard": "Card",
+        "TriggerDescription": "Whenever a player draws a card, that player loses 2 life unless they pay {2}.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

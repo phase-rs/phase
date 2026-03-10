@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "Execute": "TrigGainLife",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever another creature you control enters, you may gain 1 life."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.OppCtrl",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever a creature an opponent controls enters, you may have that player lose 1 life.",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE4_P1P1",
+        "AddKeyword": "Flying & Vigilance",
+        "Description": "As long as CARDNAME has four or more +1/+1 counters on it, it has flying and vigilance."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as CARDNAME has ten or more +1/+1 counters on it, it has indestructible.",
+        "AddKeyword": "Indestructible",
+        "Affected": "Card.Self+counters_GE10_P1P1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

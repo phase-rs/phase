@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "DamageAll",
+            "amount": {
+              "type": "Variable",
+              "value": "X"
+            },
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidCards": "Creature.withFlying",
+            "SpellDescription": "CARDNAME deals X damage to each creature with flying."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "DamageAll",
+            "amount": {
+              "type": "Variable",
+              "value": "X"
+            },
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME deals X damage to each creature without flying.",
+            "ValidCards": "Creature.withoutFlying"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

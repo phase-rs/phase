@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control dies, scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.YouCtrl",
+        "Origin": "Battlefield",
+        "Execute": "TrigScry"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

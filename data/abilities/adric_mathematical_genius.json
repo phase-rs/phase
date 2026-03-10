@@ -1,0 +1,75 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "MayChooseTarget": "True",
+          "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+          "TgtPrompt": "Choose target activated or triggered ability you control",
+          "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+          "ValidTgts": "Card,Emblem"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "MayChooseTarget": "True",
+        "TargetType": "Activated.YouCtrl,Triggered.YouCtrl",
+        "TgtPrompt": "Choose target activated or triggered ability you control",
+        "SpellDescription": "Copy target activated or triggered ability you control. You may choose new targets for the copy.",
+        "ValidTgts": "Card,Emblem"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card,Emblem"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter target activated or triggered ability.",
+        "TargetType": "Activated,Triggered",
+        "PrecostDesc": "Ultimate Sacrifice —",
+        "TgtPrompt": "Select target spell or ability"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

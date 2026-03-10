@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "SpellDescription": "Add {U}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {U}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Debuff",
+        "params": {
+          "Keywords": "Banding & Bands with other",
+          "SpellDescription": "Target creature loses banding and all \"bands with other\" abilities until end of turn. Activate only during any upkeep step.",
+          "ActivationPhases": "Upkeep",
+          "StackDescription": "SpellDescription",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Banding & Bands with other",
+        "SpellDescription": "Target creature loses banding and all \"bands with other\" abilities until end of turn. Activate only during any upkeep step.",
+        "ActivationPhases": "Upkeep",
+        "StackDescription": "SpellDescription",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

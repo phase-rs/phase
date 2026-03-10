@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.Artifact+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more artifact creatures you control deal combat damage to a player, you get {E}{E} (two energy counters).",
+        "CombatDamage": "True",
+        "Execute": "TrigEnergy"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "Execute": "TrigChooseNumber",
+        "TriggerDescription": "At the beginning of your end step, you may pay one or more {E}. If you do, create an X/X colorless Vehicle artifact token named Nalaar Aetherjet with flying and crew 2, where X is the amount of {E} spent this way."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 3
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "PayEnergy<2>"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "Defined": "Player.Opponent",
+        "SpellDescription": "Each opponent loses 3 life. You gain life equal to the life lost this way."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "LifeLost",
+      "params": {
+        "Execute": "TrigEnergy",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "FirstTime": "True",
+        "TriggerDescription": "Whenever you lose life for the first time each turn, you get {E}. (You get an energy counter. Damage causes loss of life.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

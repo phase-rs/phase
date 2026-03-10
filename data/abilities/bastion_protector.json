@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.IsCommander+YouCtrl",
+        "AddPower": "2",
+        "AddKeyword": "Indestructible",
+        "AddToughness": "2",
+        "Description": "Commander creatures you control get +2/+2 and have indestructible."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

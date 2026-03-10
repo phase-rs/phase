@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, draw a card.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "ValidCard": "Instant,Sorcery",
+        "Amount": "1",
+        "Type": "Spell",
+        "Description": "Instant and sorcery spells you cast cost {1} less to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

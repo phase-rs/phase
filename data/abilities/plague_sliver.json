@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All Slivers have \"At the beginning of your upkeep, this permanent deals 1 damage to you.\"",
+        "Affected": "Sliver",
+        "AddTrigger": "PlaguePhaseTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

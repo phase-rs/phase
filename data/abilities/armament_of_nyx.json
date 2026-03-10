@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Double Strike",
+        "Description": "Enchanted creature has double strike as long as it's an enchantment. Otherwise, prevent all damage that would be dealt by enchanted creature.",
+        "Affected": "Creature.EnchantedBy+Enchantment"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Creature.EnchantedBy+nonEnchantment",
+        "Secondary": "True",
+        "Prevent": "True",
+        "Description": "Otherwise, prevent all damage that would be dealt by enchanted creature."
+      }
+    }
+  ],
+  "faces": []
+}

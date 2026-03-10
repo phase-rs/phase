@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Enchantment",
+          "Aura"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveCardTypes": "True",
+        "RemoveEnchantmentTypes": "True",
+        "SpellDescription": "CARDNAME loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.",
+        "Defined": "Self",
+        "Duration": "Permanent",
+        "RevertCost": "U",
+        "RemoveThisAbility": "True",
+        "Keywords": "Enchant:Creature",
+        "SubAbility": "DBAttach"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You control enchanted creature.",
+        "Affected": "Card.EnchantedBy",
+        "GainControl": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

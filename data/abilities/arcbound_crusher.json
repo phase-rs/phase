@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another artifact enters, put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Artifact.Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

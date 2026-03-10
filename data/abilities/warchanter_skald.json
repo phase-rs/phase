@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME becomes tapped, if it's enchanted or equipped, create a 2/1 red Dwarf Berserker creature token.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "IsPresent": "Card.Self+enchanted,Card.Self+equipped"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

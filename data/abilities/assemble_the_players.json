@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Description": "You may look at the top card of your library any time.",
+        "MayLookAt": "You",
+        "Affected": "Card.TopLibrary+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Once each turn, you may cast a creature spell with power 2 or less from the top of your library.",
+        "MayPlayLimit": "1",
+        "MayPlay": "True",
+        "Affected": "Card.Creature+nonLand+powerLE2+TopLibrary+YouCtrl",
+        "AffectedZone": "Library"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

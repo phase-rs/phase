@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGain",
+        "TriggerDescription": "Whenever enchanted creature deals damage, you gain that much life.",
+        "ValidSource": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Trample",
+        "AddPower": "2",
+        "Description": "Enchanted creature gets +2/+2 and has trample.",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

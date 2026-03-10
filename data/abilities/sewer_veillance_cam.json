@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 U"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw two cards."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigTapOrUntap",
+        "TriggerDescription": "When this artifact enters or leaves the battlefield, you may tap or untap target creature.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this artifact enters or leaves the battlefield, you may tap or untap target creature.",
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "Origin": "Battlefield",
+        "Execute": "TrigTapOrUntap",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

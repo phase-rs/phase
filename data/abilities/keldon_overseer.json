@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigKicker",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
+        "ValidCard": "Card.Self+kicked"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

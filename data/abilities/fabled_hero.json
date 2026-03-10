@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigCounters",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on CARDNAME.",
+        "TargetsValid": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

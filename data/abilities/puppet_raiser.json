@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentZone": "Graveyard",
+        "Execute": "TrigExile",
+        "TriggerDescription": "At the beginning of your end step, exile up to one target creature card from your graveyard. If you do, seek a creature card with mana value equal to the mana value of that card plus one. That card perpetually gains menace.",
+        "IsPresent": "Card.Creature+YouOwn",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

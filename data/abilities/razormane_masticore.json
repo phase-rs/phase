@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUpkeep",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you discard a card."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your draw step, you may have CARDNAME deal 3 damage to target creature.",
+        "Phase": "Draw",
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

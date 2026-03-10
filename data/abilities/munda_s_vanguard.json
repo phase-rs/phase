@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+          "AILogic": "AtOppEOT",
+          "PrecostDesc": "Cohort —",
+          "ValidCards": "Creature.YouCtrl",
+          "CounterNum": "1",
+          "CounterType": "P1P1"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<1/Ally>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+        "AILogic": "AtOppEOT",
+        "PrecostDesc": "Cohort —",
+        "ValidCards": "Creature.YouCtrl",
+        "CounterNum": "1",
+        "CounterType": "P1P1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

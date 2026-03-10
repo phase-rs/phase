@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player draws a card.",
+        "Defined": "Player",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ValidTgts": "Player",
+        "SpellDescription": "Target player draws a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 20,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "Target player mills twenty cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

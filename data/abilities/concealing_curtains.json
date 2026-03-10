@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+              "Mode": "Transform",
+              "SorcerySpeed": "True",
+              "Defined": "Self"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+            "Mode": "Transform",
+            "SorcerySpeed": "True",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "When this creature transforms into CARDNAME, target opponent reveals their hand. You may choose a nonland card from it. If you do, that player discards that card, then draws a card.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigReveal"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

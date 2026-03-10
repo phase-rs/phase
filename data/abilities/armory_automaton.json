@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "DBAttach",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may attach any number of target Equipment to it. (Control of the Equipment doesn't change.)",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, you may attach any number of target Equipment to it. (Control of the Equipment doesn't change.)",
+        "Execute": "DBAttach",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

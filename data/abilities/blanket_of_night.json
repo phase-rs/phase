@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Swamp",
+        "Description": "Each land is a Swamp in addition to its other land types.",
+        "Affected": "Land"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

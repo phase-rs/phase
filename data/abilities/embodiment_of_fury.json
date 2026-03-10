@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "Origin": "Any",
+        "Execute": "TrigAnimate",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may have target land you control become a 3/3 Elemental creature with haste until end of turn. It's still a land."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Land+YouCtrl",
+        "AddKeyword": "Trample",
+        "Description": "Land creatures you control have trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

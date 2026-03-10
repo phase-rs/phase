@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has shroud as long as you control another artifact creature. (It can't be the target of spells or abilities.)",
+        "IsPresent": "Creature.Artifact+Other+YouCtrl",
+        "Affected": "Card.Self",
+        "AddKeyword": "Shroud"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

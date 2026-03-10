@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "UntapAdjust:Land:1",
+        "Affected": "You",
+        "Description": "You can't untap more than one land during your untap step."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

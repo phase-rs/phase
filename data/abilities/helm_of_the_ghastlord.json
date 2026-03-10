@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "As long as enchanted creature is blue, it gets +1/+1 and has \"Whenever this creature deals damage to an opponent, draw a card.\"",
+        "Affected": "Creature.EnchantedBy+Blue",
+        "AddTrigger": "BleTrigger",
+        "AddPower": "1",
+        "AddSVar": "HelmTrigDraw"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.EnchantedBy+Black",
+        "AddPower": "1",
+        "AddSVar": "HelmTrigDiscard",
+        "AddTrigger": "BlckTrigger",
+        "Description": "As long as enchanted creature is black, it gets +1/+1 and has \"Whenever this creature deals damage to an opponent, that player discards a card.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

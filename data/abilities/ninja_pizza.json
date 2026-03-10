@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "PhaseCount": "2",
+        "Phase": "Main",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your second main phase, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Foods you control have \"{T}, Sacrifice this artifact: Add one mana of any color.\"",
+        "AddAbility": "Mana",
+        "Affected": "Food.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

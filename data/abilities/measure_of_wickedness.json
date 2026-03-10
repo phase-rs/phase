@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of your end step, sacrifice CARDNAME and you lose 8 life."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainControl",
+        "Origin": "Any",
+        "ValidCard": "Card.!token+YouOwn+Other",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another card is put into your graveyard from anywhere, target opponent gains control of CARDNAME.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent.YouCtrl",
+        "AddSVar": "Sac"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

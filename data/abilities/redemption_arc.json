@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Enchanted",
+        "SpellDescription": "Exile enchanted creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Goad": "True",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Indestructible",
+        "Description": "Enchanted creature has indestructible and is goaded. (It attacks each combat if able and attacks a player other than you if able.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Stack",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SubAbility": "DBPutCounter",
+        "SpellDescription": "Exile CARDNAME with two scream counters on it."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentZone": "Exile",
+        "TriggerZones": "Exile",
+        "IsPresent": "Card.Self+counters_GE1_SCREAM",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is exiled with a scream counter on it, remove a scream counter from it. If there are no more scream counters on it, put it into your graveyard and each player returns all creature cards from their graveyard to the battlefield.",
+        "Phase": "Upkeep",
+        "Execute": "TrigRemoveCounter",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

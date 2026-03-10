@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Draw a card.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 5,
+        "toughness": 5,
+        "types": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact you control",
+        "Duration": "UntilYourNextTurn",
+        "SpellDescription": "Until your next turn, target artifact you control becomes a 5/5 creature in addition to its other types.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card",
+        "FaceDownSetType": "Artifact & Creature",
+        "FaceDownToughness": "5",
+        "Planeswalker": "True",
+        "FaceDownPower": "5",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Put any number of cards from your hand onto the battlefield face down. They're 5/5 artifact creatures.",
+        "FaceDown": "True",
+        "Ultimate": "True",
+        "ChangeNum": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

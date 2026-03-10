@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.EnchantedBy",
+            "AddKeyword": "Double Strike",
+            "Description": "Enchanted creature has double strike."
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "ReplaceWith": "Exile"
+          }
+        }
+      ]
+    }
+  ]
+}

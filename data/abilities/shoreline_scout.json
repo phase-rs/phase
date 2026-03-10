@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, you may exile a Merfolk card or a land card from your hand. If you do, conjure a Tropical Island card into your hand.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "AddPower": "1",
+        "Description": "As long as another Merfolk or an Island entered the battlefield under your control this turn, CARDNAME gets +1/+0.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

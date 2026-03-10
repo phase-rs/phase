@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you gain 2 life and draw a card.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "PlayerTurn": "True",
+        "ValidCard": "Instant",
+        "Phase": "Main1,Main2",
+        "OptionalDecider": "You",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an instant spell during your main phase, you may return CARDNAME to its owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

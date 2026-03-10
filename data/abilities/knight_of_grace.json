@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Card.Self",
+        "IsPresent": "Permanent.Black",
+        "Description": "CARDNAME gets +1/+0 as long as any player controls a black permanent."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

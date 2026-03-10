@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Hand",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent.YouOwn"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TargetMin": "0",
+            "TargetMax": "X",
+            "TgtPrompt": "Select target permanent you own",
+            "SpellDescription": "Return any number of target permanents you own to your hand."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Discard",
+            "count": 1,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBDraw",
+            "SpellDescription": "Discard any number of cards, then draw that many cards.",
+            "AnyNumber": "True",
+            "RememberDiscarded": "True",
+            "Mode": "TgtChoose",
+            "Optional": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

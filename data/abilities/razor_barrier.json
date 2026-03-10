@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "TgtPrompt": "Select target permanent you control",
+          "Gains": "Choice",
+          "ValidTgts": "Permanent.YouCtrl",
+          "Choices": "AnyColor,Artifact",
+          "SpellDescription": "Target permanent you control gains protection from artifacts or from the color of your choice until end of turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target permanent you control",
+        "Gains": "Choice",
+        "ValidTgts": "Permanent.YouCtrl",
+        "Choices": "AnyColor,Artifact",
+        "SpellDescription": "Target permanent you control gains protection from artifacts or from the color of your choice until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

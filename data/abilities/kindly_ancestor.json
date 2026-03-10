@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.EnchantedBy",
+            "Description": "Enchanted creature has lifelink.",
+            "AddKeyword": "Lifelink"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "Exile",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead."
+          }
+        }
+      ]
+    }
+  ]
+}

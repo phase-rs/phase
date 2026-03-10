@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Host": "True",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "When this creature enters, you may untap target permanent.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

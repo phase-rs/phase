@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesCrewed",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes crewed, up to one other target Vehicle you control becomes an artifact creature until end of turn.",
+        "Execute": "TrigAnimate",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

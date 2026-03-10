@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidCard": "Cleric.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever another Cleric you control enters, you gain 1 life.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "LifeGained",
+      "params": {
+        "FirstTime": "True",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you gain life for the first time each turn, put a +1/+1 counter on CARDNAME.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

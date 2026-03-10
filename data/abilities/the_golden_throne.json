@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo Any",
+        "params": {
+          "PrecostDesc": "A Thousand Souls Die Every Day —",
+          "Amount": "3",
+          "SpellDescription": "Add three mana in any combination of colors."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "A Thousand Souls Die Every Day —",
+        "Amount": "3",
+        "SpellDescription": "Add three mana in any combination of colors."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "GameLoss"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You",
+        "ReplaceWith": "ExileSetLife",
+        "Description": "Arcane Life-support — If you would lose the game, instead exile CARDNAME and your life total becomes 1."
+      }
+    }
+  ],
+  "faces": []
+}

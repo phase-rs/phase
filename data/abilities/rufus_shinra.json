@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigToken",
+        "IsPresent": "Creature.YouCtrl+namedDarkstar",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "Whenever CARDNAME attacks, if you don't control a creature named Darkstar, create Darkstar, a legendary 2/2 white and black Dog creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

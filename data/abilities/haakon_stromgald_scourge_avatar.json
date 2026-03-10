@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "Play",
+          "PumpZone": "Graveyard",
+          "TgtZone": "Graveyard",
+          "ValidTgts": "Creature.YouOwn",
+          "ExileOnMoved": "Graveyard",
+          "TgtPrompt": "Select target creature in your graveyard, you may play it this turn",
+          "SpellDescription": "You may cast target creature card in your graveyard this turn.",
+          "ActivationZone": "Command"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayLife<1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "Play",
+        "PumpZone": "Graveyard",
+        "TgtZone": "Graveyard",
+        "ValidTgts": "Creature.YouOwn",
+        "ExileOnMoved": "Graveyard",
+        "TgtPrompt": "Select target creature in your graveyard, you may play it this turn",
+        "SpellDescription": "You may cast target creature card in your graveyard this turn.",
+        "ActivationZone": "Command"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Command",
+        "ValidCard": "Creature.wasCastFromYourGraveyard",
+        "Execute": "TrigAnimate",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a creature spell from your graveyard, it becomes a black Zombie Knight."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "DBExile",
+        "Description": "If a Zombie Knight would be put into your graveyard from the battlefield, exile it instead.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Zombie+Knight"
+      }
+    }
+  ],
+  "faces": []
+}

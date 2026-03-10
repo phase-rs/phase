@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "All",
+        "RememberChanged": "True",
+        "SubAbility": "DBEffect",
+        "Defined": "You",
+        "SpellDescription": "Exile the top card of your library. You may play that card this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self,Vampire.Other+!token+YouCtrl",
+        "TriggerDescription": "Whenever CARDNAME or another nontoken Vampire you control dies, create a Treasure token.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

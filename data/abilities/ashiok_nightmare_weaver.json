@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "ChangeNum": "All",
+        "Planeswalker": "True",
+        "SpellDescription": "Exile the top three cards of target opponent's library."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature.cmcEQX+ExiledWithSource"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<X/LOYALTY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a creature card with mana value X exiled with CARDNAME onto the battlefield under your control. That creature is a Nightmare in addition to its other types.",
+        "Planeswalker": "True",
+        "ChoiceZone": "Exile",
+        "AILogic": "Ashiok",
+        "SubAbility": "DBChangeZone"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Graveyard,Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "RememberChanged": "True",
+        "SpellDescription": "Exile all cards from all opponents' hands and graveyards.",
+        "ChangeType": "Card.OppCtrl",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

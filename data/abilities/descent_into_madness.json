@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, put a despair counter on CARDNAME, then each player exiles X permanents they control and/or cards from their hand, where X is the number of despair counters on CARDNAME.",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

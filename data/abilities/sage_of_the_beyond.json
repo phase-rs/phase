@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Description": "Spells you cast from anywhere other than your hand cost {2} less to cast.",
+        "Type": "Spell",
+        "Amount": "2",
+        "ValidCard": "Card.!wasCastFromYourHand"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

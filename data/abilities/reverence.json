@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature.powerLE2",
+        "Description": "Creatures with power 2 or less can't attack you.",
+        "Target": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

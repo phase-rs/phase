@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 2 damage to any target."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "TargetType": "Spell",
+          "ActivationZone": "Graveyard",
+          "MayChooseTarget": "True",
+          "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "ActivationZone": "Graveyard",
+        "MayChooseTarget": "True",
+        "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",
+        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

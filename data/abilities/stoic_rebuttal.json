@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "TgtPrompt": "Select target spell",
+        "SpellDescription": "Counter target spell."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Metalcraft — This spell costs {1} less to cast if you control three or more artifacts.",
+        "ValidCard": "Card.Self",
+        "Amount": "1",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Condition": "Metalcraft"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

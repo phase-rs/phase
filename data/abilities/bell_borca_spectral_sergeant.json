@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigNoteNum",
+        "Destination": "Exile",
+        "Static": "True",
+        "ValidCard": "Card.!token"
+      }
+    },
+    {
+      "mode": "TurnBegin",
+      "params": {
+        "Static": "True",
+        "Execute": "TrigReset"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "PseudoDraw",
+        "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library. You may play that card this turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetPower": "ExiledCMC",
+        "EffectZone": "Battlefield",
+        "Description": "CARDNAME's power is equal to the greatest number noted for it this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

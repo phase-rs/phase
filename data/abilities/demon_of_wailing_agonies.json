@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl",
+        "AddTrigger": "TrigDealsCB",
+        "Affected": "Card.Self",
+        "AddPower": "2",
+        "Description": "Lieutenant — As long as you control your commander, CARDNAME gets +2/+2 and has \"Whenever CARDNAME deals combat damage to a player, that player sacrifices a creature.\"",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

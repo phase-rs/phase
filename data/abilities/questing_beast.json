@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Opponent",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls.",
+        "Execute": "MoreDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.powerLE2",
+        "Description": "CARDNAME can't be blocked by creatures with power 2 or less."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPreventDamage"
+      },
+      "params": {
+        "Description": "Combat damage that would be dealt by creatures you control can't be prevented.",
+        "IsCombat": "True",
+        "ValidSource": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

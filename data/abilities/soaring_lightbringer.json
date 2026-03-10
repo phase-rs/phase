@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "TriggerDescription": "Whenever you attack a player, create a 1/1 white Glimmer enchantment creature token that's tapped and attacking that player.",
+        "TriggerZones": "Battlefield",
+        "AttackedTarget": "Player",
+        "ValidAttackers": "Creature.YouCtrl",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other enchantment creatures you control have flying.",
+        "AddKeyword": "Flying",
+        "Affected": "Enchantment.Creature+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

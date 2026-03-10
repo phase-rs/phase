@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "SpellDescription": "Take an extra turn after this one. Activate only if you have the city's blessing.",
+          "Activation": "Blessing",
+          "NumTurns": "1"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U U"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "PutCardToLibFromBattlefield<1/-1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Take an extra turn after this one. Activate only if you have the city's blessing.",
+        "Activation": "Blessing",
+        "NumTurns": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

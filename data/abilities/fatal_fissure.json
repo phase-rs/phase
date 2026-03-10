@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "ThisTurn": "True",
+          "ValidTgts": "Creature",
+          "Mode": "ChangesZone",
+          "ValidCard": "Card.IsTriggerRemembered",
+          "Origin": "Battlefield",
+          "Execute": "TrigEarthbend",
+          "TriggerDescription": "When that creature dies this turn, you earthbend 4. (Target land you control becomes a 0/0 creature with haste that's still a land. Put four +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+          "SpellDescription": "Choose target creature. When that creature dies this turn, you earthbend 4. (Target land you control becomes a 0/0 creature with haste that's still a land. Put four +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+          "Destination": "Graveyard",
+          "RememberObjects": "Targeted"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ThisTurn": "True",
+        "ValidTgts": "Creature",
+        "Mode": "ChangesZone",
+        "ValidCard": "Card.IsTriggerRemembered",
+        "Origin": "Battlefield",
+        "Execute": "TrigEarthbend",
+        "TriggerDescription": "When that creature dies this turn, you earthbend 4. (Target land you control becomes a 0/0 creature with haste that's still a land. Put four +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+        "SpellDescription": "Choose target creature. When that creature dies this turn, you earthbend 4. (Target land you control becomes a 0/0 creature with haste that's still a land. Put four +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+        "Destination": "Graveyard",
+        "RememberObjects": "Targeted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

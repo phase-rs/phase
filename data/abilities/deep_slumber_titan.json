@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever this creature is dealt damage, untap it.",
+        "Execute": "TrigUntap",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self",
+        "Description": "This creature enters tapped.",
+        "ReplacementResult": "Updated"
+      }
+    },
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

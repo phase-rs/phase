@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or becomes the target of a spell, create a Treasure token.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "Secondary": "True",
+        "ValidSource": "Spell",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks or becomes the target of a spell, create a Treasure token."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Mana",
+        "Affected": "Card.Treasure+YouCtrl",
+        "Description": "Treasures you control have \"{T}, Sacrifice this artifact: Add two mana of any one color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

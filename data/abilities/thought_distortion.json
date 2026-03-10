@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "ValidTgts": "Opponent",
+          "IsCurse": "True",
+          "SpellDescription": "Target opponent reveals their hand. Exile all noncreature, nonland cards from that player's hand and graveyard.",
+          "SubAbility": "DBExile"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "IsCurse": "True",
+        "SpellDescription": "Target opponent reveals their hand. Exile all noncreature, nonland cards from that player's hand and graveyard.",
+        "SubAbility": "DBExile"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "Description": "This spell can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "ChangeValid": "Land",
+        "DestinationZone2": "Graveyard",
+        "ChangeNum": "All",
+        "SpellDescription": "Reveal the top four cards of your library. Put all land cards revealed this way into your hand and the rest into your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

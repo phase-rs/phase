@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw a card, then discard a card.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouOwn",
+        "TriggerDescription": "Whenever you draw a card, target opponent mills two cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

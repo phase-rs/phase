@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "When CARDNAME enters, untap enchanted creature.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted creature dies, return that card to the battlefield under its owner's control.",
+        "Execute": "TrigReturnOwner",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainControl": "You",
+        "Affected": "Card.EnchantedBy",
+        "Description": "You control enchanted creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

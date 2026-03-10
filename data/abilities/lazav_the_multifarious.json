@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "ValidTgts": "Creature.YouOwn+cmcEQX",
+          "TgtPrompt": "Select target creature card in your graveyard",
+          "AddTypes": "Legendary",
+          "TgtZone": "Graveyard",
+          "NewName": "Lazav, the Multifarious",
+          "GainThisAbility": "True",
+          "SpellDescription": "CARDNAME becomes a copy of target creature card in your graveyard with mana value X, except its name is Lazav, the Multifarious, it's legendary in addition to its other types, and it has this ability."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouOwn+cmcEQX",
+        "TgtPrompt": "Select target creature card in your graveyard",
+        "AddTypes": "Legendary",
+        "TgtZone": "Graveyard",
+        "NewName": "Lazav, the Multifarious",
+        "GainThisAbility": "True",
+        "SpellDescription": "CARDNAME becomes a copy of target creature card in your graveyard with mana value X, except its name is Lazav, the Multifarious, it's legendary in addition to its other types, and it has this ability."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSurveil",
+        "TriggerDescription": "When CARDNAME enters, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

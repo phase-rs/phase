@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "The next time an instant or sorcery spell would deal damage to you this turn, that spell deals that damage to its controller instead.",
+          "ReplacementEffects": "SelflessDamage",
+          "AILogic": "RedirectSpellDamageFromPlayer",
+          "Stackable": "False"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "The next time an instant or sorcery spell would deal damage to you this turn, that spell deals that damage to its controller instead.",
+        "ReplacementEffects": "SelflessDamage",
+        "AILogic": "RedirectSpellDamageFromPlayer",
+        "Stackable": "False"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

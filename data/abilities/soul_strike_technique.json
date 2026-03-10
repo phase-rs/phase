@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted creature dies, manifest the top card of your library. (Put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)",
+        "Execute": "TrigManifest",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "1",
+        "Description": "Enchanted creature gets +1/+1 and has vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

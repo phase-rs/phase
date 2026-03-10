@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidCard": "Creature.EquippedBy+inRealZoneBattlefield",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigCopyAbility",
+        "TriggerDescription": "Whenever an ability of equipped creature is activated, if it isn't a mana ability, you may pay {1}. If you do, copy that ability. You may choose new targets for the copy.",
+        "ValidSA": "SpellAbility.!ManaAbility"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has haste.",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

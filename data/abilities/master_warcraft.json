@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "DeclareCombatants",
+          "ActivationFirstCombat": "True",
+          "ActivationPhases": "Upkeep->BeginCombat",
+          "SpellDescription": "Cast this spell only before attackers are declared. You choose which creatures attack this turn. You choose which creatures block this turn and how those creatures block."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "DeclareCombatants",
+        "ActivationFirstCombat": "True",
+        "ActivationPhases": "Upkeep->BeginCombat",
+        "SpellDescription": "Cast this spell only before attackers are declared. You choose which creatures attack this turn. You choose which creatures block this turn and how those creatures block."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

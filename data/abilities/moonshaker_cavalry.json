@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "BehemothPump",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, creatures you control gain flying and get +X/+X until end of turn, where X is the number of creatures you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

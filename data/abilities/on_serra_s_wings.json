@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddType": "Legendary",
+        "AddKeyword": "Flying & Vigilance & Lifelink",
+        "Description": "Enchanted creature is legendary, gets +1/+1, and has flying, vigilance, and lifelink.",
+        "Affected": "Card.EnchantedBy",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

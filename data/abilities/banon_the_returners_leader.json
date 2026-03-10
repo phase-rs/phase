@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you attack, you may pay {1} and discard a card. If you do, draw a card.",
+        "AttackingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlayLimit": "1",
+        "MayPlay": "True",
+        "Description": "Pray — Once during each of your turns, you may cast a creature spell from among cards in your graveyard that were put there from anywhere other than the battlefield this turn.",
+        "AffectedZone": "Graveyard",
+        "EffectZone": "Battlefield",
+        "Affected": "Creature.nonLand+ThisTurnEntered+!ThisTurnEnteredFrom_Battlefield",
+        "Condition": "PlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

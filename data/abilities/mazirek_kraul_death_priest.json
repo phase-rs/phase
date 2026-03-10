@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "Execute": "TrigCounters",
+        "TriggerDescription": "Whenever a player sacrifices another permanent, put a +1/+1 counter on each creature you control.",
+        "ValidCard": "Permanent.Other",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

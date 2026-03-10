@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "RevealOptional": "True",
+          "SpellDescription": "Look at the top card of your library. You may reveal that card and put it into your hand. If you do, you lose life equal to its mana value.",
+          "Planeswalker": "True",
+          "RememberRevealed": "True",
+          "SubAbility": "DBChangeZone",
+          "PeekAmount": "1"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RevealOptional": "True",
+        "SpellDescription": "Look at the top card of your library. You may reveal that card and put it into your hand. If you do, you lose life equal to its mana value.",
+        "Planeswalker": "True",
+        "RememberRevealed": "True",
+        "SubAbility": "DBChangeZone",
+        "PeekAmount": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_2_3_vampire_flying_lifelink",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 2/3 black Vampire creature token with flying and lifelink."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 13
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "SpellDescription": "CARDNAME deals 13 damage to any target. You gain 13 life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

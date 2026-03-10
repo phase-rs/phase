@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Imprint — When CARDNAME enters, exile target nonland permanent.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Origin": "Battlefield",
+        "Static": "True",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "Players can't cast spells with the same name as the exiled card.",
+        "ValidCard": "Card.sharesNameWith Imprinted"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

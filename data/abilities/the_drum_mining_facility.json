@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlanarDice",
+      "params": {
+        "TriggerDescription": "Whenever you roll the planar die, creatures you control get +1/+1 and gain haste until end of turn.",
+        "TriggerZones": "Command",
+        "ValidPlayer": "You",
+        "Execute": "RolledDie"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, end the turn. (Exile all spells and abilities from the stack, including this card. The player whose turn it is discards down to their maximum hand size. Damage wears off, and \"this turn\" and \"until end of turn\" effects end.)",
+        "TriggerZones": "Command",
+        "Execute": "TrigEndTurn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

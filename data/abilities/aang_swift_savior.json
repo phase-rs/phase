@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "SpellDescription": "Transform NICKNAME.",
+              "Defined": "Self"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "Waterbend<8>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "SpellDescription": "Transform NICKNAME.",
+            "Defined": "Self"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When NICKNAME enters, airbend up to one other target creature or spell. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "Execute": "TrigAirbend"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigPutCounterAll",
+            "TriggerDescription": "Whenever NICKNAME attack, put a +1/+1 counter on each tapped creature you control."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

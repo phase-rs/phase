@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, venture into the dungeon. (Enter the first room or advance to the next room.)",
+        "Execute": "TrigVenture",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerController": "TriggeredSourceController"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked as long as it's attacking alone.",
+        "IsPresent": "Card.attacking+Other",
+        "PresentCompare": "EQ0",
+        "ValidAttacker": "Card.Self+attacking"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

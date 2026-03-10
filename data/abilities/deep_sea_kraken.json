@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Exile",
+        "TriggerDescription": "Whenever an opponent casts a spell, if CARDNAME is suspended, remove a time counter from it.",
+        "IsPresent": "Card.Self+suspended",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigRemoveCounter",
+        "ValidCard": "Card",
+        "PresentZone": "Exile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": "Exile"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeValidDesc": "nonland",
+        "DestinationZone2": "Hand",
+        "RememberChanged": "True",
+        "SubAbility": "DBPlot",
+        "ChangeValid": "Card.nonLand",
+        "ChangeNum": "1",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Look at the top three cards of your library. You may exile a nonland card from among them.",
+        "Optional": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

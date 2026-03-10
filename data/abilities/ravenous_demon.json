@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SorcerySpeed": "True",
+              "SpellDescription": "Transform CARDNAME. Activate this only any time you could cast a sorcery.",
+              "Defined": "Self",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SorcerySpeed": "True",
+            "SpellDescription": "Transform CARDNAME. Activate this only any time you could cast a sorcery.",
+            "Defined": "Self",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "Phase": "Upkeep",
+            "TriggerDescription": "At the beginning of your upkeep, sacrifice a Human. If you can't, tap CARDNAME and it deals 9 damage to you.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigSac"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, put a tide counter on CARDNAME.",
+        "Execute": "DBPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+counters_GE4_TIDE",
+        "Execute": "TrigRemove",
+        "TriggerDescription": "Whenever there are four or more tide counters on CARDNAME, remove all tide counters from it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Permanent.namedTidal Influence",
+        "Description": "Cast this spell only if no permanents named Tidal Influence are on the battlefield."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Self+counters_EQ1_TIDE",
+        "Description": "As long as there is exactly one tide counter on CARDNAME, all blue creatures get -2/-0.",
+        "Affected": "Creature.Blue",
+        "AddPower": "-2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "+2",
+        "IsPresent": "Card.Self+counters_EQ3_TIDE",
+        "Description": "As long as there are exactly three tide counters on CARDNAME, all blue creatures get +2/+0.",
+        "Affected": "Creature.Blue"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

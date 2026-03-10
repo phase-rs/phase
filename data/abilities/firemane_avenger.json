@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "IsPresent": "Creature.attacking+Other",
+        "PresentCompare": "GE2",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBattalionDmg",
+        "NoResolvingCheck": "True",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME deals 3 damage to any target and you gain 3 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

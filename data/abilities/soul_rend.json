@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionDefined": "Targeted",
+        "ConditionPresent": "Creature.White",
+        "SubAbility": "DelTrigSlowtrip",
+        "ConditionCompare": "EQ1",
+        "AITgts": "Card.White",
+        "SpellDescription": "Destroy target creature if it's white. A creature destroyed this way can't be regenerated. Draw a card at the beginning of the next turn's upkeep.",
+        "NoRegen": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "Description": "Equipped creature has first strike.",
+        "Affected": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as equipped creature is a Human, it gets +1/+1.",
+        "AddPower": "1",
+        "Affected": "Human.EquippedBy",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

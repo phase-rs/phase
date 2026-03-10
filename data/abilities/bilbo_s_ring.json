@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature attacks alone, you draw a card and you lose 1 life.",
+        "Alone": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "During your turn, equipped creature has hexproof and can't be blocked.",
+        "Condition": "PlayerTurn",
+        "AddKeyword": "Hexproof"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.EquippedBy",
+        "Description": "During your turn, equipped creature has hexproof and can't be blocked.",
+        "Secondary": "True",
+        "Condition": "PlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you gain 2 life.",
+        "Execute": "TrigGainLife",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you gain life, you may pay {1}. If you do, draw a card and each opponent loses 1 life.",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "IsPresent": "Card.Self",
+        "PresentZone": "Command",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in the command zone, you gain 2 life.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Command",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddOrRemoveCounter",
+        "params": {
+          "SpellDescription": "Choose a counter on target permanent or suspended card. Remove that counter from that permanent or card or put another of those counters on it.",
+          "TgtZone": "Battlefield,Exile",
+          "ValidTgts": "Permanent.inZoneBattlefield,Card.suspended",
+          "CounterNum": "1",
+          "AITgts": "Card.HasCounters",
+          "TgtPrompt": "Select target permanent or suspended card."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose a counter on target permanent or suspended card. Remove that counter from that permanent or card or put another of those counters on it.",
+        "TgtZone": "Battlefield,Exile",
+        "ValidTgts": "Permanent.inZoneBattlefield,Card.suspended",
+        "CounterNum": "1",
+        "AITgts": "Card.HasCounters",
+        "TgtPrompt": "Select target permanent or suspended card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

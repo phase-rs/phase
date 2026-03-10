@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigToken",
+            "ValidCard": "Instant,Sorcery",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 1/1 blue Human Wizard creature token. Then if you control three or more Wizards, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 1/1 blue Human Wizard creature token.",
+            "Execute": "TrigToken",
+            "ValidCard": "Instant,Sorcery",
+            "ValidActivatingPlayer": "You"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Flying",
+            "AddToughness": "1",
+            "Description": "Wizards you control get +2/+1 and have flying.",
+            "Affected": "Card.Wizard+YouCtrl",
+            "AddPower": "2"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

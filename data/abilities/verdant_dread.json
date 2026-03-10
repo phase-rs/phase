@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "SorcerySpeed": "True",
+          "SpellDescription": "Conjure a card named Verdant Dread onto the battlefield. Activate only as a sorcery.",
+          "Conjure": "True",
+          "Name": "Verdant Dread",
+          "Zone": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "SpellDescription": "Conjure a card named Verdant Dread onto the battlefield. Activate only as a sorcery.",
+        "Conjure": "True",
+        "Name": "Verdant Dread",
+        "Zone": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another card named Verdant Dread enters, manifest dread.",
+        "Execute": "TrigManifestDread",
+        "ValidCard": "Card.Self,Card.namedVerdant Dread"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

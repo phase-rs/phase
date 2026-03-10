@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}. Spend this mana only to cast a spell that's one or more colors without {X} in its mana cost.",
+          "RestrictValid": "Spell.nonColorless+!hasXCost"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromGrave<1/Card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}. Spend this mana only to cast a spell that's one or more colors without {X} in its mana cost.",
+        "RestrictValid": "Spell.nonColorless+!hasXCost"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigSurveil",
+        "TriggerDescription": "At the beginning of your upkeep, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

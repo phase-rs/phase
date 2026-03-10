@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attacking+withoutFlying"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target attacking creature without flying.",
+        "TgtPrompt": "Select target attacking creature without flying"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "Cost": "W",
+        "IsPresent": "Creature.attacking",
+        "EffectZone": "All",
+        "Description": "If exactly one creature is attacking, you may pay {W} rather than pay this spell's mana cost.",
+        "PresentCompare": "EQ1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapOrUntap",
+        "params": {
+          "ValidTgts": "Permanent.Other",
+          "TgtPrompt": "Select another target permanent",
+          "SpellDescription": "You may tap or untap another target permanent."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Permanent.Other",
+        "TgtPrompt": "Select another target permanent",
+        "SpellDescription": "You may tap or untap another target permanent."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

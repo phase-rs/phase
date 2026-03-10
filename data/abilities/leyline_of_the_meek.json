@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.token",
+        "AddToughness": "1",
+        "Description": "Creature tokens get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

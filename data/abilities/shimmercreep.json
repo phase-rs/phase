@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDrain",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Vivid — When this creature enters, each opponent loses X life and you gain X life, where X is the number of colors among permanents you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, draw a card for each land you control.",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "Creatures can't block.",
+        "EffectZone": "Command",
+        "ValidCard": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

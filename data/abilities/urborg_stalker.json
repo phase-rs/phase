@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "At the beginning of each player's upkeep, if that player controls a nonblack, nonland permanent, CARDNAME deals 1 damage to that player.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Permanent.nonBlack+nonLand+ActivePlayerCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

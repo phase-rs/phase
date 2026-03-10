@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigScry",
+        "ValidCard": "Creature.Green+YouCtrl",
+        "TriggerDescription": "Whenever a green creature you control enters, scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Green creatures you control get +1/+1.",
+        "Affected": "Creature.Green+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

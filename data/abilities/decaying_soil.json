@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, exile a card from your graveyard."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "TrigReturn",
+        "AddTrigger": "TrigDies",
+        "Condition": "Threshold",
+        "Affected": "Card.Self",
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME has \"Whenever a nontoken creature is put into your graveyard from the battlefield, you may pay {1}. If you do, return that card to your hand.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

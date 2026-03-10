@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Another target creature gains lifelink until end of turn.",
+        "TgtPrompt": "Select another target creature",
+        "KW": "Lifelink"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you gain life, put a +1/+1 counter on target creature or enchantment you control.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "LT5",
+        "Description": "As long as your devotion to white is less than five, NICKNAME isn't a creature.",
+        "Affected": "Card.Self",
+        "RemoveType": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

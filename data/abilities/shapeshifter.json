@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you may choose a number between 0 and 7.",
+        "Execute": "ChooseNumber",
+        "OptionalDecider": "You",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetToughness": "Y",
+        "SetPower": "X",
+        "Description": "CARDNAME's power is equal to the last chosen number and its toughness is equal to 7 minus that number."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

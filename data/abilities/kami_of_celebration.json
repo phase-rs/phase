@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.modified+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever a modified creature you control attacks, exile the top card of your library. You may play that card this turn. (Equipment, Auras you control, and counters are modifications.)"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.wasCastFromExile",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a spell from exile, put a +1/+1 counter on target creature you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

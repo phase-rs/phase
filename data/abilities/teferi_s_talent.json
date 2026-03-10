@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you draw a card, put a loyalty counter on enchanted planeswalker."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted planeswalker has \"[-12]: You get an emblem with 'You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.'\"",
+        "AddAbility": "TeferiUlt",
+        "Affected": "Planeswalker.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

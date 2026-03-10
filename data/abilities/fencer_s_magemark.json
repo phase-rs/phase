@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.enchanted+YouCtrl",
+        "Description": "Creatures you control that are enchanted get +1/+1 and have first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a -1/-1 counter on up to one target creature.",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a -1/-1 counter on up to one target creature.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "Creatures your opponents control with -1/-1 counters on them can't block.",
+        "ValidCard": "Creature.counters_GE1_M1M1+OppCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

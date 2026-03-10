@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerUnblocked",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks and isn't blocked, you may draw a card. If you do, CARDNAME assigns no combat damage this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

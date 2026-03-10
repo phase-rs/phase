@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever an opponent draws a card, CARDNAME deals 1 damage to that player.",
+        "ValidCard": "Card.OppOwn",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

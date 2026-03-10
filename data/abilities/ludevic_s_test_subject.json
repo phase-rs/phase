@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "HATCHLING",
+            "count": 1,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 U"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "AILogic": "CheckDFC",
+            "SpellDescription": "Put a hatchling counter on CARDNAME. Then if there are five or more hatchling counters on it, remove all of them and transform it.",
+            "SubAbility": "DBBranch"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

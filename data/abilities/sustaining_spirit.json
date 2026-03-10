@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "LifeReduced"
+      },
+      "params": {
+        "IsDamage": "True",
+        "ValidPlayer": "You.lifeGE1",
+        "ReplaceWith": "ReduceLoss",
+        "Description": "Damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+        "ActiveZones": "Battlefield",
+        "Result": "LT1"
+      }
+    }
+  ],
+  "faces": []
+}

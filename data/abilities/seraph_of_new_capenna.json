@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SorcerySpeed": "True",
+              "Mode": "Transform",
+              "Defined": "Self",
+              "AILogic": "Always",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "4 BP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SorcerySpeed": "True",
+            "Mode": "Transform",
+            "Defined": "Self",
+            "AILogic": "Always",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "ValidCard": "Card.Self",
+            "OptionalDecider": "You",
+            "Execute": "TrigPump",
+            "TriggerDescription": "Whenever CARDNAME attacks, you may sacrifice another creature or artifact. If you do, CARDNAME gets +2/+1 until end of turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

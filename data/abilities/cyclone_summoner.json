@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand, return all permanents to their owners' hands except for Giants, Wizards, and lands.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.wasCastFromYourHandByYou+Self",
+        "Execute": "TrigChangeZoneAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

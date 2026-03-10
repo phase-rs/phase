@@ -1,0 +1,78 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other,Planeswalker.Other"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMin": "0",
+        "SubAbility": "DBLoseLife",
+        "SpellDescription": "Each opponent loses 2 life and you gain 2 life. Put a corruption counter on up to one other target creature or planeswalker.",
+        "TgtPrompt": "Choose up to one other target creature or planeswalker",
+        "TargetMax": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AddKWs": "Haste",
+        "TgtPrompt": "Select target creature or planeswalker",
+        "Planeswalker": "True",
+        "SubAbility": "DBPutCounter",
+        "SpellDescription": "Gain control of target creature or planeswalker until end of turn. Untap it and put a corruption counter on it. It gains haste until end of turn.",
+        "Untap": "True",
+        "LoseControl": "EOT"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "AllValid": "Permanent.counters_GE1_CORRUPTION",
+        "Ultimate": "True",
+        "SpellDescription": "Gain control of each permanent with a corruption counter on it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

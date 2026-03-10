@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put an infection counter on it."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "DBDisease",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals X damage to target opponent previously dealt damage by it, where X is the number of infection counters on it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

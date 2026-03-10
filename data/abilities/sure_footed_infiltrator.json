@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Self",
+          "ExileOnMoved": "Battlefield",
+          "StaticAbilities": "Unblockable",
+          "SpellDescription": "CARDNAME can't be blocked this turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<1/Rogue.Other>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Self",
+        "ExileOnMoved": "Battlefield",
+        "StaticAbilities": "Unblockable",
+        "SpellDescription": "CARDNAME can't be blocked this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigDraw",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

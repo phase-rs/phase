@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 2 damage to each opponent. This ability triggers only if CARDNAME is on the battlefield or if CARDNAME is in your graveyard and you control a Giant.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 2 damage to each opponent. This ability triggers only if CARDNAME is on the battlefield or if CARDNAME is in your graveyard and you control a Giant.",
+        "Secondary": "True",
+        "IsPresent": "Creature.YouCtrl+Giant",
+        "Phase": "Upkeep",
+        "TriggerZones": "Graveyard",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "ValidPlayer": "Player.Opponent",
+        "Description": "Your opponents can't gain life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

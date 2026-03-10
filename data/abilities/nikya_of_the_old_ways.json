@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerDescription": "Whenever you tap a land for mana, add one mana of any type that land produced.",
+        "ValidCard": "Land",
+        "Execute": "TrigMana",
+        "Static": "True",
+        "TriggerZones": "Battlefield",
+        "Activator": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "You can't cast noncreature spells.",
+        "ValidCard": "Card.nonCreature",
+        "Caster": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

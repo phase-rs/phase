@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigUpkeep",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {G}.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSacrificeBlue",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a player puts an Island or blue permanent onto the battlefield, that player sacrifices an Island or blue permanent.",
+        "ValidCard": "Island,Card.Blue"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Swamp,Card.Black",
+        "Execute": "TrigSacrificeBlack",
+        "TriggerDescription": "Whenever a player puts an Swamp or black permanent onto the battlefield, that player sacrifices a Swamp or black permanent.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

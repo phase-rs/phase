@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Creature.Legendary+Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another legendary creature you control enters, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigTreasure",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, create a Treasure token.",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

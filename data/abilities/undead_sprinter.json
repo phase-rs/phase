@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "DBEffect",
+        "ValidSA": "Spell.MayPlaySource",
+        "ValidCard": "Card.Self",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "AffectedZone": "Graveyard",
+        "Affected": "Card.Self",
+        "CheckSVar": "X",
+        "Description": "You may cast CARDNAME from your graveyard if a non-Zombie creature died this turn. If you do, CARDNAME enters with a +1/+1 counter on it.",
+        "EffectZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

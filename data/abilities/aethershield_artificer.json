@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerDescription": "At the beginning of combat on your turn, target artifact creature you control gets +2/+2 and gains indestructible until end of turn.",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

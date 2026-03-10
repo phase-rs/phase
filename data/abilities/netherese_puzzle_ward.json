@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "Focus Beam — At the beginning of your upkeep, roll a d4. Scry X, where X is the result.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRollDice",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "RolledDie",
+      "params": {
+        "TriggerDescription": "Perfect Illumination — Whenever you roll a die's highest natural result, draw a card.",
+        "ValidResult": "Highest",
+        "Natural": "True",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

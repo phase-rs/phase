@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "3",
+          "SpellDescription": "Add three mana of any one color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "3",
+        "SpellDescription": "Add three mana of any one color."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "If CARDNAME would enter, sacrifice two untapped lands instead. If you do, put CARDNAME onto the battlefield. If you don't, put it into its owner's graveyard.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "ReplaceWith": "PayBeforeETB"
+      }
+    }
+  ],
+  "faces": []
+}

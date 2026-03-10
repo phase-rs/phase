@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "SVarCompare": "GTW",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Opponent",
+        "CheckSVar": "X"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Opponent",
+        "OptionalDecider": "You",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "Z",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "At the beginning of each opponent's end step, if that player controls more lands than you, you may search your library for a basic Plains card, put it onto the battlefield tapped, then shuffle.",
+        "SVarCompare": "GTY"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

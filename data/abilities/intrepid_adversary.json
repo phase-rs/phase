@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPay",
+        "TriggerDescription": "When CARDNAME enters, you may pay {1}{W} any number of times. When you pay this cost one or more times, put that many valor counters on CARDNAME.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control get +1/+1 for each valor counter on CARDNAME.",
+        "AddToughness": "Z",
+        "AddPower": "Z"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

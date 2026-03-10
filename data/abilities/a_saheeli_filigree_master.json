@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Scry",
+        "count": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Scry 2. If you control an artifact, draw a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_1_1_a_thopter_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PumpKeywords": "Haste",
+        "TokenOwner": "You",
+        "SpellDescription": "Create two 1/1 colorless Thopter artifact creature tokens with flying. They gain haste until end of turn.",
+        "TokenAmount": "2",
+        "Planeswalker": "True",
+        "PumpDuration": "EOT"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Always",
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "SpellDescription": "You get an emblem with \"Artifact creatures you control get +1/+1\" and \"Artifact spells you cast cost {1} less to cast.\"",
+          "Duration": "Permanent",
+          "StaticAbilities": "EmblemArtifactPump,ReduceCost",
+          "Name": "Emblem — Saheeli, Filigree Master",
+          "Stackable": "False"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Always",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "SpellDescription": "You get an emblem with \"Artifact creatures you control get +1/+1\" and \"Artifact spells you cast cost {1} less to cast.\"",
+        "Duration": "Permanent",
+        "StaticAbilities": "EmblemArtifactPump,ReduceCost",
+        "Name": "Emblem — Saheeli, Filigree Master",
+        "Stackable": "False"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

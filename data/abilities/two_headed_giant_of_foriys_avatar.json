@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control have menace. (They can't be blocked except by two or more creatures.)",
+        "EffectZone": "Command",
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Menace"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "CanBlockAmount": "1",
+        "Description": "Each creature you control can block an additional creature each combat.",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

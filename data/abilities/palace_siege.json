@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeKhans",
+        "Description": "• Khans — At the beginning of your upkeep, return target creature card from your graveyard to your hand.",
+        "AddTrigger": "KhansTrigger"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeDragons",
+        "Description": "• Dragons — At the beginning of your upkeep, each opponent loses 2 life and you gain 2 life.",
+        "AddTrigger": "DragonsTrigger"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

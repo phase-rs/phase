@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Wolf,Creature.Werewolf"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "TgtPrompt": "Select target Wolf or Werewolf",
+        "SpellDescription": "Return target [Wolf or Werewolf] creature to its owner's hand."
+      }
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NonBasicSpell": "True",
+        "StackDescription": "Return {c:Targeted} to its owner's hand.",
+        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+        "CostDesc": "{3}{U}",
+        "PrecostDesc": "Cleave",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

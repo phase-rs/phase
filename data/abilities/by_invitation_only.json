@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseNumber",
+        "params": {
+          "SpellDescription": "Choose a number between 0 and 13. Each player sacrifices that many creatures.",
+          "Min": "0",
+          "Defined": "You",
+          "Max": "13",
+          "AILogic": "SweepCreatures",
+          "SubAbility": "DBSac",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose a number between 0 and 13. Each player sacrifices that many creatures.",
+        "Min": "0",
+        "Defined": "You",
+        "Max": "13",
+        "AILogic": "SweepCreatures",
+        "SubAbility": "DBSac",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME becomes the target of a spell or ability an opponent controls, exile CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Exile",
+        "Affected": "Card.Self",
+        "Description": "You may cast CARDNAME from exile.",
+        "MayPlay": "True",
+        "AffectedZone": "Exile"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

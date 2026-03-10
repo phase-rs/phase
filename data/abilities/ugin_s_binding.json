@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand+YouDontCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonland permanent you don't control",
+        "SpellDescription": "Return target nonland permanent you don't control to its owner's hand."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigImmediateTrig",
+        "TriggerDescription": "Whenever you cast a colorless spell with mana value 7 or greater, you may exile CARDNAME from your graveyard. When you do, return each nonland permanent you don't control to its owner's hand.",
+        "ValidCard": "Card.Colorless+cmcGE7+YouCtrl",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

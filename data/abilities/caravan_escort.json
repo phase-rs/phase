@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "LEVEL 1-4 2/2",
+        "SetToughness": "2",
+        "Affected": "Card.Self",
+        "SetPower": "2",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE4_LEVEL"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "LEVEL 5+ 5/5 First strike",
+        "Affected": "Card.Self",
+        "IsPresent": "Card.Self+counters_GE5_LEVEL",
+        "SetPower": "5",
+        "SetToughness": "5",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

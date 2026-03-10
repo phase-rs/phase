@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "RegenerationAbility": "DBImmediateTrigger",
+          "Defined": "Self",
+          "SpellDescription": "Choose target opponent. Regenerate CARDNAME. When it regenerates this way, that player may draw a card.",
+          "RememberObjects": "TargetedPlayer",
+          "StackDescription": "SpellDescription",
+          "ValidTgts": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RegenerationAbility": "DBImmediateTrigger",
+        "Defined": "Self",
+        "SpellDescription": "Choose target opponent. Regenerate CARDNAME. When it regenerates this way, that player may draw a card.",
+        "RememberObjects": "TargetedPlayer",
+        "StackDescription": "SpellDescription",
+        "ValidTgts": "Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

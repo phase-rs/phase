@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may transform it. If you do, attach it to target creature that player controls.",
+            "TriggerZones": "Battlefield",
+            "ValidSource": "Card.Self",
+            "CombatDamage": "True",
+            "ValidTarget": "Player",
+            "OptionalDecider": "You",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "You control enchanted creature.",
+            "Affected": "Card.EnchantedBy",
+            "GainControl": "You"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

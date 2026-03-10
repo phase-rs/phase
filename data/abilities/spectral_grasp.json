@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't attack you or planeswalkers you control.",
+        "Target": "You,Planeswalker.YouCtrl"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.YouCtrl",
+        "ValidBlocker": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't block creatures you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

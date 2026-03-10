@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "TriggersWhenSpent": "TrigSpent",
+          "SpellDescription": "Add {U}. When you spend this mana to cast an instant or sorcery spell with mana value 3 or less, you may exile that spell instead of putting it into its owner's graveyard as it resolves."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TriggersWhenSpent": "TrigSpent",
+        "SpellDescription": "Add {U}. When you spend this mana to cast an instant or sorcery spell with mana value 3 or less, you may exile that spell instead of putting it into its owner's graveyard as it resolves."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Defined": "ExiledWith",
+          "WithoutManaCost": "True",
+          "Optional": "True",
+          "SorcerySpeed": "True",
+          "ValidSA": "Spell",
+          "Amount": "All",
+          "SpellDescription": "You may cast any number of spells from among cards exiled with CARDNAME without paying their mana costs. Activate only as a sorcery."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 U U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "ExiledWith",
+        "WithoutManaCost": "True",
+        "Optional": "True",
+        "SorcerySpeed": "True",
+        "ValidSA": "Spell",
+        "Amount": "All",
+        "SpellDescription": "You may cast any number of spells from among cards exiled with CARDNAME without paying their mana costs. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

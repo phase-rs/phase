@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a noncreature spell, create a 1/1 white Monk creature token with prowess.",
+        "ValidCard": "Card.nonCreature",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

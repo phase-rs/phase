@@ -1,0 +1,89 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "BestCard",
+        "TgtPrompt": "Select target land card in your graveyard",
+        "SpellDescription": "Return up to one target land card from your graveyard to your hand.",
+        "Planeswalker": "True",
+        "TargetMin": "0",
+        "TargetMax": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "CARDNAME deals 1 damage to any target."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Always",
+          "Name": "Emblem — Wrenn and Six",
+          "Stackable": "False",
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "Duration": "Permanent",
+          "Image": "emblem_wrenn_and_six",
+          "StaticAbilities": "STWrenn",
+          "SpellDescription": "You get an emblem with \"Instant and sorcery cards in your graveyard have retrace.\" (You may cast instant and sorcery cards from your graveyard by discarding a land card in addition to paying their other costs.)"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Always",
+        "Name": "Emblem — Wrenn and Six",
+        "Stackable": "False",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "Duration": "Permanent",
+        "Image": "emblem_wrenn_and_six",
+        "StaticAbilities": "STWrenn",
+        "SpellDescription": "You get an emblem with \"Instant and sorcery cards in your graveyard have retrace.\" (You may cast instant and sorcery cards from your graveyard by discarding a land card in addition to paying their other costs.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

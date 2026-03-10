@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "3",
+        "AddKeyword": "Reach",
+        "AddPower": "1",
+        "Description": "Enchanted creature gets +1/+3 and has reach. (It can block creatures with flying.)",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

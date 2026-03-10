@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When NICKNAME enters, conjure a card of your choice from the Planets spellbook onto the battlefield.",
+        "Destination": "Battlefield",
+        "Execute": "TrigConjure",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerDescription": "Whenever you attack, create a Lander token. It becomes a 2/1 artifact creature and gains flying.",
+        "Execute": "TrigToken",
+        "AttackingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

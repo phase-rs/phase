@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigToken",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.YouCtrl"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Artifact.YouCtrl",
+        "ValidPlayer": "You",
+        "Execute": "TrigWinsGame",
+        "TriggerDescription": "Treasure Hunter — At the beginning of your upkeep, if you control thirty or more artifacts, you win the game.",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "PresentCompare": "GE30"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

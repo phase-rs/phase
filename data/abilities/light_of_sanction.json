@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
+        "Prevent": "True",
+        "Description": "Prevent all damage that would be dealt to creatures you control by sources you control.",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

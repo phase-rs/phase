@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "PhaseReversed"
+      },
+      "params": {
+        "Description": "The phases of each player's turn are reversed. (The phases are, in reverse order, ending, postcombat main, combat, precombat main, and beginning.)",
+        "ValidPlayer": "Player"
+      }
+    },
+    {
+      "mode": {
+        "Other": "TurnReversed"
+      },
+      "params": {
+        "SVarCompare": "GT2",
+        "CheckSVar": "X",
+        "Description": "As long as there are more than two players in the game, the turn order is reversed.",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

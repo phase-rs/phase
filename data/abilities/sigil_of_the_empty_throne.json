@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an enchantment spell, create a 4/4 white Angel creature token with flying.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken",
+        "ValidCard": "Enchantment"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

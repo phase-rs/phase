@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "GainLife",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "If you would gain life, you gain twice that much life instead.",
+        "ValidPlayer": "You",
+        "ReplaceWith": "GainDouble",
+        "AILogic": "DoubleLife"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Dinosaur.YouCtrl+Other",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Whenever another Dinosaur you control enters, you may have CARDNAME base power become equal to that creature's power until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

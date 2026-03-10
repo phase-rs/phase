@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Ante"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "20Life",
+        "PromptToSkipOptionalAbility": "True",
+        "Optional": "True",
+        "Defined": "Player",
+        "ChangeNum": "All",
+        "RememberChanged": "True",
+        "SpellDescription": "Each player may ante the top card of their library. If a player does, that player's life total becomes 20."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

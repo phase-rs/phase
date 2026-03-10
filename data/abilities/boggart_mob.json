@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "Execute": "TrigToken",
+        "OptionalDecider": "You",
+        "ValidSource": "Goblin.YouCtrl",
+        "TriggerDescription": "Whenever a Goblin you control deals combat damage to a player, you may create a 1/1 black Goblin Rogue creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

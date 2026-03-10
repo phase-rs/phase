@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "IsPresent": "Artifact.YouCtrl",
+        "Description": "As long as you control two or more artifacts, this creature gets +2/+0.",
+        "Affected": "Card.Self",
+        "PresentCompare": "GE2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

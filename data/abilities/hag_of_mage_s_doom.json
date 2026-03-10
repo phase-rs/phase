@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Warlock.YouCtrl",
+        "Description": "Warlocks you control have \"Ward — Pay 2 life.\"",
+        "AddKeyword": "Ward:PayLife<2>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

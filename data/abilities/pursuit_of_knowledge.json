@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 7
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "SubCounter<3/STUDY>"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw seven cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "If you would draw a card, you may put a study counter on CARDNAME instead.",
+        "ValidPlayer": "You",
+        "ReplaceWith": "Counter",
+        "Optional": "True"
+      }
+    }
+  ],
+  "faces": []
+}

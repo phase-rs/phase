@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigOpenAttraction",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters the battlefield, open an Attraction."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "Affected": "Card.Self",
+        "AddKeyword": "Indestructible",
+        "Description": "As long as you've visited an Attraction this turn, CARDNAME has indestructible. (Damage and effects that say \"destroy\" don't destroy it.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.cmcGE6",
+        "TriggerZones": "Graveyard",
+        "Origin": "Any",
+        "TriggerDescription": "When a creature with mana value 6 or greater enters, you may return CARDNAME from your graveyard to the battlefield attached to that creature.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Enchanted creature gets +1/+1 and has trample.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

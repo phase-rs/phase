@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Creature.Self",
+        "TriggerDescription": "Stowage — Whenever CARDNAME attacks, put two +1/+1 counters on another target attacking creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

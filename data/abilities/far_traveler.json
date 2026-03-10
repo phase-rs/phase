@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commander creatures you own have \"At the beginning of your end step, exile up to one target tapped creature you control, then return it to the battlefield under its owner's control.\"",
+        "AddTrigger": "EndStep",
+        "Affected": "Creature.IsCommander+YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

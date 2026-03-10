@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "GimmeSome",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TrigCounter",
+        "Condition": "Threshold",
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME has \"At the beginning of your upkeep, you may put another +1/+1 counter on CARDNAME.\"",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

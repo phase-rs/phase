@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Whenever you cast a spell with cascade, return CARDNAME from your graveyard to your hand.",
+        "ValidCard": "Card.withCascade",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

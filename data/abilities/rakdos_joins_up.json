@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, return target creature card from your graveyard to the battlefield with two additional +1/+1 counters on it.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigChange"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDamage",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.Legendary+YouCtrl",
+        "TriggerDescription": "Whenever a legendary creature you control dies, CARDNAME deals damage equal to that creature's power to target opponent.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

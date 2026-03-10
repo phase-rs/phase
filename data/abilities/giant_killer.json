@@ -1,44 +1,65 @@
 {
-    "$schema": "schema.json",
-    "abilities": [],
-    "triggers": [],
-    "statics": [],
-    "replacements": [],
-    "faces": [
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
         {
-            "abilities": [
-                {
-                    "kind": "Activated",
-                    "cost": {
-                        "type": "Composite",
-                        "costs": [
-                            { "type": "Mana", "cost": "{1}{W}" },
-                            { "type": "Tap" }
-                        ]
-                    },
-                    "effect": {
-                        "type": "Tap",
-                        "target": { "type": "Filtered", "filter": "Creature.powerGE4" }
-                    }
-                }
-            ],
-            "triggers": [],
-            "statics": [],
-            "replacements": []
-        },
-        {
-            "abilities": [
-                {
-                    "kind": "Spell",
-                    "effect": {
-                        "type": "Destroy",
-                        "target": { "type": "Filtered", "filter": "Creature.powerGE4" }
-                    }
-                }
-            ],
-            "triggers": [],
-            "statics": [],
-            "replacements": []
+          "kind": "Activated",
+          "effect": {
+            "type": "Tap",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1 W"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Tap target creature."
+          }
         }
-    ]
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Destroy",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.powerGE4"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target creature with power 4 or greater",
+            "SpellDescription": "Destroy target creature with power 4 or greater. (Then exile this card. You may cast the creature later from exile.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
 }

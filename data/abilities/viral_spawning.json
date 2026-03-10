@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "g_3_3_phyrexian_beast_toxic",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 3/3 green Phyrexian Beast creature token with toxic 1. (Players dealt combat damage by this creature also get a poison counter.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SVarCompare": "GE3",
+        "EffectZone": "Graveyard",
+        "AddKeyword": "Flashback:2 G",
+        "AffectedZone": "Graveyard",
+        "CheckSVar": "X",
+        "Description": "Corrupted — As long as an opponent has three or more poison counters and CARDNAME is in your graveyard, it has flashback {2}{G}. (You may cast this card from your graveyard for its flashback cost. Then exile it.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

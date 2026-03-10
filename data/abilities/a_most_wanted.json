@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When enchanted creature dies, create two Treasure tokens."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +2/+2.",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

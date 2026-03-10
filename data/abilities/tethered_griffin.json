@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "IsPresent": "Enchantment.YouCtrl",
+        "PresentCompare": "EQ0",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When you control no enchantments, sacrifice CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

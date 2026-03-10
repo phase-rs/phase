@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Card.RedSource+YouCtrl",
+        "ReplaceWith": "DmgPlus2",
+        "Description": "If a red source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.",
+        "ValidTarget": "Player.Opponent,Permanent.OppCtrl",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

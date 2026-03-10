@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, double the power of target creature you control until end of turn.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

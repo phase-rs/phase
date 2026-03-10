@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDamage",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME attacks, she deals X damage to defending player, where X is the number of attacking creatures."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

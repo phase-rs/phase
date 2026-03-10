@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "ValidTgts": "Instant.YouCtrl+cmcLE2",
+          "TargetType": "Spell",
+          "AILogic": "Once",
+          "MayChooseTarget": "True",
+          "SpellDescription": "Copy target instant spell you control with mana value 2 or less. You may choose new targets for the copy."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Instant.YouCtrl+cmcLE2",
+        "TargetType": "Spell",
+        "AILogic": "Once",
+        "MayChooseTarget": "True",
+        "SpellDescription": "Copy target instant spell you control with mana value 2 or less. You may choose new targets for the copy."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "ValidTgts": "Sorcery.YouCtrl+cmcLE2",
+          "TargetType": "Spell",
+          "SpellDescription": "Copy target sorcery spell you control with mana value 2 or less. You may choose new targets for the copy.",
+          "MayChooseTarget": "True",
+          "AILogic": "Once"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Sorcery.YouCtrl+cmcLE2",
+        "TargetType": "Spell",
+        "SpellDescription": "Copy target sorcery spell you control with mana value 2 or less. You may choose new targets for the copy.",
+        "MayChooseTarget": "True",
+        "AILogic": "Once"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

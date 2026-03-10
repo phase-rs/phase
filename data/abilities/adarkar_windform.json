@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Debuff",
+        "params": {
+          "ValidTgts": "Creature",
+          "Keywords": "Flying",
+          "SpellDescription": "Target creature loses flying until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 S"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "Keywords": "Flying",
+        "SpellDescription": "Target creature loses flying until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

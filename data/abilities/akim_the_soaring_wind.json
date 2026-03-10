@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U R W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.token+YouCtrl",
+        "SpellDescription": "Creature tokens you control gain double strike until end of turn.",
+        "KW": "Double Strike"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "TokenCreatedOnce",
+      "params": {
+        "OnlyFirst": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you create one or more tokens for the first time each turn, create a 1/1 white Bird creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "ValidCard": "Card.MultiColor",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a multicolored spell, CARDNAME deals X damage to any target, where X is the number of colors that spell is.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetPower": "3",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LT3_LEVEL",
+        "SetToughness": "3",
+        "Description": "LEVEL 1-2 3/3"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "5",
+        "Description": "LEVEL 3+ 5/5 CARDNAME can't be blocked except by black creatures.",
+        "Affected": "Card.Self",
+        "IsPresent": "Card.Self+counters_GE3_LEVEL",
+        "SetToughness": "5",
+        "AddStaticAbility": "SCantBlock"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

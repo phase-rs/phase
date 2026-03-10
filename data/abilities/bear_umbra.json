@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddSVar": "BearUmbraUntap & HasAttackEffect",
+        "AddTrigger": "TrigUntap",
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted creature gets +2/+2 and has \"Whenever this creature attacks, untap all lands you control.\"",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl+cmcLE3,Planeswalker.OppCtrl+cmcLE3"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetsForEachPlayer": "True",
+        "TargetMin": "0",
+        "SpellDescription": "For each opponent, gain control of up to one target creature or planeswalker that player controls with mana value 3 or less.",
+        "TgtPrompt": "Select target creature or planeswalker an opponent controls with mana value 3 or less to gain control of.",
+        "TargetMax": "OneEach"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you draw a card, put a +1/+1 counter on NICKNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Caster": "You",
+        "IsPresent": "Card.Self+powerEven",
+        "Description": "As long as NICKNAME's power is even, you may cast noncreature spells as though they had flash.",
+        "ValidCard": "Card.nonCreature",
+        "ValidSA": "Spell"
+      }
+    },
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "IsPresent": "Card.Self+powerOdd",
+        "ValidCard": "Creature",
+        "Caster": "You",
+        "Description": "As long as NICKNAME's power is odd, you may cast creature spells as though they had flash.",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

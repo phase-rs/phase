@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigScry",
+        "TriggerDescription": "Whenever a creature you control enters, scry 1. (Look at the top card of your library. You may put that card on the bottom of your library.)",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a spell that targets a creature you control, draw a card.",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You",
+        "TargetsValid": "Creature.YouCtrl+inZoneBattlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

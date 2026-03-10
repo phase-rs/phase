@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you cast CARDNAME, you may search your library for a colorless creature card with mana value 7 or greater, reveal it, then shuffle and put that card on top of it.",
+        "Execute": "TrigSearch"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "The first creature spell you cast each turn costs {2} less to cast.",
+        "Type": "Spell",
+        "EffectZone": "Battlefield",
+        "OnlyFirstSpell": "True",
+        "Amount": "2",
+        "ValidCard": "Card.Creature",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

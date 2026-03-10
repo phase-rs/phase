@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DiscardValid": "Card.nonLand+cmcLE2",
+        "DiscardValidDesc": "nonland card from it with mana value 2 or less",
+        "SpellDescription": "Target player reveals their hand. You choose a nonland card from it [with mana value 2 or less]. That player discards that card.",
+        "Mode": "RevealYouChoose"
+      }
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "{2}{B}",
+        "DiscardValid": "Card.nonLand",
+        "NonBasicSpell": "True",
+        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+        "PrecostDesc": "Cleave",
+        "Mode": "RevealYouChoose"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

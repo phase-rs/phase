@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, create a 1/1 green Insect creature token with flying named Butterfly.",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Affected": "Creature.cmcLE2",
+        "Description": "Each creature with mana value 2 or less gets +2/+2.",
+        "AddPower": "2",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

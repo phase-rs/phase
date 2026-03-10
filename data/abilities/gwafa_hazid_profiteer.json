@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "BRIBERY",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouDontCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Put a bribery counter on target creature you don't control. Its controller draws a card.",
+        "TgtPrompt": "Select target creature you don't control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "Creatures with bribery counters on them can't attack or block.",
+        "ValidCard": "Creature.counters_GE1_BRIBERY"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

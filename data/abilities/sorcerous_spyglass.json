@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeActivated",
+      "params": {
+        "ValidSA": "Activated.!ManaAbility",
+        "Description": "Activated abilities of sources with the chosen name can't be activated unless they're mana abilities.",
+        "ValidCard": "Card.NamedCard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

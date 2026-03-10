@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "PlayerTurn": "True",
+        "Destination": "Exile",
+        "ValidCards": "Card.!token+!copiedSpell",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever one or more cards are put into exile during your turn, put a +1/+1 counter on CARDNAME. This ability triggers only once each turn.",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

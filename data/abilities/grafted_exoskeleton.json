@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Unattach",
+      "params": {
+        "ValidAttachment": "Card.Self",
+        "Execute": "TrigSac",
+        "ValidObject": "Permanent",
+        "TriggerDescription": "Whenever CARDNAME becomes unattached from a permanent, sacrifice that permanent."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddKeyword": "Infect",
+        "AddToughness": "2",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+2 and has infect. (It deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

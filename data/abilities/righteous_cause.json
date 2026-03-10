@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever a creature attacks, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

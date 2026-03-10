@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Creature.Blue+YouCtrl",
+        "AddKeyword": "Flying",
+        "Description": "CARDNAME has flying as long as you control a blue creature.",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Affected": "Card.Self",
+        "IsPresent": "Creature.White+YouCtrl",
+        "Description": "CARDNAME has vigilance as long as you control a white creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

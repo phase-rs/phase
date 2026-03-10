@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Phaeron — Whenever one or more artifact cards leave your graveyard, create two 2/2 black Necron Warrior artifact creature tokens.",
+        "Destination": "Any",
+        "Origin": "Graveyard",
+        "Execute": "TrigToken",
+        "ValidCards": "Artifact.YouOwn"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "Execute": "TrigPump",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Grand Strategist — At the beginning of combat on your turn, another target artifact creature you control gets +2/+2 and gains menace until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

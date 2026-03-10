@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "SpellDescription": "Target opponent chooses X cards from their hand. Look at those cards. You may cast a spell from among them without paying its mana cost.",
+          "IsCurse": "True",
+          "RememberRevealed": "True",
+          "ValidTgts": "Opponent",
+          "NumCards": "X",
+          "SubAbility": "PlayChosen",
+          "StackDescription": "{p:Targeted} chooses X cards from their hand. Look at those cards. You may cast a spell from among them without paying its mana cost."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target opponent chooses X cards from their hand. Look at those cards. You may cast a spell from among them without paying its mana cost.",
+        "IsCurse": "True",
+        "RememberRevealed": "True",
+        "ValidTgts": "Opponent",
+        "NumCards": "X",
+        "SubAbility": "PlayChosen",
+        "StackDescription": "{p:Targeted} chooses X cards from their hand. Look at those cards. You may cast a spell from among them without paying its mana cost."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

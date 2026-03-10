@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "RemoveCounter",
+        "counter_type": "NET",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Mana<0\\EnchantedCost>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Remove a net counter from this Aura. Only the controller of the enchanted creature may activate this ability.",
+        "CostDesc": "Pay enchanted creature's mana cost:",
+        "Activator": "Player.EnchantedController"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Creature.EnchantedBy",
+        "Layer": "CantHappen",
+        "IsPresent": "Card.Self+counters_GE1_NET",
+        "ValidStepTurnToController": "You",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step if this Aura has a net counter on it."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a Mutant, Ninja, or Turtle you control enters, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Mutant.YouCtrl,Ninja.YouCtrl,Turtle.YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigInvestigate"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

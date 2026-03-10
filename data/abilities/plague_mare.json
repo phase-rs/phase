@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, creatures your opponents control get -1/-1 until end of turn.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.White",
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked by white creatures."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

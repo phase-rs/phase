@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a historic spell, CARDNAME gets +1/+1 until end of turn. (Artifacts, legendaries, and Sagas are historic.)",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.Historic",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

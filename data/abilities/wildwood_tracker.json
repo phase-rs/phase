@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, if you control another non-Human creature, CARDNAME gets +1/+1 until end of turn.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature.nonHuman+Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, if you control another non-Human creature, CARDNAME gets +1/+1 until end of turn.",
+        "Execute": "TrigPump",
+        "IsPresent": "Creature.nonHuman+Other+YouCtrl",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

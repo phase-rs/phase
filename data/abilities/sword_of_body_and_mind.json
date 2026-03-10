@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigToken",
+        "ValidSource": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you create a 2/2 green Wolf creature token and that player mills ten cards.",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+2 and has protection from green and from blue.",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddSVar": "SwordOfBodyAndMindCE",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Protection from green & Protection from blue"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

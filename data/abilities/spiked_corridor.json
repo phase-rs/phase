@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ValidPlayer": "You",
+            "Execute": "TrigToken",
+            "ThisDoor": "True",
+            "TriggerDescription": "When you unlock this door, create three 1/1 red Devil creature tokens with \"When this creature dies, it deals 1 damage to any target.\"",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "DamageDone",
+          "params": {
+            "IsCombat": "False",
+            "ActiveZones": "Battlefield",
+            "ValidTarget": "Opponent",
+            "ReplaceWith": "DamageReplace",
+            "Description": "If a source you control would deal noncombat damage to an opponent, it deals that much damage plus 2 instead.",
+            "ValidSource": "Card.YouCtrl,Emblem.YouCtrl"
+          }
+        }
+      ]
+    }
+  ]
+}

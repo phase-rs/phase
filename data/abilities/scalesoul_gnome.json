@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, discover X, where X is that damage.",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "Execute": "TrigDiscover"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you play a card from exile, conjure a duplicate of it into your hand.",
+        "ValidCard": "Card.wasCastFromExile+!token",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigConjure"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Execute": "TrigConjure",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you play a card from exile, conjure a duplicate of it into your hand.",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Origin": "Exile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

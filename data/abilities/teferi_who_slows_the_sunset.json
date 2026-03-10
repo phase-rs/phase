@@ -1,0 +1,90 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "Choose up to one target artifact, up to one target creature, and up to one target land.",
+        "SpellDescription": "Choose up to one target artifact, up to one target creature, and up to one target land. Untap the chosen permanents you control. Tap the chosen permanents you don't control. You gain 2 life.",
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "TgtPrompt": "Choose up to one target artifact",
+        "Planeswalker": "True",
+        "SubAbility": "DBChooseCreature"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "NoReveal": "True",
+        "Planeswalker": "True",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "UntapOppStep",
+          "Image": "emblem_teferi_who_slows_the_sunset",
+          "Stackable": "False",
+          "Duration": "Permanent",
+          "AILogic": "Always",
+          "SpellDescription": "You get an emblem with \"Untap all permanents you control during each opponent's untap step\" and \"You draw a card during each opponent's draw step.\"",
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "Name": "Emblem — Teferi, Who Slows the Sunset",
+          "Triggers": "DrawOppStep"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "UntapOppStep",
+        "Image": "emblem_teferi_who_slows_the_sunset",
+        "Stackable": "False",
+        "Duration": "Permanent",
+        "AILogic": "Always",
+        "SpellDescription": "You get an emblem with \"Untap all permanents you control during each opponent's untap step\" and \"You draw a card during each opponent's draw step.\"",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "Name": "Emblem — Teferi, Who Slows the Sunset",
+        "Triggers": "DrawOppStep"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a creature attacks, it gets +1/+1 until end of turn for each other creature its controller controls that shares a creature type with it.",
+        "TriggerZones": "Command",
+        "ValidCard": "Creature",
+        "Execute": "AnimosityPump"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "TrigSetState",
+        "TriggerDescription": "Whenever chaos ensues, turn target creature face down. It becomes a 2/2 Cyberman artifact creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, CARDNAME and up to one other target creature you control both gain your choice of first strike or lifelink until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSelectTargetCreature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

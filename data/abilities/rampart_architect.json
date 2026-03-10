@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever this creature enters or attacks, create a 1/3 white Wall creature token with defender."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever this creature enters or attacks, create a 1/3 white Wall creature token with defender."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+withDefender",
+        "Destination": "Graveyard",
+        "Execute": "TrigChangeZone",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a creature you control with defender dies, you may search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

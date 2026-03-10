@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME is dealt damage, each opponent gains that much life.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "Execute": "TrigGain"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

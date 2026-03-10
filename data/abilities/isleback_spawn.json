@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "Description": "CARDNAME gets +4/+8 as long as a library has twenty or fewer cards in it.",
+        "Affected": "Card.Self",
+        "AddToughness": "8",
+        "AddPower": "4",
+        "SVarCompare": "LE20"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

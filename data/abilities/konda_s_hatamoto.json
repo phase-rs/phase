@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Description": "As long as you control a legendary Samurai, CARDNAME gets +1/+2 and has vigilance. (Attacking doesn't cause this creature to tap.)",
+        "IsPresent": "Samurai.Legendary+YouCtrl",
+        "Affected": "Card.Self",
+        "AddPower": "1",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has haste as long as you control another Dinosaur.",
+        "AddKeyword": "Haste",
+        "Affected": "Card.Self",
+        "IsPresent": "Dinosaur.Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

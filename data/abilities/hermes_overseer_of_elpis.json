@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "TriggerDescription": "Whenever you cast a noncreature spell, create a 1/1 blue Bird creature token with flying and vigilance.",
+        "Execute": "TrigToken",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "Creature.Bird+YouCtrl",
+        "TriggerDescription": "Whenever you attack with one or more Birds, scry 2.",
+        "Execute": "TrigScry"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

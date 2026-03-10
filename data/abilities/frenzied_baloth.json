@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPreventDamage"
+      },
+      "params": {
+        "IsCombat": "True",
+        "Description": "Combat damage can't be prevented."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen"
+      }
+    },
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell.Creature+YouCtrl",
+        "ActiveZones": "Battlefield",
+        "Description": "Creature spells you control can't be countered.",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

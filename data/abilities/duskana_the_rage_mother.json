@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card for each creature you control with base power and toughness 2/2.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+basePowerEQ2+baseToughnessEQ2",
+        "TriggerDescription": "Whenever a creature you control with base power and toughness 2/2 attacks, it gets +3/+3 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

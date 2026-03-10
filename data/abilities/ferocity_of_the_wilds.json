@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Trample",
+        "Affected": "Creature.nonHuman+attacking+YouCtrl",
+        "Description": "Attacking non-Human creatures you control get +1/+0 and have trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

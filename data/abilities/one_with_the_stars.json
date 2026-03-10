@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Enchantment",
+        "RemoveCardTypes": "True",
+        "Description": "Enchanted permanent is an enchantment and loses all other card types. (It still has its abilities, but it's no longer a creature.)",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigDrain",
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "Player.EnchantedBy",
+            "TriggerDescription": "At the beginning of enchanted player's upkeep, they lose 1 life and you gain 1 life."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": {
+            "Other": "Transform"
+          },
+          "params": {
+            "ValidCard": "Card.Self",
+            "Description": "As this permanent transforms into CARDNAME, attach it to a player.",
+            "ReplaceWith": "Attach"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

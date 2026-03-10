@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBLoseLife",
+        "SpellDescription": "Each opponent discards a card and loses 2 life.",
+        "Defined": "Player.Opponent",
+        "Mode": "TgtChoose",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Gain control of target creature until end of turn. Untap it. It gains haste until end of turn. Sacrifice it at the beginning of the next end step if it has mana value 3 or less.",
+        "SubAbility": "DelTrig",
+        "AddKWs": "Haste",
+        "Planeswalker": "True",
+        "LoseControl": "EOT",
+        "Untap": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "Planeswalker": "True",
+          "RepeatPlayers": "Player.Opponent",
+          "RepeatSubAbility": "DBLoseLife2",
+          "SpellDescription": "Each opponent loses life equal to the number of cards in their graveyard.",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "RepeatPlayers": "Player.Opponent",
+        "RepeatSubAbility": "DBLoseLife2",
+        "SpellDescription": "Each opponent loses life equal to the number of cards in their graveyard.",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

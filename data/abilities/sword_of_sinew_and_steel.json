@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, destroy up to one target planeswalker and up to one target artifact.",
+        "ValidSource": "Creature.EquippedBy",
+        "CombatDamage": "True",
+        "Execute": "TrigDestroyPlaneswalker",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddSVar": "SwordOfSinewAndSteelCE",
+        "Description": "Equipped creature gets +2/+2 and has protection from black and from red.",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Protection from black & Protection from red",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

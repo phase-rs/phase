@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, put a charge counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "X",
+        "Description": "Equipped creature gets +1/+1 for each counter on CARDNAME.",
+        "AddPower": "X"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "AddKeyword": "Double Strike",
+        "Description": "As long as CARDNAME has four or more counters on it, equipped creature has double strike.",
+        "Affected": "Creature.EquippedBy",
+        "SVarCompare": "GE4"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

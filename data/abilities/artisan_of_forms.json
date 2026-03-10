@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, you may have CARDNAME become a copy of target creature, except it has this ability.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigArtisanCopy",
+        "ValidActivatingPlayer": "You",
+        "TargetsValid": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

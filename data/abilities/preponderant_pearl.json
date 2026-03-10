@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this artifact enters, conjure a card named Ponder into your hand.",
+        "Origin": "Any",
+        "Execute": "TrigConjure1",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigConjure2",
+        "TriggerDescription": "Whenever one or more Merfolk you control deal combat damage to a player, sacrifice this artifact. If you do, conjure a card named Flooded Strand into your hand.",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Merfolk.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

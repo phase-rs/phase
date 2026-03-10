@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Equipped creature can't be blocked by creatures with power 4 or greater.",
+        "ValidAttacker": "Creature.EquippedBy",
+        "ValidBlocker": "Creature.powerGE4"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Equipped creature gets +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

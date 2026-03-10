@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveCreatureTypes": "True",
+        "Description": "Celebration — As long as two or more nonland permanents entered the battlefield under your control this turn, CARDNAME is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (It loses all other creature types.)",
+        "SetPower": "4",
+        "AddType": "Dragon",
+        "CheckSVar": "Celebration",
+        "SetToughness": "4",
+        "Affected": "Card.Self",
+        "AddAbility": "DragonPump",
+        "AddKeyword": "Flying",
+        "SVarCompare": "GE2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P0P1",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromGrave<1/Creature>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put X +0/+1 counters on CARDNAME, where X is the exiled card's mana value.",
+        "AILogic": "ExiledCreatureFromGraveCMC"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

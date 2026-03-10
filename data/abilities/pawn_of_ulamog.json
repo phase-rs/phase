@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another nontoken creature you control dies, you may create a 0/1 colorless Eldrazi Spawn creature token. It has \"Sacrifice this creature: Add {C}.\"",
+        "ValidCard": "Creature.Other+!token+YouCtrl,Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

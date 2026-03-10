@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPut",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.IsCommander+YouCtrl",
+        "TriggerDescription": "Whenever a commander you control attacks, put a +1/+1 counter on it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

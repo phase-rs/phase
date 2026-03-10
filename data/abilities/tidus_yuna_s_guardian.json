@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "Phase": "BeginCombat",
+        "TriggerDescription": "At the beginning of combat on your turn, you may move a counter from target creature you control onto a second target creature you control.",
+        "Execute": "TrigMoveCounter"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigDraw",
+        "CombatDamage": "True",
+        "TriggerDescription": "Cheer — Whenever one or more creatures you control with counters on them deal combat damage to a player, you may draw a card and proliferate. Do this only once each turn.",
+        "ValidSource": "Creature.YouCtrl+HasCounters",
+        "ValidTarget": "Player",
+        "ResolvedLimit": "1",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When this Case enters, conjure four cards named Fblthp, the Lost into your library, then shuffle. Draw a card.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "IsPresent2": "Card.Self+!IsSolved",
+        "Execute": "TrigSolve",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "To solve — You control a legendary Homunculus.",
+        "IsPresent": "Homunculus.YouCtrl+Legendary"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "IsPresent": "Card.Self+IsSolved",
+        "MayLookAt": "You",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayPlay": "True",
+        "Description": "Solved — You may look at the top card of your library any time and you may play lands and cast spells from the top of your library."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

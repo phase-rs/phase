@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Zombie.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Zombie you control enters, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigInvestigate",
+        "TriggerDescription": "Whenever a nontoken creature you control dies, investigate.",
+        "ValidCard": "Creature.!token+YouCtrl",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Clues you control have exalted. (Whenever a creature you control attacks alone, that creature gets +1/+1 until end of turn for each instance of exalted among permanents you control.)",
+        "AddKeyword": "Exalted",
+        "Affected": "Clue.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

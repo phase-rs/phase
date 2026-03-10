@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "AILogic": "Pump",
+          "RememberObjects": "Targeted",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "StaticAbilities": "Unblockable",
+          "SpellDescription": "Target creature can't be blocked this turn.",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "AILogic": "Pump",
+        "RememberObjects": "Targeted",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "StaticAbilities": "Unblockable",
+        "SpellDescription": "Target creature can't be blocked this turn.",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

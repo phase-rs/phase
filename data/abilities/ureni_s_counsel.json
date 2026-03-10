@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "SpellDescription": "Seek a Dragon card.",
+          "Type": "Dragon"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Seek a Dragon card.",
+        "Type": "Dragon"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {1} less to cast for each Dragon card in your library.",
+        "EffectZone": "All",
+        "Amount": "X",
+        "ValidCard": "Card.Self",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

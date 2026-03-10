@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Description": "Metalcraft — As long as you control three or more artifacts, CARDNAME gets +2/+2 and has flying.",
+        "AddToughness": "2",
+        "Condition": "Metalcraft",
+        "AddPower": "2",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

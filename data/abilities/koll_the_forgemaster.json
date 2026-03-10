@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another nontoken creature you control dies, if it was enchanted or equipped, return it to its owner's hand.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.Other+!token+enchanted+YouCtrl,Creature.Other+!token+equipped+YouCtrl",
+        "Execute": "TrigChangeZone",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Creature tokens you control that are enchanted or equipped get +1/+1.",
+        "Affected": "Creature.token+enchanted+YouCtrl,Creature.token+equipped+YouCtrl",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

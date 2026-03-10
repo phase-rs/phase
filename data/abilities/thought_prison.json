@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may have target player reveal their hand. If you do, choose a nonland card from it and exile that card.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever a player casts a spell that shares a color or mana value with the exiled card, CARDNAME deals 2 damage to that player.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.SharesCMCWith Imprinted.ExiledWithSource,Card.SharesColorWith Imprinted.ExiledWithSource",
+        "Execute": "TrigDamage"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Exile",
+        "ValidCard": "Card.IsImprinted+ExiledWithSource",
+        "Execute": "DBForget",
+        "Destination": "Any",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "DBCleanup"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

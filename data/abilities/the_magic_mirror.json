@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, put a knowledge counter on CARDNAME, then draw a card for each knowledge counter on CARDNAME.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "CARDNAME costs {1} less to cast for each instant and sorcery card in your graveyard.",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "Amount": "X"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You have no maximum hand size.",
+        "SetMaxHandSize": "Unlimited"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

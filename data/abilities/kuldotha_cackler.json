@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "HeroPump",
+        "TriggerDescription": "Whenever CARDNAME attacks, it gets +X/+0 until end of turn, where X is the number of permanents you control with oil counters on them.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

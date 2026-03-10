@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBCounters",
+        "Description": "CARDNAME escapes with two +1/+1 counters on it. When it enters this way, each opponent sacrifices a non-Gorgon creature.",
+        "ValidCard": "Card.Self+escaped"
+      }
+    }
+  ],
+  "faces": []
+}

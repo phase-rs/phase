@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerDescription": "When one or more creatures you control deal combat damage to a player, if there is no monarch, you become the monarch.",
+        "SVarCompare": "EQ0",
+        "CombatDamage": "True",
+        "Execute": "TrigMonarch",
+        "CheckSVar": "Monarch",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, create a 1/1 black Assassin creature token with deathtouch and haste.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

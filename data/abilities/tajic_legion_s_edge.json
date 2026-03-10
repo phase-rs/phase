@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gains first strike until end of turn.",
+        "KW": "First Strike"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "IsCombat": "False",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Creature.Other+YouCtrl",
+        "Prevent": "True",
+        "Description": "Prevent all noncombat damage that would be dealt to other creatures you control."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "ChangeType": "Forest",
+        "SpellDescription": "Search your library for a Forest card, reveal that card, put it into your hand, then shuffle."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "If you have no land cards in hand, you may reveal your hand rather than pay this spell's mana cost.",
+        "ValidCard": "Card.Self",
+        "ValidPlayer": "You",
+        "EffectZone": "All",
+        "Cost": "Reveal<1/Hand>",
+        "ValidSA": "Spell",
+        "CheckSVar": "X",
+        "SVarCompare": "EQ0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

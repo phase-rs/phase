@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Land.YouCtrl",
+          "Abilities": "ABMana",
+          "SpellDescription": "Until end of turn, lands you control gain \"{T}: Add one mana of any color.\""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Land.YouCtrl",
+        "Abilities": "ABMana",
+        "SpellDescription": "Until end of turn, lands you control gain \"{T}: Add one mana of any color.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

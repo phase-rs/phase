@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, mill four cards.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "X",
+        "Description": "CARDNAME gets +X/+0, where X is the greatest power among creature cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

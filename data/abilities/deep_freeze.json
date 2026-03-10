@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "0",
+        "AddType": "Wall",
+        "SetToughness": "4",
+        "Affected": "Card.EnchantedBy",
+        "AddColor": "Blue",
+        "AddKeyword": "Defender",
+        "Description": "Enchanted creature has base power and toughness 0/4, has defender, loses all other abilities, and is a blue Wall in addition to its other colors and types.",
+        "RemoveAllAbilities": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

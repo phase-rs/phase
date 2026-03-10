@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "SpellDescription": "Each player chooses up to two creatures they control, then sacrifices the rest. Then you create a tapped Treasure token for each creature your opponents control.",
+        "ControlledByPlayer": "Chooser",
+        "StackDescription": "SpellDescription",
+        "MinAmount": "0",
+        "Defined": "Player",
+        "SubAbility": "SacAllOthers",
+        "Amount": "2",
+        "ChoiceTitle": "Choose up to two creatures to keep"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

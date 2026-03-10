@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRemoveCtr",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, remove an omen counter from CARDNAME. If there are no omen counters on CARDNAME, the player with the highest life total wins the game. If two or more players are tied for highest life total, the game is a draw."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

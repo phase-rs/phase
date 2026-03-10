@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddType": "Swamp",
+        "Description": "Enchanted land is a Swamp.",
+        "RemoveLandTypes": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

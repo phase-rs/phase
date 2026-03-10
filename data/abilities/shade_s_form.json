@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted creature dies, return that card to the battlefield under your control.",
+        "Origin": "Battlefield",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddAbility": "Pump",
+        "Description": "Enchanted creature has \"{B}: This creature gets +1/+1 until end of turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

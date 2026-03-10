@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "X",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each permanent card in your graveyard."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Prevent": "True",
+        "Description": "Immune — Prevent all combat damage that would be dealt to CARDNAME.",
+        "IsCombat": "True",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Domain — Whenever CARDNAME enters or becomes tapped, put a +1/+1 counter on each creature you control with toughness less than the number of basic land types among lands you control."
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Domain — Whenever CARDNAME enters or becomes tapped, put a +1/+1 counter on each creature you control with toughness less than the number of basic land types among lands you control.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

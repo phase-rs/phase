@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Player",
+        "Execute": "TrigFlip",
+        "TriggerDescription": "Whenever a player casts a spell, that player flips a coin. If the player loses the flip, counter that spell.",
+        "TriggerZones": "Command",
+        "ValidCard": "Card"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, target player reveals the top card of their library. If it's a nonland card, you may cast it without paying its mana cost.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

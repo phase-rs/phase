@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayEnergy<1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KWChoice": "Flying,Vigilance,Lifelink",
+        "SpellDescription": "CARDNAME gains your choice of flying, vigilance, or lifelink until end of turn.",
+        "StackDescription": "SpellDescription"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "CARDNAME gets +2/-2 or -2/+2 until end of turn.",
+          "Defined": "You",
+          "Choices": "ABPump1,ABPump2"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayEnergy<1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "CARDNAME gets +2/-2 or -2/+2 until end of turn.",
+        "Defined": "You",
+        "Choices": "ABPump1,ABPump2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigEnergy",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E} (three energy counters).",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

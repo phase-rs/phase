@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever you cast a creature spell, create a 1/1 white Warrior creature token with vigilance.",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "Type": "Spell",
+        "Activator": "You",
+        "Description": "White creature spells you cast cost {1} less to cast.",
+        "ValidCard": "Creature.White"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage. If damage is prevented this way, CARDNAME deals that much damage to that source's controller.",
+          "SubAbility": "DBEffect",
+          "AILogic": "NeedsPrevention",
+          "Choices": "Card,Emblem"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage. If damage is prevented this way, CARDNAME deals that much damage to that source's controller.",
+        "SubAbility": "DBEffect",
+        "AILogic": "NeedsPrevention",
+        "Choices": "Card,Emblem"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

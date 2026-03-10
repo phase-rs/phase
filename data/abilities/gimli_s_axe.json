@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +3/+0.",
+        "AddPower": "3",
+        "Affected": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as equipped creature is legendary, it has menace. (It can't be blocked except by two or more creatures.)",
+        "Affected": "Card.EquippedBy+Legendary",
+        "AddKeyword": "Menace"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

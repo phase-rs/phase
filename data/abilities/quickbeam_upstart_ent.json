@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "DBPump",
+        "TriggerDescription": "Whenever CARDNAME or another Treefolk you control enters, up to two target creatures each get +2/+2 and gain trample until end of turn.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Treefolk.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME enters, create Voja, Friend to Elves, a legendary 3/3 green and white Wolf creature token.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever a Wolf you control enters, you gain 3 life and that creature fights up to one target creature you don't control.",
+        "ValidCard": "Wolf.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

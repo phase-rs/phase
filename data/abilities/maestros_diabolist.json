@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, if you don't control a Devil token, create a tapped and attacking 1/1 red Devil creature token with \"When this creature dies, it deals 1 damage to any target.\"",
+        "IsPresent": "Devil.token+YouCtrl",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

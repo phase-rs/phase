@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayEnergy<2>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose target creature card in a graveyard. Exile it with a brain counter on it. Activate only as a sorcery.",
+        "AILogic": "Mairsil",
+        "WithCountersType": "BRAIN",
+        "SorcerySpeed": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, they mill two cards and you get {E}{E} (two energy counters).",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "NICKNAME has all activated abilities of all cards in exile with brain counters on them.",
+        "Affected": "Card.Self",
+        "GainsAbilitiesOfZones": "Exile",
+        "GainsAbilitiesOf": "Card.counters_GE1_BRAIN",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Card.Creature+YouCtrl+wasCast",
+            "AddKeyword": "Convoke",
+            "AffectedZone": "Stack",
+            "Description": "Creature spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a creature spell pays for {1} or one mana of that creature's color.)"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": {
+            "Other": "UntapOtherPlayer"
+          },
+          "params": {
+            "Description": "Untap each creature you control during each other player's untap step.",
+            "ValidCard": "Creature.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME enters, return target instant, sorcery, or creature card from your graveyard to your hand.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ReplaceWith": "Exile",
+        "Description": "If CARDNAME would die, exile it instead.",
+        "ValidCard": "Card.Self",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

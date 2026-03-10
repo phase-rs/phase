@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDelayedTrigger",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {2}. If you do, when you cast your next instant or sorcery spell this turn, copy it. You may choose new targets for the copy."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Caster": "You",
+        "Description": "You may cast sorcery spells as though they had flash.",
+        "ValidSA": "Spell",
+        "ValidCard": "Sorcery"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "UnlessCost": "Sac<1/Permanent.Other>",
+        "UnlessPayer": "You",
+        "SpellDescription": "You may sacrifice another permanent. If you do, you gain 1 life and draw a card.",
+        "Planeswalker": "True",
+        "UnlessSwitched": "True",
+        "SubAbility": "DBDraw"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand+cmcLE3"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target nonland permanent with mana value 3 or less.",
+        "TgtPrompt": "Select target nonland permanent with mana value 3 or less",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Duration": "Permanent",
+          "Name": "Emblem — Vraska, Golgari Queen",
+          "Ultimate": "True",
+          "AILogic": "Always",
+          "Planeswalker": "True",
+          "Image": "emblem_vraska_golgari_queen",
+          "SpellDescription": "You get an emblem with \"Whenever a creature you control deals combat damage to a player, that player loses the game.\"",
+          "Stackable": "False",
+          "Triggers": "TrigDamage"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "Name": "Emblem — Vraska, Golgari Queen",
+        "Ultimate": "True",
+        "AILogic": "Always",
+        "Planeswalker": "True",
+        "Image": "emblem_vraska_golgari_queen",
+        "SpellDescription": "You get an emblem with \"Whenever a creature you control deals combat damage to a player, that player loses the game.\"",
+        "Stackable": "False",
+        "Triggers": "TrigDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

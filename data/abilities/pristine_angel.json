@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever you cast a spell, you may untap CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection:Artifact & Protection from each color",
+        "Affected": "Card.Self+untapped",
+        "Description": "As long as CARDNAME is untapped, it has protection from artifacts and from each color."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

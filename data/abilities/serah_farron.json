@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "OptionalDecider": "You",
+            "TriggerDescription": "At the beginning of combat on your turn, if you control two or more other legendary creatures, you may transform CARDNAME.",
+            "IsPresent": "Creature.Other+Legendary+YouCtrl",
+            "TriggerZones": "Battlefield",
+            "Phase": "BeginCombat",
+            "Execute": "TrigTransform",
+            "ValidPlayer": "You",
+            "PresentCompare": "GE2"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Amount": "2",
+            "EffectZone": "Battlefield",
+            "Type": "Spell",
+            "Activator": "You",
+            "ValidCard": "Creature.Legendary",
+            "Description": "The first legendary creature spell you cast each turn costs {2} less to cast.",
+            "OnlyFirstSpell": "True"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "ValidCard": "Creature.Legendary",
+            "Description": "The first legendary creature spell you cast each turn costs {2} less to cast.",
+            "Amount": "2",
+            "EffectZone": "Battlefield",
+            "Type": "Spell",
+            "Activator": "You",
+            "OnlyFirstSpell": "True"
+          }
+        },
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "2",
+            "Description": "Legendary creatures you control get +2/+2.",
+            "Affected": "Creature.Legendary+YouCtrl",
+            "AddToughness": "2"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

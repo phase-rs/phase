@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "WerewolfTransformCondition": "True",
+            "Phase": "Upkeep",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "Whenever an opponent casts a spell, CARDNAME deals 2 damage to that player.",
+            "ValidCard": "Card",
+            "ValidActivatingPlayer": "Opponent",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigDealDamage"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "Execute": "TrigTransform",
+            "WerewolfUntransformCondition": "True",
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

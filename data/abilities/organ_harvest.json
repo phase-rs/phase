@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSubAbility": "DBSac",
+          "SpellDescription": "Your team may sacrifice any number of creatures. For each creature sacrificed this way, you add {B}{B}.",
+          "RepeatPlayers": "NonOpponent",
+          "ChangeZoneTable": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "DBSac",
+        "SpellDescription": "Your team may sacrifice any number of creatures. For each creature sacrificed this way, you add {B}{B}.",
+        "RepeatPlayers": "NonOpponent",
+        "ChangeZoneTable": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

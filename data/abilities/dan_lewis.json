@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.nonCreature+nonEquipment+YouCtrl",
+        "AddType": "Equipment",
+        "AddStaticAbility": "EquipAB",
+        "AddKeyword": "Equip:1",
+        "Description": "Noncreature, non-Equipment artifacts you control are Equipment in addition to their other types and have \"Equipped creature gets +1/+0\" and equip {1}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

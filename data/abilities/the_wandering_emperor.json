@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "1",
+        "SubAbility": "DBPump",
+        "Planeswalker": "True",
+        "SpellDescription": "Put a +1/+1 counter on up to one target creature. It gains first strike until end of turn.",
+        "TargetMin": "0"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_2_2_samurai_vigilance",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 2/2 white Samurai creature token with vigilance."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.tapped"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target tapped creature. You gain 2 life.",
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target tapped creature",
+        "SubAbility": "DBGainLife"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "ValidSA": "Activated.Loyalty",
+        "Caster": "You",
+        "Description": "As long as CARDNAME entered this turn, you may activate her loyalty abilities any time you could cast an instant.",
+        "ValidCard": "Card.Self+ThisTurnEntered"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

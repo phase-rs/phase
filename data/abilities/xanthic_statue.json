@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 8,
+        "toughness": 8,
+        "types": [
+          "Creature",
+          "Artifact",
+          "Golem"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "RemoveCreatureTypes": "True",
+        "SpellDescription": "Until end of turn, CARDNAME becomes an 8/8 Golem artifact creature with trample.",
+        "Keywords": "Trample"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigChange",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {2} less to cast if there are no land cards in your hand.",
+        "PresentZone": "Hand",
+        "Amount": "2",
+        "Type": "Spell",
+        "IsPresent": "Land.YouOwn",
+        "PresentCompare": "EQ0",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

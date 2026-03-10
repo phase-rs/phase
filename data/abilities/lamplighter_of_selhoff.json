@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if you control another Zombie, you may draw a card. If you do, discard a card.",
+        "IsPresent": "Permanent.Zombie+Other+YouCtrl",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

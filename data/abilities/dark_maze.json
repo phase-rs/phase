@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "CanAttack",
+          "AtEOT": "Exile",
+          "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender. Exile it at the beginning of the next end step."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "CanAttack",
+        "AtEOT": "Exile",
+        "SpellDescription": "CARDNAME can attack this turn as though it didn't have defender. Exile it at the beginning of the next end step."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

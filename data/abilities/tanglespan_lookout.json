@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Aura.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an Aura you control enters, draw a card.",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "AddsNoCounter": "True",
+          "SpellDescription": "Add one mana of any color. Spend this mana only to cast a legendary spell, and that spell can't be countered.",
+          "RestrictValid": "Spell.Legendary"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AddsNoCounter": "True",
+        "SpellDescription": "Add one mana of any color. Spend this mana only to cast a legendary spell, and that spell can't be countered.",
+        "RestrictValid": "Spell.Legendary"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

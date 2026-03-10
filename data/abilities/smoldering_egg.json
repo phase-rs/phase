@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigCharge",
+            "ValidCard": "Instant,Sorcery",
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, put a number of ember counters on CARDNAME equal to the amount of mana spent to cast that spell. Then if CARDNAME has seven or more ember counters on it, remove them and transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigDamage",
+            "ValidActivatingPlayer": "You",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME deals 2 damage to any target.",
+            "ValidCard": "Instant,Sorcery",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

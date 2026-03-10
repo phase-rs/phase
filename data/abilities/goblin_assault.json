@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of your upkeep, create a 1/1 red Goblin creature token with haste.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "Goblin creatures attack each combat if able.",
+        "ValidCreature": "Creature.Goblin"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

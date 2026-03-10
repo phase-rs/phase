@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Scry",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "ActivationLimit": "1",
+        "TriggerDescription": "Whenever you scry, CARDNAME gets +1/+0 until end of turn and can't be blocked this turn. This ability triggers only once each turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

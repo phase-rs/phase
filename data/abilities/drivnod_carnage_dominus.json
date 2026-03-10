@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "Indestructible",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "BP BP"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromGrave<3/Creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "Put an indestructible counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "ValidCard": "Permanent.YouCtrl",
+        "ValidCause": "Creature",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Description": "If a creature dying causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+        "ValidMode": "ChangesZone,ChangesZoneAll"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "ValidCard": "Enchantment.YouCtrl",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 and gains lifelink until end of turn.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "FullyUnlock",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidCard": "Card.Room",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Eerie — Whenever an enchantment you control enters and whenever you fully unlock a Room, CARDNAME gets +2/+0 and gains lifelink until end of turn.",
+        "Secondary": "True",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

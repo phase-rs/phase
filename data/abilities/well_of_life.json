@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Land.untapped+YouCtrl",
+        "Execute": "TrigGainLife",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "At the beginning of your end step, if you control no untapped lands, you gain 2 life.",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AITap",
+        "Affected": "Land.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

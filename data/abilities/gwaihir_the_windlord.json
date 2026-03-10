@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "SVarCompare": "GE2",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "EffectZone": "All",
+        "Amount": "2",
+        "Description": "This spell costs {2} less to cast as long as you've drawn two or more cards this turn."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Bird.Other+YouCtrl",
+        "Description": "Other Birds you control have vigilance.",
+        "AddKeyword": "Vigilance"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

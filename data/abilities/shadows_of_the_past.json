@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each opponent loses 2 life and you gain 2 life. Activate only if there are four or more creature cards in your graveyard.",
+        "Defined": "Player.Opponent",
+        "SubAbility": "DBGainLife",
+        "PresentCompare": "GE4",
+        "IsPresent": "Creature.YouOwn",
+        "PresentZone": "Graveyard"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature dies, scry 1.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature",
+        "Execute": "TrigScry",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

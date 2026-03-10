@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PhaseOut",
+      "params": {
+        "ValidCard": "Card.phasedOutSelf",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever CARDNAME phases out, discard a card."
+      }
+    },
+    {
+      "mode": "PhaseIn",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME phases in, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

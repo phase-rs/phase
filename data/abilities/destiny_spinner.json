@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Creature",
+          "Elemental"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target land you control",
+        "SpellDescription": "Target land you control becomes an X/X Elemental creature with trample and haste until end of turn, where X is the number of enchantments you control. It's still a land.",
+        "Keywords": "Trample & Haste"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidSA": "Spell.Creature+YouCtrl,Spell.Enchantment+YouCtrl",
+        "ActiveZones": "Battlefield",
+        "Description": "Creature and enchantment spells you control can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

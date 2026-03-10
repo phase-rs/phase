@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "w_2_2_samurai_vigilance",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "PumpDuration": "EOT",
+        "TokenAmount": "X",
+        "SubAbility": "DBTokenOpp",
+        "PumpKeywords": "Menace & Haste",
+        "SpellDescription": "Create X 2/2 white Samurai creature tokens with vigilance. They gain menace and haste until end of turn. Each opponent creates X minus one 2/2 white Samurai creature tokens with vigilance."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

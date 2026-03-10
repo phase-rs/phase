@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouDontCtrl,Planeswalker.YouDontCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target creature or planeswalker you don't control. Put a +1/+1 counter on up to one target creature you control.",
+        "TgtPrompt": "Select target creature or planeswalker you don't control",
+        "SubAbility": "DBPutCounter"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "PlayerTurn": "You",
+        "Description": "This spell costs {2} less to cast during your end step.",
+        "EffectZone": "All",
+        "Phases": "End of Turn",
+        "Type": "Spell",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

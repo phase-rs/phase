@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card",
+        "Shuffle": "False",
+        "ChangeNum": "4",
+        "Reveal": "True",
+        "SubAbility": "DBChangeZone1",
+        "DifferentNames": "True",
+        "StackDescription": "REP Search_{p:You} searches & your library_their library & reveal_reveals",
+        "SpellDescription": "Search your library for up to four cards with different names and reveal them.",
+        "RememberChanged": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

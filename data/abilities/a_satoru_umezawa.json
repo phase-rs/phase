@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ActivationLimit": "1",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDig",
+        "TriggerDescription": "Whenever you activate a ninjutsu ability, look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order. This ability triggers only once each turn.",
+        "ValidActivatingPlayer": "You",
+        "ValidSA": "Activated.Ninjutsu"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouOwn",
+        "AffectedZone": "Hand",
+        "AddKeyword": "Ninjutsu:1 U B",
+        "Description": "Each creature card in your hand has ninjutsu {1}{U}{B}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if you control a token, tap enchanted creature, then scry 2.",
+        "IsPresent": "Card.YouCtrl+token",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTap",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Creature.AttachedBy",
+        "Layer": "CantHappen",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

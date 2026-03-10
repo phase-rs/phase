@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "No Mercy — Whenever CARDNAME deals combat damage to an opponent, it deals that much damage to each other opponent.",
+        "CombatDamage": "True",
+        "Execute": "TrigDmg",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Opponent"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "CARDNAME attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

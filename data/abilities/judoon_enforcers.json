@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AttackRestrict"
+      },
+      "params": {
+        "ValidDefender": "You",
+        "MaxAttackers": "1",
+        "Description": "No more than one creature can attack you each combat."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

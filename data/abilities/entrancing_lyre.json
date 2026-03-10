@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.powerLEX"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Tap target creature with power X or less. It doesn't untap during its controller's untap step for as long as CARDNAME remains tapped.",
+        "RememberTapped": "True",
+        "TgtPrompt": "Select target creature with power X or less",
+        "AlwaysRemember": "True",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Static": "True",
+        "Execute": "ClearRemembered",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Card.IsRemembered",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

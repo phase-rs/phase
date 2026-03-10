@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "NoResolvingCheck": "True",
+        "IsPresent": "Creature.attacking+Other",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME gains double strike until end of turn.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE2",
+        "Execute": "TrigBattalionPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

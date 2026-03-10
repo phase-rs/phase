@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "Execute": "TrigCrank",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever you crank CARDNAME, put target creature card from your graveyard on top of your library."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

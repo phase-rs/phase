@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Sacrificed",
+          "params": {
+            "TriggerDescription": "Whenever an opponent sacrifices a nontoken permanent, you may put that card from a graveyard onto the battlefield under your control.",
+            "OptionalDecider": "You",
+            "Execute": "TrigReturn",
+            "ValidCard": "Permanent.!token+OppCtrl",
+            "TriggerZones": "Battlefield"
+          }
+        },
+        {
+          "mode": "Discarded",
+          "params": {
+            "ValidCard": "Permanent.!token+OppCtrl",
+            "OptionalDecider": "You",
+            "TriggerDescription": "Whenever an opponent discards a permanent card, you may put that card from a graveyard onto the battlefield under your control.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigReturn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 0,
+            "toughness": 0,
+            "target": {
+              "type": "Player"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Target player loses 3 life unless they sacrifice a nonland permanent or discard a card.",
+            "StackDescription": "{p:Targeted} loses 3 life unless they sacrifice a nonland permanent or discard a card.",
+            "SubAbility": "TrigGenericChoice",
+            "IsCurse": "True"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Untap",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Untap CARDNAME."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

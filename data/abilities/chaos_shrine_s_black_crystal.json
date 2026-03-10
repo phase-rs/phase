@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a nontoken creature you control dies, exile it.",
+        "ValidCard": "Creature.YouCtrl+!token",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChange",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a creature card exiled with CARDNAME onto the battlefield under your control with a finality counter on it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

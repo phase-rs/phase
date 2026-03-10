@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Each creature with toughness greater than its power can't block this turn.",
+          "StaticAbilities": "CantBlock"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 C"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each creature with toughness greater than its power can't block this turn.",
+        "StaticAbilities": "CantBlock"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

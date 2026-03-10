@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Ninja.attacking+unblocked+YouCtrl",
+        "AddKeyword": "Lifelink",
+        "Description": "Unblocked attacking Ninjas you control have lifelink."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

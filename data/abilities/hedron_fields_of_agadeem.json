@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, create a 7/7 colorless Eldrazi creature token with annihilator 1. (Whenever it attacks, defending player sacrifices a permanent.)",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature.powerGE7",
+        "Description": "Creatures with power 7 or greater can't attack or block.",
+        "EffectZone": "Command"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Secondary": "True",
+        "Description": "Creatures with power 7 or greater can't attack or block.",
+        "ValidBlocker": "Creature.powerGE7",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

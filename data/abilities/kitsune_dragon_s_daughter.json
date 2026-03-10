@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExchangeControl",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever NICKNAME enters or deals combat damage to a player, you may exchange control of two other target creatures controlled by different players.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever NICKNAME enters or deals combat damage to a player, you may exchange control of two other target creatures controlled by different players.",
+        "CombatDamage": "True",
+        "Execute": "TrigExchangeControl",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

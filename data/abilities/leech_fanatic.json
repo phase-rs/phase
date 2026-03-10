@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "AddKeyword": "Lifelink",
+        "Affected": "Card.Self",
+        "Description": "During your turn, CARDNAME has lifelink."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "ValidCard": "Creature.!token",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.",
+        "ValidSource": "Creature.YouCtrl",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

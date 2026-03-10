@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttach"
+      },
+      "params": {
+        "Description": "CARDNAME can't be equipped.",
+        "Target": "Card.Self",
+        "ValidCard": "Card.Equipment"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

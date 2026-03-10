@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "Creatures and nonbasic lands your opponents control enter tapped.",
+        "ValidCard": "Creature.OppCtrl,Land.nonBasic+OppCtrl",
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

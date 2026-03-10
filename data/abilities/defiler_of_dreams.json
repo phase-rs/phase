@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Permanent.Blue",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a blue permanent spell, draw a card.",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "Description": "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.",
+        "Cost": "PayLife<2>",
+        "ValidCard": "Permanent.Blue",
+        "Activator": "You",
+        "ValidSA": "Spell",
+        "ReduceColor": "U"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

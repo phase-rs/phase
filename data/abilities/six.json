@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks, mill three cards. You may put a land card from among them into your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Retrace",
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, nonland permanent cards in your graveyard have retrace.",
+        "AffectedZone": "Graveyard",
+        "Affected": "Card.nonLand+Permanent+YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

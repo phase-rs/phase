@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "Execute": "TrigDestroy",
+        "IsPresent": "Card.EnchantedBy+!attackedThisTurn",
+        "ValidPlayer": "Player.EnchantedController",
+        "TriggerDescription": "At the beginning of the end step of enchanted creature's controller, destroy that creature if it didn't attack this turn."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike & Trample",
+        "Description": "Enchanted creature has first strike and trample.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

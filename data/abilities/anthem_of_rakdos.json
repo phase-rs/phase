@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "AnthemPump",
+        "TriggerDescription": "Whenever a creature you control attacks, it gets +2/+0 until end of turn and CARDNAME deals 1 damage to you."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DmgTwice",
+        "Description": "Hellbent — As long as you have no cards in hand, if a source you control would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+        "ValidTarget": "Permanent,Player",
+        "Hellbent": "True",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

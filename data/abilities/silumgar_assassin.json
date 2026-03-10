@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, destroy target creature with power 3 or less an opponent controls.",
+        "Execute": "TrigDestroy",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.powerGTX",
+        "Description": "Creatures with power greater than CARDNAME's power can't block it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

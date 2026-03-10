@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "ValidCard": "Artifact",
+        "Amount": "X",
+        "Activator": "Player",
+        "Type": "Spell",
+        "Relative": "True",
+        "Description": "Each artifact spell costs {1} more to cast for each artifact its controller controls."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

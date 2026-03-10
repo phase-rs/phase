@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "When CARDNAME deals combat damage to a player, create two 1/1 red Goblin creature tokens and sacrifice CARDNAME.",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

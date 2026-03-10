@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "DBPumpAll",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, creatures you control get +1/+1 until end of turn.",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

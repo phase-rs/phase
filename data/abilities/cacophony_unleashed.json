@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+wasCastByYou",
+        "Execute": "TrigDestroyAll",
+        "TriggerDescription": "When CARDNAME enters, if you cast it, destroy all nonenchantment creatures."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Whenever CARDNAME or another enchantment you control enters, until end of turn, CARDNAME becomes a legendary 6/6 Nightmare God creature with menace and deathtouch. It's still an enchantment.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

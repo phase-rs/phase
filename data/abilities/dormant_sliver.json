@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Sliver",
+        "AddKeyword": "Defender",
+        "Description": "All Sliver creatures have defender."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TrigEnter",
+        "Description": "All Slivers have \"When this permanent enters, draw a card.\"",
+        "Affected": "Permanent.Sliver"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

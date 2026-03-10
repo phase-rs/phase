@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Description": "Foretelling cards from your hand costs {1} less and can be done on any player's turn.",
+        "ValidSpell": "Static.Foretelling",
+        "Amount": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Foretell on any player's turn",
+        "Affected": "You",
+        "Description": "Foretelling cards from your hand on any player's turn.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

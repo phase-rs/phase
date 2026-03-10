@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDiscard",
+            "TriggerDescription": "When CARDNAME enters, you may discard a card. If you do, draw two cards.",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetPower": "X",
+            "CharacteristicDefining": "True",
+            "Description": "CARDNAME's power is equal to the total power of the exiled cards used to craft it."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<5/Zombie>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put target creature card from a graveyard onto the battlefield under your control.",
+        "TgtPrompt": "Choose target creature card in a graveyard",
+        "GainControl": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

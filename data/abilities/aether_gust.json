@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield,Stack",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.inZoneStack+Red,Card.inZoneStack+Green,Permanent.Red,Permanent.Green"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtZone": "Battlefield,Stack",
+        "TgtPrompt": "Select target spell or permanent that's red or green",
+        "DestinationAlternative": "Library",
+        "LibraryPositionAlternative": "-1",
+        "StackDescription": "{c:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
+        "SpellDescription": "Choose target spell or permanent that's red or green. Its owner puts it on the top or bottom of their library.",
+        "AlternativeDecider": "TargetedOwner"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

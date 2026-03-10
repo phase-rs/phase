@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "SacrificeAll",
+        "params": {
+          "SpellDescription": "Each player sacrifices all permanents they control that are one or more colors.",
+          "ValidCards": "Permanent.nonColorless"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player sacrifices all permanents they control that are one or more colors.",
+        "ValidCards": "Permanent.nonColorless"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

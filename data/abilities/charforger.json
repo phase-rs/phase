@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<3/OIL/CARDNAME>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Exile the top card of your library. You may play that card this turn.",
+        "ChangeNum": "All"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 red Phyrexian Goblin creature token."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever another creature or artifact you control is put into a graveyard from the battlefield, put an oil counter on CARDNAME.",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.Other+YouCtrl,Artifact.Other+YouCtrl",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each end step, discard your hand.",
+        "Phase": "End of Turn",
+        "Execute": "TrigDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "Permanent,Player",
+        "ReplaceWith": "DmgPlus2",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Instant.YouCtrl,Sorcery.YouCtrl",
+        "Description": "If an instant or sorcery source you control would deal damage to a permanent or player, it deals that much damage plus 2 to that permanent or player instead."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "SpellDescription": "CARDNAME gets +2/+2 until end of turn. If you control creatures named Mine Worker and Tower Worker, put two +1/+1 counters on CARDNAME instead. Activate only once each turn.",
+          "BranchConditionSVarCompare": "GE2",
+          "FalseSubAbility": "DBPump",
+          "TrueSubAbility": "DBPutCounter",
+          "ActivationLimit": "1",
+          "BranchConditionSVar": "UrzaCheck"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME gets +2/+2 until end of turn. If you control creatures named Mine Worker and Tower Worker, put two +1/+1 counters on CARDNAME instead. Activate only once each turn.",
+        "BranchConditionSVarCompare": "GE2",
+        "FalseSubAbility": "DBPump",
+        "TrueSubAbility": "DBPutCounter",
+        "ActivationLimit": "1",
+        "BranchConditionSVar": "UrzaCheck"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

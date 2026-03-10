@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player discards a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +3/+3 as long as an opponent has no cards in hand.",
+        "SVarCompare": "EQ0",
+        "AddToughness": "3",
+        "Affected": "Card.Self",
+        "AddPower": "3",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

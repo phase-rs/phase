@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "Whenever an opponent casts an instant or sorcery spell, create a 1/2 green Spider creature token with reach.",
+        "ValidCard": "Instant,Sorcery",
+        "Execute": "DBToken",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "Execute": "EffTrigCopy",
+          "ValidCard": "Instant,Sorcery",
+          "AILogic": "SpellCopy",
+          "ValidActivatingPlayer": "You",
+          "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy it for each time you've cast your commander from the command zone this game. You may choose new targets for the copies.",
+          "ThisTurn": "True",
+          "Mode": "SpellCast"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Execute": "EffTrigCopy",
+        "ValidCard": "Instant,Sorcery",
+        "AILogic": "SpellCopy",
+        "ValidActivatingPlayer": "You",
+        "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy it for each time you've cast your commander from the command zone this game. You may choose new targets for the copies.",
+        "ThisTurn": "True",
+        "Mode": "SpellCast"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "Activator": "You",
+        "Amount": "1",
+        "Description": "Instant and sorcery spells you cast cost {1} less to cast.",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

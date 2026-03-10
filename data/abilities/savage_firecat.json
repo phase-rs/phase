@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerDescription": "Whenever you tap a land for mana, remove a +1/+1 counter from CARDNAME.",
+        "ValidCard": "Land",
+        "Activator": "You",
+        "Execute": "TrigRemoveCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

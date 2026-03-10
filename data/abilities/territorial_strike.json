@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPump",
+        "SpellDescription": "Destroy target nonland permanent. If a Dragon creature was beheld, it perpetually gets +2/+2.",
+        "TgtPrompt": "Select target nonland permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Description": "As an additional cost to cast this spell, you may behold a Dragon creature.",
+        "Cost": "Behold<1/Creature.Dragon/Dragon creature>",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

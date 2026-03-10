@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MustTarget"
+      },
+      "params": {
+        "Description": "While an opponent is choosing targets as part of casting a spell they control or activating an ability they control, that player must choose at least one Flagbearer on the battlefield if able.",
+        "ValidZone": "Battlefield",
+        "ValidSA": "Spell.OppCtrl,Activated.OppCtrl",
+        "ValidTarget": "Flagbearer"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

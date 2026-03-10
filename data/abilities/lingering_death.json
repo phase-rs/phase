@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigSacrifice",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of the end step of enchanted creature's controller, that player sacrifices that creature.",
+        "ValidPlayer": "Player.EnchantedController",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

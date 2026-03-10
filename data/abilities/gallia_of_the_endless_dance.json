@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackersAmount": "GE3",
+        "Execute": "TrigDiscard",
+        "AttackingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack with three or more creatures, you may discard a card at random. If you do, draw two cards.",
+        "ValidAttackers": "Creature"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Satyrs you control get +1/+1 and have haste.",
+        "AddKeyword": "Haste",
+        "Affected": "Card.Satyr+Other+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

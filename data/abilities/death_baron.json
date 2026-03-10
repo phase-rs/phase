@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.Zombie+Other+YouCtrl,Creature.Skeleton+YouCtrl",
+        "AddKeyword": "Deathtouch",
+        "Description": "Skeletons you control and other Zombies you control get +1/+1 and have deathtouch."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

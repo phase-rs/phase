@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you get an amount of {E} (energy counters) equal to the number of artifact creatures you control.",
+        "Execute": "TrigEnergy",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {E}{E}{E}. If you do, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power is equal to the number of cards in your hand.",
+        "SetPower": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

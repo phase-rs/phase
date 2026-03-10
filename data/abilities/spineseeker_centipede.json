@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME enters, search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddToughness": "2",
+        "Condition": "Delirium",
+        "Description": "Delirium — CARDNAME gets +1/+2 and has vigilance as long as there are four or more card types among cards in your graveyard.",
+        "AddPower": "1",
+        "AddKeyword": "Vigilance"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

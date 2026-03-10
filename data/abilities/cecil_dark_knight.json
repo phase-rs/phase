@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDealtOnce",
+          "params": {
+            "TriggerDescription": "Darkness — Whenever NICKNAME deals damage, you lose that much life. Then if your life total is less than or equal to half your starting life total, untap NICKNAME and transform it.",
+            "ValidSource": "Card.Self",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigLoseLife"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPumpAttack",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Protect — Whenever NICKNAME attacks, other attacking creatures gain indestructible until end of turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

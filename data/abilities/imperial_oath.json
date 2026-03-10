@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "w_2_2_samurai_vigilance",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenAmount": "3",
+        "SpellDescription": "Create three 2/2 white Samurai tokens with vigilance. Scry 3.",
+        "SubAbility": "DBScry",
+        "StackDescription": "{p:You} creates three 2/2 white Samurai tokens with vigilance."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

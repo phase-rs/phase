@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigChoose",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you may choose a creature card in your hand. If you do, that card perpetually incorporates {1}{G} and gets +4/+4."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Ward:2",
+        "Description": "Multicolored creatures you control have ward {2}.",
+        "Affected": "Creature.MultiColor+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

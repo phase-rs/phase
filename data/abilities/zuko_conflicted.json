@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Main1",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your first main phase, ABILITY",
+        "Execute": "TrigCharm",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

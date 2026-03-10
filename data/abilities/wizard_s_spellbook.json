@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Instant,Sorcery"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "Mandatory": "True",
+        "SubAbility": "DBRollDice",
+        "RememberChanged": "True",
+        "SpellDescription": "Exile target instant or sorcery card from a graveyard. Roll a d20. Activate only as a sorcery.",
+        "TgtPrompt": "Select target instant or sorcery card in a graveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

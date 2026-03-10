@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you may pay {2}. If you do, untap this creature.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigUntap",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen",
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

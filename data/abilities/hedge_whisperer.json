@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 5,
+        "toughness": 5,
+        "types": [
+          "Creature",
+          "Plant",
+          "Boar"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3 G"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "CollectEvidence<4>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "UntilUntaps",
+        "OverwriteColors": "True",
+        "SorcerySpeed": "True",
+        "TgtPrompt": "Select target land you control",
+        "Colors": "Green",
+        "Keywords": "Haste",
+        "SpellDescription": "Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as CARDNAME remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Haste",
+        "AddToughness": "1",
+        "Description": "Equipped creature gets +1/+1 and has haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

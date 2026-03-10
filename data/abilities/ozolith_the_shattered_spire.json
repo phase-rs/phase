@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl,Artifact.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "SpellDescription": "Put a +1/+1 counter on target artifact or creature you control. Activate only as a sorcery.",
+        "TgtPrompt": "Select target artifact or creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidCounterType": "P1P1",
+        "ReplaceWith": "AddOneMoreCounters",
+        "Description": "If one or more +1/+1 counters would be put on an artifact or creature you control, that many plus one +1/+1 counters are put on it instead.",
+        "ValidCard": "Creature.YouCtrl+inZoneBattlefield,Artifact.YouCtrl+inZoneBattlefield"
+      }
+    }
+  ],
+  "faces": []
+}

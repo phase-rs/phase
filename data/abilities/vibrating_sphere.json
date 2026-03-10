@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Affected": "Creature.YouCtrl",
+        "AddPower": "2",
+        "Description": "During your turn, creatures you control get +2/+0."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "NotPlayerTurn",
+        "Description": "During turns other than yours, creatures you control get -0/-2.",
+        "AddToughness": "-2",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

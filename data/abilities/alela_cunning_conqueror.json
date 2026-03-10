@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ActivatorThisTurnCast": "EQ1",
+        "TriggerDescription": "Whenever you cast your first spell during each opponent's turn, create a 1/1 black Faerie Rogue creature token with flying.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "Execute": "TrigToken",
+        "OpponentTurn": "True"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever one or more Faeries you control deal combat damage to a player, goad target creature that player controls.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "ValidSource": "Creature.Faerie+YouCtrl",
+        "Execute": "TrigGoad",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

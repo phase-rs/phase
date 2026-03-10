@@ -1,0 +1,94 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBUntap",
+        "TargetMax": "1",
+        "TargetMin": "0",
+        "SpellDescription": "Untap up to one target creature and up to one target land."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigMultiple",
+        "params": {
+          "DigNum": "4",
+          "ChangeValid": "Creature,Land",
+          "Reveal": "True",
+          "Optional": "True",
+          "DestinationZone2": "Graveyard",
+          "SpellDescription": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "DigNum": "4",
+        "ChangeValid": "Creature,Land",
+        "Reveal": "True",
+        "Optional": "True",
+        "DestinationZone2": "Graveyard",
+        "SpellDescription": "Reveal the top four cards of your library. You may put a creature card and/or a land card from among them into your hand. Put the rest into your graveyard.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "AILogic": "Always",
+          "SpellDescription": "You get an emblem with \"Whenever a creature you control enters, you may have it fight target creature.\" Then create three 8/8 blue Octopus creature tokens.",
+          "Triggers": "TrigFight",
+          "Image": "emblem_kiora_master_of_the_depths",
+          "Duration": "Permanent",
+          "Ultimate": "True",
+          "Name": "Emblem — Kiora, Master of the Depths",
+          "SubAbility": "DBToken"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "AILogic": "Always",
+        "SpellDescription": "You get an emblem with \"Whenever a creature you control enters, you may have it fight target creature.\" Then create three 8/8 blue Octopus creature tokens.",
+        "Triggers": "TrigFight",
+        "Image": "emblem_kiora_master_of_the_depths",
+        "Duration": "Permanent",
+        "Ultimate": "True",
+        "Name": "Emblem — Kiora, Master of the Depths",
+        "SubAbility": "DBToken"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player",
+        "Phase": "Upkeep",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player untaps a land they control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ValidCard": "Land",
+        "ActiveZones": "Battlefield",
+        "ValidStepTurnToController": "You",
+        "Description": "Lands don't untap during their controller's untap steps."
+      }
+    }
+  ],
+  "faces": []
+}

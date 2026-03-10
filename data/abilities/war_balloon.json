@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "FIRE",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a fire counter on this Vehicle."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as this Vehicle has three or more fire counters on it, it's an artifact creature.",
+        "Affected": "Card.Self+counters_GE3_FIRE",
+        "AddType": "Artifact & Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

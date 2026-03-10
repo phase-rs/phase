@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Vehicle+YouCtrl",
+        "AddType": "ChosenType",
+        "Description": "Vehicle creatures you control are the chosen creature type in addition to their other types."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Each creature you control of the chosen type other than this Vehicle gets +1/+1.",
+        "AddPower": "1",
+        "Affected": "Creature.ChosenType+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Ward:Sac<1/Permanent>",
+        "Affected": "Permanent.YouCtrl",
+        "Description": "Permanents you control have \"Ward—Sacrifice a permanent.\""
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.YouOwn",
+        "AddKeyword": "Unearth:1 B R",
+        "AffectedZone": "Graveyard",
+        "Description": "Each artifact card in your graveyard has unearth {1}{B}{R}. ({1}{B}{R}: Return the card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step or if it would leave the battlefield. Unearth only as a sorcery.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigUpkeep",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {W}{W}."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "ValidCard": "Creature.EnchantedBy",
+        "ValidSA": "Activated.hasTapCost",
+        "Description": "Enchanted creature can't attack or block, and its activated abilities with {T} in their costs can't be activated."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

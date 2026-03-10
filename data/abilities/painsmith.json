@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Artifact",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you cast an artifact spell, you may have target creature get +2/+0 and gain deathtouch until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

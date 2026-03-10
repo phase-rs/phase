@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidSpell": "Spell.Dash",
+        "Activator": "You",
+        "Description": "Dash costs you pay cost {2} less (as long as this creature is on the battlefield).",
+        "Amount": "2",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

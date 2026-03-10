@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, equipped creature gets +2/+0 and has first strike. (It deals combat damage before creatures without first strike.)",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "First Strike",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

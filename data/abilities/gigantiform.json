@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "KickedGiant",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+kicked",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, you may search your library for a card named Gigantiform, put it onto the battlefield, then shuffle.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "8",
+        "SetToughness": "8",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has base power and toughness 8/8 and has trample.",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

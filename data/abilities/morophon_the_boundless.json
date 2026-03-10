@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "Description": "Spells of the chosen type you cast cost {W}{U}{B}{R}{G} less to cast. This effect reduces only the amount of colored mana you pay.",
+        "Type": "Spell",
+        "Color": "W U B R G",
+        "ValidCard": "Card.ChosenType",
+        "Activator": "You",
+        "IgnoreGeneric": "True"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.ChosenType+Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other creatures you control of the chosen type get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

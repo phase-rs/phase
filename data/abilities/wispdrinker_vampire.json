@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 W B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Deathtouch & Lifelink",
+        "SpellDescription": "Creatures you control with power 2 or less gain deathtouch and lifelink until end of turn.",
+        "ValidCards": "Creature.powerLE2+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.powerLE2+YouCtrl+Other",
+        "Origin": "Any",
+        "Execute": "TrigGain",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature you control with power 2 or less enters, each opponent loses 1 life and you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

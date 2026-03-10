@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a creature spell, target creature you control gets +2/+2 and gains trample until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Creature.Green",
+        "Type": "Spell",
+        "Activator": "You",
+        "Description": "Green creature spells you cast cost {1} less to cast.",
+        "Amount": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

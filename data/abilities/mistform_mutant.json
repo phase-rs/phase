@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Defined": "You",
+          "Type": "Creature",
+          "SpellDescription": "Choose a creature type other than Wall. Target creature becomes that type until end of turn.",
+          "InvalidTypes": "Wall",
+          "SubAbility": "DBAnimate"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "Type": "Creature",
+        "SpellDescription": "Choose a creature type other than Wall. Target creature becomes that type until end of turn.",
+        "InvalidTypes": "Wall",
+        "SubAbility": "DBAnimate"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

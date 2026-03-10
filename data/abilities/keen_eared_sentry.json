@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "AddKeyword": "Hexproof",
+        "Description": "You have hexproof. (You can't be the target of spells or abilities your opponents control.)"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantVenture"
+      },
+      "params": {
+        "ValidPlayer": "Opponent.VenturedThisTurn",
+        "Description": "Each opponent can't venture into the dungeon more than once each turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

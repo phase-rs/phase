@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DayTimeChanges",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "DBDig",
+        "TriggerDescription": "Whenever day becomes night or night becomes day, look at the top two cards of your library. Put one of them into your graveyard."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "DayTime": "Neither",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Description": "If it's neither day nor night, it becomes day as CARDNAME enters.",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "DoDay"
+      }
+    }
+  ],
+  "faces": []
+}

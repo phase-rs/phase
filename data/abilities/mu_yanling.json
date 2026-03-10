@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature",
+          "AILogic": "Pump",
+          "SpellDescription": "Target creature can't be blocked this turn.",
+          "StaticAbilities": "Unblockable",
+          "RememberObjects": "Targeted",
+          "Planeswalker": "True",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "AILogic": "Pump",
+        "SpellDescription": "Target creature can't be blocked this turn.",
+        "StaticAbilities": "Unblockable",
+        "RememberObjects": "Targeted",
+        "Planeswalker": "True",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "ExileOnMoved": "Battlefield"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Draw two cards."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapAll",
+        "params": {
+          "AILogic": "AtLeast3",
+          "Planeswalker": "True",
+          "StackDescription": "SpellDescription",
+          "ValidCards": "Creature.OppCtrl",
+          "Ultimate": "True",
+          "SubAbility": "DBAddTurn",
+          "SpellDescription": "Tap all creatures your opponents control. You take an extra turn after this one."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtLeast3",
+        "Planeswalker": "True",
+        "StackDescription": "SpellDescription",
+        "ValidCards": "Creature.OppCtrl",
+        "Ultimate": "True",
+        "SubAbility": "DBAddTurn",
+        "SpellDescription": "Tap all creatures your opponents control. You take an extra turn after this one."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

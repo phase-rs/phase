@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "RememberRevealed": "True",
+          "RevealValid": "Card.hasXCost+YouCtrl",
+          "SubAbility": "DBMana",
+          "SpellDescription": "Reveal any number of cards with X in their mana cost in your hand. Add {C}{C} for each card revealed this way. Spend this mana only on costs that contain X.",
+          "AnyNumber": "True"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberRevealed": "True",
+        "RevealValid": "Card.hasXCost+YouCtrl",
+        "SubAbility": "DBMana",
+        "SpellDescription": "Reveal any number of cards with X in their mana cost in your hand. Add {C}{C} for each card revealed this way. Spend this mana only on costs that contain X.",
+        "AnyNumber": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, mill six cards. You may put a card with X in its mana cost from among them into your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

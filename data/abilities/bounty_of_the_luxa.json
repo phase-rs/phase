@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigRemove",
+        "TriggerDescription": "At the beginning of your first main phase, remove all flood counters from CARDNAME. If no counters were removed this way, put a flood counter on CARDNAME and draw a card. Otherwise, add {C}{G}{U}.",
+        "Phase": "Main1",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

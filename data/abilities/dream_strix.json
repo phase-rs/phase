@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "When CARDNAME becomes the target of a spell, sacrifice it.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "ValidSource": "Spell",
+        "Execute": "TrigSac"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, learn. (You may reveal a Lesson card you own from outside the game and put it into your hand, or discard a card to draw a card.)",
+        "Execute": "TrigLearn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

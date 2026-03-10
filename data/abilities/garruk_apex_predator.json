@@ -1,0 +1,106 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Planeswalker.Other"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select another target planeswalker",
+        "SpellDescription": "Destroy another target planeswalker.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_3_3_beast_deathtouch",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 3/3 black Beast creature token with deathtouch."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target creature. You gain life equal to its toughness.",
+        "SubAbility": "DBGainLife",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Always",
+          "SpellDescription": "Target opponent gets an emblem with \"Whenever a creature attacks you, it gets +5/+5 and gains trample until end of turn.\"",
+          "Name": "Emblem — Garruk, Apex Predator",
+          "Image": "emblem_garruk_apex_predator",
+          "ValidTgts": "Opponent",
+          "Duration": "Permanent",
+          "EffectOwner": "Targeted",
+          "Planeswalker": "True",
+          "Triggers": "TrigAttackYou",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Always",
+        "SpellDescription": "Target opponent gets an emblem with \"Whenever a creature attacks you, it gets +5/+5 and gains trample until end of turn.\"",
+        "Name": "Emblem — Garruk, Apex Predator",
+        "Image": "emblem_garruk_apex_predator",
+        "ValidTgts": "Opponent",
+        "Duration": "Permanent",
+        "EffectOwner": "Targeted",
+        "Planeswalker": "True",
+        "Triggers": "TrigAttackYou",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

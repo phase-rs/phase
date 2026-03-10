@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Affected": "Card.Self",
+        "AddToughness": "2",
+        "AddKeyword": "Vigilance",
+        "IsPresent": "Planeswalker.Dovin+YouCtrl",
+        "Description": "As long as you control a Dovin planeswalker, CARDNAME gets +2/+2 and has vigilance. (Attacking doesn't cause it to tap.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

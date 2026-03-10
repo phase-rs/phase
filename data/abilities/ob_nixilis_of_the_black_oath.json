@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Each opponent loses 1 life. You gain life equal to the life lost this way.",
+        "Defined": "Player.Opponent",
+        "StackDescription": "SpellDescription"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_5_5_demon_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBLoseLife",
+        "Planeswalker": "True",
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 5/5 black Demon creature token with flying. You lose 2 life."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "You get an emblem with \"{1}{B}, Sacrifice a creature: You gain X life and draw X cards, where X is the sacrificed creature's power.\"",
+          "Stackable": "False",
+          "Abilities": "ObGainLife",
+          "Ultimate": "True",
+          "Name": "Emblem — Ob Nixilis of the Black Oath",
+          "Planeswalker": "True",
+          "Duration": "Permanent",
+          "Image": "emblem_ob_nixilis_of_the_black_oath"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You get an emblem with \"{1}{B}, Sacrifice a creature: You gain X life and draw X cards, where X is the sacrificed creature's power.\"",
+        "Stackable": "False",
+        "Abilities": "ObGainLife",
+        "Ultimate": "True",
+        "Name": "Emblem — Ob Nixilis of the Black Oath",
+        "Planeswalker": "True",
+        "Duration": "Permanent",
+        "Image": "emblem_ob_nixilis_of_the_black_oath"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

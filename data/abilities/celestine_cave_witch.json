@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 black Insect creature tokens."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigCurse",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may sacrifice an Insect. When you do, curse defending player. (Create a black Aura Curse enchantment token that's attached to that player. It has enchant player and \"At the beginning of enchanted player's upkeep, that player loses 1 life.\")"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

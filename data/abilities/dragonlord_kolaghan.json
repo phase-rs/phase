@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidSAonCard": "Spell.Creature+sharesNameWith YourGraveyard,Spell.Planeswalker+sharesNameWith YourGraveyard",
+        "TriggerDescription": "Whenever an opponent casts a creature or planeswalker spell with the same name as a card in their graveyard, that player loses 10 life.",
+        "Execute": "TrigLoseLife",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other creatures you control have haste.",
+        "Affected": "Creature.Other+YouCtrl",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

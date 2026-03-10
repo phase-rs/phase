@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.YouOwn",
+        "AffectedZone": "Graveyard",
+        "MayPlay": "True",
+        "Description": "You may play lands from your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

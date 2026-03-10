@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, create a Treasure token.",
+        "ValidSource": "Creature.EquippedBy",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigTreasure"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +1/+1.",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

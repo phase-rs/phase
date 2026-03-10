@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "DBShuffle",
+          "SubAbility": "RepeatLands",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Each player shuffles all cards from their hand and all permanents they own into their library, then draws that many cards. Each player may put any number of land cards from their hand onto the battlefield. Exile CARDNAME."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "DBShuffle",
+        "SubAbility": "RepeatLands",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Each player shuffles all cards from their hand and all permanents they own into their library, then draws that many cards. Each player may put any number of land cards from their hand onto the battlefield. Exile CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

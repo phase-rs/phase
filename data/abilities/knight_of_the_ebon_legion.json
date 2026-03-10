@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 3,
+        "toughness": 3,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gets +3/+3 and gains deathtouch until end of turn.",
+        "KW": "Deathtouch"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your end step, if a player lost 4 or more life this turn, put a +1/+1 counter on CARDNAME. (Damage causes loss of life.)",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "SVarCompare": "GE4"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

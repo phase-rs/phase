@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Vote",
+        "params": {
+          "Defined": "Player",
+          "TargetType": "Spell",
+          "VoteTiedAbility": "DBDuplication",
+          "SpellDescription": "Will of the Council — Choose target instant or sorcery spell. Starting with you, each player votes for denial or duplication. If denial gets more votes, counter that spell. If duplication gets more votes or the vote is tied, copy the spell. You may choose new targets for the copy.",
+          "ValidTgts": "Instant,Sorcery",
+          "Choices": "DBDenial,DBDuplication",
+          "TgtZone": "Stack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Player",
+        "TargetType": "Spell",
+        "VoteTiedAbility": "DBDuplication",
+        "SpellDescription": "Will of the Council — Choose target instant or sorcery spell. Starting with you, each player votes for denial or duplication. If denial gets more votes, counter that spell. If duplication gets more votes or the vote is tied, copy the spell. You may choose new targets for the copy.",
+        "ValidTgts": "Instant,Sorcery",
+        "Choices": "DBDenial,DBDuplication",
+        "TgtZone": "Stack"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

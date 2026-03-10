@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "ChooseOpp",
+        "Static": "True",
+        "TriggerDescription": "As CARDNAME enters, you and an opponent each secretly choose Whack or Doodle. Then those choices are revealed. If the choices match, CARDNAME has that ability. Otherwise, it has Buzz. • Whack — {T}: Target player loses 2 life. • Doodle — {T}: You gain 3 life. • Buzz — {2}, {T}: Draw a card.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

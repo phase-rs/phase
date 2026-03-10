@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever enchanted creature blocks or becomes blocked, it gets +0/+3 until end of turn and you gain 1 life.",
+        "Execute": "TrigPump1",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "Whenever enchanted creature blocks or becomes blocked, it gets +0/+3 until end of turn and you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump2",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

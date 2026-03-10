@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerDescription": "Eternity Gate — Whenever CARDNAME attacks, mill three cards. For each creature card milled this way, create a 2/2 black Necron Warrior artifact creature token.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

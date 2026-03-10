@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl+withFlying",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature you control with flying enters, NICKNAME gets +1/+1 until end of turn.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "CheckSVar": "X",
+        "Description": "The first non-Lemur creature spell with flying you cast during each of your turns costs {1} less to cast.",
+        "Condition": "PlayerTurn",
+        "ValidCard": "Creature.nonLemur+withFlying+YouCtrl",
+        "Amount": "1",
+        "SVarCompare": "EQ0",
+        "Activator": "You",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "ManaConvert"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "Description": "You may spend white mana as though it were red mana.",
+        "ManaConversion": "White->Red"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

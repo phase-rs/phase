@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Artifact",
+        "TriggerZones": "Battlefield",
+        "Activator": "Opponent",
+        "TriggerDescription": "Whenever an opponent taps an artifact for mana, gain control of that artifact until the end of your next turn.",
+        "Execute": "TrigControl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever CARDNAME attacks, sacrifice a creature or land, then draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AdjustLandPlays": "1",
+        "Description": "You may play an additional land on each of your turns.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Creature.OppCtrl,Land.nonBasic+OppCtrl",
+        "ReplacementResult": "Updated",
+        "Description": "Creatures and nonbasic lands your opponents control enter tapped.",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

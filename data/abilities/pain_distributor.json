@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "Execute": "TrigTreasure",
+        "ValidActivatingPlayer": "Player",
+        "ActivatorThisTurnCast": "EQ1",
+        "TriggerDescription": "Whenever a player casts their first spell each turn, they create a Treasure token.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever an artifact an opponent controls is put into a graveyard from the battlefield, CARDNAME deals 1 damage to that player.",
+        "Execute": "TrigDamage",
+        "Origin": "Battlefield",
+        "ValidCard": "Artifact.OppCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

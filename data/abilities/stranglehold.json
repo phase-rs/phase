@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Opponent",
+        "AddKeyword": "CantSearchLibrary",
+        "Description": "Your opponents can't search libraries."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginTurn"
+      },
+      "params": {
+        "Skip": "True",
+        "Description": "If an opponent would begin an extra turn, that player skips that turn instead.",
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "Opponent",
+        "ExtraTurn": "True"
+      }
+    }
+  ],
+  "faces": []
+}

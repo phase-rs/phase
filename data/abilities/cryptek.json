@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.Creature+YouCtrl+Other"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "When {c:Targeted} dies this turn, return that card to the battlefield tapped.",
+        "SubAbility": "DBDelayedTrigger",
+        "SpellDescription": "Choose another target artifact creature you control.",
+        "TgtPrompt": "Choose another target artifact creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

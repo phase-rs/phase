@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "8"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Flying",
+        "TargetMin": "0",
+        "TgtPrompt": "Select up to two target creatures",
+        "TargetMax": "2",
+        "PrecostDesc": "Wind Walk —",
+        "SpellDescription": "Up to two target creatures each get +2/+2 and gain flying until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

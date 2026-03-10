@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "Rather than pay the mana cost for a spell, its controller may discard a card that shares a color with that spell.",
+        "Cost": "Discard<1/Card.SharesColorWith/color sharing>",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

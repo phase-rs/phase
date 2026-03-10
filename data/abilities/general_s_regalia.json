@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "SubAbility": "DBEffect",
+          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature you control instead.",
+          "AILogic": "NeedsPrevention",
+          "Choices": "Card,Emblem"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect",
+        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature you control instead.",
+        "AILogic": "NeedsPrevention",
+        "Choices": "Card,Emblem"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

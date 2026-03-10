@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this creature enters, draw a card.",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigImmediateTrigger",
+        "TriggerDescription": "At the beginning of combat on your turn, if you control an Equipment, you may pay {1}. When you do, attach target Equipment you control to target creature you control.",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "IsPresent": "Equipment.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

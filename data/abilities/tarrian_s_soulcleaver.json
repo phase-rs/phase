@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another artifact or creature is put into a graveyard from the battlefield, put a +1/+1 counter on equipped creature.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Other,Artifact.Other",
+        "Execute": "TrigGainCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Description": "Equipped creature has vigilance.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

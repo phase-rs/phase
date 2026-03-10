@@ -1,0 +1,94 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_2_2_wolf",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Put a 2/2 green Wolf creature token onto the battlefield."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Wolf"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target Wolf creature",
+        "SpellDescription": "Target Wolf creature gets +1/+0 and gains deathtouch until end of turn.",
+        "Planeswalker": "True",
+        "KW": "Deathtouch"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAddLoyalty",
+        "SpellDescription": "Destroy target creature. Put loyalty counters on CARDNAME equal to that creature's toughness.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -25
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy all creatures CARDNAME doesn't control.",
+        "Planeswalker": "True",
+        "ValidCards": "Creature.YouDontCtrl",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

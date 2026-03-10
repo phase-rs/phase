@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {
+          "AILogic": "MostProminentOnBattlefield"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 G"
+          },
+          {
+            "type": "Mana",
+            "cost": "ChooseCreatureType<1>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "MostProminentOnBattlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "SetPower": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power and toughness are each equal to the number of creatures of the chosen type on the battlefield."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

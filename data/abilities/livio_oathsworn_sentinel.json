@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "WithCountersType": "AEGIS",
+        "TgtPrompt": "Select another target creature",
+        "Optional": "True",
+        "DefinedPlayer": "TargetedController",
+        "SpellDescription": "Choose another target creature. Its controller may exile it with an aegis counter on it.",
+        "Chooser": "TargetedController",
+        "StackDescription": "{p:You} chooses {c:Targeted}. {p:TargetedController} may exile it with an aegis counter on it."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Exile",
+        "destination": "Battlefield",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card.counters_GE1_AEGIS",
+        "SpellDescription": "Return all exiled cards with aegis counters on them to the battlefield under their owners' control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

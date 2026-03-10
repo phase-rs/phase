@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "Execute": "TrigCharm",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, ABILITY"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigRemoveCounter",
+            "TriggerDescription": "Whenever CARDNAME attacks, remove all counters from up to one target permanent."
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of your upkeep, if you haven't been dealt combat damage since your last turn, you draw a card and you lose 1 life.",
+            "SVarCompare": "EQ0",
+            "CheckSVar": "X",
+            "Phase": "Upkeep",
+            "ValidPlayer": "You",
+            "Execute": "TrigDraw",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

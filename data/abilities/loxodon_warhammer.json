@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample & Lifelink",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +3/+0 and has trample and lifelink.",
+        "AddPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

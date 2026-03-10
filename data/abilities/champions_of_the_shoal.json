@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigTap",
+        "TriggerDescription": "Whenever this creature enters or becomes tapped, tap up to one target creature and put a stun counter on it.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "Execute": "TrigTap",
+        "TriggerDescription": "Whenever this creature enters or becomes tapped, tap up to one target creature and put a stun counter on it."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Cost": "BeholdExile<1/Merfolk>",
+        "Activator": "You",
+        "EffectZone": "All",
+        "Description": "As an additional cost to cast this spell, behold a Merfolk and exile it. (Exile a Merfolk you control or a Merfolk card from your hand.)",
+        "ValidCard": "Card.Self",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

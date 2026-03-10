@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "ValidTgts": "Instant.YouCtrl+cmcEQX,Sorcery.YouCtrl+cmcEQX",
+          "SpellDescription": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy.",
+          "MayChooseTarget": "True",
+          "TargetType": "Spell",
+          "AILogic": "Once"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "tapXType<X/Artifact/artifacts you control>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Instant.YouCtrl+cmcEQX,Sorcery.YouCtrl+cmcEQX",
+        "SpellDescription": "Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy.",
+        "MayChooseTarget": "True",
+        "TargetType": "Spell",
+        "AILogic": "Once"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigInvestigate",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may discard a card. If you do, investigate twice.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

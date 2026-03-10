@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 3,
+        "types": [
+          "Elephant"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveAllAbilities": "True",
+        "SpellDescription": "Until end of turn, target creature loses all abilities and becomes a green Elephant with base power and toughness 3/3.",
+        "OverwriteColors": "True",
+        "Colors": "Green",
+        "RemoveCreatureTypes": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "Abandon",
+        "TriggerDescription": "At the beginning of each end step, if you've been dealt 5 or more damage this turn, abandon this scheme.",
+        "Phase": "End of Turn",
+        "CheckSVar": "X",
+        "SVarCompare": "GE5"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Command",
+        "ValidTarget": "You",
+        "PreventionEffect": "True",
+        "Description": "If a source an opponent controls would deal damage to you, prevent 1 of that damage.",
+        "ValidSource": "Card.OppCtrl,Emblem.OppCtrl",
+        "ReplaceWith": "DBReplace"
+      }
+    }
+  ],
+  "faces": []
+}

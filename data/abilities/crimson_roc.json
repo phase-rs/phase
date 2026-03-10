@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidCard": "Creature.withoutFlying",
+        "ValidBlocker": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME blocks a creature without flying, CARDNAME gets +1/+0 and gains first strike until end of turn.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

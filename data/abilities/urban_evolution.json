@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Urban Evolution's Effect — Exploration",
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Draw three cards. You may play an additional land this turn.",
+          "StaticAbilities": "Exploration",
+          "AILogic": "Always"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Urban Evolution's Effect — Exploration",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Draw three cards. You may play an additional land this turn.",
+        "StaticAbilities": "Exploration",
+        "AILogic": "Always"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

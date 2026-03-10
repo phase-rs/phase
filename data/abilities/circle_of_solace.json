@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "RPreventNextFromCreature",
+          "SpellDescription": "The next time a creature of the chosen type would deal damage to you this turn, prevent that damage."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "RPreventNextFromCreature",
+        "SpellDescription": "The next time a creature of the chosen type would deal damage to you this turn, prevent that damage."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigDig",
+            "TriggerDescription": "At the beginning of your upkeep, exile the top card of your library. You may play that card this turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "MayPlay": "True",
+            "Description": "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast from exile.",
+            "AffectedZone": "Exile",
+            "MayPlayDontGrantZonePermissions": "True",
+            "Affected": "Card.YouCtrl+nonLand",
+            "MayPlayAltManaCost": "0",
+            "MayPlayLimit": "1"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

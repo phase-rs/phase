@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "Defined": "You",
+          "Amount": "1",
+          "SpellDescription": "Prevent the next 1 damage that would be dealt to you this turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/PALLIATION>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "Amount": "1",
+        "SpellDescription": "Prevent the next 1 damage that would be dealt to you this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerDescription": "Whenever a creature an opponent controls becomes tapped, put a palliation counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

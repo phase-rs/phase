@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, draw a card for each artifact you control."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "FlipCoinMod"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "CheckSVar": "Count$YouFlipThisTurn",
+        "SVarCompare": "EQ0",
+        "Result": "True",
+        "Description": "Two-Headed Coin — The first time you flip one or more coins each turn, those coins come up heads and you win those flips."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

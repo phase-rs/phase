@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever one or more other creatures die, put a +1/+1 counter on CARDNAME. This ability triggers only once each turn.",
+        "ActivationLimit": "1",
+        "ValidCards": "Creature.Other",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

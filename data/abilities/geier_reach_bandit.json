@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "WerewolfTransformCondition": "True",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigTransform1",
+            "Origin": "Any",
+            "ValidCard": "Werewolf.YouCtrl",
+            "TriggerDescription": "Whenever a Werewolf you control enters, you may transform it.",
+            "Destination": "Battlefield",
+            "TriggerZones": "Battlefield",
+            "OptionalDecider": "You"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "Execute": "TrigTransform2",
+            "Phase": "Upkeep",
+            "WerewolfUntransformCondition": "True",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {G}.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUpkeep"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDmg",
+        "ValidCard": "Swamp",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player puts a Swamp onto the battlefield, CARDNAME deals 3 damage to that player unless the player puts a -1/-1 counter on a creature they control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self+attacking",
+        "CheckSVar": "X",
+        "SVarCompare": "EQY",
+        "Description": "CARDNAME can't be blocked as long as defending player controls the most creatures or is tied for the most."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SpellDescription": "Each player with fewer cards in hand than the player with the most cards in hand draws cards equal to the difference.",
+          "RepeatPlayers": "Player.HasCardsInHand_Card_LTX",
+          "RepeatSubAbility": "DBDraw"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player with fewer cards in hand than the player with the most cards in hand draws cards equal to the difference.",
+        "RepeatPlayers": "Player.HasCardsInHand_Card_LTX",
+        "RepeatSubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

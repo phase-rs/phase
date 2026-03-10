@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Creature.Red+YouCtrl",
+        "Description": "CARDNAME has haste as long as you control a red creature.",
+        "AddKeyword": "Haste",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has wither as long as you control a green creature. (It deals damage to creatures in the form of -1/-1 counters.)",
+        "IsPresent": "Creature.Green+YouCtrl",
+        "Affected": "Card.Self",
+        "AddKeyword": "Wither"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Creature.enchanted+YouCtrl,Creature.Enchantment+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an enchanted creature or enchantment creature you control attacks, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.AttachedBy",
+        "AddToughness": "4",
+        "AddPower": "4",
+        "Description": "Enchanted creature gets +4/+4."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

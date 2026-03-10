@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerDescription": "When you sacrifice a Clue, return CARDNAME from your graveyard to your hand.",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Graveyard",
+        "ValidCard": "Clue.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

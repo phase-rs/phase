@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "You",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Creature.unblocked",
+        "DamageTarget": "Self",
+        "ReplaceWith": "DmgSelf",
+        "Description": "As long as CARDNAME is untapped, all damage that would be dealt to you by unblocked creatures is dealt to CARDNAME instead.",
+        "IsPresent": "Card.Self+untapped"
+      }
+    }
+  ],
+  "faces": []
+}

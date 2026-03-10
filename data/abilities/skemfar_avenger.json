@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another nontoken Elf or Berserker you control dies, you draw a card and you lose 1 life.",
+        "Origin": "Battlefield",
+        "ValidCard": "Elf.!token+Other+YouCtrl,Berserker.!token+Other+YouCtrl",
+        "Execute": "TrigDraw",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

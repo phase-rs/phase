@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigClone",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you cycle a card, you may have CARDNAME become a copy of another target permanent until your next turn, except it has this ability.",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

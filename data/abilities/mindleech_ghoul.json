@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "ValidCard": "Creature",
+        "Execute": "TrigExile",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME exploits a creature, each opponent exiles a card from their hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

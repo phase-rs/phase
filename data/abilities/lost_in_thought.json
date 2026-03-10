@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "Continuous,CantAttack,CantBlock,CantBeActivated"
+      },
+      "params": {
+        "ValidCard": "Card.EnchantedBy",
+        "Affected": "Creature.EnchantedBy",
+        "IgnoreEffectCost": "ExileFromGrave<3/Card>",
+        "Description": "Enchanted creature can't attack or block, and its activated abilities can't be activated. Its controller may exile three cards from their graveyard for that player to ignore this effect until end of turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

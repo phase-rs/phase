@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Spore Chimney — When CARDNAME enters, search your library for up to X basic land cards, put them onto the battlefield tapped, then shuffle.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

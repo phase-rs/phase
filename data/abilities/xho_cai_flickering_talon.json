@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigEffect",
+        "Origin": "Any",
+        "TriggerDescription": "When NICKNAME enters, the next noncreature spell you cast costs {1} less to cast."
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ActivatorThisTurnCast": "EQ2",
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Flurry — Whenever you cast your second spell each turn, exile up to one target creature you control, then return it to the battlefield under its owner's control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

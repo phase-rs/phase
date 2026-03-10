@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever a player taps a land for mana, if it's not that player's turn, destroy that land.",
+        "TriggerZones": "Battlefield",
+        "Activator": "Player.NonActive",
+        "ValidCard": "Land"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

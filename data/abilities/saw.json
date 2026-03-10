@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever equipped creature attacks, you may sacrifice a permanent other than that creature or CARDNAME. If you do, draw a card.",
+        "ValidCard": "Card.EquippedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+0.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

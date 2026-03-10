@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +0/+2 and can block creatures with landwalk abilities as though they didn't have those abilities."
+      }
+    },
+    {
+      "mode": {
+        "Other": "IgnoreLandWalk"
+      },
+      "params": {
+        "Description": "Enchanted creature can block creatures with landwalk abilities as though they didn't have those abilities.",
+        "ValidBlocker": "Creature.EnchantedBy",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeLife",
+        "params": {
+          "ValidTgts": "Player",
+          "ConditionSVarCompare": "LE5",
+          "SpellDescription": "If the difference between your life total and target player's life total is 5 or less, exchange life totals with that player.",
+          "ConditionCheckSVar": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "ConditionSVarCompare": "LE5",
+        "SpellDescription": "If the difference between your life total and target player's life total is 5 or less, exchange life totals with that player.",
+        "ConditionCheckSVar": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

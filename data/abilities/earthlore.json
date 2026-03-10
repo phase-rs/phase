@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.blocking"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<1/Land.EnchantedBy/Enchanted Land>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "Tap enchanted land:",
+        "SpellDescription": "Target blocking creature gets +1/+2 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

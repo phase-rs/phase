@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "AddKeyword": "Melee",
+        "Description": "Lieutenant — As long as you control your commander, other creatures you control have melee.",
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

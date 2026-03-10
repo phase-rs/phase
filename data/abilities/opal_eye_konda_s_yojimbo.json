@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "Choices": "Card,Emblem",
+          "AILogic": "NeedsPrevention",
+          "SubAbility": "DBEffect",
+          "SpellDescription": "The next time a source of your choice would deal damage this turn, that damage is dealt to CARDNAME instead."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "Card,Emblem",
+        "AILogic": "NeedsPrevention",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "The next time a source of your choice would deal damage this turn, that damage is dealt to CARDNAME instead."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "Amount": "1",
+          "SpellDescription": "Prevent the next 1 damage that would be dealt to NICKNAME this turn.",
+          "Defined": "Self"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "SpellDescription": "Prevent the next 1 damage that would be dealt to NICKNAME this turn.",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

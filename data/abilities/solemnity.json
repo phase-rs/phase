@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPutCounter"
+      },
+      "params": {
+        "ValidPlayer": "Player",
+        "Description": "Players can't get counters."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPutCounter"
+      },
+      "params": {
+        "Description": "Counters can't be put on artifacts, creatures, enchantments or lands.",
+        "ValidCard": "Creature.inZoneBattlefield,Artifact.inZoneBattlefield,Enchantment.inZoneBattlefield,Land.inZoneBattlefield",
+        "AffectedZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

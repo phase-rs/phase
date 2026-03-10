@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Island",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "Whenever a player taps an Island for mana, CARDNAME deals 1 damage to that player."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

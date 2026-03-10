@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a Bolas planeswalker spell, you may sacrifice CARDNAME. If you do, destroy target creature.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroy",
+        "ValidCard": "Planeswalker.Bolas",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

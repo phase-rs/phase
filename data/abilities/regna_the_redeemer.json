@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "Execute": "TrigWarrior",
+        "TriggerDescription": "At the beginning of each end step, if your team gained life this turn, create two 1/1 white Warrior creature tokens.",
+        "CheckSVar": "YouTeamLifeGained",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

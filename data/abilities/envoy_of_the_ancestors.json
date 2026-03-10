@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Modified creatures you control have lifelink. (Equipment, Auras you control, and counters are modifications.)",
+        "AddKeyword": "Lifelink",
+        "Affected": "Creature.modified+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

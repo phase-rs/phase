@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast an artifact or enchantment spell, create a 1/1 blue Faerie creature token with flying.",
+        "ValidCard": "Artifact,Enchantment",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.withFlying+Other+YouCtrl",
+        "Description": "Other creatures you control with flying get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

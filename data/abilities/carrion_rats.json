@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DBNoCombatDamage",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, any player may exile a card from their graveyard. If a player does, CARDNAME assigns no combat damage this turn.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "DBNoCombatDamage",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, any player may exile a card from their graveyard. If a player does, CARDNAME assigns no combat damage this turn.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

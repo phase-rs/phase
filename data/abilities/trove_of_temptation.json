@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, create a Treasure token.",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "Execute": "DBTreasureToken",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "PlayerMustAttack"
+      },
+      "params": {
+        "ValidPlayer": "Opponent",
+        "Description": "Each opponent must attack you or a planeswalker you control with at least one creature each combat if able.",
+        "MustAttack": "You,Planeswalker.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

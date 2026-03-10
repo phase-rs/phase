@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Enchantment.YouCtrl",
+        "TriggerDescription": "Constellation — Whenever an enchantment you control enters, you gain 1 life.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Command",
+        "Execute": "TrigGainLife"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, choose a color. Add an amount of mana of that color equal to your devotion to that color.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Enchantment",
+        "Description": "Nontoken creatures are enchantments in addition to their other types.",
+        "Affected": "Creature.!token",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

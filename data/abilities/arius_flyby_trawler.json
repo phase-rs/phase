@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSeek",
+        "TriggerDescription": "Whenever NICKNAME attacks, seek a non-Shark card.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DiscardedAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you discard one or more cards, put a +1/+1 counter on NICKNAME.",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

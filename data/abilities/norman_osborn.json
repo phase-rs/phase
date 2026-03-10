@@ -1,0 +1,89 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SorcerySpeed": "True",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+              "AILogic": "Always",
+              "Defined": "Self",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "1 U B R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SorcerySpeed": "True",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+            "AILogic": "Always",
+            "Defined": "Self",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "CombatDamage": "True",
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, he connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)",
+            "Execute": "TrigConnive",
+            "ValidTarget": "Player",
+            "ValidSource": "Card.Self"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "ValidAttacker": "Creature.Self",
+            "Description": "CARDNAME can't be blocked."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Type": "Spell",
+            "Activator": "You",
+            "Amount": "2",
+            "ValidCard": "Card.wasCastFromYourGraveyard",
+            "Description": "Spells you cast from your graveyard cost {2} less to cast."
+          }
+        },
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Card.YouOwn+nonLand",
+            "Description": "Goblin Formula — Each nonland card in your graveyard has mayhem. The mayhem cost is equal to its mana cost. (You may cast a card from your graveyard for its mayhem cost if you discarded it this turn. Timing rules still apply.)",
+            "AffectedZone": "Graveyard",
+            "AddKeyword": "Mayhem:CardManaCost"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

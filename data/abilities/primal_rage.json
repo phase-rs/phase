@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have trample. (A creature with trample can deal excess combat damage to the player or planeswalker it's attacking.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

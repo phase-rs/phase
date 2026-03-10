@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Formidable — Whenever CARDNAME attacks, if creatures you control have total power 8 or greater, creatures you control gain trample until end of turn.",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "SVarCompare": "GE8",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigFormidable"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

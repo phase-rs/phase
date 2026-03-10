@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "TriggerDescription": "Whenever you attack a player, target creature that's attacking that player gains first strike until end of turn.",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "AttackedTarget": "Player",
+        "ValidAttackers": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

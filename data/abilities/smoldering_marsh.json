@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "LandTapped",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME enters tapped unless you control two or more basic lands."
+      }
+    }
+  ],
+  "faces": []
+}

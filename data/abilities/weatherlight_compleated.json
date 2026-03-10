@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature you control dies, put a phyresis counter on CARDNAME. Then draw a card if it has seven or more phyresis counters on it. If it doesn't, scry 1.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature & Phyrexian",
+        "Affected": "Card.Self+counters_GE4_PHYRESIS",
+        "Description": "As long as CARDNAME has four or more phyresis counters on it, it's a Phyrexian creature in addition to its other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

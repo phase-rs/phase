@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Exile<1/CARDNAME>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each creature you control that's an artifact or Human gains indestructible until end of turn.",
+        "KW": "Indestructible",
+        "ValidCards": "Creature.Human+YouCtrl,Creature.Artifact+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

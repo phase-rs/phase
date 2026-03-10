@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this creature enters, Forest cards in your hand and library perpetually become 3/4 Treefolk creatures in addition to their other types and gain reach and haste.",
+        "Execute": "TrigAnimateAll"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this creature dies, seek two Forest cards and put them onto the battlefield.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigSeek"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

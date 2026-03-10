@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Chooser": "You",
+        "SpellDescription": "Target opponent reveals their hand. You choose up to X nonland cards from among them. Search that player's library, hand and graveyard for cards with the same name as those cards and exile them. Then, that player shuffles their library.",
+        "IsCurse": "True",
+        "SubAbility": "DBRepeat",
+        "RememberChanged": "True",
+        "DefinedPlayer": "Targeted",
+        "ChangeNum": "X",
+        "ChangeType": "Card.nonLand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

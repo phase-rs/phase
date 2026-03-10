@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may have Ally creatures you control gain flying until end of turn.",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

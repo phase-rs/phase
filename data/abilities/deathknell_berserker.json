@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self+powerGE3",
+        "TriggerDescription": "When CARDNAME dies, if its power was 3 or greater, create a 2/2 black Zombie Berserker creature token.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

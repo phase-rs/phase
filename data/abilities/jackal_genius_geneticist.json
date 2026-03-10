@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a creature spell with mana value equal to NICKNAME's power, copy that spell, except the copy isn't legendary. Then put a +1/+1 counter on NICKNAME. (The copy becomes a token.)",
+        "ValidCard": "Creature.cmcEQX",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

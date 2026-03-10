@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +2/+2 as long as it's a Vampire. Otherwise, it gets -2/-2.",
+        "AddPower": "2",
+        "Affected": "Creature.EnchantedBy+Vampire",
+        "AddToughness": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Secondary": "True",
+        "Affected": "Creature.EnchantedBy+nonVampire",
+        "AddToughness": "-2",
+        "AddPower": "-2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

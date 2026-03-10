@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, the Ring tempts you.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigTempt",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTempt",
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, the Ring tempts you.",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigTreasure",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, create a Treasure token.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

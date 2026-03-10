@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterRemovedOnce",
+      "params": {
+        "CounterType": "TIME",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigScry",
+        "TriggerDescription": "Whenever one or more time counters are removed from CARDNAME, scry 1 and you gain 1 life. Then if CARDNAME has no time counters on it, exile it. When you do, take an extra turn after this one.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

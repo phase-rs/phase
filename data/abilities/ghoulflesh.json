@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets -1/-1 and is a black Zombie in addition to its other colors and types.",
+        "AddPower": "-1",
+        "AddToughness": "-1",
+        "AddType": "Zombie",
+        "AddColor": "Black"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

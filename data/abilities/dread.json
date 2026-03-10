@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "You",
+        "TriggerDescription": "Whenever a creature deals damage to you, destroy it.",
+        "ValidSource": "Creature.inZoneBattlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigShuffle",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from anywhere, shuffle it into its owner's library."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

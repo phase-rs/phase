@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME attacks while saddled, exile the top card of your library. Until the end of your next turn, you may play that card.",
+        "ValidCard": "Card.Self+IsSaddled",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

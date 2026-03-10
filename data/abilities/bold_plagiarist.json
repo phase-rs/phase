@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterPlayerAddedAll",
+      "params": {
+        "ValidSource": "Opponent",
+        "Execute": "TrigCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent puts one or more counters on a creature they control, they put the same number and kind of counters on CARDNAME.",
+        "ValidObjectToSource": "Creature.YouCtrl+inRealZoneBattlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

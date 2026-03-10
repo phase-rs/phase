@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Kithkin.YouOwn",
+        "Execute": "TrigConjure",
+        "Origin": "Library",
+        "TriggerZones": "Battlefield",
+        "Destination": "Hand",
+        "TriggerDescription": "Whenever a Kithkin card is put into your hand from your library, conjure a duplicate of that card into your hand."
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack, Kithkin creature cards in your hand perpetually get +1/+1.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

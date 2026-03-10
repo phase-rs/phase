@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "ExtraTurnDelayedTrigger": "DBDelTrig",
+          "ExtraTurnDelayedTriggerExcute": "TrigEffect",
+          "SubAbility": "DBExile",
+          "NumTurns": "1",
+          "StackDescription": "{p:You} takes an extra turn after this one. During that turn, damage can't be prevented. At the beginning of that turn's end step, {p:You} loses the game.",
+          "SpellDescription": "Take an extra turn after this one. [At the beginning of that turn's end step, you lose the game.]"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ExtraTurnDelayedTrigger": "DBDelTrig",
+        "ExtraTurnDelayedTriggerExcute": "TrigEffect",
+        "SubAbility": "DBExile",
+        "NumTurns": "1",
+        "StackDescription": "{p:You} takes an extra turn after this one. During that turn, damage can't be prevented. At the beginning of that turn's end step, {p:You} loses the game.",
+        "SpellDescription": "Take an extra turn after this one. [At the beginning of that turn's end step, you lose the game.]"
+      }
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "NumTurns": "1",
+          "ExtraTurnDelayedTriggerExcute": "TrigEffect2",
+          "ExtraTurnDelayedTrigger": "DBDelTrig",
+          "StackDescription": "{p:You} takes an extra turn after this one. During that turn, damage can't be prevented.",
+          "PrecostDesc": "Cleave",
+          "CostDesc": "{4}{U}{U}{R}",
+          "NonBasicSpell": "True",
+          "SubAbility": "DBExile",
+          "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 U U R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NumTurns": "1",
+        "ExtraTurnDelayedTriggerExcute": "TrigEffect2",
+        "ExtraTurnDelayedTrigger": "DBDelTrig",
+        "StackDescription": "{p:You} takes an extra turn after this one. During that turn, damage can't be prevented.",
+        "PrecostDesc": "Cleave",
+        "CostDesc": "{4}{U}{U}{R}",
+        "NonBasicSpell": "True",
+        "SubAbility": "DBExile",
+        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

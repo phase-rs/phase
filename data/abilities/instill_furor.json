@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has \"At the beginning of your end step, sacrifice this creature unless it attacked this turn.\"",
+        "Affected": "Creature.EnchantedBy",
+        "AddSVar": "InstillTrigSac & MustAttack",
+        "AddTrigger": "EOTTrigger"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

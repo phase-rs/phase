@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, creatures you control gain first strike until end of turn.",
+        "Destination": "Battlefield",
+        "Execute": "TrigPumpAll",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

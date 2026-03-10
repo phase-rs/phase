@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create a 2/2 black Skeleton Pirate creature token."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You.descended",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "At the beginning of your end step, if you descended this turn, you may pay 1 life. If you do, return CARDNAME to its owner's hand. (You descended if a permanent card was put into your graveyard from anywhere.)",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Skeleton+YouCtrl",
+        "Description": "Skeletons you control get +1/+0 and have haste.",
+        "AddPower": "1",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

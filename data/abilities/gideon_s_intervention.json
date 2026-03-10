@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Caster": "Opponent",
+        "ValidCard": "Card.NamedCard+nonLand",
+        "Description": "Your opponents can't cast spells with the chosen name."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Card.NamedCard",
+        "Description": "Prevent all damage that would be dealt to you and permanents you control by sources with the chosen name.",
+        "ActiveZones": "Battlefield",
+        "Prevent": "True",
+        "ValidTarget": "You,Permanent.YouCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

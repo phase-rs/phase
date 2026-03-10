@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may put a Faerie permanent card from your hand onto the battlefield.",
+        "ChangeType": "Permanent.Faerie",
+        "ChangeNum": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "ValidTgts": "Creature.Green",
+          "TgtPrompt": "Select target green creature",
+          "Gains": "black",
+          "SpellDescription": "Target green creature gains protection from black until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.Green",
+        "TgtPrompt": "Select target green creature",
+        "Gains": "black",
+        "SpellDescription": "Target green creature gains protection from black until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,90 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Attach",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Attach CARDNAME to up to one target creature you control. Put a +1/+1 counter on that creature.",
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "SubAbility": "DBPutCounter",
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target creature you control"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw two cards.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Ultimate": "True",
+          "Amount": "10",
+          "Planeswalker": "True",
+          "SpellDescription": "Add ten mana of any one color."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -10
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Amount": "10",
+        "Planeswalker": "True",
+        "SpellDescription": "Add ten mana of any one color."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Target": "Card.Self+AttachedTo Creature",
+        "ValidCard": "Creature",
+        "Description": "As long as CARDNAME is attached to a creature, CARDNAME can't be attacked and has \"Whenever equipped creature deals combat damage during your turn, put that many loyalty counters on CARDNAME.\""
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as CARDNAME is attached to a creature, CARDNAME can't be attacked and has \"Whenever equipped creature deals combat damage during your turn, put that many loyalty counters on CARDNAME.\"",
+        "Affected": "Card.Self+AttachedTo Creature",
+        "AddTrigger": "TrigDamageDoneOnce",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

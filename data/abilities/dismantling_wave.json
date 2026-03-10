@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.OppCtrl,Enchantment.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "SpellDescription": "For each opponent, destroy up to one target artifact or enchantment that player controls.",
+        "TargetMax": "OneEach",
+        "TgtPrompt": "Select up to one target artifact or enchantment each opponent controls",
+        "TargetsForEachPlayer": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cycle CARDNAME, destroy all artifacts and enchantments.",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

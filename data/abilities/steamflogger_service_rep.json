@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Goblin.Other+YouCtrl",
+        "Execute": "TrigAssemble",
+        "TriggerDescription": "Whenever another Goblin you control enters, you may pay {1}. If you do, CARDNAME assembles a Contraption."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

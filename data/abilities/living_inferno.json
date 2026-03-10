@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "Count$CardPower"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "Count$CardPower",
+        "SpellDescription": "CARDNAME deals damage equal to its power divided as you choose among any number of target creatures.",
+        "TgtPrompt": "Select any number of target creatures",
+        "TargetMin": "0",
+        "DividedAsYouChoose": "Count$CardPower",
+        "SubAbility": "Retribution"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

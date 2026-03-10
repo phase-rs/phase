@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "ValidAttackers": "Creature",
+        "ValidAttackersAmount": "GE3",
+        "AttackingPlayer": "You",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Whenever you attack with three or more creatures, you may pay {2}{R}. If you do, return CARDNAME from your graveyard to the battlefield tapped and attacking."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has \"At the beginning of your upkeep, sacrifice this creature unless you discard a card.\"",
+        "AddSVar": "TrigCoralDiscard & DBCoralSacrifice & DBCoralCleanup",
+        "Affected": "Creature.AttachedBy",
+        "AddTrigger": "TrigCoralPhase"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

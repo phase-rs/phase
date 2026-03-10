@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigPump",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, target creature gets +4/+4 until end of turn.",
+            "Destination": "Battlefield"
+          }
+        },
+        {
+          "mode": "Transformed",
+          "params": {
+            "Secondary": "True",
+            "Execute": "TrigPump",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, target creature gets +4/+4 until end of turn.",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "WerewolfTransformCondition": "True",
+            "Execute": "TrigTransform",
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "OptionalDecider": "You",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigFight",
+            "TriggerDescription": "Whenever this creature transforms into CARDNAME, you may have it fight target non-Werewolf creature you don't control."
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "WerewolfUntransformCondition": "True",
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

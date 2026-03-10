@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "MayLookFaceDown",
+          "SpellDescription": "Until end of turn, you may look at face-down creatures you don't control any time."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "MayLookFaceDown",
+        "SpellDescription": "Until end of turn, you may look at face-down creatures you don't control any time."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

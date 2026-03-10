@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "SpellDescription": "Add {U}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {U}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "HOUR",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put an hour counter on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each upkeep, put an hour counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "CounterAdded",
+      "params": {
+        "CounterAmount": "EQ12",
+        "Execute": "TrigChangeAll",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When the twelfth hour counter is put on CARDNAME, shuffle your hand and graveyard into your library, then draw seven cards. Exile CARDNAME.",
+        "CounterType": "HOUR",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

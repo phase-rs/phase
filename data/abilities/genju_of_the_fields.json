@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 2,
+        "toughness": 5,
+        "types": [
+          "Creature",
+          "Spirit"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "PseudoLifelink",
+        "Defined": "Enchanted",
+        "Colors": "White",
+        "SpellDescription": "Until end of turn, enchanted Plains becomes a 2/5 white Spirit creature with \"Whenever this creature deals damage, its controller gains that much life.\" It's still a land."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.EnchantedBy",
+        "Origin": "Battlefield",
+        "Execute": "TrigReturnOwner",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted Plains is put into a graveyard, you may return CARDNAME from your graveyard to your hand.",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

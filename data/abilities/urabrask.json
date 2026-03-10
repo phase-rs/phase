@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "CheckSVar": "X",
+            "RememberChanged": "True",
+            "SVarCompare": "GE3",
+            "SorcerySpeed": "True",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Exile CARDNAME, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery and only if you've cast three or more instant and/or sorcery spells this turn.",
+            "SubAbility": "DBReturn"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigDealDamage",
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Card.Instant,Card.Sorcery",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME deals 1 damage to target opponent. Add {R}."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

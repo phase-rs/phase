@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "TriggerDescription": "Whenever a player casts a spell, if the amount of mana spent to cast it was less than its mana value, NICKNAME deal 3 damage to that player.",
+        "ValidSAonCard": "Spell.ManaSpent LTX"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

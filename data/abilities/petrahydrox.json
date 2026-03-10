@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChange",
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "When CARDNAME becomes the target of a spell or ability, return CARDNAME to its owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

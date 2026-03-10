@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDraw",
+            "TriggerDescription": "When CARDNAME enters, draw three cards, then discard a card.",
+            "Origin": "Any"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "CopySpellAbility",
+            "params": {
+              "ValidTgts": "Card.YouCtrl",
+              "TargetType": "Spell",
+              "SpellDescription": "Copy target spell you control. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidTgts": "Card.YouCtrl",
+            "TargetType": "Spell",
+            "SpellDescription": "Copy target spell you control. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

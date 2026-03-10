@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigScry",
+        "TriggerDescription": "Whenever an artifact you control enters, scry 1.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Artifact.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

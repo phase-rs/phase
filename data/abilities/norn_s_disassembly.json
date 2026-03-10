@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "Type": "Card.Historic",
+          "SpellDescription": "Seek a historic card.",
+          "StackDescription": "REP Seek_{p:You} seeks"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Card.Historic",
+        "SpellDescription": "Seek a historic card.",
+        "StackDescription": "REP Seek_{p:You} seeks"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

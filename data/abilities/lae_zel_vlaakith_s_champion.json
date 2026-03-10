@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidSource": "You",
+        "ReplaceWith": "AddOneMoreCounters",
+        "ValidObject": "Creature.YouCtrl+inZoneBattlefield,Planeswalker.YouCtrl+inZoneBattlefield,You",
+        "Description": "If you would put one or more counters on a creature or planeswalker you control or on yourself, put that many plus one of each of those kinds of counters on that permanent or player instead."
+      }
+    }
+  ],
+  "faces": []
+}

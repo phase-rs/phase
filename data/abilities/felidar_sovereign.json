@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "LifeAmount": "GE40",
+        "Execute": "TrigWin",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, if you have 40 or more life, you win the game.",
+        "LifeTotal": "You",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

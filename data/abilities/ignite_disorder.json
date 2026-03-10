@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Blue,Creature.White"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DividedAsYouChoose": "3",
+        "TgtPrompt": "Select target white and/or blue creature to distribute damage to",
+        "TargetMax": "3",
+        "SpellDescription": "CARDNAME deals 3 damage divided as you choose among one, two, or three target white and/or blue creatures.",
+        "TargetMin": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

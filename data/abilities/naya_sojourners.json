@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may put a +1/+1 counter on target creature.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may put a +1/+1 counter on target creature.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

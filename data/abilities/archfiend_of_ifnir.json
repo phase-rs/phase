@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you cycle or discard another card, put a -1/-1 counter on each creature your opponents control.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Other+YouOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

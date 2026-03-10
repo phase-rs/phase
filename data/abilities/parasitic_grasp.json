@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Human"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "TgtPrompt": "Select target Human creature",
+        "SpellDescription": "CARDNAME deals 3 damage to target [Human] creature."
+      }
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "{1}{B}{B}",
+        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+        "SubAbility": "DBGainLife",
+        "PrecostDesc": "Cleave",
+        "NonBasicSpell": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

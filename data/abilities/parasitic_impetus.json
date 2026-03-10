@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLose",
+        "TriggerDescription": "Whenever enchanted creature attacks, its controller loses 2 life and you gain 2 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Goad": "True",
+        "Description": "Enchanted creature gets +2/+2 and is goaded. (It attacks each combat if able and attacks a player other than you if able.)",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

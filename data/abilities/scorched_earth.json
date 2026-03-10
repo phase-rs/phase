@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Land"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X R"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<X/Land/land card(s)>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "As an additional cost to cast this spell, discard X land cards.",
+        "TargetMax": "X",
+        "SpellDescription": "Destroy X target lands.",
+        "TargetMin": "X",
+        "TgtPrompt": "Select X target lands"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

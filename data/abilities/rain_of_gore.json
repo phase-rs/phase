@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "GainLife",
+      "params": {
+        "ValidSource": "SpellAbility",
+        "SourceController": "True",
+        "AILogic": "LoseLife",
+        "Description": "If a spell or ability would cause its controller to gain life, that player loses that much life instead.",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "RLoseLife"
+      }
+    }
+  ],
+  "faces": []
+}

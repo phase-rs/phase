@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another Villain you control enters, put a +1/+1 counter on this creature. This ability triggers only once each turn.",
+        "ValidCard": "Villain.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike & MustBeBlockedBy Creature",
+        "Description": "As long as equipped creature is attacking, it has first strike and must be blocked if able.",
+        "Affected": "Creature.EquippedBy+attacking"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "Masarmonicon",
+        "Description": "Equipped creature has \"If a creature dying causes a triggered ability of this creature or an emblem you own to trigger, that ability triggers an additional time.\"",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

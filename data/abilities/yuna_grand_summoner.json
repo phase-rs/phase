@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "PrecostDesc": "Grand Summon —",
+          "SubAbility": "DBEffectAddCounter",
+          "SpellDescription": "Add one mana of any color. When you next cast a creature spell this turn, that creature enters with two additional +1/+1 counters on it."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Grand Summon —",
+        "SubAbility": "DBEffectAddCounter",
+        "SpellDescription": "Add one mana of any color. When you next cast a creature spell this turn, that creature enters with two additional +1/+1 counters on it."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Permanent.YouCtrl+Other+HasCounters",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever another permanent you control is put into a graveyard from the battlefield, if it had one or more counters on it, you may put that number of +1/+1 counters on target creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

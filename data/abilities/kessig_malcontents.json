@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, it deals damage to target player or planeswalker equal to the number of Humans you control.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TroubleMaking"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

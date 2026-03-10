@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "SVarCompare": "GE2",
+          "Name": "Forest",
+          "SpellDescription": "Conjure a card named Forest onto the battlefield. Activate only if two or more Elf cards are in your graveyard.",
+          "Conjure": "True",
+          "Zone": "Battlefield",
+          "CheckSVar": "X"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SVarCompare": "GE2",
+        "Name": "Forest",
+        "SpellDescription": "Conjure a card named Forest onto the battlefield. Activate only if two or more Elf cards are in your graveyard.",
+        "Conjure": "True",
+        "Zone": "Battlefield",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

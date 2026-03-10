@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ValidPlayer": "Opponent",
+        "ReplaceWith": "RepYouDraw",
+        "Description": "If an opponent would draw a card except the first one they draw in each of their draw steps, instead that player skips that draw and you draw a card.",
+        "ActiveZones": "Battlefield",
+        "NotFirstCardInDrawStep": "True"
+      }
+    }
+  ],
+  "faces": []
+}

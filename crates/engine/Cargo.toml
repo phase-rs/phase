@@ -24,6 +24,10 @@ path = "src/bin/coverage_report.rs"
 name = "card-data-export"
 path = "src/bin/card_data_export.rs"
 
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }

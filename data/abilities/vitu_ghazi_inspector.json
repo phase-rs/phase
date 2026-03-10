@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if evidence was collected, put a +1/+1 counter on target creature and you gain 2 life.",
+        "CheckSVar": "Z",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Cost": "CollectEvidence<6>",
+        "ValidSA": "Spell",
+        "Description": "As an additional cost to cast this spell, you may collect evidence 6. (Exile cards with total mana value 6 or greater from your graveyard.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

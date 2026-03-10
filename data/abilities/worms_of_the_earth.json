@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigChoose",
+        "TriggerDescription": "At the beginning of each upkeep, any player may sacrifice two lands or have CARDNAME deal 5 damage to that player. If a player does either, destroy CARDNAME.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPlayLand"
+      },
+      "params": {
+        "Description": "Players can't play lands."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "Layer": "CantHappen",
+        "Description": "Lands can't enter the battlefield.",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Land",
+        "Prevent": "True"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAnimateAll",
+        "TriggerDescription": "When CARDNAME enters, creatures you control perpetually gain \"When this creature dies, you may shuffle it into its owner's library if it's in your graveyard. If you do, investigate.\""
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by creatures with power 2 or less.",
+        "ValidBlocker": "Creature.powerLE2",
+        "ValidAttacker": "Creature.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

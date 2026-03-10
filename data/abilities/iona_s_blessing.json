@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CanBlockAmount": "1",
+        "Description": "Enchanted creature gets +2/+2, has vigilance, and can block an additional creature each combat.",
+        "AddToughness": "2",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "2",
+        "AddKeyword": "Vigilance"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

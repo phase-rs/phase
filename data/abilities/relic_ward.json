@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.EnchantedBy",
+        "Description": "Enchanted artifact has shroud. (It can't be the target of spells or abilities.)",
+        "AddKeyword": "Shroud"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

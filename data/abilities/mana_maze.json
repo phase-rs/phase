@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card.SharesColorWith LastCastThisTurn",
+        "Description": "Players can't cast spells that share a color with the spell most recently cast this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

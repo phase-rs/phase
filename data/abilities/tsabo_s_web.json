@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Land.hasNonManaActivatedAbility",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "Description": "Each land with an activated ability that isn't a mana ability doesn't untap during its controller's untap step."
+      }
+    }
+  ],
+  "faces": []
+}

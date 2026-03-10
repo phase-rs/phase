@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "IsCurse": "True",
+          "AILogic": "Fog",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "All combat damage that would be dealt to you this turn is dealt to target attacking creature instead.",
+          "ValidTgts": "Creature.attacking",
+          "ReplacementEffects": "DamageEvent",
+          "TgtPrompt": "Select target attacking creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "AILogic": "Fog",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "All combat damage that would be dealt to you this turn is dealt to target attacking creature instead.",
+        "ValidTgts": "Creature.attacking",
+        "ReplacementEffects": "DamageEvent",
+        "TgtPrompt": "Select target attacking creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

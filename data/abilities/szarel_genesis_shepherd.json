@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you sacrifice another nontoken permanent during your turn, put a number of +1/+1 counters equal to NICKNAME's power on up to one other target creature.",
+        "PlayerTurn": "True",
+        "ValidCard": "Permanent.Other+!token",
+        "ValidPlayer": "You",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may play lands from your graveyard.",
+        "MayPlay": "True",
+        "Affected": "Land.YouOwn",
+        "AffectedZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

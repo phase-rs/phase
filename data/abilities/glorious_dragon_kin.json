@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Artifact+YouCtrl,Dragon.YouCtrl",
+        "AddKeyword": "Protection:Card.ChosenColor:chosenColor",
+        "Description": "Artifact creatures and Dragons you control have protection from the chosen color."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

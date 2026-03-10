@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Command",
+        "TriggerDescription": "When you set this scheme in motion, create seven 0/1 green Plant creature tokens. If you control ten or more lands, create seven 3/3 green Elemental creature tokens instead.",
+        "Execute": "NewEvil"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

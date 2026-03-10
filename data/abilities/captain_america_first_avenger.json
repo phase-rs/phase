@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Mana",
+            "cost": "Unattach<Equipment.Attached+cmcEQX/an Equipment attached to NICKNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Throw . . . —",
+        "TargetMin": "1",
+        "TargetMax": "3",
+        "TgtPrompt": "Select any target to distribute damage to",
+        "XAnnounceTitle": "mana value of Equipment to unattach",
+        "SpellDescription": "He deals damage equal to that Equipment's mana value divided as you choose among one, two, or three targets.",
+        "DividedAsYouChoose": "X",
+        "Announce": "X"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "DBAttach",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "TriggerDescription": ". . . Catch — At the beginning of combat on your turn, attach up one target Equipment you control to NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

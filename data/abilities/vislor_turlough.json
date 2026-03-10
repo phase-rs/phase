@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChoose",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Deal with the Black Guardian — When CARDNAME enters, you may have an opponent gain control of it. If you do, it's goaded for as long as they control it.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of your end step, draw a card, then you lose life equal to the number of cards in your hand.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

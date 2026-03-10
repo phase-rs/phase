@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Black+YouCtrl",
+        "Description": "Black creatures you control have wither. (They deal damage to creatures in the form of -1/-1 counters.)",
+        "AddKeyword": "Wither"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

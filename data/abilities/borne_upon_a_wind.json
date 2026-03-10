@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "QuickSpell",
+          "SubAbility": "DBDraw",
+          "SpellDescription": "You may cast spells this turn as though they had flash."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "QuickSpell",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "You may cast spells this turn as though they had flash."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

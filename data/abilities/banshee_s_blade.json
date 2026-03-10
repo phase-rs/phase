@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage, put a charge counter on CARDNAME.",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Equipped creature gets +1/+1 for each charge counter on CARDNAME.",
+        "Affected": "Card.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

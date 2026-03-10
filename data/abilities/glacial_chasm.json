@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, sacrifice a land.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Description": "Creatures you control can't attack.",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Prevent": "True",
+        "Description": "Prevent all damage that would be dealt to you.",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "You"
+      }
+    }
+  ],
+  "faces": []
+}

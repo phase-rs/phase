@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "LEVEL 4-7 4/4 Flying",
+        "AddKeyword": "Flying",
+        "SetPower": "4",
+        "Affected": "Card.Self",
+        "SetToughness": "4",
+        "IsPresent": "Card.Self+counters_GE4_LEVEL+counters_LE7_LEVEL"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Self+counters_GE8_LEVEL",
+        "Description": "LEVEL 8+ 8/8 Flying, trample,,,{R}: CARDNAME gets +1/+0 until end of turn.",
+        "SetPower": "8",
+        "AddKeyword": "Flying & Trample",
+        "Affected": "Card.Self",
+        "SetToughness": "8",
+        "AddAbility": "Pump"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

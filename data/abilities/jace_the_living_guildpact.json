@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 2,
+        "destination": "Graveyard"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NoReveal": "True",
+        "Defined": "You",
+        "SpellDescription": "Look at the top two cards of your library. Put one of them into your graveyard.",
+        "LibraryPosition2": "0",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.Other+nonLand"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TgtPrompt": "Select another target nonland permanent",
+        "SpellDescription": "Return another target nonland permanent to its owner's hand."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Hand,Graveyard",
+        "destination": "Library",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player shuffles their hand and graveyard into their library. You draw seven cards.",
+        "SubAbility": "DBDraw",
+        "ChangeType": "Card",
+        "UseAllOriginZones": "True",
+        "Shuffle": "True",
+        "Planeswalker": "True",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

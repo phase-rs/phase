@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a nontoken artifact is put into your graveyard from the battlefield, return that card to your hand unless target opponent has CARDNAME deal 3 damage to them.",
+        "Destination": "Graveyard",
+        "ValidCard": "Artifact.YouOwn+!token",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

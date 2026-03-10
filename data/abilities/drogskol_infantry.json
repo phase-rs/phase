@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Enchanted creature gets +2/+2.",
+            "AddPower": "2",
+            "AddToughness": "2",
+            "Affected": "Creature.EnchantedBy"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ReplaceWith": "Exile",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

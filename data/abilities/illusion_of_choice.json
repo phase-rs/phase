@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SubAbility": "DBDraw",
+          "StaticAbilities": "STVoter",
+          "SpellDescription": "You choose how each player votes this turn. Draw a card."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "StaticAbilities": "STVoter",
+        "SpellDescription": "You choose how each player votes this turn. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

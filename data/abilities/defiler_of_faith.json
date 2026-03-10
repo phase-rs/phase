@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Permanent.White",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a white permanent spell, create a 1/1 white Soldier creature token.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "Description": "As an additional cost to cast white permanent spells, you may pay 2 life. Those spells cost {W} less to cast if you paid life this way. This effect reduces only the amount of white mana you pay.",
+        "ValidCard": "Permanent.White",
+        "ValidSA": "Spell",
+        "Activator": "You",
+        "Cost": "PayLife<2>",
+        "ReduceColor": "W"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

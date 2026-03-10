@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Gates, you may draw a card.",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "PresentCompare": "GE2",
+        "OptionalDecider": "You",
+        "IsPresent": "Gate.YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

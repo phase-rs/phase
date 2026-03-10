@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "Y"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "PowerAtLeast.4",
+        "TgtPrompt": "Select target creature or planeswalker",
+        "SpellDescription": "CARDNAME deals 3 damage to target creature or planeswalker. If you revealed a Dragon card or chose a Dragon as you cast this spell, CARDNAME deals damage equal to the power of that card or creature instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "Cost": "RevealOrChoose<1/Dragon>",
+        "Description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand or choose a Dragon you control.",
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

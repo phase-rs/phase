@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "Spell": "True",
+        "ValidPlayer": "You",
+        "Execute": "TrigDealDamage",
+        "ValidSource": "Instant.White,Sorcery.White",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a white instant or sorcery spell causes you to gain life, CARDNAME deals 3 damage to target creature or player."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Red instant and sorcery spells you control have lifelink.",
+        "AffectedZone": "Stack",
+        "Affected": "Instant.Red+YouCtrl,Sorcery.Red+YouCtrl",
+        "AddKeyword": "Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

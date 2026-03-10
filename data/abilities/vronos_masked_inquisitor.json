@@ -1,0 +1,91 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Planeswalker.YouCtrl+Other"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMin": "0",
+        "TargetMax": "2",
+        "TgtPrompt": "Select up to two target other planeswalkers you control",
+        "SubAbility": "DelayedTrig",
+        "SpellDescription": "Up to two other target planeswalkers you control phase out at the beginning of the next end step. (Treat them and anything attached to them as though they don't exist until your next turn.)"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand+OppCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "TgtPrompt": "Select up to one target nonland permanent each opponent controls",
+        "SpellDescription": "For each opponent, return up to one target nonland permanent that player controls to its owner's hand.",
+        "TargetMax": "OneEach",
+        "TargetsForEachPlayer": "True",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 9,
+        "toughness": 9,
+        "types": [
+          "Artifact",
+          "Creature",
+          "Construct"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Duration": "Permanent",
+        "RemoveCreatureTypes": "True",
+        "SpellDescription": "Target artifact you control becomes a 9/9 Construct artifact creature and gains vigilance, indestructible, and \"This creature can't be blocked.\"",
+        "TgtPrompt": "Select target artifact you control",
+        "Keywords": "Vigilance & Indestructible",
+        "staticAbilities": "Unblockable",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

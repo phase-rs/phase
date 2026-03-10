@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackersDeclared",
+          "params": {
+            "ValidAttackers": "Creature",
+            "ValidAttackersAmount": "EQ2",
+            "AttackingPlayer": "You",
+            "TriggerDescription": "When you attack with exactly two creatures, transform CARDNAME.",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 1,
+            "toughness": 0,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "R R"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBPump",
+            "SpellDescription": "CARDNAME and another target creature each get +1/+0 until end of turn.",
+            "Defined": "Self",
+            "StackDescription": "CARDNAME and"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigMana",
+            "TriggerDescription": "When this creature transforms into CARDNAME, add {R}{R}. Until end of turn, you don't lose this mana as steps and phases end."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

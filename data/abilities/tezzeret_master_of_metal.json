@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "Valid": "Card.Artifact",
+          "RevealRandomOrder": "True",
+          "Planeswalker": "True",
+          "RevealedDestination": "Library",
+          "SpellDescription": "Reveal cards from the top of your library until you reveal an artifact card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+          "RevealedLibraryPosition": "-1",
+          "FoundDestination": "Hand",
+          "ValidDescription": "artifact"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Card.Artifact",
+        "RevealRandomOrder": "True",
+        "Planeswalker": "True",
+        "RevealedDestination": "Library",
+        "SpellDescription": "Reveal cards from the top of your library until you reveal an artifact card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+        "RevealedLibraryPosition": "-1",
+        "FoundDestination": "Hand",
+        "ValidDescription": "artifact"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 0
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target opponent loses life equal to the number of artifacts you control.",
+        "ValidTgts": "Opponent",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "NewController": "You",
+        "SpellDescription": "Gain control of all artifacts and creatures target opponent controls.",
+        "AllValid": "Artifact.ControlledBy Targeted,Creature.ControlledBy Targeted",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChoosePlayer",
+        "params": {
+          "ValidTgts": "Creature,Player,Planeswalker",
+          "SubAbility": "DBChooseCreature",
+          "Choices": "ThisTargetedPlayer",
+          "Defined": "You",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "The next X damage that would be dealt to target creature, planeswalker, or player this turn is dealt to another target creature, planeswalker, or player instead."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature,Player,Planeswalker",
+        "SubAbility": "DBChooseCreature",
+        "Choices": "ThisTargetedPlayer",
+        "Defined": "You",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "The next X damage that would be dealt to target creature, planeswalker, or player this turn is dealt to another target creature, planeswalker, or player instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

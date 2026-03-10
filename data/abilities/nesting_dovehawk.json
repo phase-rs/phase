@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "Execute": "TrigPopulate",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, populate. (Create a token that's a copy of a creature token you control.)",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.token+YouCtrl",
+        "TriggerDescription": "Whenever a creature token you control enters, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

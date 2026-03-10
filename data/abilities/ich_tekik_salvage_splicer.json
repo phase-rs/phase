@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create a 3/3 colorless Phyrexian Golem artifact creature token.",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an artifact is put into a graveyard from the battlefield, put a +1/+1 counter on NICKNAME and a +1/+1 counter on each Golem you control.",
+        "Execute": "TrigCounter",
+        "ValidCard": "Artifact",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

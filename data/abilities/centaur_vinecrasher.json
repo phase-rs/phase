@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.!token+Land",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Whenever a land card is put into a graveyard from anywhere, you may pay {G}{G}. If you do, return CARDNAME from your graveyard to your hand.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

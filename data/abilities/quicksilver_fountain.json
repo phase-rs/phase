@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player puts a flood counter on target non-Island land they control of their choice. That land is an Island for as long as it has a flood counter on it.",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Land.nonIsland",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRemoveAll",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of each end step, if all lands on the battlefield are Islands, remove all flood counters from them.",
+        "PresentCompare": "EQ0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

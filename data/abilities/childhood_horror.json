@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "Threshold",
+        "Affected": "Card.Self",
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and can't block.",
+        "AddToughness": "2",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "Enchanted Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +2/+2 and can't block.",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "Condition": "Threshold"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

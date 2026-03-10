@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you draw your second card each turn, attach CARDNAME to target creature you control.",
+        "TriggerZones": "Battlefield",
+        "Number": "2",
+        "Execute": "TrigAttach"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+2.",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

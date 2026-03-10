@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "SubAbility": "DBEffect",
+          "Choices": "Land",
+          "SpellDescription": "The next time a land source of your choice would deal damage to you this turn, prevent that damage.",
+          "AILogic": "NeedsPrevention"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect",
+        "Choices": "Land",
+        "SpellDescription": "The next time a land source of your choice would deal damage to you this turn, prevent that damage.",
+        "AILogic": "NeedsPrevention"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

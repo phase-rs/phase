@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidActivatingPlayer": "You",
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "Whenever you cast a spell that's white, blue, black, or red, put a +1/+1 counter on CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Card.White,Card.Blue,Card.Black,Card.Red"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Dig",
+            "count": 2,
+            "destination": "Exile"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBEffect",
+            "ChangeNum": "All",
+            "RememberChanged": "True",
+            "SpellDescription": "Exile the top two cards of your library."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

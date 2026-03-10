@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attackingYou"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "RevealChosen<Player>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionDefined": "Targeted",
+        "ConditionPresent": "Card.ChosenCtrl",
+        "TgtPrompt": "Select target creature that's attacking you",
+        "GameActivationLimit": "1",
+        "SpellDescription": "Exile target creature that's attacking you if it's controlled by the chosen player. Activate only once."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, secretly choose an opponent.",
+        "Execute": "TrigChooseOpp",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

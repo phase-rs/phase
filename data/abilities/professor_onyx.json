@@ -1,0 +1,92 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Defined": "You",
+        "SubAbility": "DBDig",
+        "SpellDescription": "You lose 1 life. Look at the top three cards of your library. Put one of them into your hand and the rest into your graveyard."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SubAbility": "DBSac",
+          "RepeatPlayers": "Opponent",
+          "SpellDescription": "Each opponent sacrifices a creature with the greatest power among creatures that player controls.",
+          "Planeswalker": "True",
+          "RepeatSubAbility": "DBChooseCard"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBSac",
+        "RepeatPlayers": "Opponent",
+        "SpellDescription": "Each opponent sacrifices a creature with the greatest power among creatures that player controls.",
+        "Planeswalker": "True",
+        "RepeatSubAbility": "DBChooseCard"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Repeat",
+        "params": {
+          "MaxRepeat": "7",
+          "Ultimate": "True",
+          "RepeatSubAbility": "TrigDiscard",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Each opponent may discard a card. If they don't, they lose 3 life. Repeat this process six more times.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "MaxRepeat": "7",
+        "Ultimate": "True",
+        "RepeatSubAbility": "TrigDiscard",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Each opponent may discard a card. If they don't, they lose 3 life. Repeat this process six more times.",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCastOrCopy",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 2 life and you gain 2 life.",
+        "Execute": "TrigDrain"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

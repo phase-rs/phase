@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, shuffle the cards from your hand into your library, then draw that many cards.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigChangeAll"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeAll",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, shuffle the cards from your hand into your library, then draw that many cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

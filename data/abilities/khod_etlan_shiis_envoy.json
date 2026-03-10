@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Island",
+        "Description": "All lands are Islands in addition to their other types.",
+        "Affected": "Land"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Homarid.Other+YouCtrl,Camarid.Other+YouCtrl,Octopus.Other+YouCtrl,Nautilid.Other+YouCtrl,Merfolk.Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other Homarids, Camarids, Octopuses, Nautilids, and Merfolk you control get +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

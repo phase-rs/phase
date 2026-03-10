@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigPutCounterAll",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you draw a card, put a +1/+1 counter on each other Merfolk and/or Knight you control.",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

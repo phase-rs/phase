@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other",
+        "Origin": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigDealDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature dies, you may have CARDNAME deal 1 damage to target player or planeswalker.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

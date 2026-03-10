@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Target player loses 1 life and you gain 1 life.",
+        "ValidTgts": "Player",
+        "TgtPrompt": "Select a player"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if you have more cards in hand than each opponent, you may return CARDNAME from your graveyard to your hand.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "CheckSVar": "X",
+        "TriggerZones": "Graveyard",
+        "SVarCompare": "GTY",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever equipped creature attacks, draw a card, then discard a card.",
+            "ValidCard": "Creature.EquippedBy",
+            "Execute": "TrigDraw"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigAttach",
+            "TriggerDescription": "When CARDNAME enters, attach it to target creature you control.",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "Attached",
+          "params": {
+            "TriggerDescription": "Equipped creature is a copy of the last chosen card.",
+            "ValidSource": "Card.Self",
+            "Static": "True",
+            "Execute": "DBClone"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": {
+            "Other": "Attached"
+          },
+          "params": {
+            "ReplaceWith": "ChooseCard",
+            "Description": "As CARDNAME becomes attached to a creature, choose an exiled creature card used to craft CARDNAME.",
+            "ActiveZones": "Battlefield",
+            "ValidTarget": "Creature",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

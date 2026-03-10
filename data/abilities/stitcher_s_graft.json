@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature attacks, it doesn't untap during its controller's next untap step.",
+        "Execute": "StayTapped",
+        "ValidCard": "Card.EquippedBy"
+      }
+    },
+    {
+      "mode": "Unattach",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever CARDNAME becomes unattached from a permanent, sacrifice that permanent.",
+        "ValidObject": "Permanent",
+        "ValidAttachment": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +3/+3.",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "3",
+        "AddPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "ValidTgts": "Any",
+          "Amount": "3",
+          "SpellDescription": "Prevent the next 3 damage that would be dealt to any target this turn."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Any",
+        "Amount": "3",
+        "SpellDescription": "Prevent the next 3 damage that would be dealt to any target this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.MultiColor",
+        "TriggerZones": "Graveyard",
+        "OptionalDecider": "You",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Whenever you cast a multicolored spell, you may return CARDNAME from your graveyard to your hand.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChangeZone1",
+        "StackDescription": "REP Search_{p:You} searches & your library_their library & and reveal_reveals",
+        "ChangeNum": "3",
+        "AILogic": "Intuition",
+        "Shuffle": "False",
+        "SpellDescription": "Search your library for three cards and reveal them.",
+        "ChangeType": "Card",
+        "Mandatory": "True",
+        "RememberChanged": "True",
+        "Reveal": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

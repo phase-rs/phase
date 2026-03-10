@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

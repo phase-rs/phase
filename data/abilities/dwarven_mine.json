@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+untapped",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters untapped, create a 1/1 red Dwarf creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped unless you control three or more other Mountains.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "LandTapped"
+      }
+    }
+  ],
+  "faces": []
+}

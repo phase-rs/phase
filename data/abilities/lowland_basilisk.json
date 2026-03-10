@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals damage to a creature, destroy that creature at end of combat.",
+        "Execute": "DelTrig",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

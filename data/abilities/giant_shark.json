@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidCard": "Creature.wasDealtDamageThisTurn",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature that has been dealt damage this turn, CARDNAME gets +2/+0 and gains trample until end of turn.",
+        "Execute": "TrigPumpShark",
+        "ValidBlocker": "Card.Self"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature that has been dealt damage this turn, CARDNAME gets +2/+0 and gains trample until end of turn.",
+        "Execute": "TrigPumpShark",
+        "ValidBlocker": "Creature.wasDealtDamageThisTurn"
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "When you control no Islands, sacrifice CARDNAME.",
+        "IsPresent": "Island.YouCtrl",
+        "PresentCompare": "EQ0",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't attack unless defending player controls an Island.",
+        "UnlessDefender": "controlsIsland"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

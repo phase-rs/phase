@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerDescription": "Whenever you attack with two or more creatures, draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "Creature",
+        "Execute": "TrigDraw",
+        "ValidAttackersAmount": "GE2",
+        "AttackingPlayer": "You"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackersAmount": "GE2",
+        "TriggerDescription": "Whenever another player attacks with two or more creatures, they draw a card if none of those creatures attacked you.",
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "Creature",
+        "AttackingPlayer": "Player.Other",
+        "Execute": "TrigTheyDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

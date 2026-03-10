@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "ValidTgts": "Creature",
+              "RememberObjects": "ThisTargetedCard",
+              "StackDescription": "{c:Targeted} attacks this turn if able.",
+              "SpellDescription": "Target creature attacks or blocks this turn if able.",
+              "StaticAbilities": "MustAttack,MustBlock",
+              "ExileOnMoved": "Battlefield"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidTgts": "Creature",
+            "RememberObjects": "ThisTargetedCard",
+            "StackDescription": "{c:Targeted} attacks this turn if able.",
+            "SpellDescription": "Target creature attacks or blocks this turn if able.",
+            "StaticAbilities": "MustAttack,MustBlock",
+            "ExileOnMoved": "Battlefield"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PumpAll",
+            "power": 2,
+            "toughness": 2,
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidCards": "Creature.YouCtrl",
+            "SubAbility": "DBTurnFaceUp",
+            "KW": "Trample",
+            "SpellDescription": "Creatures you control get +2/+2 and gain trample until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

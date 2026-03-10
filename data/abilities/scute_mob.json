@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of your upkeep, if you control five or more lands, put four +1/+1 counters on CARDNAME.",
+        "IsPresent": "Land.YouCtrl",
+        "PresentCompare": "GE5",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

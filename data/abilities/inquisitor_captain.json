@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "CheckSVar": "X",
+        "ValidCard": "Card.wasCast+Self",
+        "TriggerDescription": "When CARDNAME enters, if you cast it and there are twenty or more creature cards with mana value 3 or less among cards in your graveyard, hand, and library, seek two creature cards with mana value 3 or less. Put one of them onto the battlefield and shuffle the other into your library.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "SVarCompare": "GE20",
+        "Execute": "TrigSeek"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "TrigImmediateTrig",
+        "ValidCard": "Creature.nonHuman+Other+YouCtrl",
+        "TriggerDescription": "Whenever another non-Human creature you control enters, you may pay {X}. When you do, put X +1/+1 counters on CARDNAME.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

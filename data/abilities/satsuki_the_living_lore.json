@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "ValidCardsDesc": "Saga you control",
+          "CounterType": "LORE",
+          "SorcerySpeed": "True",
+          "SpellDescription": "Put a lore counter on each Saga you control. Activate only as a sorcery.",
+          "CounterNum": "1",
+          "ValidCards": "Saga.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCardsDesc": "Saga you control",
+        "CounterType": "LORE",
+        "SorcerySpeed": "True",
+        "SpellDescription": "Put a lore counter on each Saga you control. Activate only as a sorcery.",
+        "CounterNum": "1",
+        "ValidCards": "Saga.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, ABILITY",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigCharm"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

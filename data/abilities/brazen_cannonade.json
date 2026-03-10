@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever an attacking creature you control dies, CARDNAME deals 2 damage to each opponent.",
+        "ValidCard": "Creature.attacking+YouCtrl",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "RaidTest",
+        "Execute": "TrigExile",
+        "TriggerDescription": "Raid — At the beginning of each of your postcombat main phases, if you attacked this turn, exile the top card of your library. Until end of combat on your next turn, you may play that card.",
+        "Phase": "Main2",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

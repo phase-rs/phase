@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked, you may have it deal damage equal to its power to target creature. If you do, CARDNAME assigns no combat damage this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

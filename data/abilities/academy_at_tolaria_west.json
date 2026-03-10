@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Command",
+        "IsPresent": "Card.YouOwn",
+        "PresentZone": "Hand",
+        "Phase": "End of Turn",
+        "Execute": "AcademicDraw",
+        "PresentCompare": "EQ0",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if you have no cards in hand, draw seven cards."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever chaos ensues, discard your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When CARDNAME enters, discard a card, then draw a card.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigUntap",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Self",
+        "Delirium": "True",
+        "TriggerDescription": "Delirium — Whenever CARDNAME attacks for the first time each turn, if there are four or more card types among cards in your graveyard, untap target creature. After this phase, there is an additional combat phase.",
+        "FirstAttack": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you may pay {U}{U}. If you do, untap CARDNAME.",
+        "Execute": "TrigUntap"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped."
+      }
+    },
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen",
+        "ValidStepTurnToController": "You",
+        "Description": "CARDNAME doesn't untap during your untap step."
+      }
+    }
+  ],
+  "faces": []
+}

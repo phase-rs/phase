@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card",
+        "ChangeNum": "1",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Exile a card from your hand face down. You may look at it for as long as it remains exiled.",
+        "ExileFaceDown": "True",
+        "RememberChanged": "True",
+        "Mandatory": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Exile",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ForgetChanged": "True",
+        "SpellDescription": "Return a card you own exiled with CARDNAME to your hand.",
+        "Mandatory": "True",
+        "Hidden": "True",
+        "ChangeType": "Card.IsRemembered+YouOwn+ExiledWithSource"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Static": "True",
+        "ValidCard": "Card.IsRemembered+ExiledWithSource",
+        "Execute": "DBForget",
+        "Origin": "Exile"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard.",
+        "Execute": "DBChangeZoneAll",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesController",
+      "params": {
+        "TriggerDescription": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard.",
+        "ValidCard": "Card.Self",
+        "Execute": "DBChangeZoneAll",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

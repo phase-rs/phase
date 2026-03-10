@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Hand"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "DestinationZone2": "Graveyard",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Reveal the top card of your library. If it's a creature card, put it into your hand. Otherwise, you may put it into your graveyard.",
+        "ChangeValid": "Creature",
+        "ChangeNum": "All",
+        "DestZone2Optional": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "LT5",
+        "Description": "As long as your devotion to green is less than five, NICKNAME isn't a creature.",
+        "RemoveType": "Creature",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "ValidCard": "Creature",
+        "Type": "Spell",
+        "Activator": "You",
+        "Description": "Creature spells you cast cost {1} less to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, destroy target artifact or enchantment that player controls."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by more than one creature.",
+        "Max": "1",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

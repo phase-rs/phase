@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "M1M1",
+        "count": 3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.withFlying"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature with flying",
+        "IsCurse": "True",
+        "SpellDescription": "Put three -1/-1 counters on target creature with flying."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

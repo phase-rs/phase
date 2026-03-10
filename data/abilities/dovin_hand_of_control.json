@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.OppCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target permanent an opponent controls",
+        "Planeswalker": "True",
+        "SpellDescription": "Until your next turn, prevent all damage that would be dealt to and dealt by target permanent an opponent controls.",
+        "Duration": "UntilYourNextTurn",
+        "IsCurse": "True",
+        "KW": "Prevent all damage that would be dealt to and dealt by CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "1",
+        "ValidCard": "Artifact,Instant,Sorcery",
+        "Activator": "Opponent",
+        "Description": "Artifact, instant, and sorcery spells your opponents cast cost {1} more to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

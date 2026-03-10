@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigToken",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a 2/2 black Zombie creature token with decayed. (It can't block. When it attacks, sacrifice it at end of combat.)",
+            "ValidCard": "Instant,Sorcery"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "Phase": "Upkeep",
+            "OptionalDecider": "You",
+            "IsPresent": "Creature.token+YouCtrl",
+            "ValidPlayer": "You",
+            "PresentCompare": "GE3",
+            "TriggerDescription": "At the beginning of your upkeep, if you control three or more creature tokens, you may transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of your upkeep, you may transform CARDNAME.",
+            "ValidPlayer": "You",
+            "OptionalDecider": "You",
+            "TriggerZones": "Battlefield",
+            "Phase": "Upkeep",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetPower": "3",
+            "Description": "Creature tokens you control lose all abilities and have base power and toughness 3/3.",
+            "RemoveAllAbilities": "True",
+            "Affected": "Creature.token+YouCtrl",
+            "SetToughness": "3"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

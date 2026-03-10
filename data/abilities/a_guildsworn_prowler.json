@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+!blocking",
+        "Destination": "Graveyard",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME dies, if it wasn't blocking, draw a card.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

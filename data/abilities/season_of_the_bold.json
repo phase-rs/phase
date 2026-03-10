@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "CharmNum": "5",
+          "Pawprint": "5",
+          "Choices": "DBToken,DBExile,DBDamageEffect",
+          "MinCharmNum": "0",
+          "CanRepeatModes": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "CharmNum": "5",
+        "Pawprint": "5",
+        "Choices": "DBToken,DBExile,DBDamageEffect",
+        "MinCharmNum": "0",
+        "CanRepeatModes": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

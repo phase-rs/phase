@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "At the beginning of your upkeep, if CARDNAME has two or fewer judgment counters on it, put a judgment counter on it.",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "IsPresent": "Card.Self+counters_LE2_JUDGMENT",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CanAttackDefender"
+          },
+          "params": {
+            "ValidCard": "Card.Self+counters_GE3_JUDGMENT",
+            "Description": "As long as CARDNAME has three or more judgment counters on it, it can attack as though it didn't have defender."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Phase": "Upkeep",
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "At the beginning of your upkeep, put a judgment counter on CARDNAME. Then if there are three or more judgment counters on it, enchanted player loses the game.",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ValidCard": "Card.Self",
+            "ReplaceWith": "Exile",
+            "Destination": "Graveyard"
+          }
+        }
+      ]
+    }
+  ]
+}

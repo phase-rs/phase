@@ -1,0 +1,117 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "PlayerTurn": "True",
+            "Execute": "TrigFlip",
+            "ValidActivatingPlayer": "You",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell during your turn, flip a coin. If you lose the flip, CARDNAME deals 1 damage to you. If you win the flip, you may exile NICKNAME. If you do, return him to the battlefield transformed under his owner's control.",
+            "ValidCard": "Instant,Sorcery"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Activator": "You",
+            "Type": "Spell",
+            "Description": "Instant and sorcery spells you cast cost {1} less to cast.",
+            "Amount": "1",
+            "ValidCard": "Instant,Sorcery"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "Duration": "UntilYourNextTurn",
+              "Planeswalker": "True",
+              "StaticAbilities": "RalReduceCost",
+              "SpellDescription": "Until your next turn, instant and sorcery spells you cast cost {1} less to cast."
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": 1
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Duration": "UntilYourNextTurn",
+            "Planeswalker": "True",
+            "StaticAbilities": "RalReduceCost",
+            "SpellDescription": "Until your next turn, instant and sorcery spells you cast cost {1} less to cast."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 2
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -2
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "DividedAsYouChoose": "2",
+            "Planeswalker": "True",
+            "SubAbility": "DBDraw",
+            "TargetMax": "2",
+            "SpellDescription": "NICKNAME deals 2 damage divided as you choose among one or two targets. Draw a card if you control a blue permanent other than NICKNAME.",
+            "TargetMin": "1",
+            "TgtPrompt": "Select any target to distribute damage to"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 8,
+            "destination": "Exile"
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -8
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "RememberChanged": "True",
+            "Planeswalker": "True",
+            "Ultimate": "True",
+            "ChangeNum": "All",
+            "Defined": "You",
+            "SpellDescription": "Exile the top eight cards of your library. You may cast instant and sorcery spells from among them this turn without paying their mana costs.",
+            "SubAbility": "DBEffect"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

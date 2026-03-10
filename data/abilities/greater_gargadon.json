@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "RemoveCounter",
+        "counter_type": "TIME",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsPresent": "Card.Self+suspended",
+        "CostDesc": "Sacrifice an artifact, creature, or land:",
+        "SpellDescription": "Remove a time counter from CARDNAME. Activate only if CARDNAME is suspended.",
+        "Defined": "Self",
+        "PresentZone": "Exile",
+        "ActivationZone": "Exile"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

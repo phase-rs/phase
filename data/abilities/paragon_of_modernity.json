@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "BranchConditionSVar": "X",
+          "TrueSubAbility": "DBPutCounter",
+          "SpellDescription": "CARDNAME gets +1/+1 until end of turn. If exactly three colors of mana were spent to activate this ability, put a +1/+1 counter on it instead.",
+          "BranchConditionSVarCompare": "EQ3",
+          "FalseSubAbility": "DBPump"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "BranchConditionSVar": "X",
+        "TrueSubAbility": "DBPutCounter",
+        "SpellDescription": "CARDNAME gets +1/+1 until end of turn. If exactly three colors of mana were spent to activate this ability, put a +1/+1 counter on it instead.",
+        "BranchConditionSVarCompare": "EQ3",
+        "FalseSubAbility": "DBPump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

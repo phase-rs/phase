@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you draw your second card each turn, create a 1/1 blue Illusion creature token with \"This creature gets +1/+0 for each other Illusion you control.\"",
+        "Number": "2",
+        "ValidCard": "Card.YouCtrl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "ValidCard": "Illusion.YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever an Illusion you control dies, you may put a permanent card with mana value less than or equal to that creature's power from your hand onto the battlefield.",
+        "Execute": "TrigChangeZone",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

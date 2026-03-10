@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Spirit.Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other Spirits you control get +1/+1.",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.wasCastFromYourGraveyard",
+        "Color": "U",
+        "Type": "Spell",
+        "Activator": "You",
+        "Description": "Spells you cast from your graveyard cost {U} less to cast. (If it doesn't require {U}, it costs {1} less to cast.)",
+        "Amount": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

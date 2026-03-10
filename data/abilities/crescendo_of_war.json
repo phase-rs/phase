@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "TrigStrife",
+        "TriggerDescription": "At the beginning of each upkeep, put a strife counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.attacking",
+        "AddPower": "X",
+        "Description": "Attacking creatures get +1/+0 for each strife counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Blocking creatures you control get +1/+0 for each strife counter on CARDNAME.",
+        "Affected": "Creature.blocking+YouCtrl",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

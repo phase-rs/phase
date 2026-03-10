@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Description": "CARDNAME has trample as long as it has a +1/+1 counter on it.",
+        "Affected": "Card.Self+counters_GE1_P1P1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

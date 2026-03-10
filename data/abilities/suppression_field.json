@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "2",
+        "ValidCard": "Card",
+        "ValidSpell": "Activated.!ManaAbility",
+        "Description": "Activated abilities cost {2} more to activate unless they're mana abilities."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

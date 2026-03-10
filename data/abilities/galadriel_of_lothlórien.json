@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "RingTemptsYou",
+      "params": {
+        "Execute": "TrigScry",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever the Ring tempts you, if you chose a creature other than CARDNAME as your Ring-bearer, scry 3."
+      }
+    },
+    {
+      "mode": "Scry",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "DBReveal",
+        "TriggerDescription": "Whenever you scry, you may reveal the top card of your library. If a land card is revealed this way, put it onto the battlefield tapped."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

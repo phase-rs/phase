@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEachDamage",
+        "TargetMin": "0",
+        "StackDescription": "REP Up to two target creatures you control_{c:ThisTargetedCard}",
+        "SpellDescription": "Up to two target creatures you control each get +1/+0 until end of turn.",
+        "TargetMax": "2",
+        "TgtPrompt": "Select up to two target creatures you control",
+        "AILogic": "PowerDmg"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

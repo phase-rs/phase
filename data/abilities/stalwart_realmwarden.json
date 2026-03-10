@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, the next noncreature spell target opponent casts costs {2} more to cast.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ForgetOnCast": "Card.nonCreature+YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

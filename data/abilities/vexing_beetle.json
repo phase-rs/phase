@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +3/+3 as long as no opponent controls a creature.",
+        "AddToughness": "3",
+        "IsPresent": "Creature.OppCtrl",
+        "AddPower": "3",
+        "PresentCompare": "EQ0"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

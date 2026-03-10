@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "AddTrigger": "TrigDamageDone",
+        "AddPower": "1",
+        "Description": "Equipped creature gets +1/+1, is a Ninja in addition to its other types, and has \"Whenever this creature deals combat damage to a player, draw a card, then discard a card. That player loses life equal to the discarded card's mana value.\"",
+        "AddType": "Ninja"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

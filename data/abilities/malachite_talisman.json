@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigUntap",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a player casts a green spell, you may pay {3}. If you do, untap target permanent.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Green"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

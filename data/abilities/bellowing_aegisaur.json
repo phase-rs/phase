@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "PutCounterAll",
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, put a +1/+1 counter on each other creature you control.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Faerie.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDrain",
+        "TriggerDescription": "Whenever another Faerie you control enters, each opponent loses 1 life.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

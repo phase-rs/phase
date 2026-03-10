@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.YouCtrl",
+        "AddType": "ChosenType",
+        "Description": "Lands you control are the chosen type in addition to their other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

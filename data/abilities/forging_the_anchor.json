@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 5,
+        "destination": "Hand"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "ChangeNum": "Any",
+        "ChangeValid": "Artifact",
+        "DestinationZone2": "Library",
+        "RestRandomOrder": "True",
+        "SpellDescription": "Look at the top five cards of your library. You may reveal any number of artifact cards from among them and put the revealed cards into your hand. Put the rest on the bottom of your library in a random order."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "AILogic": "NeedsPrevention",
+          "SubAbility": "DBEffect",
+          "Choices": "Card.BlackSource",
+          "SpellDescription": "The next time a black source of your choice would deal damage to you this turn, prevent that damage."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "NeedsPrevention",
+        "SubAbility": "DBEffect",
+        "Choices": "Card.BlackSource",
+        "SpellDescription": "The next time a black source of your choice would deal damage to you this turn, prevent that damage."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 10,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Wall+blocking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AtEOT": "Destroy",
+        "SpellDescription": "Target blocking Wall you control gets +10/+0 until end of combat. Prevent all damage that would be dealt to it this turn. Destroy it at the beginning of the next end step.",
+        "SubAbility": "DBPump",
+        "TgtPrompt": "Select target blocking Wall you control",
+        "Duration": "UntilEndOfCombat"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

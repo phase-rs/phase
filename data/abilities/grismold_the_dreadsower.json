@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, each player creates a 1/1 green Plant creature token.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.token",
+        "TriggerDescription": "Whenever a creature token dies, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

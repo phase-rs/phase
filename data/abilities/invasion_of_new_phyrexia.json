@@ -1,0 +1,102 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME enters, create X 2/2 white and blue Knight creature tokens with vigilance.",
+            "Execute": "TrigToken",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 2
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": 1
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "SubAbility": "DBDiscard",
+            "SpellDescription": "Draw two cards."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "Name": "Emblem — Teferi Akosa of Zhalfir",
+              "Duration": "Permanent",
+              "Planeswalker": "True",
+              "StaticAbilities": "STPump",
+              "SpellDescription": "You get an emblem with \"Knights you control get +1/+0 and have ward {1}.\"",
+              "Image": "emblem_teferi_akosa_of_zhalfir"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -2
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Name": "Emblem — Teferi Akosa of Zhalfir",
+            "Duration": "Permanent",
+            "Planeswalker": "True",
+            "StaticAbilities": "STPump",
+            "SpellDescription": "You get an emblem with \"Knights you control get +1/+0 and have ward {1}.\"",
+            "Image": "emblem_teferi_akosa_of_zhalfir"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Tap",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -3
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "ChoicePrompt": "Tap any number of untapped creatures you control",
+            "StackDescription": "Tap any number of untapped creatures you control.",
+            "Planeswalker": "True",
+            "CardChoices": "Creature.YouCtrl+untapped",
+            "SpellDescription": "Tap any number of untapped creatures you control.",
+            "SubAbility": "DBImmediateTrig",
+            "ChoiceAmount": "Count$Valid Creature.YouCtrl+untapped",
+            "RememberTapped": "True",
+            "AnyNumber": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

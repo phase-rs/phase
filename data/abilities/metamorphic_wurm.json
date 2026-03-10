@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "4",
+        "Condition": "Threshold",
+        "AddToughness": "4",
+        "Description": "Threshold — CARDNAME gets +4/+4 as long as there are seven or more cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

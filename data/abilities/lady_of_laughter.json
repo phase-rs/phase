@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraw",
+        "Phase": "End of Turn",
+        "TriggerDescription": "Celebration — At the beginning of your end step, if two or more nonland permanents entered the battlefield under your control this turn, draw a card.",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "Celebration",
+        "SVarCompare": "GE2",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, roll five six-sided dice and store those results on it.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigRollDice"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of combat on your turn, you may reroll any number of CARDNAME's stored results.",
+        "Phase": "BeginCombat",
+        "Execute": "TrigReroll"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "CARDNAME gets +X/+X, where X is the greatest number of stored results on it of the same value."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

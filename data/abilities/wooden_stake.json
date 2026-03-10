@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "TrigDestroyBlocked",
+        "ValidCard": "Creature.Vampire",
+        "ValidBlocker": "Card.AttachedBy",
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a Vampire, destroy that creature. It can't be regenerated."
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "TrigDestroyBlocker",
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a Vampire, destroy that creature. It can't be regenerated.",
+        "ValidBlocker": "Creature.Vampire",
+        "Secondary": "True",
+        "ValidCard": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+0.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

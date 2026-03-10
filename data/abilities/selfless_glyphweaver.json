@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "PumpAll",
+            "power": 0,
+            "toughness": 0,
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "Exile<1/CARDNAME>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Creatures you control gain indestructible until end of turn.",
+            "ValidCards": "Creature.YouCtrl",
+            "KW": "Indestructible"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChooseCard",
+            "choices": [
+              "Creature",
+              "Planeswalker"
+            ],
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBDestroyAll",
+            "ChoiceZone": "Battlefield",
+            "StackDescription": "SpellDescription",
+            "Amount": "1",
+            "Defined": "You",
+            "Mandatory": "True",
+            "SpellDescription": "Choose a creature or planeswalker,",
+            "ChoiceTitle": "Choose a creature or planeswalker"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "AbundantGrowthTap",
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted land has \"{T}: Add two mana of any one color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

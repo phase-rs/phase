@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike & Vigilance & Trample & Haste",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+0 and has first strike, vigilance, trample, and haste.",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

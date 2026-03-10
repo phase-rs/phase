@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.withTrample,Creature.withHaste"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature with trample or haste",
+        "TargetMax": "1",
+        "SpellDescription": "Put three +1/+1 counters on up to one target creature with trample or haste.",
+        "Planeswalker": "True",
+        "TargetMin": "0"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SacValid": "Creature",
+        "SubAbility": "DBImmediateTrigger",
+        "SpellDescription": "Sacrifice a creature. When you do, CARDNAME deals X damage to any target, where X is that creature's power. If the sacrificed creature was a Hamster, draw X cards.",
+        "Planeswalker": "True",
+        "RememberSacrificed": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "PresentCompare": "EQ0",
+        "Destination": "Battlefield",
+        "IsPresent": "Creature.YouCtrl+namedBoo",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, if you don't control a creature named Boo, create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "IsPresent": "Creature.YouCtrl+namedBoo",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "When CARDNAME enters and at the beginning of your upkeep, if you don't control a creature named Boo, create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

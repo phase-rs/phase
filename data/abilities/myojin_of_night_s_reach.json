@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/DIVINITY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Mode": "Hand",
+        "SpellDescription": "Each opponent discards their hand.",
+        "Defined": "Player.Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has indestructible as long as it has a divinity counter on it.",
+        "AddKeyword": "Indestructible",
+        "Affected": "Card.Self+counters_GE1_DIVINITY"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

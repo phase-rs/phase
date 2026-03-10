@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Raid — When this creature enters, if you attacked this turn, this creature deals 2 damage to any target.",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "RaidTest",
+        "Execute": "TrigDealDamage",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

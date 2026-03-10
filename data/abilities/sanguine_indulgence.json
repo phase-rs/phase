@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouOwn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target creature card in your graveyard",
+        "TargetMin": "0",
+        "SpellDescription": "Return up to two target creature cards from your graveyard to your hand.",
+        "TargetMax": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "CheckSVar": "X",
+        "Amount": "3",
+        "SVarCompare": "GE3",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Description": "CARDNAME costs {3} less to cast if you've gained 3 or more life this turn.",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you're dealt damage, put that many charge counters on CARDNAME.",
+        "ValidTarget": "You",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.Self+counters_GE1_CHARGE",
+        "ValidPlayer": "Player",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each upkeep, you may remove a charge counter from CARDNAME. If you do, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

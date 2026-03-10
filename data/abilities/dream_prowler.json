@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "PresentCompare": "EQ0",
+        "Description": "CARDNAME can't be blocked as long as it's attacking alone.",
+        "ValidAttacker": "Card.Self+attacking",
+        "IsPresent": "Card.Other+attacking"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

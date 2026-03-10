@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Discard",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player discards a card with the greatest mana value among cards in their hand.",
+        "DiscardValid": "Card.cmcEQX",
+        "Mode": "TgtChoose",
+        "SubAbility": "DBExileGraveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "Description": "As an additional cost to cast this spell, you may behold a Dragon. (You may choose a Dragon you control or reveal a Dragon card from your hand.)",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "ValidSA": "Spell",
+        "Cost": "Behold<1/Dragon>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

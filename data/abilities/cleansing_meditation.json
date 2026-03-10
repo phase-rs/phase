@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "BranchConditionSVar": "X",
+          "SpellDescription": "Destroy all enchantments. Threshold — If seven or more cards are in your graveyard, instead destroy all enchantments, then return all cards in your graveyard destroyed this way to the battlefield.",
+          "BranchConditionSVarCompare": "GE7",
+          "TrueSubAbility": "ThreshDestruction",
+          "FalseSubAbility": "Destruction"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "BranchConditionSVar": "X",
+        "SpellDescription": "Destroy all enchantments. Threshold — If seven or more cards are in your graveyard, instead destroy all enchantments, then return all cards in your graveyard destroyed this way to the battlefield.",
+        "BranchConditionSVarCompare": "GE7",
+        "TrueSubAbility": "ThreshDestruction",
+        "FalseSubAbility": "Destruction"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

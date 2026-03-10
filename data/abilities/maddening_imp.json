@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ActivationPhases": "Upkeep->Main1",
+          "SubAbility": "DelTrig",
+          "ActivationFirstCombat": "True",
+          "SpellDescription": "Non-Wall creatures the active player controls attack this turn if able. At the beginning of the next end step, destroy each of those creatures that didn't attack this turn. Activate only during an opponent's turn and only before combat.",
+          "StackDescription": "None",
+          "RememberObjects": "Valid Creature.ActivePlayerCtrl+nonWall",
+          "StaticAbilities": "MustAttack",
+          "OpponentTurn": "True"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationPhases": "Upkeep->Main1",
+        "SubAbility": "DelTrig",
+        "ActivationFirstCombat": "True",
+        "SpellDescription": "Non-Wall creatures the active player controls attack this turn if able. At the beginning of the next end step, destroy each of those creatures that didn't attack this turn. Activate only during an opponent's turn and only before combat.",
+        "StackDescription": "None",
+        "RememberObjects": "Valid Creature.ActivePlayerCtrl+nonWall",
+        "StaticAbilities": "MustAttack",
+        "OpponentTurn": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

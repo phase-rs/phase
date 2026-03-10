@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature",
+            "MayPlay": "True",
+            "Description": "Once each turn, you may pay {0} rather than pay the mana cost for a creature spell you cast from exile.",
+            "MayPlayLimit": "1",
+            "AffectedZone": "Exile",
+            "MayPlayAltManaCost": "0",
+            "MayPlayDontGrantZonePermissions": "True"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouOwn"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target creature card in your graveyard",
+            "SubAbility": "DBEffect",
+            "SpellDescription": "Exile target creature card from your graveyard."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

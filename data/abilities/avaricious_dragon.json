@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your draw step, draw an additional card.",
+        "ValidPlayer": "You",
+        "Execute": "TrigDraw",
+        "Phase": "Draw",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDiscard",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, discard your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "TrueSubAbility": "ThreshDestroy",
+          "SpellDescription": "Destroy target land. Threshold — If there are seven or more cards in your graveyard, instead destroy that land and CARDNAME deals 1 damage to each creature and each player.",
+          "ValidTgts": "Land",
+          "BranchConditionSVarCompare": "GE7",
+          "FalseSubAbility": "Destroy",
+          "BranchConditionSVar": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TrueSubAbility": "ThreshDestroy",
+        "SpellDescription": "Destroy target land. Threshold — If there are seven or more cards in your graveyard, instead destroy that land and CARDNAME deals 1 damage to each creature and each player.",
+        "ValidTgts": "Land",
+        "BranchConditionSVarCompare": "GE7",
+        "FalseSubAbility": "Destroy",
+        "BranchConditionSVar": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

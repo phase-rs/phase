@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library and/or graveyard for a Rune card, reveal it, and put it into your hand. If you search your library this way, shuffle.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "You may pay {1} rather than pay the mana cost for Rune spells you cast.",
+        "ValidSA": "Spell",
+        "ValidPlayer": "You",
+        "Cost": "1",
+        "ValidCard": "Card.Rune"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

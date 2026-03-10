@@ -1,0 +1,90 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 2,
+        "toughness": 2,
+        "types": [
+          "Kithkin",
+          "Spirit"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "RW"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveCreatureTypes": "True",
+        "Duration": "Permanent",
+        "SpellDescription": "CARDNAME becomes a Kithkin Spirit with base power and toughness 2/2."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Kithkin",
+          "Spirit",
+          "Warrior"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "RW RW RW"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionPresent": "Card.Self+Spirit",
+        "RemoveCreatureTypes": "True",
+        "Duration": "Permanent",
+        "SpellDescription": "If CARDNAME is a Spirit, it becomes a Kithkin Spirit Warrior with base power and toughness 4/4."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 8,
+        "toughness": 8,
+        "types": [
+          "Kithkin",
+          "Spirit",
+          "Warrior",
+          "Avatar"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "RW RW RW RW RW RW"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Flying & First Strike",
+        "RemoveCreatureTypes": "True",
+        "ConditionPresent": "Card.Self+Warrior",
+        "SpellDescription": "If CARDNAME is a Warrior, it becomes a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike.",
+        "Duration": "Permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

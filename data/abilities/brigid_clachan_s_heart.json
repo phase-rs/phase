@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, create a 1/1 green and white Kithkin creature token.",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigToken"
+          }
+        },
+        {
+          "mode": "Transformed",
+          "params": {
+            "Secondary": "True",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, create a 1/1 green and white Kithkin creature token.",
+            "Execute": "TrigToken"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "Phase": "Main1",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {G}. If you do, transform NICKNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Combo G W",
+            "params": {
+              "Each": "X",
+              "SpellDescription": "Add X {G} or X {W}, where X is the number of other creatures you control."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Each": "X",
+            "SpellDescription": "Add X {G} or X {W}, where X is the number of other creatures you control."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Main1",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {W}. If you do, transform NICKNAME.",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

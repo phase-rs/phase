@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "PresentZone": "Battlefield",
+        "ValidPlayer": "You",
+        "IsPresent": "Card.StrictlySelf",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Eminence — At the beginning of combat on your turn, if CARDNAME is in the command zone or on the battlefield, another target Cat you control gets +3/+3 until end of turn.",
+        "Execute": "TrigPump1"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.StrictlySelf",
+        "PresentZone": "Command",
+        "Execute": "TrigPump1",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerZones": "Command",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.Cat+Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Cat you control attacks, you may pay {1}{G}{W}. If you do, it gains trample and gets +X/+X until end of turn, where X is its power.",
+        "Execute": "TrigPump2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

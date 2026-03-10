@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "CARDNAME deals 1 damage to any target."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "AILogic": "SpellCopy",
+          "Mode": "SpellCast",
+          "Execute": "EffTrigCopy",
+          "ValidActivatingPlayer": "You",
+          "Planeswalker": "True",
+          "ValidCard": "Instant,Sorcery",
+          "ThisTurn": "True",
+          "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "SpellCopy",
+        "Mode": "SpellCast",
+        "Execute": "EffTrigCopy",
+        "ValidActivatingPlayer": "You",
+        "Planeswalker": "True",
+        "ValidCard": "Instant,Sorcery",
+        "ThisTurn": "True",
+        "SpellDescription": "When you cast your next instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 6
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "SpellDescription": "CARDNAME deals 6 damage to each of up to six targets.",
+        "TargetMin": "0",
+        "Planeswalker": "True",
+        "TargetMax": "6"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

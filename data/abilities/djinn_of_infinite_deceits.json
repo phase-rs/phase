@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeControl",
+        "params": {
+          "TgtPrompt": "Select target nonlegendary creature",
+          "ValidTgts": "Creature.nonLegendary",
+          "TargetMin": "2",
+          "TargetMax": "2",
+          "ActivationPhases": "Upkeep->Main1,Main2->Cleanup",
+          "SpellDescription": "Exchange control of two target nonlegendary creatures. You can't activate this ability during combat."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target nonlegendary creature",
+        "ValidTgts": "Creature.nonLegendary",
+        "TargetMin": "2",
+        "TargetMax": "2",
+        "ActivationPhases": "Upkeep->Main1,Main2->Cleanup",
+        "SpellDescription": "Exchange control of two target nonlegendary creatures. You can't activate this ability during combat."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

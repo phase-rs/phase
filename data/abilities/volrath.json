@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a creature you control is put into your graveyard from the battlefield, you may put it on top of your library.",
+        "TriggerZones": "Command",
+        "ValidCard": "Creature.YouCtrl+YouOwn",
+        "Execute": "GetUp",
+        "Origin": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

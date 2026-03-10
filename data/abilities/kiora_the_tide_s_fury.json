@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Name": "Kraken Hatchling",
+          "Zone": "Hand",
+          "SpellDescription": "Conjure a Kraken Hatchling card into your hand.",
+          "Conjure": "True",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Kraken Hatchling",
+        "Zone": "Hand",
+        "SpellDescription": "Conjure a Kraken Hatchling card into your hand.",
+        "Conjure": "True",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Land"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBPump",
+        "StackDescription": "Untap {c:Targeted}. Prevent all damage that would be dealt to and dealt by that permanent until your next turn.",
+        "TgtPrompt": "Select target creature or land",
+        "SpellDescription": "Untap target creature or land. Prevent all damage that would be dealt to and dealt by that permanent until your next turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SacValid": "Kraken",
+        "SubAbility": "DBToken",
+        "Planeswalker": "True",
+        "Optional": "True",
+        "RememberSacrificed": "True",
+        "StackDescription": "SpellDescription",
+        "Amount": "1",
+        "SpellDescription": "You may sacrifice a Kraken. If you do, create an 8/8 blue Kraken creature token."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

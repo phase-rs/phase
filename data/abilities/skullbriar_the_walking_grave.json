@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CountersRemain"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "Counters remain on NICKNAME as it moves to any zone other than a player's hand or library.",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

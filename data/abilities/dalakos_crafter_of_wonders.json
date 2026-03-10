@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Amount": "2",
+          "SpellDescription": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+          "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "SpellDescription": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+        "RestrictValid": "Spell.Artifact,Activated.Artifact+inZoneBattlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying & Haste",
+        "Affected": "Creature.YouCtrl+equipped",
+        "Description": "Equipped creatures you control have flying and haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

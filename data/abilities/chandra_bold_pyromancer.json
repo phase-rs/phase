@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SubAbility": "DBDealDamage",
+          "AILogic": "Always",
+          "Amount": "2",
+          "SpellDescription": "Add {R}{R}. CARDNAME deals 2 damage to target player.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDealDamage",
+        "AILogic": "Always",
+        "Amount": "2",
+        "SpellDescription": "Add {R}{R}. CARDNAME deals 2 damage to target player.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target creature or planeswalker",
+        "SpellDescription": "CARDNAME deals 3 damage to target creature or planeswalker."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 10
+        },
+        "target": {
+          "type": "All",
+          "filter": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ValidDescription": "target player and each creature and planeswalker they control.",
+        "TgtPrompt": "Select a player",
+        "SpellDescription": "CARDNAME deals 10 damage to target player and each creature and planeswalker they control.",
+        "ValidCards": "Creature,Planeswalker",
+        "ValidPlayers": "Targeted",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

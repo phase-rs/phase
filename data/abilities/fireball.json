@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DivideEvenly": "RoundedDown",
+        "TargetMax": "MaxTargets",
+        "SpellDescription": "CARDNAME deals X damage divided evenly, rounded down, among any number of targets.",
+        "TargetMin": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Relative": "True",
+        "EffectZone": "All",
+        "Amount": "IncreaseCost",
+        "Type": "Spell",
+        "Description": "This spell costs {1} more to cast for each target beyond the first."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

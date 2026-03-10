@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "SVarCompare": "GE3",
+        "CheckSVar": "X",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if an opponent was dealt 3 or more damage this turn, you may pay {R}. If you do, return CARDNAME from your graveyard to the battlefield.",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

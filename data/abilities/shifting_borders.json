@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeControl",
+        "params": {
+          "SpellDescription": "Exchange control of two target lands.",
+          "TargetMax": "2",
+          "TgtPrompt": "Select two target lands",
+          "ValidTgts": "Land",
+          "TargetMin": "2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exchange control of two target lands.",
+        "TargetMax": "2",
+        "TgtPrompt": "Select two target lands",
+        "ValidTgts": "Land",
+        "TargetMin": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

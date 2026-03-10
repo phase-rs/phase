@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may cast spells that have a cycling ability from your graveyard.",
+        "Affected": "Card.nonLand+YouOwn+withCycling,Card.nonLand+YouOwn+withTypeCycling",
+        "MayPlay": "True",
+        "AffectedZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "Exile",
+        "Description": "If a card that has a cycling ability would be put into your graveyard from anywhere and it wasn't cycled, exile it instead.",
+        "Cycling": "False",
+        "ActiveZones": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.YouOwn+withCycling,Card.YouOwn+withTypeCycling"
+      }
+    }
+  ],
+  "faces": []
+}

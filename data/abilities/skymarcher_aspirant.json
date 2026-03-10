@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "Blessing",
+        "AddKeyword": "Flying",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has flying as long as you have the city's blessing."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

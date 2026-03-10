@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exerted",
+      "params": {
+        "TriggerDescription": "Whenever you exert a creature, reveal cards from the top of your library until you reveal an Equipment card. Put that card onto the battlefield attached to that creature, then put the rest on the bottom of your library in a random order.",
+        "Execute": "TrigDig",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "Description": "You may exert CARDNAME as it attacks. (It won't untap during your next untap step.)",
+        "Cost": "Exert<1/CARDNAME>",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

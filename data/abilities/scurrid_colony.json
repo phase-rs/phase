@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "PresentCompare": "GE8",
+        "Description": "CARDNAME gets +2/+2 as long as you control eight or more lands.",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Affected": "Card.Self",
+        "IsPresent": "Land.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

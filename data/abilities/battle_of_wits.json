@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentZone": "Library",
+        "ValidPlayer": "You",
+        "PresentCompare": "GE200",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, if you have 200 or more cards in your library, you win the game.",
+        "Phase": "Upkeep",
+        "Execute": "TrigWinGame",
+        "IsPresent": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Creature.blockingSource",
+        "PresentCompare": "GE2",
+        "AddPower": "-2",
+        "Description": "CARDNAME gets -2/-0 as long as two or more creatures are blocking it.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

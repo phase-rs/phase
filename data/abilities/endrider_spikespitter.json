@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddTrigger": "PhaseTrig",
+        "Condition": "MaxSpeed",
+        "Description": "Max speed — At the beginning of your upkeep, exile the top card of your library. You may play that card this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

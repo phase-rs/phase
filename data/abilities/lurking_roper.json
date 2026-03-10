@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUntap",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you gain life, untap this creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ValidStepTurnToController": "You",
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

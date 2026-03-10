@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": "Hand"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Waterbend<5>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "DestinationZone2": "Library",
+        "ChangeValid": "Creature.powerLE3",
+        "ChangeNum": "1",
+        "ForceRevealToController": "True",
+        "RestRandomOrder": "True",
+        "SpellDescription": "Look at the top four cards of your library. You may reveal a creature card with power 3 or less from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "Optional": "True",
+        "LibraryPosition": "-1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeControl",
+        "params": {
+          "TgtPrompt": "Select target creature you don't control",
+          "SpellDescription": "Exchange control of two target creatures you don't control.",
+          "TargetUnique": "True",
+          "TargetMax": "2",
+          "StackDescription": "SpellDescription",
+          "ValidTgts": "Creature.YouDontCtrl",
+          "TargetMin": "2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature you don't control",
+        "SpellDescription": "Exchange control of two target creatures you don't control.",
+        "TargetUnique": "True",
+        "TargetMax": "2",
+        "StackDescription": "SpellDescription",
+        "ValidTgts": "Creature.YouDontCtrl",
+        "TargetMin": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

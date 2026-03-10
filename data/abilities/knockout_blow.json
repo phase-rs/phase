@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attacking,Creature.blocking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target attacking or blocking creature",
+        "SubAbility": "GainLife",
+        "SpellDescription": "CARDNAME deals 4 damage to target attacking or blocking creature and you gain 2 life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidTarget": "Creature.Red",
+        "EffectZone": "All",
+        "Description": "This spell costs {2} less to cast if it targets a red creature.",
+        "Amount": "2",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

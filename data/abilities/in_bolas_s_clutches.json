@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent.EnchantedBy",
+        "Description": "You control enchanted permanent.",
+        "GainControl": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Legendary",
+        "Description": "Enchanted permanent is legendary.",
+        "Affected": "Permanent.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

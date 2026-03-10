@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Creature.OppOwn",
+        "TriggerDescription": "Whenever an opponent discards a creature card, create a 2/2 black Zombie creature token.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "Execute": "TrigMana",
+        "ValidCard": "Land.OppOwn",
+        "TriggerDescription": "Whenever an opponent discards a land card, add {B}{B}.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Card.nonLand+nonCreature+OppOwn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an opponent discards a noncreature, nonland card, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a noncreature spell, if at least four mana was spent to cast it, CARDNAME becomes an artifact creature until end of turn.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.nonCreature",
+        "ValidSA": "Spell.ManaSpent GE4",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAnimate"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

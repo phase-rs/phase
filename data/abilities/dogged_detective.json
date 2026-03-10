@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigSurveil"
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever an opponent draws their second card each turn, you may return CARDNAME from your graveyard to your hand.",
+        "Number": "2",
+        "ValidPlayer": "Player.Opponent",
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

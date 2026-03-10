@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SpellDescription": "Each player loses 1 life for each Swamp they control.",
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "DBLoseLife",
+          "AILogic": "AllPlayerLoseLife"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player loses 1 life for each Swamp they control.",
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "DBLoseLife",
+        "AILogic": "AllPlayerLoseLife"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

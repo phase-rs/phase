@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "TgtPrompt": "Select target artifact or creature you control",
+          "SpellDescription": "Create X tokens that are copies of target artifact or creature you control. Those tokens gain haste until end of turn. Sacrifice them at the beginning of the next end step.",
+          "AtEOT": "Sacrifice",
+          "NumCopies": "X",
+          "PumpKeywords": "Haste",
+          "ValidTgts": "Artifact.YouCtrl,Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact or creature you control",
+        "SpellDescription": "Create X tokens that are copies of target artifact or creature you control. Those tokens gain haste until end of turn. Sacrifice them at the beginning of the next end step.",
+        "AtEOT": "Sacrifice",
+        "NumCopies": "X",
+        "PumpKeywords": "Haste",
+        "ValidTgts": "Artifact.YouCtrl,Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

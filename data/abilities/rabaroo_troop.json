@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, this creature gains flying until end of turn and you gain 1 life.",
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "TrigFlying"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

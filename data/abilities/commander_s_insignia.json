@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "X",
+        "Affected": "Creature.YouCtrl",
+        "AddPower": "X",
+        "Description": "Creatures you control get +1/+1 for each time you've cast your commander from the command zone this game."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

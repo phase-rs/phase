@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSubAbility": "DBSetLife",
+          "SpellDescription": "Each player's life total becomes the number of creatures they control.",
+          "RepeatPlayers": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "DBSetLife",
+        "SpellDescription": "Each player's life total becomes the number of creatures they control.",
+        "RepeatPlayers": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

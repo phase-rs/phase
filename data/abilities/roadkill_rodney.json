@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "Execute": "TrigToken",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever this creature deals combat damage to a player, create a Mutagen token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

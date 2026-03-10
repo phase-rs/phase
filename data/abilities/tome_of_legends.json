@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<1/PAGE>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever your commander enters or attacks, put a page counter on CARDNAME.",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever your commander enters or attacks, put a page counter on CARDNAME.",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

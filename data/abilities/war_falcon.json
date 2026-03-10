@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "IsPresent": "Knight.YouCtrl,Soldier.YouCtrl",
+        "PresentCompare": "EQ0",
+        "Description": "CARDNAME can't attack unless you control a Knight or Soldier."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

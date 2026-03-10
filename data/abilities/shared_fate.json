@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.ExiledWithSource",
+        "MayLookAt": "True",
+        "MayPlayPlayer": "Exiler",
+        "MayPlay": "True",
+        "AffectedZone": "Exile",
+        "Description": "Each player may look at cards they exiled with CARDNAME, and they may play lands and cast spells from among those cards."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ReplaceWith": "DBChooseOpp",
+        "ActiveZones": "Battlefield",
+        "Description": "If a player would draw a card, that player exiles the top card of one of their opponents' libraries face down instead."
+      }
+    }
+  ],
+  "faces": []
+}

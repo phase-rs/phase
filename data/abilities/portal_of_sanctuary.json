@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "All",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "UseAllOriginZones": "True",
+        "ChangeType": "TargetedCard.Self,Aura.AttachedTo Targeted",
+        "PlayerTurn": "True",
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Return target creature you control and all Auras attached to it to their owners' hands. Activate only during your turn.",
+        "StackDescription": "Return {c:Targeted} and all Auras attached to it to their owners' hands."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

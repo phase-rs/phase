@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.OppOwn",
+        "Execute": "TrigCounter",
+        "TriggerDescription": "Whenever an opponent discards a card, put a +1/+1 counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+kicked",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, target opponent discards two cards at random."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

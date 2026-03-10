@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigEnergy",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you get {E} (an energy counter).",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you get {E} (an energy counter).",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigEnergy",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of your upkeep, you may pay {E}{E}. If you do, you draw a card and you lose 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever another creature you control dies, CARDNAME deals 1 damage to each opponent and you gain 1 life.",
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Creature.Other+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

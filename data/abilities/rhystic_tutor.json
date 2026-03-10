@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Mandatory": "True",
+        "ChangeNum": "1",
+        "UnlessCost": "2",
+        "ChangeType": "Card",
+        "UnlessPayer": "Player",
+        "SpellDescription": "Unless any player pays {2}, search your library for a card, put that card into your hand, then shuffle."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

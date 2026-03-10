@@ -1,0 +1,113 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.Other"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Untap another target artifact.",
+        "TgtPrompt": "Select another target artifact"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Scry",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StackDescription": "{c:Targeted} can't be blocked this turn",
+          "SpellDescription": "Target creature can't be blocked this turn.",
+          "RememberObjects": "Targeted",
+          "AILogic": "Pump",
+          "StaticAbilities": "Unblockable",
+          "ExileOnMoved": "Battlefield",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "{c:Targeted} can't be blocked this turn",
+        "SpellDescription": "Target creature can't be blocked this turn.",
+        "RememberObjects": "Targeted",
+        "AILogic": "Pump",
+        "StaticAbilities": "Unblockable",
+        "ExileOnMoved": "Battlefield",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

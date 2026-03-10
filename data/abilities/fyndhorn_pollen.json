@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": -1,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "ValidCards": "Creature",
+        "SpellDescription": "All creatures get -1/-0 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "-1",
+        "Affected": "Creature",
+        "Description": "All creatures get -1/-0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

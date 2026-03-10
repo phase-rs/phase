@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 2,
+        "toughness": 3,
+        "types": [
+          "Spirit",
+          "Warrior"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "S S"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveCreatureTypes": "True",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "CARDNAME becomes a Spirit Warrior with base power and toughness 2/3.",
+        "Duration": "Permanent"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "Flying",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "S S S"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionPresent": "Card.Self+Warrior",
+        "SubAbility": "TrigAnimate",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "If CARDNAME is a Warrior, put a flying counter on it and it becomes an Angel Spirit Warrior with base power and toughness 4/4."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 2,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "S S S S"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "If CARDNAME is an Angel, put two +1/+1 counters on it and it gains \"Whenever this creature deals combat damage to a player, draw a card.\"",
+        "SubAbility": "AddTrigger",
+        "StackDescription": "SpellDescription",
+        "ConditionPresent": "Card.Self+Angel"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "Execute": "TrigDig",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME becomes tapped, you may pay {X}. If you do, reveal the top X cards of your library, put all Dwarf and Vehicle cards from among them into your hand, then put the rest on the bottom of your library in a random order.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Dwarves you control get +1/+1.",
+        "Affected": "Permanent.Dwarf+Other+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each Vehicle you control gets +1/+1 as long as it's a creature.",
+        "Affected": "Creature.Vehicle+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

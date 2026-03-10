@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidTarget": "Opponent",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME deals damage to an opponent, you may draw a card.",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

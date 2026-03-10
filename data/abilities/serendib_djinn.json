@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac2",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice a land. If you sacrifice an Island this way, CARDNAME deals 3 damage to you.",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When you control no lands, sacrifice CARDNAME.",
+        "IsPresent": "Land.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

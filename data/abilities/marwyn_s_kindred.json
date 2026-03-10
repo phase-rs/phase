@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Zone": "Battlefield",
+          "SubAbility": "DBConjure",
+          "Conjure": "True",
+          "Amount": "1",
+          "SpellDescription": "Conjure a card named Marwyn, the Nurturer and X cards named Llanowar Elves onto the battlefield.",
+          "Name": "Marwyn, the Nurturer"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Zone": "Battlefield",
+        "SubAbility": "DBConjure",
+        "Conjure": "True",
+        "Amount": "1",
+        "SpellDescription": "Conjure a card named Marwyn, the Nurturer and X cards named Llanowar Elves onto the battlefield.",
+        "Name": "Marwyn, the Nurturer"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

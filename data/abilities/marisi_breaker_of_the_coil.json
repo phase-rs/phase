@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGoad",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, goad each creature that player controls. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "Your opponents can't cast spells during combat.",
+        "Caster": "Player.Opponent",
+        "ValidCard": "Card",
+        "Phases": "BeginCombat->EndCombat"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

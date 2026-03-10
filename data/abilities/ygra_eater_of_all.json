@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Food",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a Food is put into a graveyard from the battlefield, put two +1/+1 counters on CARDNAME.",
+        "Origin": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other creatures are Food artifacts in addition to their other types and have \"{2}, {T}, Sacrifice this permanent: You gain 3 life.\"",
+        "AddType": "Artifact & Food",
+        "AddAbility": "FoodSac",
+        "Affected": "Creature.Other",
+        "AffectedZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

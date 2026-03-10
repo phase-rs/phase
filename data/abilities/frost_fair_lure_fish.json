@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 blue Fish creature tokens and create two tapped Treasure tokens.",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Fish.YouCtrl",
+        "AddKeyword": "Haste",
+        "Description": "Fish you control have haste and can't be blocked by Humans."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Fish you control have haste and can't be blocked by Humans.",
+        "ValidAttacker": "Fish.YouCtrl",
+        "ValidBlocker": "Creature.Human",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

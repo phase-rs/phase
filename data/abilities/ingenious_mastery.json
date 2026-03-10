@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "BranchConditionSVar": "AltCostPaid",
+          "TrueSubAbility": "DBAltCostEffect",
+          "FalseSubAbility": "DBDrawX",
+          "SpellDescription": "If the {2}{U} cost was paid, you draw three cards, then an opponent creates two Treasure tokens and they scry 2. If that cost wasn't paid, you draw X cards.",
+          "BranchConditionSVarCompare": "GE1"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "BranchConditionSVar": "AltCostPaid",
+        "TrueSubAbility": "DBAltCostEffect",
+        "FalseSubAbility": "DBDrawX",
+        "SpellDescription": "If the {2}{U} cost was paid, you draw three cards, then an opponent creates two Treasure tokens and they scry 2. If that cost wasn't paid, you draw X cards.",
+        "BranchConditionSVarCompare": "GE1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "2 U",
+        "ValidSA": "Spell.Self",
+        "Description": "You may pay {2}{U} rather than pay this spell's mana cost.",
+        "EffectZone": "All",
+        "StackDescription": "If the {2}{U} cost was paid, you draw three cards, then an opponent creates two Treasure tokens and they scry 2. If that cost wasn't paid, you draw X cards."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

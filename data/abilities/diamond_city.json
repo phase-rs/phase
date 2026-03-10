@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MoveCounter",
+        "params": {
+          "CheckSVar": "X",
+          "Source": "Self",
+          "SVarCompare": "GE2",
+          "CounterNum": "1",
+          "ValidTgts": "Creature",
+          "CounterType": "SHIELD",
+          "SpellDescription": "Move a shield counter from CARDNAME onto target creature. Activate only if two or more creatures entered the battlefield under your control this turn."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CheckSVar": "X",
+        "Source": "Self",
+        "SVarCompare": "GE2",
+        "CounterNum": "1",
+        "ValidTgts": "Creature",
+        "CounterType": "SHIELD",
+        "SpellDescription": "Move a shield counter from CARDNAME onto target creature. Activate only if two or more creatures entered the battlefield under your control this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, mill four cards.",
+        "Destination": "Battlefield",
+        "Execute": "TrigMill",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigLoseLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Delirium — At the beginning of your upkeep, you lose 4 life unless there are four or more card types among cards in your graveyard."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

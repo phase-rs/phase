@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDiscard",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "OptionalDecider": "You",
+        "IsPresent": "Swamp.YouCtrl",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, if you control a Swamp, you may have that player discard a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

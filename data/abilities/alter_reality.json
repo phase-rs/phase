@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChangeText",
+        "params": {
+          "TgtPrompt": "Choose target spell or permanent",
+          "ChangeColorWord": "Choose Choose",
+          "ValidTgts": "Card",
+          "TgtZone": "Stack,Battlefield",
+          "Duration": "Permanent",
+          "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another. (This effect lasts indefinitely.)"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target spell or permanent",
+        "ChangeColorWord": "Choose Choose",
+        "ValidTgts": "Card",
+        "TgtZone": "Stack,Battlefield",
+        "Duration": "Permanent",
+        "SpellDescription": "Change the text of target spell or permanent by replacing all instances of one color word with another. (This effect lasts indefinitely.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

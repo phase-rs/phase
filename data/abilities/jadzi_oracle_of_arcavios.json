@@ -1,0 +1,73 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Hand",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Return CARDNAME to its owner's hand."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCastOrCopy",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigDig",
+            "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, reveal the top card of your library. If it's a nonland card, you may cast it by paying {1} rather than paying its mana cost. If it's a land card, put it onto the battlefield.",
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Instant,Sorcery"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Hand",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ChangeNum": "X",
+            "ChangeType": "Land",
+            "SpellDescription": "You may put any number of land cards from your hand onto the battlefield.",
+            "SubAbility": "DBBounce",
+            "StackDescription": "{p:You} puts any number of land cards from your hand onto the battlefield."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

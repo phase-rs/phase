@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land is a 5/6 green Treefolk creature that's still a land.",
+        "Affected": "Card.EnchantedBy",
+        "SetPower": "5",
+        "SetToughness": "6",
+        "SetColor": "Green",
+        "AddType": "Creature & Treefolk"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

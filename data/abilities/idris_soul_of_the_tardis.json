@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile another artifact you control until NICKNAME leaves the battlefield.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "NICKNAME has all activated and triggered abilities of the exiled card and gets +X/+X, where X is the exiled card's mana value.",
+        "EffectZone": "Battlefield",
+        "GainsAbilitiesOf": "Card.ExiledWithSource",
+        "AddPower": "X",
+        "GainsTriggerAbsOf": "Card.ExiledWithSource",
+        "GainsAbilitiesOfZones": "Exile",
+        "AddToughness": "X",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

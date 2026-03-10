@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Artifacts you control have \"{2}, Sacrifice this artifact: It deals damage to any target equal to 1 plus the number of permanents named Food Fight you control.\"",
+        "AddAbility": "SacSelf",
+        "Affected": "Artifact.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

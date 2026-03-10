@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentDefined": "Self",
+        "PhaseCount": "2",
+        "ValidPlayer": "You",
+        "Phase": "Main",
+        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, put a flying, lifelink, or +1/+1 counter on it.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter1",
+        "IsPresent": "Card.tapped"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self+HasCounters,Creature.Other+YouCtrl+HasCounters",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter2",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control dies, if it had counters on it, put those counters on up to one target creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

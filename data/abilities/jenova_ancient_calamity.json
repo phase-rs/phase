@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, put a number of +1/+1 counters equal to NICKNAME's power on up to one other target creature. That creature becomes a Mutant in addition to its other types.",
+        "Execute": "DBPutCounter",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidCard": "Mutant.YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a Mutant you control dies during your turn, you draw cards equal to its power.",
+        "TriggerZones": "Battlefield",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeBrotherhood",
+        "AddTrigger": "BrotherhoodTrig",
+        "Description": "• Brotherhood — At the beginning of your upkeep, each opponent draws a card. You draw a card for each card drawn this way."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeEnclave",
+        "Description": "• Enclave — Whenever a player attacks you with one or more creatures, that player gets twice that many rad counters.",
+        "AddTrigger": "EnclaveTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "W U B R G",
+        "params": {
+          "ConditionCheckSVar": "RDCoolness",
+          "PrecostDesc": "Sonic Rainboom —",
+          "SpellDescription": "If you're at least 100% cool, add {W}{U}{B}{R}{G}, draw a card, and reset your coolness.",
+          "SubAbility": "DBDraw",
+          "ConditionSVarCompare": "GE5"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionCheckSVar": "RDCoolness",
+        "PrecostDesc": "Sonic Rainboom —",
+        "SpellDescription": "If you're at least 100% cool, add {W}{U}{B}{R}{G}, draw a card, and reset your coolness.",
+        "SubAbility": "DBDraw",
+        "ConditionSVarCompare": "GE5"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigGetCooler",
+        "TriggerDescription": "Whenever a creature you control with flying and/or haste attacks, you get 20% cooler. (You start at 0% coolness.)",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.withFlying+YouCtrl,Creature.withHaste+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

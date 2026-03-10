@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Creature",
+        "Execute": "TrigDamage",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a creature dies, you may have CARDNAME deal damage to target player equal to the number of cards in that player's hand.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

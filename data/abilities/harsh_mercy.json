@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "SubAbility": "DBDestroyAll",
+          "RepeatPlayers": "Player",
+          "RepeatSubAbility": "DBChooseType",
+          "SpellDescription": "Each player chooses a creature type. Destroy all creatures that aren't of a type chosen this way. They can't be regenerated."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SubAbility": "DBDestroyAll",
+        "RepeatPlayers": "Player",
+        "RepeatSubAbility": "DBChooseType",
+        "SpellDescription": "Each player chooses a creature type. Destroy all creatures that aren't of a type chosen this way. They can't be regenerated."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

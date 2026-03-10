@@ -1,0 +1,91 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "Amount": "3",
+          "AILogic": "Always",
+          "Planeswalker": "True",
+          "SubAbility": "DBExile",
+          "SpellDescription": "Add {R}{R}{R}."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "3",
+        "AILogic": "Always",
+        "Planeswalker": "True",
+        "SubAbility": "DBExile",
+        "SpellDescription": "Add {R}{R}{R}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "AddKeywords": "Haste",
+          "ValidTgts": "Creature.YouCtrl",
+          "AtEOTTrig": "Sacrifice",
+          "Planeswalker": "True",
+          "SpellDescription": "Create a token that's a copy of target creature you control, except it has haste and \"At the beginning of the end step, sacrifice this token.\"",
+          "TgtPrompt": "Select target creature you control"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AddKeywords": "Haste",
+        "ValidTgts": "Creature.YouCtrl",
+        "AtEOTTrig": "Sacrifice",
+        "Planeswalker": "True",
+        "SpellDescription": "Create a token that's a copy of target creature you control, except it has haste and \"At the beginning of the end step, sacrifice this token.\"",
+        "TgtPrompt": "Select target creature you control"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 8
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "NICKNAME deals 8 damage divided as you choose among any number of target creatures and/or planeswalkers.",
+        "DividedAsYouChoose": "8",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "TargetMin": "0",
+        "TgtPrompt": "Select any number of target creatures and planeswalkers to distribute damage to",
+        "TargetMax": "8"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

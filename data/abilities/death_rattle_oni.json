@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, destroy all other creatures that were dealt damage this turn.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "DBDestroyAll",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "This spell costs {2} less to cast for each creature that died this turn.",
+        "Amount": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

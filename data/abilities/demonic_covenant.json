@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "ValidAttackers": "Creature.Demon+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more Demons you control attack a player, you draw a card and lose 1 life.",
+        "Execute": "TrigDrawAndDamage",
+        "AttackedTarget": "Player"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCreateAndMill",
+        "TriggerDescription": "At the beginning of your end step, create a 5/5 black Demon creature token with flying, then mill two cards. If two cards that share all their card types were milled this way, sacrifice CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

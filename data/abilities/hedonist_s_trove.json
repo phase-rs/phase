@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, exile all cards from target opponent's graveyard."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Exile",
+        "Description": "You may play lands from among cards exiled with CARDNAME.",
+        "MayPlay": "True",
+        "Affected": "Land.ExiledWithSource"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Affected": "Card.nonLand+ExiledWithSource",
+        "AffectedZone": "Exile",
+        "MayPlayLimit": "1",
+        "Description": "You may cast spells from among cards exiled with CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

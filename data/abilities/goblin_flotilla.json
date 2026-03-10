@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "TriggerDescription": "At the beginning of each combat, unless you pay {R}, whenever CARDNAME blocks or becomes blocked by a creature this combat, that creature gains first strike until end of turn.",
+        "Execute": "AnimateDB"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

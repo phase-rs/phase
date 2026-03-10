@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.!token",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a nontoken creature enters, its controller creates a token that's a copy of that creature.",
+        "Execute": "TrigDualCopy",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "TriggerDescription": "Whenever a nontoken creature leaves the battlefield, exile all tokens with the same name as that creature.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.!token",
+        "Origin": "Battlefield",
+        "Execute": "TrigDualExile"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, exile all tokens created with CARDNAME.",
+        "Destination": "Any",
+        "Execute": "TrigDualExileAll"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.IsRemembered",
+        "Destination": "Any",
+        "Execute": "TrigForget",
+        "Static": "True",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

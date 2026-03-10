@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks, exchange its power and the power of target creature it's blocking until end of combat.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExchangePower"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

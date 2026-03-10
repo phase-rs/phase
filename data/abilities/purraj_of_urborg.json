@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a player casts a black spell, you may pay {B}. If you do, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Card.Black"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "Affected": "Card.Self+attacking",
+        "Description": "CARDNAME has first strike as long as it's attacking."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

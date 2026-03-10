@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "AffectedX",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "AffectedX",
+        "Description": "Enchanted creature gets +1/+1 for each of its colors."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

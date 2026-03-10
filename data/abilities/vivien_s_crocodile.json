@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Planeswalker.Vivien+YouCtrl",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +1/+1 as long as you control a Vivien planeswalker.",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

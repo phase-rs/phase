@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "X",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each creature you control with a +1/+1 counter on it.",
+        "Type": "Spell",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Type": "Spell",
+        "Amount": "X",
+        "ValidCard": "Creature",
+        "EffectZone": "Battlefield",
+        "Description": "Creature spells you cast cost {1} less to cast for each creature you control with a +1/+1 counter on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

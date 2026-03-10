@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Affected": "Permanent.Other+YouCtrl",
+        "Description": "Other permanents you control have indestructible."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

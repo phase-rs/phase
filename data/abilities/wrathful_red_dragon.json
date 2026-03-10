@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever a Dragon you control is dealt damage, it deals that much damage to any target that isn't a Dragon.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "ValidTarget": "Dragon.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

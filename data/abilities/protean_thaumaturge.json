@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Enchantment.YouCtrl",
+        "Execute": "TrigProteanCopy",
+        "TriggerDescription": "Constellation — Whenever an enchantment you control enters, you may have CARDNAME become a copy of another target creature, except it has this ability.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "SubAbility": "DBAnimate",
+          "SpellDescription": "Seek three nonland cards,",
+          "Type": "Card.nonLand",
+          "Num": "3",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAnimate",
+        "SpellDescription": "Seek three nonland cards,",
+        "Type": "Card.nonLand",
+        "Num": "3",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

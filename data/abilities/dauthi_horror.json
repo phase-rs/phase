@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked by white creatures.",
+        "ValidBlocker": "Creature.White"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "2",
+        "Activator": "Opponent",
+        "Description": "Spells your opponents cast that target CARDNAME cost {2} more to cast.",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

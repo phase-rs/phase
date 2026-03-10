@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, destroy each permanent you don't control that has the same name as a permanent that dealt damage to you last turn.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDestroyAll",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigRemember",
+        "Static": "True",
+        "ValidSource": "Permanent",
+        "ValidTarget": "You"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Cleanup",
+        "Static": "True",
+        "Execute": "TrigForget"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

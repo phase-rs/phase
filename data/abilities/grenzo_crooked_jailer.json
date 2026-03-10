@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigHeist",
+        "Origin": "Any",
+        "TriggerDescription": "When NICKNAME enters and at the beginning of your upkeep, heist target opponent's library."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "Secondary": "True",
+        "ValidPlayer": "You",
+        "TriggerDescription": "When NICKNAME enters and at the beginning of your upkeep, heist target opponent's library.",
+        "Execute": "TrigHeist",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "MayPlayLimit": "1",
+        "Description": "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast that you don't own with mana value 3 or less.",
+        "Affected": "Card.YouDontOwn+cmcLE3",
+        "MayPlayAltManaCost": "0",
+        "AffectedZone": "Hand,Graveyard,Library,Exile,Command",
+        "MayPlayDontGrantZonePermissions": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

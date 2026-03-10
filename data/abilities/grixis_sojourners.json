@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may exile target card from a graveyard."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may exile target card from a graveyard.",
+        "Origin": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "Destination": "Graveyard",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

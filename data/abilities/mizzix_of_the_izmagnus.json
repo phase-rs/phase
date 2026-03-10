@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigExperience",
+        "ValidCard": "Instant.cmcGTX,Sorcery.cmcGTX",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell with mana value greater than the number of experience counters you have, you get an experience counter.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Instant,Sorcery",
+        "Amount": "X",
+        "Description": "Instant and sorcery spells you cast cost {1} less to cast for each experience counter you have.",
+        "Activator": "You",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

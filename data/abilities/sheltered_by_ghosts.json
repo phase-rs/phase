@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile target nonland permanent an opponent controls until CARDNAME leaves the battlefield."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Enchanted creature gets +1/+0 and has lifelink and ward {2}.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Lifelink & Ward:2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

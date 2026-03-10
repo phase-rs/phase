@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.Self+!kicked",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigNotKicked",
+        "TriggerDescription": "At the beginning of the end step, if CARDNAME wasn't kicked, sacrifice it.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

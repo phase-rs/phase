@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player discards a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Pirates you control get +1/+0.",
+        "Affected": "Creature.Pirate+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

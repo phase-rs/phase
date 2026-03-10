@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.tapped,Creature.blocking"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U B B R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target tapped or blocking creature.",
+        "TgtPrompt": "Select target tapped or blocking creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantTarget"
+      },
+      "params": {
+        "ValidSource": "Aura",
+        "ValidTarget": "Card.Self",
+        "ValidSA": "Spell",
+        "Description": "CARDNAME can't be the target of Aura spells."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

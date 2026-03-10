@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, target player gets two rad counters.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigRadiation",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "MilledAll",
+      "params": {
+        "ValidCard": "Card.nonLand",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidPlayer": "Player",
+        "ActivationLimit": "1",
+        "TriggerDescription": "Whenever one or more nonland cards are milled, draw a card, then put a +1/+1 counter on CARDNAME. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

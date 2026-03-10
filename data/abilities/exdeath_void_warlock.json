@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Execute": "TrigGainLife",
+            "TriggerDescription": "When NICKNAME enters, you gain 3 life.",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "CheckSVar": "X",
+            "TriggerDescription": "At the beginning of your end step, if there are six or more permanent cards in your graveyard, transform NICKNAME.",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "Phase": "End of Turn",
+            "SVarCompare": "GE6"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetPower": "X",
+            "Description": "NICKNAME's power is equal to the number of permanent cards in your graveyard.",
+            "CharacteristicDefining": "True"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

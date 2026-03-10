@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Delirium — Whenever CARDNAME deals damage, if there are four or more card types among cards in your graveyard, exile target creature an opponent controls.",
+        "Delirium": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

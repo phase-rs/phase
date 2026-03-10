@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidSource": "Spell.OppCtrl",
+        "Execute": "TrigCounter",
+        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell an opponent controls, counter that spell unless its controller discards a card.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

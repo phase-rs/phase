@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 0,
+        "toughness": 0,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.nonCreature+YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target noncreature artifact you control",
+        "Duration": "Permanent",
+        "RememberAnimated": "True",
+        "SubAbility": "DBPutCounter",
+        "StackDescription": "{c:Targeted} becomes a 0/0 artifact creature. {p:You} puts four +1/+1 counters on each artifact that became a creature this way.",
+        "SpellDescription": "Target noncreature artifact you control becomes a 0/0 artifact creature. Put four +1/+1 counters on each artifact that became a creature this way."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

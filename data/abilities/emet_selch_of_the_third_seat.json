@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeLostAll",
+      "params": {
+        "OptionalDecider": "You",
+        "ResolvedLimit": "1",
+        "TriggerDescription": "Whenever one or more opponents lose life, you may cast target instant or sorcery card from your graveyard. If that spell would be put into your graveyard, exile it instead. Do this only once each turn.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Opponent",
+        "Execute": "TrigPlay"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Spells you cast from your graveyard cost {2} less to cast.",
+        "ValidCard": "Card.wasCastFromYourGraveyard",
+        "Activator": "You",
+        "Type": "Spell",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

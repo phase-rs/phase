@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "CARDNAME can't be blocked this turn.",
+          "RememberObjects": "Self",
+          "StaticAbilities": "Unblockable"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "CARDNAME can't be blocked this turn.",
+        "RememberObjects": "Self",
+        "StaticAbilities": "Unblockable"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

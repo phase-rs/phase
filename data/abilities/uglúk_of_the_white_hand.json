@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainCounter",
+        "TriggerDescription": "Whenever another creature you control dies, put a +1/+1 counter on CARDNAME. If that creature was a Goblin or Orc, put two +1/+1 counters on NICKNAME instead.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control have \"{T}: Add one mana of any color.\"",
+        "Affected": "Creature.YouCtrl",
+        "AddAbility": "AnyMana"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

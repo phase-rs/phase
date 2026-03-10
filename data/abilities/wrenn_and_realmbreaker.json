@@ -1,0 +1,102 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 3,
+        "types": [
+          "Creature",
+          "Elemental"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select up to one target land you control",
+        "Keywords": "Vigilance & Hexproof & Haste",
+        "TargetMin": "0",
+        "TargetMax": "1",
+        "Planeswalker": "True",
+        "Duration": "UntilYourNextTurn",
+        "SpellDescription": "Up to one target land you control becomes a 3/3 Elemental creature with vigilance, hexproof, and haste until your next turn. It's still a land."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 3,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBChangeZone",
+        "RememberMilled": "True",
+        "SpellDescription": "Mill three cards. You may put a permanent card from among the milled cards into your hand."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Image": "emblem_wrenn_and_realmbreaker",
+          "Duration": "Permanent",
+          "Name": "Emblem — Wrenn and Realmbreaker",
+          "AILogic": "Always",
+          "SpellDescription": "You get an emblem with \"You may play lands and cast permanent spells from your graveyard.\"",
+          "StaticAbilities": "PermanentRecycle",
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "Stackable": "False"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Image": "emblem_wrenn_and_realmbreaker",
+        "Duration": "Permanent",
+        "Name": "Emblem — Wrenn and Realmbreaker",
+        "AILogic": "Always",
+        "SpellDescription": "You get an emblem with \"You may play lands and cast permanent spells from your graveyard.\"",
+        "StaticAbilities": "PermanentRecycle",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "Stackable": "False"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Lands you control have \"{T}: Add one mana of any color.\"",
+        "AddAbility": "AnyMana",
+        "Affected": "Land.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

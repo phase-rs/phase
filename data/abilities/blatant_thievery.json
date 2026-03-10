@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "OneEach",
+        "SpellDescription": "For each opponent, gain control of target permanent that player controls.",
+        "TargetsForEachPlayer": "True",
+        "TgtPrompt": "Select target permanent an opponent controls to gain control of.",
+        "TargetMax": "OneEach"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "IsPresent": "Planeswalker.Vraska+YouCtrl",
+        "TriggerDescription": "When CARDNAME dies, if you control a Vraska planeswalker, you gain life equal to CARDNAME's power.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

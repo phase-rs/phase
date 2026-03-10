@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "SpellDescription": "Choose a land type. Target creature you control gains snow landwalk of the chosen type until end of turn.",
+          "Defined": "You",
+          "Type": "Land",
+          "SubAbility": "DBPump",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose a land type. Target creature you control gains snow landwalk of the chosen type until end of turn.",
+        "Defined": "You",
+        "Type": "Land",
+        "SubAbility": "DBPump",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

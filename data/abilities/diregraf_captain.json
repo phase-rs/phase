@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Zombie.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Zombie you control dies, target opponent loses 1 life.",
+        "Execute": "TrigLoseLife",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.Zombie+Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other Zombie creatures you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile target land you control."
+      }
+    },
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Land.sharesNameWith Imprinted",
+        "TriggerDescription": "Whenever a land with the same name as the exiled card is tapped for mana, its controller adds one mana of any type that land produced.",
+        "Static": "True",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMana"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "ValidCard": "Card.Self",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
+        "Execute": "DBForget",
+        "Static": "True",
+        "Origin": "Exile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

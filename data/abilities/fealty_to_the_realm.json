@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you become the monarch.",
+        "Execute": "TrigMonarch"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "The monarch controls enchanted creature.",
+        "GainControl": "Player.isMonarch",
+        "Affected": "Card.EnchantedBy"
+      }
+    },
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Target": "You",
+        "Description": "Enchanted creature attacks each combat if able and can't attack you.",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

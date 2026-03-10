@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "ICE",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 S"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "SubAbility": "DBTap",
+        "SpellDescription": "Put an ice counter on target creature. Tap that creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "Description": "Creatures with ice counters on them don't untap during their controllers' untap steps.",
+        "ValidCard": "Creature.counters_GE1_ICE",
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

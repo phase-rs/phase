@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "IsSingleTarget": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player casts an instant or sorcery spell that targets only CARDNAME, that player copies that spell for each other creature they control that the spell could target. Each copy targets a different one of those creatures.",
+        "ValidCard": "Instant,Sorcery",
+        "TargetsValid": "Card.Self",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

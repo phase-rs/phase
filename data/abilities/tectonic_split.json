@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Description": "As an additional cost to cast this spell, sacrifice half the lands you control, rounded up.",
+        "Activator": "You",
+        "ValidCard": "Card.Self",
+        "Cost": "Sac<X/Land/land(s)>",
+        "EffectZone": "All",
+        "Type": "Spell"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.YouCtrl",
+        "AddAbility": "AnyMana",
+        "Description": "Lands you control have \"{T}: Add three mana of any one color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

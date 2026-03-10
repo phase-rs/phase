@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, target opponent creates three 0/1 white Goat creature tokens.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TripleGoat",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigTap",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of combat on your turn, any opponent may sacrifice a creature. If a player does, tap CARDNAME, you gain 3 life, and you draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

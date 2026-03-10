@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "TriggerDescription": "Whenever a player casts a spell, you draw a card.",
+        "Execute": "TrigDrawCard",
+        "ValidActivatingPlayer": "Player",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "DrewLastTurn",
+        "Phase": "Upkeep",
+        "Execute": "DBAbandon",
+        "TriggerDescription": "At the beginning of your upkeep, if you drew a card last turn, abandon this scheme.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

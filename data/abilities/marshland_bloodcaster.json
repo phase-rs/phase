@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "ReduceCost",
+          "ForgetOnCast": "Card.YouCtrl",
+          "SpellDescription": "Rather than pay the mana cost of the next spell you cast this turn, you may pay life equal to that spell's mana value."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "ReduceCost",
+        "ForgetOnCast": "Card.YouCtrl",
+        "SpellDescription": "Rather than pay the mana cost of the next spell you cast this turn, you may pay life equal to that spell's mana value."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

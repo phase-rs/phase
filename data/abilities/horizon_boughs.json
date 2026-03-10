@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "DBFetch",
+        "TriggerDescription": "Whenever chaos ensues, you may search your library for up to three basic land cards, put them onto the battlefield tapped, then shuffle."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "UntapOtherPlayer"
+      },
+      "params": {
+        "Description": "All permanents untap during each player's untap step.",
+        "ValidCard": "Permanent",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you sacrifice one or more other creatures, CARDNAME deals 2 damage to each opponent. This ability triggers only once each turn.",
+        "ActivationLimit": "1",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

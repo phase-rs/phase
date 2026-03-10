@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "CounterType": "P1P1",
+          "SpellDescription": "Put a +1/+1 counter on each creature you control with flying.",
+          "ValidCards": "Creature.YouCtrl+withFlying",
+          "CounterNum": "1"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "CounterType": "P1P1",
+        "SpellDescription": "Put a +1/+1 counter on each creature you control with flying.",
+        "ValidCards": "Creature.YouCtrl+withFlying",
+        "CounterNum": "1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPut",
+        "TriggerDescription": "When CARDNAME enters, put a flying counter on target non-Human creature you control.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

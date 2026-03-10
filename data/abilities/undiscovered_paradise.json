@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SubAbility": "DBReturn",
+          "SpellDescription": "Add one mana of any color. During your next untap step, as you untap your permanents, return CARDNAME to its owner's hand."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBReturn",
+        "SpellDescription": "Add one mana of any color. During your next untap step, as you untap your permanents, return CARDNAME to its owner's hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

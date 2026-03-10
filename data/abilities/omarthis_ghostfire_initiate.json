@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you put one or more +1/+1 counters on another colorless creature, you may put a +1/+1 counter on NICKNAME.",
+        "CounterType": "P1P1",
+        "ValidSource": "You",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Other+inZoneBattlefield+Colorless"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigManifest",
+        "TriggerDescription": "When NICKNAME dies, manifest a number of cards from the top of your library equal to the number of counters on it.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

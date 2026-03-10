@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or enchanted creature attacks, tap target creature an opponent controls.",
+        "Execute": "TrigTap",
+        "ValidCard": "Card.Self,Creature.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted creature gets +3/+3.",
+        "AddToughness": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

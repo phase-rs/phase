@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "DBSeek",
+        "TriggerDescription": "When CARDNAME dies, seek a creature card with mana value 3 or less. That card perpetually gains haste, \"This spell costs {1} less to cast,\" and \"At the beginning of your end step, sacrifice this creature.\"",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

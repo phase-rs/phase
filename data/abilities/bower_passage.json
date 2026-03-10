@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.withFlying",
+        "ValidAttacker": "Creature.YouCtrl",
+        "Description": "Creatures with flying can't block creatures you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

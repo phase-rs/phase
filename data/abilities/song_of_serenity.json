@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "ValidCard": "Creature.enchanted",
+        "Description": "Creatures that are enchanted can't attack or block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

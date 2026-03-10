@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddPhase",
+        "params": {
+          "ExtraPhase": "Combat",
+          "ExtraPhaseDelayedTrigger": "DelTrigUntap",
+          "SpellDescription": "After the second main phase this turn, there's an additional combat phase followed by an additional main phase. At the beginning of that combat, untap all creatures that attacked this turn.",
+          "ExtraPhaseDelayedTriggerExcute": "TrigUntapAll",
+          "FollowedBy": "Main2",
+          "BeforeFirstPostCombatMainEnd": "True",
+          "AfterPhase": "Main2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ExtraPhase": "Combat",
+        "ExtraPhaseDelayedTrigger": "DelTrigUntap",
+        "SpellDescription": "After the second main phase this turn, there's an additional combat phase followed by an additional main phase. At the beginning of that combat, untap all creatures that attacked this turn.",
+        "ExtraPhaseDelayedTriggerExcute": "TrigUntapAll",
+        "FollowedBy": "Main2",
+        "BeforeFirstPostCombatMainEnd": "True",
+        "AfterPhase": "Main2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Creature",
+        "Execute": "DBLoseLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, that creature's controller loses 2 life and you gain 2 life.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

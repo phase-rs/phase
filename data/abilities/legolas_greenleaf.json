@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another legendary creature you control enters, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.Legendary+Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by creatures with power 2 or less.",
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.powerLE2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

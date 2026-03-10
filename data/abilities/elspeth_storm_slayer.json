@@ -1,0 +1,91 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_soldier",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 1/1 white Soldier creature token."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "SubAbility": "DBPumpAll",
+          "ValidCards": "Creature.YouCtrl",
+          "Planeswalker": "True",
+          "CounterType": "P1P1",
+          "CounterNum": "1",
+          "SpellDescription": "Put a +1/+1 counter on each creature you control. Those creatures gain flying until your next turn."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPumpAll",
+        "ValidCards": "Creature.YouCtrl",
+        "Planeswalker": "True",
+        "CounterType": "P1P1",
+        "CounterNum": "1",
+        "SpellDescription": "Put a +1/+1 counter on each creature you control. Those creatures gain flying until your next turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl+cmcGE3"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target creature an opponent controls with mana value 3 or greater",
+        "SpellDescription": "Destroy target creature an opponent controls with mana value 3 or greater.",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "Description": "If one or more tokens would be created under your control, twice that many of those tokens are created instead.",
+        "ActiveZones": "Battlefield",
+        "ValidToken": "Card.YouCtrl",
+        "ReplaceWith": "DoubleToken"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBranch",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Celebration — At the beginning of your end step, create a Food token. If two or more nonland permanents entered the battlefield under your control this turn, instead conjure a card named Food Fight onto the battlefield.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "Description": "Players can't gain life.",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

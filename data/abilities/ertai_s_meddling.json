@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Stack",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "XMin1 X U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDelayEffect",
+        "WithCountersPlacer": "TargetedController",
+        "WithCountersAmount": "X",
+        "SpellDescription": "Target spell's controller exiles it with X delay counters on it.",
+        "Imprint": "True",
+        "TargetType": "Spell",
+        "TgtZone": "Stack",
+        "WithCountersType": "DELAY"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of each of that player's upkeeps, if that card is exiled, remove a delay counter from it. If the card has no delay counters on it, the player puts it onto the stack as a copy of the original spell.",
+        "TriggerZones": "Command",
+        "Execute": "TrigLoseDelay",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

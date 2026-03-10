@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Elf"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "1",
+        "SubAbility": "DBRandom",
+        "StackDescription": "REP up to one target Elf_{c:Targeted}",
+        "SpellDescription": "Untap up to one target Elf. That Elf and a random Elf creature card in your hand perpetually get +1/+1.",
+        "TargetMin": "0",
+        "TgtPrompt": "Select up to one target Elf",
+        "RememberTargets": "True",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "StackDescription": "REP Seek_{p:You} seeks",
+          "SpellDescription": "Seek an Elf card.",
+          "Planeswalker": "True",
+          "Type": "Card.Elf"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "REP Seek_{p:You} seeks",
+        "SpellDescription": "Seek an Elf card.",
+        "Planeswalker": "True",
+        "Type": "Card.Elf"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "SpellDescription": "Conjure a card named Regal Force onto the battlefield.",
+          "Conjure": "True",
+          "Name": "Regal Force",
+          "Zone": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "Conjure a card named Regal Force onto the battlefield.",
+        "Conjure": "True",
+        "Name": "Regal Force",
+        "Zone": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

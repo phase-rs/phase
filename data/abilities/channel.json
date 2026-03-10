@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Abilities": "ABMana",
+          "SpellDescription": "Until end of turn, any time you could activate a mana ability, you may pay 1 life. If you do, add {C}."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Abilities": "ABMana",
+        "SpellDescription": "Until end of turn, any time you could activate a mana ability, you may pay 1 life. If you do, add {C}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

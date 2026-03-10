@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "Whenever a source deals damage to CARDNAME, that source's controller sacrifices that many permanents."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

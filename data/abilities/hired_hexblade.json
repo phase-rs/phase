@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if mana from a Treasure was spent to cast it, you draw a card and you lose 1 life.",
+        "CheckSVar": "TreasureCheck",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeActivated",
+      "params": {
+        "Description": "Activated abilities of sources with the chosen name can't be activated.",
+        "ValidCard": "Card.NamedCard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

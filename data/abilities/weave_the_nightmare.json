@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "AdditionalDescription": "If you control a nonland permanent you don't own as you cast this spell, you may choose two instead.",
+          "CharmNum": "Count$Compare Y GE1.2.1",
+          "MinCharmNum": "1",
+          "Choices": "DBHeist,DBPump,DBCounter"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AdditionalDescription": "If you control a nonland permanent you don't own as you cast this spell, you may choose two instead.",
+        "CharmNum": "Count$Compare Y GE1.2.1",
+        "MinCharmNum": "1",
+        "Choices": "DBHeist,DBPump,DBCounter"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

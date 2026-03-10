@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "Execute": "TrigChoose",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Targeting Relay — At the beginning of combat on your turn, choose an opponent."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.attacking ChosenPlayer",
+        "Description": "Creatures attacking the last chosen player have menace.",
+        "AddKeyword": "Menace"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

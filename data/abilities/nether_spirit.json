@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "IsPresent": "Creature.YouOwn",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is the only creature card in your graveyard, you may return CARDNAME to the battlefield.",
+        "PresentCompare": "EQ1",
+        "ValidPlayer": "You",
+        "TriggerZones": "Graveyard",
+        "PresentZone": "Graveyard",
+        "Phase": "Upkeep",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

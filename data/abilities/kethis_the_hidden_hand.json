@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "ExileFromGrave<2/Card.Legendary/legendary card>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Until end of turn, each legendary card in your graveyard gains \"You may play this card from your graveyard.\"",
+        "Defined": "ValidGraveyard Card.Legendary+YouOwn",
+        "staticAbilities": "Play"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Legendary",
+        "Activator": "You",
+        "Description": "Legendary spells you cast cost {1} less to cast.",
+        "Type": "Spell",
+        "Amount": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

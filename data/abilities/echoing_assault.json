@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "ValidAttackers": "Creature.YouCtrl",
+        "Execute": "TrigCopy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack a player, choose target nontoken creature that's attacking that player. Create a token that's a copy of that creature, except it's 1/1. The token enters tapped and attacking that player. Sacrifice it at the beginning of the next end step.",
+        "AttackedTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creature tokens you control have menace.",
+        "AddKeyword": "Menace",
+        "Affected": "Creature.token+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

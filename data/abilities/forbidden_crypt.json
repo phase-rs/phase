@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ValidPlayer": "You",
+        "ReplaceWith": "CheckLoseCondition",
+        "ActiveZones": "Battlefield",
+        "Description": "If you would draw a card, return a card from your graveyard to your hand instead. If you can't, you lose the game."
+      }
+    },
+    {
+      "event": "Moved",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Card.!token+YouOwn",
+        "Description": "If a card would be put into your graveyard from anywhere, exile that card instead.",
+        "ReplaceWith": "CryptExile",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "faces": []
+}

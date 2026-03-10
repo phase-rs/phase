@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "X",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "X",
+        "Description": "Equipped creature gets +1/+1 for each creature you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

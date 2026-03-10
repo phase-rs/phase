@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever an opponent casts a creature spell, create a token that's a copy of it, except it's 1/1.",
+        "ValidActivatingPlayer": "Opponent",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopySpell"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

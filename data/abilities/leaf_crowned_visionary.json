@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast an Elf spell, you may pay {G}. If you do, draw a card.",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Elf",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Battlefield",
+        "Description": "Other Elves you control get +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Elf.Other+YouCtrl",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

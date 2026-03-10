@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Bushido:X",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has bushido X, where X is the number of attacking creatures."
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "Creatures your opponents control attack each combat if able.",
+        "ValidCreature": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

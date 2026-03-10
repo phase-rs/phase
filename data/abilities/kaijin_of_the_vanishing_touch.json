@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks a creature, return that creature to its owner's hand at end of combat.",
+        "Execute": "DelayedTrig",
+        "ValidCard": "Creature",
+        "ValidBlocker": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "TargetType": "Spell",
+          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
+          "Amount": "X",
+          "MayChooseTarget": "True",
+          "SpellDescription": "Copy target instant or sorcery spell you control. If this spell was cast from a graveyard, copy that spell twice instead. You may choose new targets for the copies."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
+        "Amount": "X",
+        "MayChooseTarget": "True",
+        "SpellDescription": "Copy target instant or sorcery spell you control. If this spell was cast from a graveyard, copy that spell twice instead. You may choose new targets for the copies."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.Wall",
+        "Description": "CARDNAME can't be blocked by Walls.",
+        "ValidAttacker": "Creature.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "Threshold",
+        "Affected": "Card.Self",
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME gets +3/+0 and attacks each combat if able.",
+        "AddPower": "3"
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Card.Self",
+        "Condition": "Threshold",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

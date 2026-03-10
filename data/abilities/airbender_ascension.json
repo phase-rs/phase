@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAirbend",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When this enchantment enters, airbend up to one target creature."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature you control enters, put a quest counter on this enchantment."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, if this enchantment has four or more quest counters on it, exile up to one target creature you control, then return it to the battlefield under its owner's control.",
+        "Execute": "TrigChangeZone",
+        "IsPresent": "Card.Self+counters_GE4_QUEST",
+        "Phase": "End of Turn",
+        "PresentCompare": "EQ1",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

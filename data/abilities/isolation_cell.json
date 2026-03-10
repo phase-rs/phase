@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "Whenever an opponent casts a creature spell, that player loses 2 life unless they pay {2}.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "Execute": "TrigLose"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

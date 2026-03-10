@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.withoutFlying",
+        "Description": "CARDNAME can't be blocked except by creatures with flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

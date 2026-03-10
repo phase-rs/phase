@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may have target land become a Plains until CARDNAME leaves the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

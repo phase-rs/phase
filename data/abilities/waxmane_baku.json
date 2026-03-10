@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Mana",
+            "cost": "SubCounter<X/KI>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select X target creatures",
+        "TargetMin": "X",
+        "TargetMax": "X",
+        "IsCurse": "True",
+        "SpellDescription": "Tap X target creatures."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Spirit,Arcane",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, you may put a ki counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

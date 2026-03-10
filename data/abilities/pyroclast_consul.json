@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "OptionalDecider": "You",
+        "Execute": "TrigKinship",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Kinship — At the beginning of your upkeep, you may look at the top card of your library. If it shares a creature type with CARDNAME, you may reveal it. If you do, CARDNAME deals 2 damage to each creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

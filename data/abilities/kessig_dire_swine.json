@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Trample",
+        "Condition": "Delirium",
+        "Description": "Delirium — CARDNAME has trample as long as there are four or more card types among cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Creature",
+          "SpellDescription": "Until end of turn, all creatures gain \"{T}: Tap target creature.\"",
+          "Abilities": "ShovingMatch"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "SpellDescription": "Until end of turn, all creatures gain \"{T}: Tap target creature.\"",
+        "Abilities": "ShovingMatch"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
+        "TriggerDescription": "At the beginning of combat on your turn, if you control another Wolf or Werewolf, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "When CARDNAME dies, you gain life equal to its power."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

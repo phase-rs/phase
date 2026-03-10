@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self,Creature.EnchantedBy",
+        "Description": "CARDNAME can't be blocked."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +1/+1 and can't be blocked."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

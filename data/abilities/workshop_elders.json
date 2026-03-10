@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "At the beginning of combat on your turn, you may have target noncreature artifact you control becomes a 0/0 artifact creature. If you do, put four +1/+1 counters on it.",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Artifact+YouCtrl",
+        "AddKeyword": "Flying",
+        "Description": "Artifact creatures you control have flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

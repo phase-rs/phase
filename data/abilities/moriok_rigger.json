@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Artifact",
+        "TriggerDescription": "Whenever an artifact is put into a graveyard from the battlefield, you may put a +1/+1 counter on CARDNAME.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

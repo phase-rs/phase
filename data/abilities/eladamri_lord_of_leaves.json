@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Elf+Other",
+        "AddKeyword": "Landwalk:Forest",
+        "Description": "Other Elf creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Elves have shroud. (They can't be the targets of spells or abilities.)",
+        "Affected": "Card.Elf+Other",
+        "AddKeyword": "Shroud"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

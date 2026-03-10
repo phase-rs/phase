@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "X",
+        "Affected": "Card.Self,Card.EnchantedBy",
+        "Description": "CARDNAME and enchanted creature get +1/+1 for each creature you control and +1/+1 for each Aura you control.",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

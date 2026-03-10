@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Execute": "TrigExile",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME dies, exile it and return to the battlefield all artifact and creature cards in your graveyard that were put there from the battlefield this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

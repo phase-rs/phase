@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control have horsemanship.",
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Horsemanship"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PhaseIn",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME phases in, target creature phases out.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigWarp"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

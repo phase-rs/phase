@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Zone": "Battlefield",
+          "Conjure": "True",
+          "SpellDescription": "Conjure a card of your choice from CARDNAME's spellbook onto the battlefield.",
+          "Spellbook": "Gate of the Black Dragon,Gate to Manorborn,Gate to Seatower,Gate to the Citadel,Gate to Tumbledown"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Zone": "Battlefield",
+        "Conjure": "True",
+        "SpellDescription": "Conjure a card of your choice from CARDNAME's spellbook onto the battlefield.",
+        "Spellbook": "Gate of the Black Dragon,Gate to Manorborn,Gate to Seatower,Gate to the Citadel,Gate to Tumbledown"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

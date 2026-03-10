@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigCopy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, create a token that's a copy of CARDNAME.",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.EquippedBy",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

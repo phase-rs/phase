@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDamageAll",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this creature enters, it deals 1 damage to each creature your opponents control."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTreasure",
+        "TriggerDescription": "Whenever a creature an opponent controls with a counter on it dies, you create a tapped Treasure token.",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.OppCtrl+HasCounters",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

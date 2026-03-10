@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "DiesTrigger",
+        "Description": "As long as CARDNAME is paired with another creature, each of those creatures has \"When this creature dies, draw cards equal to its power.\"",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

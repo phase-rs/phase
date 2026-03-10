@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "CARDNAME attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Protection:Card.cmcNEChosenNumber,Emblem:each mana value other than ChosenNumber",
+        "Description": "NICKNAME has protection from each mana value other than the chosen number."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigImmediateTrig",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you draw a card, you may pay {1}. When you do, you may tap or untap target creature.",
+        "ValidCard": "Card.YouOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

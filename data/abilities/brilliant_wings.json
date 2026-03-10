@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigAttach",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control enters, you may pay {1}. If you do, attach this Aura to that creature.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying & Hexproof",
+        "Affected": "Permanent.EnchantedBy",
+        "Description": "Enchanted permanent has flying and hexproof."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Prevent all damage that would be dealt this turn to creatures you control.",
+          "ReplacementEffects": "RPrevent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent all damage that would be dealt this turn to creatures you control.",
+        "ReplacementEffects": "RPrevent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "If an opponent controls a Mountain and you control a Plains, you may cast this spell without paying its mana cost.",
+        "ValidSA": "Spell",
+        "ValidPlayer": "You",
+        "ValidCard": "Card.Self",
+        "Cost": "0",
+        "CheckSecondSVar": "Y",
+        "EffectZone": "All",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

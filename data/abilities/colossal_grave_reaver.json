@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever this creature enters or attacks, mill three cards.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "Execute": "TrigMill",
+        "TriggerDescription": "Whenever this creature enters or attacks, mill three cards."
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Creature.YouOwn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more creature cards are put into your graveyard from your library, put one of them onto the battlefield.",
+        "Origin": "Library",
+        "Destination": "Graveyard",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

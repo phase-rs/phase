@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "KhansTrigger",
+        "Affected": "Card.Self+ChosenModeKhans",
+        "Description": "• Khans — At the beginning of each of your main phases, add {G}{G}."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeDragons",
+        "AddTrigger": "DragonsTrigger",
+        "Description": "• Dragons — Whenever a creature with flying enters under your control, you may have it fight target creature you don't control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

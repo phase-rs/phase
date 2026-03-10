@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Activated.Crew+Vehicle",
+        "ValidCard": "Card.Self",
+        "ValidPlayer": "You",
+        "Cost": "SubCounter<1/LOYALTY/Planeswalker.YouCtrl/Planeswalker you Control>",
+        "Description": "You may remove a loyalty counter from a planeswalker you control rather than pay CARDNAME's crew cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

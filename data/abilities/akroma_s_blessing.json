@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseColor",
+        "params": {
+          "AILogic": "MostProminentAttackers",
+          "Defined": "You",
+          "SubAbility": "DBProtection",
+          "SpellDescription": "Choose a color. Creatures you control gain protection from the chosen color until end of turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "MostProminentAttackers",
+        "Defined": "You",
+        "SubAbility": "DBProtection",
+        "SpellDescription": "Choose a color. Creatures you control gain protection from the chosen color until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

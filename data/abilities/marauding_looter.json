@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "Execute": "TrigLoot",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Raid — At the beginning of your end step, if you attacked this turn, you may draw a card. If you do, discard a card.",
+        "CheckSVar": "RaidTest",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

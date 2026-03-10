@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Other blue creatures you control get +1/+1.",
+        "Affected": "Creature.Blue+Other+YouCtrl",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other black creatures you control get +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Creature.Black+Other+YouCtrl",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

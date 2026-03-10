@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Clue",
+        "Execute": "TrigUnblockable",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you sacrifice a Clue, target creature can't be blocked this turn.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "ClueSac",
+        "Affected": "Artifact.YouCtrl",
+        "AddType": "Clue",
+        "Description": "Artifacts you control are Clues in addition to their other types and have \"{2}, Sacrifice this artifact: Draw a card.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

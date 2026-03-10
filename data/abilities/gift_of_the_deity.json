@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Deathtouch",
+        "Description": "As long as enchanted creature is black, it gets +1/+1 and has deathtouch. (Any amount of damage it deals to a creature is enough to destroy that creature.)",
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy+Black",
+        "AddToughness": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddHiddenKeyword": "All creatures able to block CARDNAME do so.",
+        "Description": "As long as enchanted creature is green, it gets +1/+1 and all creatures able to block it do so.",
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy+Green",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

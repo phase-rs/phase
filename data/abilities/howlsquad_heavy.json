@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "At the beginning of combat on your turn, create a 1/1 red Goblin creature token. That token attacks this combat if able."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Goblins you control have haste.",
+        "AddKeyword": "Haste",
+        "Affected": "Goblin.YouCtrl+Other"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Max speed — {T}: Add {R} for each Goblin you control.",
+        "Condition": "MaxSpeed",
+        "AddAbility": "ABMana",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

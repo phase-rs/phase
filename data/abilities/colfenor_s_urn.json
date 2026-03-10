@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a creature with toughness 4 or greater is put into your graveyard from the battlefield, you may exile it.",
+        "ValidCard": "Creature.toughnessGE4+YouOwn",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigExile"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "SVarCompare": "GE3",
+        "Execute": "TrigReturnAll",
+        "TriggerDescription": "At the beginning of the end step, if three or more cards have been exiled with CARDNAME, sacrifice it. If you do, return those cards to the battlefield under their owner's control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

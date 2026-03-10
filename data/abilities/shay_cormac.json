@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "SpellDescription": "Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.",
+          "RemoveKeywords": "Hexproof & Indestructible & Protection & Shroud & Ward",
+          "ValidCards": "Permanent.OppCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.",
+        "RemoveKeywords": "Hexproof & Indestructible & Protection & Shroud & Ward",
+        "ValidCards": "Permanent.OppCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidSource": "SpellAbility.YouCtrl",
+        "ValidTarget": "Creature.OppCtrl+inZoneBattlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature an opponent controls becomes the target of a spell or ability you control, put a bounty counter on that creature.",
+        "Execute": "TrigPutCounterTriggered"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.OppCtrl+counters_GE1_BOUNTY",
+        "TriggerDescription": "Whenever a creature with a bounty counter on it dies, put two +1/+1 counters on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

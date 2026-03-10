@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ActivatorThisTurnCast": "EQ2",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you cast your second spell each turn, CARDNAME deals 2 damage to target opponent. Scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

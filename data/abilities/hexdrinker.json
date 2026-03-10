@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "4",
+        "Description": "LEVEL 3-7 4/4 Protection from instants",
+        "SetPower": "4",
+        "IsPresent": "Card.Self+counters_GE3_LEVEL+counters_LT8_LEVEL",
+        "Affected": "Card.Self",
+        "AddKeyword": "Protection:Instant:instants"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "6",
+        "SetToughness": "6",
+        "Affected": "Card.Self",
+        "AddKeyword": "Protection from everything",
+        "IsPresent": "Card.Self+counters_GE8_LEVEL",
+        "Description": "LEVEL 8+ 6/6 Protection from everything"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another Human you control enters, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Human.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

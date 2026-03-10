@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "Execute": "TrigCrank",
+        "TriggerDescription": "Whenever you crank CARDNAME, create two 1/1 blue Faerie Spy creature tokens with flying, haste, and \"Whenever this creature deals combat damage to a player, draw a card.\" Exile them at the beginning of the next end step.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

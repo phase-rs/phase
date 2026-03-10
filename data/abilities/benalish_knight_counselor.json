@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Enlisted",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBoon",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enlists a creature, you get a boon with \"When you cast your next creature spell, that creature enters with a +1/+1 counter on it.\""
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

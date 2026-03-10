@@ -1,0 +1,97 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": 0,
+            "toughness": 0,
+            "target": {
+              "type": "Filtered",
+              "filter": "Human.YouCtrl"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "KW": "Lifelink",
+            "TgtPrompt": "Select target Human you control",
+            "SpellDescription": "Target Human you control gains lifelink until end of turn."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigLoseLife",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME enters the or another nontoken Human you control dies, you lose 1 life and create a 1/1 white Human creature token."
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigLoseLife",
+            "Destination": "Graveyard",
+            "ValidCard": "Human.Other+!token+YouCtrl",
+            "Origin": "Battlefield",
+            "TriggerDescription": "Whenever CARDNAME enters the or another nontoken Human you control dies, you lose 1 life and create a 1/1 white Human creature token.",
+            "Secondary": "True",
+            "TriggerZones": "Battlefield"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "SVarCompare": "EQ13",
+            "TriggerDescription": "At the beginning of your end step, if you have exactly 13 life, you may pay {4}{B}{B}. If you do, transform NICKNAME.",
+            "Phase": "End of Turn",
+            "ValidPlayer": "You",
+            "Execute": "TrigTransform",
+            "CheckSVar": "X"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Draw a card."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

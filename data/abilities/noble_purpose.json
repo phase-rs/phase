@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever a creature you control deals combat damage, you gain that much life.",
+        "Execute": "TrigGain",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

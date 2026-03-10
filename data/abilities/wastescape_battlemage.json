@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self+kicked 1",
+        "TriggerDescription": "When you cast this spell, if it was kicked with its {G} kicker, exile target artifact or enchantment an opponent controls."
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "When you cast this spell, if it was kicked with its {1}{U} kicker, return target creature an opponent controls to its owner's hand.",
+        "Execute": "TrigReturn",
+        "ValidCard": "Card.Self+kicked 2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

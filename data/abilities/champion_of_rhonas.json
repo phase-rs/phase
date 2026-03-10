@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "Trigger": "TrigChangeZone",
+        "ValidCard": "Card.Self",
+        "Description": "You may exert CARDNAME as it attacks. When you do, you may put a creature card from your hand onto the battlefield. (An exerted creature won't untap during your next untap step.)",
+        "Cost": "Exert<1/CARDNAME>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

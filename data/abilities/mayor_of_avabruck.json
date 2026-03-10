@@ -1,0 +1,73 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "WerewolfTransformCondition": "True"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "1",
+            "Description": "Other Human creatures you control get +1/+1.",
+            "Affected": "Creature.Human+Other+YouCtrl",
+            "AddToughness": "1"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigToken",
+            "TriggerDescription": "At the beginning of your end step, create a 2/2 green Wolf creature token.",
+            "ValidPlayer": "You",
+            "Phase": "End of Turn"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "WerewolfUntransformCondition": "True",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "Phase": "Upkeep",
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Each other creature you control that's a Werewolf or a Wolf gets +1/+1.",
+            "AddToughness": "1",
+            "Affected": "Creature.Werewolf+Other+YouCtrl,Creature.Wolf+Other+YouCtrl",
+            "AddPower": "1"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

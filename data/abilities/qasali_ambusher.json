@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlayWithFlash": "True",
+        "CheckSVar": "X",
+        "MayPlayDontGrantZonePermissions": "True",
+        "CheckThirdSVar": "Z",
+        "MayPlay": "True",
+        "Description": "If a creature is attacking you and you control a Forest and a Plains, you may cast CARDNAME without paying its mana cost and as though it had flash.",
+        "CheckSecondSVar": "Y",
+        "MayPlayWithoutManaCost": "True",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

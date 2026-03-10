@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Creature>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Trample",
+        "Defined": "Self",
+        "ActivationLimit": "1",
+        "SpellDescription": "CARDNAME gets +2/+2 and gains trample until end of turn. Activate only once each turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

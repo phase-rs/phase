@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigScry",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, scry 3, then reveal the top card of your library. If it's a land or double-faced card, draw a card.",
+            "Origin": "Any",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Trample & Ward:2",
+            "Description": "Other transformed permanents you control have trample and ward {2}.",
+            "Affected": "Permanent.Transformed+Other+YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

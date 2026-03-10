@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Connive",
+        "params": {
+          "TargetMax": "X",
+          "SpellDescription": "Each of X target creatures you control connive.",
+          "SubAbility": "DBPhase",
+          "TgtPrompt": "Select X target creatures you control",
+          "ValidTgts": "Creature.YouCtrl",
+          "TargetMin": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "X",
+        "SpellDescription": "Each of X target creatures you control connive.",
+        "SubAbility": "DBPhase",
+        "TgtPrompt": "Select X target creatures you control",
+        "ValidTgts": "Creature.YouCtrl",
+        "TargetMin": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

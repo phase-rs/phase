@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When CARDNAME enters, if the gift was promised, destroy target artifact or enchantment an opponent controls.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+PromisedGift"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

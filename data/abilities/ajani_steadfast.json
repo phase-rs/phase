@@ -1,0 +1,98 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "KW": "First Strike & Vigilance & Lifelink",
+        "TargetMax": "1",
+        "Planeswalker": "True",
+        "SpellDescription": "Until end of turn, up to one target creature gets +1/+1 and gains first strike, vigilance, and lifelink."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterNum": "1",
+          "CounterType2": "LOYALTY",
+          "Planeswalker": "True",
+          "CounterType": "P1P1",
+          "ValidCards2": "Planeswalker.YouCtrl+StrictlyOther",
+          "SpellDescription": "Put a +1/+1 counter on each creature you control and a loyalty counter on each other planeswalker you control.",
+          "AILogic": "OwnCreatsAndOtherPWs",
+          "ValidCards": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterNum": "1",
+        "CounterType2": "LOYALTY",
+        "Planeswalker": "True",
+        "CounterType": "P1P1",
+        "ValidCards2": "Planeswalker.YouCtrl+StrictlyOther",
+        "SpellDescription": "Put a +1/+1 counter on each creature you control and a loyalty counter on each other planeswalker you control.",
+        "AILogic": "OwnCreatsAndOtherPWs",
+        "ValidCards": "Creature.YouCtrl"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "Duration": "Permanent",
+          "AILogic": "Always",
+          "Image": "emblem_ajani_steadfast",
+          "Stackable": "False",
+          "ReplacementEffects": "RPreventDamage",
+          "SpellDescription": "You get an emblem with \"If a source would deal damage to you or a planeswalker you control, prevent all but 1 of that damage.\"",
+          "Name": "Emblem — Ajani Steadfast"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "Duration": "Permanent",
+        "AILogic": "Always",
+        "Image": "emblem_ajani_steadfast",
+        "Stackable": "False",
+        "ReplacementEffects": "RPreventDamage",
+        "SpellDescription": "You get an emblem with \"If a source would deal damage to you or a planeswalker you control, prevent all but 1 of that damage.\"",
+        "Name": "Emblem — Ajani Steadfast"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

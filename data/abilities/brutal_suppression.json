@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Description": "Activated abilities of nontoken Rebels cost an additional \"Sacrifice a land\" to activate.",
+        "Type": "Ability",
+        "Cost": "Sac<1/Land>",
+        "AffectedZone": "Battlefield",
+        "ValidCard": "Rebel.!token"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may pay {2}{R}. If you do, choose a color, then that player reveals their hand and NICKNAME deals damage to the player equal to the number of cards of that color revealed this way.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigChooseColor"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

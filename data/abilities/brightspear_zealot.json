@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "SVarCompare": "GE2",
+        "CheckSVar": "X",
+        "Affected": "Card.Self",
+        "Description": "This creature gets +2/+0 as long as you've cast two or more spells this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

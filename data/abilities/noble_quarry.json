@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddHiddenKeyword": "All creatures able to block CARDNAME do so.",
+        "Description": "All creatures able to block enchanted creature do so."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Card.EnchantedBy",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "BeginCombat",
+            "IsPresent": "Creature.YouCtrl+powerLTtoughness",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "PresentCompare": "GE3",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of combat on your turn, if you control three or more creatures that each have toughness greater than their power, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "LoseLife",
+            "amount": 0
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 B"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidTgts": "Opponent",
+            "SpellDescription": "Target opponent loses life equal to the sacrificed creature's toughness."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

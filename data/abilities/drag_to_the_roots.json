@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target nonland permanent.",
+        "TgtPrompt": "Select target nonland permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Condition": "Delirium",
+        "Description": "Delirium — This spell costs {2} less to cast if there are four or more card types among cards in your graveyard.",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Amount": "2",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

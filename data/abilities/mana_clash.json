@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Repeat",
+        "params": {
+          "RepeatSubAbility": "ResetCheck",
+          "SpellDescription": "You and target opponent each flip a coin. CARDNAME deals 1 damage to each player whose coin comes up tails. Repeat this process until both players' coins come up heads on the same flip.",
+          "StackDescription": "SpellDescription",
+          "RepeatCheckSVar": "RepeatCheck",
+          "ValidTgts": "Opponent",
+          "RepeatSVarCompare": "GT0"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "ResetCheck",
+        "SpellDescription": "You and target opponent each flip a coin. CARDNAME deals 1 damage to each player whose coin comes up tails. Repeat this process until both players' coins come up heads on the same flip.",
+        "StackDescription": "SpellDescription",
+        "RepeatCheckSVar": "RepeatCheck",
+        "ValidTgts": "Opponent",
+        "RepeatSVarCompare": "GT0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

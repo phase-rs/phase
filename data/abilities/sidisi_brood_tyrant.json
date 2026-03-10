@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigMill",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill three cards.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill three cards.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Creature.YouOwn",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever one or more creature cards are put into your graveyard from your library, create a 2/2 black Zombie creature token.",
+        "Origin": "Library",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

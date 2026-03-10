@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put two +1/+1 counters on up to one target creature.",
+        "TargetMin": "0",
+        "AIActivateLast": "True",
+        "Planeswalker": "True",
+        "TargetMax": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Target creature you control deals damage equal to its power to target creature you don't control.",
+        "AILogic": "PowerDmg",
+        "SubAbility": "TailDamage",
+        "Planeswalker": "True",
+        "StackDescription": "None"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 4,
+        "toughness": 4,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures you control get +4/+4 and gain trample until end of turn.",
+        "KW": "Trample",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "ValidCards": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

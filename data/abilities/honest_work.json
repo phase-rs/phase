@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this Aura enters, tap enchanted creature and remove all counters from it.",
+        "Execute": "TrigTap",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature loses all abilities and is a Citizen with base power and toughness 1/1 and \"{T}: Add {C}\" named Humble Merchant. (It loses all other creature types and names.)",
+        "Affected": "Creature.EnchantedBy",
+        "AddType": "Citizen",
+        "SetPower": "1",
+        "SetToughness": "1",
+        "AddAbility": "Mana",
+        "RemoveAllAbilities": "True",
+        "SetName": "Humble Merchant",
+        "RemoveCreatureTypes": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

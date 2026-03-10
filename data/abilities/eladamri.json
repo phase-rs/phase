@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ActivationZone": "Command",
+          "ExileOnMoved": "Battlefield",
+          "ValidTgts": "Creature.YouCtrl",
+          "RememberObjects": "Targeted",
+          "TgtPrompt": "Select target creature to redirect damage from",
+          "Duration": "Permanent",
+          "ReplacementEffects": "RedirectDamage",
+          "SpellDescription": "The next 1 damage that would be dealt to target creature you control is dealt to you instead."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Command",
+        "ExileOnMoved": "Battlefield",
+        "ValidTgts": "Creature.YouCtrl",
+        "RememberObjects": "Targeted",
+        "TgtPrompt": "Select target creature to redirect damage from",
+        "Duration": "Permanent",
+        "ReplacementEffects": "RedirectDamage",
+        "SpellDescription": "The next 1 damage that would be dealt to target creature you control is dealt to you instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

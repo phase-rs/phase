@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Prevent all combat damage that would be dealt by target attacking creature this turn.",
+          "TgtPrompt": "Select target attacking creature",
+          "ReplacementEffects": "RPrevent",
+          "ValidTgts": "Creature.attacking",
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Targeted"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent all combat damage that would be dealt by target attacking creature this turn.",
+        "TgtPrompt": "Select target attacking creature",
+        "ReplacementEffects": "RPrevent",
+        "ValidTgts": "Creature.attacking",
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Targeted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

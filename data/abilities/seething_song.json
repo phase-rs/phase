@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "Amount": "5",
+          "AILogic": "ManaRitual",
+          "AINoRecursiveCheck": "True",
+          "SpellDescription": "Add {R}{R}{R}{R}{R}."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "5",
+        "AILogic": "ManaRitual",
+        "AINoRecursiveCheck": "True",
+        "SpellDescription": "Add {R}{R}{R}{R}{R}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

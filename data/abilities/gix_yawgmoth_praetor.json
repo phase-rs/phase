@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4 B B B"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<X/Card/card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "StackDescription": "Exile the top X cards of {p:Targeted}'s library.",
+        "SpellDescription": "Exile the top X cards of target opponent's library.",
+        "ChangeNum": "All",
+        "SubAbility": "DBPlay",
+        "RememberChanged": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Opponent",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "TriggeredSourceController",
+        "ValidSource": "Creature",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature deals combat damage to one of your opponents, its controller may pay 1 life. If they do, they draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

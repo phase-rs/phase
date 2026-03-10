@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME enters and whenever one or more Assassins you control deal combat damage to a player, return target historic card from your graveyard to your hand."
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidSource": "Assassin.YouCtrl",
+        "TriggerDescription": "When CARDNAME enters and whenever one or more Assassins you control deal combat damage to a player, return target historic card from your graveyard to your hand.",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "Execute": "TrigChangeZone",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

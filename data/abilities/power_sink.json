@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter target spell unless its controller pays {X}. If that player doesn't, they tap all lands with mana abilities they control and lose all unspent mana.",
+        "UnlessResolveSubs": "WhenNotPaid",
+        "UnlessCost": "X",
+        "TargetType": "Spell",
+        "StackDescription": "Countering [{s:Targeted}] unless {p:TargetedController} pays X.",
+        "SubAbility": "TapLands",
+        "TgtPrompt": "Select target spell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Defined": "You",
+          "SubAbility": "DBChangeZoneAll",
+          "SpellDescription": "Choose a creature type. Return all creature cards of the chosen type from your graveyard to the battlefield.",
+          "AILogic": "MostProminentInComputerGraveyard",
+          "Type": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SubAbility": "DBChangeZoneAll",
+        "SpellDescription": "Choose a creature type. Return all creature cards of the chosen type from your graveyard to the battlefield.",
+        "AILogic": "MostProminentInComputerGraveyard",
+        "Type": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

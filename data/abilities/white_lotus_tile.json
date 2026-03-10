@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add X mana of any one color, where X is the greatest number of creatures you control that have a creature type in common.",
+          "Amount": "X"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add X mana of any one color, where X is the greatest number of creatures you control that have a creature type in common.",
+        "Amount": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped",
+        "Description": "This artifact enters tapped.",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

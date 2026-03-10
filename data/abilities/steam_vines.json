@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When enchanted land becomes tapped, destroy it and CARDNAME deals 1 damage to that land's controller. That player attaches CARDNAME to a land of their choice."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantDraw",
+      "params": {
+        "DrawLimit": "1",
+        "Description": "Each player can't draw more than one card each turn.",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

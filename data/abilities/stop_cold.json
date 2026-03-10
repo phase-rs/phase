@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigTap",
+        "TriggerDescription": "When this Aura enters, tap enchanted permanent.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveAllAbilities": "True",
+        "Affected": "Permanent.AttachedBy",
+        "Description": "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
+        "ValidStepTurnToController": "You",
+        "ValidCard": "Permanent.AttachedBy",
+        "Secondary": "True",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

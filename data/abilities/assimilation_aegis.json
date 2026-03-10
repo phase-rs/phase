@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile up to one target creature until CARDNAME leaves the battlefield.",
+        "Execute": "TrigChangeZone",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attached",
+      "params": {
+        "Execute": "TrigClone",
+        "ValidTarget": "Creature",
+        "TriggerDescription": "Whenever CARDNAME becomes attached to a creature, for as long as CARDNAME remains attached to it, that creature becomes a copy of a creature card exiled with CARDNAME.",
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

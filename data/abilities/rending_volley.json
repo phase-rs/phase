@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.White,Creature.Blue"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target white or blue creature.",
+        "SpellDescription": "CARDNAME deals 4 damage to target white or blue creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "Description": "This spell can't be countered.",
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterType": "P1P1",
+          "SpellDescription": "Put three +1/+1 counters on each Myr you control. Activate only during your turn.",
+          "CounterNum": "3",
+          "PlayerTurn": "True",
+          "ValidCards": "Myr.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W U B R G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterType": "P1P1",
+        "SpellDescription": "Put three +1/+1 counters on each Myr you control. Activate only during your turn.",
+        "CounterNum": "3",
+        "PlayerTurn": "True",
+        "ValidCards": "Myr.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a Myr spell, create a 1/1 colorless Myr artifact creature token.",
+        "ValidCard": "Myr",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "TriggerDescription": "At the beginning of combat on your turn, untap each Myr you control.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "UntapMyr"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

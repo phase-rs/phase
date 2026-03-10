@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUpkeep",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {B}{B}."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "Execute": "TrigExile",
+        "ValidTarget": "Creature",
+        "TriggerDescription": "Whenever CARDNAME deals damage to a creature, exile that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

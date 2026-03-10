@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigReveal",
+        "TriggerDescription": "When CARDNAME enters, target opponent reveals each nonland card in their hand. You choose one of those cards and exile it.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, the exiled card's owner seeks a nonland card with lesser mana value than the exiled card.",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "TrigSeek"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

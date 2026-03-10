@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player casts an instant or sorcery card, exile it. Then that player copies each instant or sorcery card exiled with CARDNAME. For each copy, the player may cast the copy without paying its mana cost.",
+        "Execute": "TrigExileSpell",
+        "ValidCard": "Instant.!token,Sorcery.!token"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsRemembered",
+        "Static": "True",
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "Destination": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Static": "True",
+        "Execute": "DBCleanup"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

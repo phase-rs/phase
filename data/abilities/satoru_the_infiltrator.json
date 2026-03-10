@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCards": "Creature.YouCtrl+!token+!wasCast,Creature.YouCtrl+!token+CastSa Spell.ManaSpent EQ0",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME and/or one or more other nontoken creatures you control enter, if none of them were cast or no mana was spent to cast them, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

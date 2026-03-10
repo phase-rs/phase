@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TeaseYou",
+        "TriggerDescription": "At the beginning of each player's end step, CARDNAME deals 2 damage to that player unless one of their opponents was dealt damage this turn.",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidCard": "Creature",
+        "ValidBlocker": "Card.Self",
+        "Execute": "TrigDealDamageAttack",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME deals 3 damage to that creature."
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "ValidBlocker": "Creature",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME deals 3 damage to that creature.",
+        "Execute": "TrigDealDamageBlock"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

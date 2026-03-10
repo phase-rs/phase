@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Host": "True",
+        "Execute": "TrigRoll",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this creature enters, roll a six-sided die. Put a number of +1/+1 counters on this creature equal to the result."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

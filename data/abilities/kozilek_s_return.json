@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidDescription": "each creature.",
+        "SpellDescription": "CARDNAME deals 2 damage to each creature.",
+        "ValidCards": "Creature"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast an Eldrazi creature spell with mana value 7 or greater, you may exile CARDNAME from your graveyard. If you do, CARDNAME deals 5 damage to each creature.",
+        "ValidCard": "Creature.Eldrazi+cmcGE7+YouCtrl",
+        "TriggerZones": "Graveyard",
+        "Execute": "DBDamageAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

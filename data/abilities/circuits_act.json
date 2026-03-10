@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "Sides": "6",
+          "DifferentResults": "True",
+          "SpellDescription": "Roll three six-sided dice.",
+          "Amount": "3",
+          "SubAbility": "DBToken"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Sides": "6",
+        "DifferentResults": "True",
+        "SpellDescription": "Roll three six-sided dice.",
+        "Amount": "3",
+        "SubAbility": "DBToken"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another nontoken Phyrexian you control enters, create X 3/3 colorless Phyrexian Golem artifact creature tokens, where X is the number of opponents you have.",
+        "ValidCard": "Card.Self,Phyrexian.!token+YouCtrl",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Golems you control have indestructible.",
+        "AddKeyword": "Indestructible",
+        "Affected": "Golem.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

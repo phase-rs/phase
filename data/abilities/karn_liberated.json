@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "IsCurse": "True",
+        "Mandatory": "True",
+        "SpellDescription": "Target player exiles a card from their hand.",
+        "Hidden": "True",
+        "Planeswalker": "True",
+        "ChangeType": "Card",
+        "Chooser": "Targeted"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target permanent.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RestartGame",
+        "params": {
+          "RestrictFromZone": "Exile",
+          "RestrictFromValid": "Card.!ExiledWithSource,Spell,Card.Aura",
+          "SubAbility": "ReturnFromExile",
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "SpellDescription": "Restart the game, leaving in exile all non-Aura permanent cards exiled with CARDNAME. Then put those cards onto the battlefield under your control."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -14
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictFromZone": "Exile",
+        "RestrictFromValid": "Card.!ExiledWithSource,Spell,Card.Aura",
+        "SubAbility": "ReturnFromExile",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "Restart the game, leaving in exile all non-Aura permanent cards exiled with CARDNAME. Then put those cards onto the battlefield under your control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

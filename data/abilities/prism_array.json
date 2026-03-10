@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/CRYSTAL>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Tap target creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Scry",
+        "count": 3
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W U B R G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Scry 3. (Look at the top three cards of your library, then put any number of them on the bottom of your library and the rest on top in any order.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

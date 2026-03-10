@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "AddTriggers": "TrigDamage",
+          "SpellDescription": "NICKNAME becomes a copy of the exiled creature, except it has \"Whenever this creature deals combat damage to a player, draw cards equal to its base power.\"",
+          "AddSVars": "TrigDamage,TrigDraw",
+          "Defined": "Exiled"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/Artifact.!token+Other+Creature/select another target artifact creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AddTriggers": "TrigDamage",
+        "SpellDescription": "NICKNAME becomes a copy of the exiled creature, except it has \"Whenever this creature deals combat damage to a player, draw cards equal to its base power.\"",
+        "AddSVars": "TrigDamage,TrigDraw",
+        "Defined": "Exiled"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw cards equal to its base power.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

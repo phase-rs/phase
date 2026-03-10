@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "AnyMana",
+        "Affected": "Land.YouCtrl,Ally.YouCtrl",
+        "Description": "Each land and Ally you control has \"{T}: Add one mana of any color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

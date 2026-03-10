@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "OptionalDecider": "You",
+        "ValidPlayer": "You",
+        "IsPresent": "Card.StrictlySelf",
+        "PresentZone": "Graveyard",
+        "Execute": "TrigChange",
+        "PresentPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard, you may discard a card. If you do, return CARDNAME to your hand.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

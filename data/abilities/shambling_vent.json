@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo W B",
+        "params": {
+          "SpellDescription": "Add {W} or {B}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {W} or {B}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 2,
+        "toughness": 3,
+        "types": [
+          "Creature",
+          "Elemental"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "Colors": "White,Black",
+        "SpellDescription": "Until end of turn, this land becomes a 2/3 white and black Elemental creature with lifelink. It's still a land.",
+        "Keywords": "Lifelink",
+        "OverwriteColors": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped",
+        "Description": "This land enters tapped."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Scry",
+            "count": 3
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Scry 3."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Dig",
+            "count": 1,
+            "destination": "Battlefield"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ChangeNum": "1",
+            "SpellDescription": "Look at the top card of your library. You may put it onto the battlefield if it's a creature card. If you don't, put it into your hand.",
+            "DestinationZone2": "Hand",
+            "ChangeValid": "Creature",
+            "Optional": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.OppCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Prevent all damage that would be dealt to and dealt by CARDNAME.",
+        "Duration": "UntilYourNextTurn",
+        "SpellDescription": "Until your next turn, prevent all damage that would be dealt to and dealt by target permanent an opponent controls.",
+        "Planeswalker": "True",
+        "IsCurse": "True",
+        "TgtPrompt": "Select target permanent an opponent controls"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Draw a card. You may play an additional land this turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Emblem — Kiora, the Crashing Wave",
+          "AILogic": "Always",
+          "Triggers": "EOTTrig",
+          "Duration": "Permanent",
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "SpellDescription": "You get an emblem with \"At the beginning of your end step, create a 9/9 blue Kraken creature token.\""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Emblem — Kiora, the Crashing Wave",
+        "AILogic": "Always",
+        "Triggers": "EOTTrig",
+        "Duration": "Permanent",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "SpellDescription": "You get an emblem with \"At the beginning of your end step, create a 9/9 blue Kraken creature token.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

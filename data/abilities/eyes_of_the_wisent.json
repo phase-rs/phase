@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidActivatingPlayer": "Opponent",
+        "ValidCard": "Card.Blue",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a blue spell during your turn, you may create a 4/4 green Elemental creature token.",
+        "Execute": "TrigToken",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

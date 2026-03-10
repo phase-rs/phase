@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "PresentCompare": "GE3",
+        "OptionalDecider": "You",
+        "IsPresent": "Creature.YouOwn+Above",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard with three or more creature cards above it, you may put CARDNAME onto the battlefield.",
+        "PresentZone": "Graveyard",
+        "ValidPlayer": "You",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

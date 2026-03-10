@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select any number of targets to distribute damage to",
+        "SubAbility": "CowedByAurelia",
+        "TargetMin": "0",
+        "SpellDescription": "CARDNAME deals X damage divided as you choose among any number of any targets. Tap each creature dealt damage this way. Players dealt damage this way can't cast noncreature spells this turn.",
+        "TargetMax": "MaxTgts",
+        "RememberDamaged": "True",
+        "DividedAsYouChoose": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

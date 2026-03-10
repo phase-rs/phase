@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": -1,
+        "toughness": -1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionCheckSVar": "X",
+        "SubAbility": "DBDestroy",
+        "ConditionSVarCompare": "LT7",
+        "SpellDescription": "Target nonblack creature gets -1/-1 until end of turn.",
+        "IsCurse": "True",
+        "TgtPrompt": "Select target nonblack creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

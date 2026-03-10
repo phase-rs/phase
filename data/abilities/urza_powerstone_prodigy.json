@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card, then discard a card.",
+        "SubAbility": "DBDiscard"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DiscardedAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1",
+        "ValidCard": "Card.Artifact",
+        "ValidPlayer": "You",
+        "Execute": "TrigPowerstone",
+        "TriggerDescription": "Whenever you discard one or more artifact cards, create a tapped Powerstone token. This ability triggers only once each turn. (The token is an artifact with \"{T}; Add {C}. This mana can't be spent to cast a nonartifact spell.\")"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

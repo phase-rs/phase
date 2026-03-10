@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "SubAbility": "DBSearch",
+          "SpellDescription": "Creatures you control have base power and toughness 3/3 until end of turn.",
+          "ValidCards": "Creature.YouCtrl",
+          "Toughness": "3",
+          "Power": "3"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBSearch",
+        "SpellDescription": "Creatures you control have base power and toughness 3/3 until end of turn.",
+        "ValidCards": "Creature.YouCtrl",
+        "Toughness": "3",
+        "Power": "3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

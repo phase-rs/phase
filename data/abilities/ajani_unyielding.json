@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 3,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "All",
+        "ChangeValid": "Permanent.nonLand",
+        "Planeswalker": "True",
+        "Reveal": "True",
+        "SpellDescription": "Reveal the top three cards of your library. Put all nonland permanent cards revealed this way into your hand and the rest on the bottom of your library in any order."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberLKI": "True",
+        "Planeswalker": "True",
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Exile target creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "Ultimate": "True",
+          "CounterType2": "LOYALTY",
+          "AILogic": "OwnCreatsAndOtherPWs",
+          "Planeswalker": "True",
+          "ValidCards2": "Planeswalker.YouCtrl+StrictlyOther",
+          "CounterType": "P1P1",
+          "SpellDescription": "Put five +1/+1 counters on each creature you control and five loyalty counters on each other planeswalker you control.",
+          "ValidCards": "Creature.YouCtrl",
+          "CounterNum": "5"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "CounterType2": "LOYALTY",
+        "AILogic": "OwnCreatsAndOtherPWs",
+        "Planeswalker": "True",
+        "ValidCards2": "Planeswalker.YouCtrl+StrictlyOther",
+        "CounterType": "P1P1",
+        "SpellDescription": "Put five +1/+1 counters on each creature you control and five loyalty counters on each other planeswalker you control.",
+        "ValidCards": "Creature.YouCtrl",
+        "CounterNum": "5"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

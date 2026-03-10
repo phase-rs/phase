@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card for each creature [with flying] you control."
+      }
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 G U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "{4}{G}{U}",
+        "PrecostDesc": "Cleave",
+        "NonBasicSpell": "True",
+        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

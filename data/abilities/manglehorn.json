@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may destroy target artifact.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDestroy",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "Artifacts your opponents control enter tapped.",
+        "ValidCard": "Artifact.OppCtrl",
+        "ActiveZones": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

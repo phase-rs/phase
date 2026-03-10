@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "ValidAttacker": "Creature.withoutFlying",
+            "ValidBlocker": "Creature.Self",
+            "Description": "CARDNAME can block only creatures with flying."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Hand",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent.nonLand+OppCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target nonland permanent an opponent controls",
+            "SpellDescription": "Return target nonland permanent an opponent controls to its owner's hand."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "ValidCard": "Creature.inRealZoneBattlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever one or more -1/-1 counters are put on a creature, draw a card if you control that creature. If you don't control it, its controller loses 1 life.",
+        "TriggerZones": "Battlefield",
+        "CounterType": "M1M1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this artifact enters, exile target nonland permanent an opponent controls until this artifact leaves the battlefield.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Max speed — {T}: Put a +1/+1 counter on target creature or Vehicle you control. Activate only as a sorcery.",
+        "Affected": "Card.Self",
+        "Condition": "MaxSpeed",
+        "AddAbility": "ABPutCounter"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

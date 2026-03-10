@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Damage",
+        "Description": "All Slivers have \"{1}, Sacrifice this permanent: This permanent deals 1 damage to any target.\"",
+        "Affected": "Sliver"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver",
+        "AddAbility": "Prevent",
+        "Description": "All Slivers have \"{1}, Sacrifice this permanent: Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

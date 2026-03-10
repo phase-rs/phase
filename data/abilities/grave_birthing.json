@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "Hidden": "True",
+        "IsCurse": "True",
+        "Chooser": "Targeted",
+        "SpellDescription": "Target opponent exiles a card from their graveyard.",
+        "SubAbility": "DBToken",
+        "ChangeType": "Card",
+        "DefinedPlayer": "Targeted",
+        "Mandatory": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

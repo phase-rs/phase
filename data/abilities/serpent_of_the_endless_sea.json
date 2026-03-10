@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "UnlessDefender": "controlsIsland",
+        "Description": "CARDNAME can't attack unless defending player controls an Island.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of Islands you control.",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl+!token",
+          "RepeatSubAbility": "DBConjure",
+          "RepeatTargeted": "True",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Conjure a duplicate of each of up to two target nontoken creatures you control into your hand.",
+          "TargetMax": "2",
+          "TargetMin": "0",
+          "TgtPrompt": "Select up to two target nontoken creatures you control"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl+!token",
+        "RepeatSubAbility": "DBConjure",
+        "RepeatTargeted": "True",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Conjure a duplicate of each of up to two target nontoken creatures you control into your hand.",
+        "TargetMax": "2",
+        "TargetMin": "0",
+        "TgtPrompt": "Select up to two target nontoken creatures you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to target creature you control instead.",
+          "Name": "en-Kor Redirection",
+          "ReplacementEffects": "EnKor",
+          "Duration": "UntilHostLeavesPlayOrEOT",
+          "TgtPrompt": "Select target creature you control to redirect the damage to",
+          "RememberObjects": "Targeted"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to target creature you control instead.",
+        "Name": "en-Kor Redirection",
+        "ReplacementEffects": "EnKor",
+        "Duration": "UntilHostLeavesPlayOrEOT",
+        "TgtPrompt": "Select target creature you control to redirect the damage to",
+        "RememberObjects": "Targeted"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "SubAbility": "DBEffect",
+          "AILogic": "NeedsPrevention",
+          "SpellDescription": "The next time a source of your choice would deal damage to target creature this turn, that damage is dealt to CARDNAME instead.",
+          "Choices": "Card,Emblem"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect",
+        "AILogic": "NeedsPrevention",
+        "SpellDescription": "The next time a source of your choice would deal damage to target creature this turn, that damage is dealt to CARDNAME instead.",
+        "Choices": "Card,Emblem"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

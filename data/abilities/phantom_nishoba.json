@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals damage, you gain that much life.",
+        "Execute": "TrigGain"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "If damage would be dealt to CARDNAME, prevent that damage. Remove a +1/+1 counter from CARDNAME.",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "DBRemoveCounters",
+        "ValidTarget": "Card.Self",
+        "PreventionEffect": "True",
+        "AlwaysReplace": "True"
+      }
+    }
+  ],
+  "faces": []
+}

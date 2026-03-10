@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, if it was bargained, return target instant or sorcery card from your graveyard to your hand.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self+bargained"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

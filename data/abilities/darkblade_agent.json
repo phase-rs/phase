@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "TrigDraw",
+        "Description": "As long as you've surveilled this turn, CARDNAME has deathtouch and \"Whenever this creature deals combat damage to a player, you draw a card.\"",
+        "AddKeyword": "Deathtouch",
+        "CheckSVar": "X",
+        "Affected": "Card.Self",
+        "AddTrigger": "Trig1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

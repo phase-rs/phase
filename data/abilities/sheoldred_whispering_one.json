@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChange",
+        "TriggerDescription": "At the beginning of your upkeep, return target creature card from your graveyard to the battlefield."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each opponent's upkeep, that player sacrifices a creature.",
+        "Execute": "TrigSac",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Opponent",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

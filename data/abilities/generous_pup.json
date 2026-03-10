@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ActivationLimit": "1",
+        "CounterType": "P1P1",
+        "Execute": "TrigPutCounterAll",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, put a +1/+1 counter on each other creature you control. This ability triggers only once each turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

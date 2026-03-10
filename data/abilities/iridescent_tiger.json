@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigMana",
+        "ValidCard": "Card.Self+wasCastByYou",
+        "TriggerDescription": "When this creature enters, if you cast it, add {W}{U}{B}{R}{G}."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

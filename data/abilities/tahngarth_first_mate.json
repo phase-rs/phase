@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "IsPresent": "Card.tapped",
+        "OptionalDecider": "You",
+        "Execute": "TrigGainControl",
+        "AttackingPlayer": "Player.Opponent",
+        "TriggerDescription": "Whenever an opponent attacks with one or more creatures, if NICKNAME is tapped, you may have that opponent gain control of NICKNAME until end of combat. If you do, choose a player or planeswalker that opponent is attacking. NICKNAME is attacking that player or planeswalker.",
+        "TriggerZones": "Battlefield",
+        "PresentDefined": "Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't be blocked by more than one creature.",
+        "Max": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

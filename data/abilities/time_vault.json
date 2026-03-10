@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "NumTurns": "1",
+          "SpellDescription": "Take an extra turn after this one."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NumTurns": "1",
+        "SpellDescription": "Take an extra turn after this one."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped",
+        "Description": "This artifact enters tapped."
+      }
+    },
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "This artifact doesn't untap during your untap step.",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen"
+      }
+    },
+    {
+      "event": {
+        "Other": "BeginTurn"
+      },
+      "params": {
+        "IsPresent": "Card.Self+tapped",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "DBUntap",
+        "ValidPlayer": "You",
+        "Optional": "True",
+        "Description": "If you would begin your turn while this artifact is tapped, you may skip that turn instead. If you do, untap this artifact."
+      }
+    }
+  ],
+  "faces": []
+}

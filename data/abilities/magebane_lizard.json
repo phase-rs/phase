@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Player",
+        "Execute": "TrigDmg",
+        "ValidCard": "Card.nonCreature",
+        "TriggerDescription": "Whenever a player casts a noncreature spell, CARDNAME deals damage to that player equal to the number of noncreature spells they've cast this turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

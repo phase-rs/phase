@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, it deals 2 damage to target opponent and 2 damage to up to one target creature or planeswalker.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

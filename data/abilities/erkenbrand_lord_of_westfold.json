@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME or another Human creature you control enters, creatures you control get +1/+0 until end of turn.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self,Creature.Human+Other+YouCtrl",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

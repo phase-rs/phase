@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Player.EnchantedBy",
+        "TriggerDescription": "Whenever enchanted player casts a noncreature spell, roll a d6. CARDNAME deals damage to that player equal to the result. Then attach CARDNAME to another one of your opponents chosen at random.",
+        "ValidCard": "Card.nonCreature",
+        "Execute": "TrigRollDice"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

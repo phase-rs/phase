@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you lose 1 life.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddPower": "3",
+        "AddToughness": "3",
+        "AddKeyword": "Flying",
+        "Description": "Enchanted creature gets +3/+3 and has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

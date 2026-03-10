@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<1/Creature.EnchantedBy/Enchanted Creature>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "Tap enchanted creature:",
+        "SubAbility": "DBPutCounter",
+        "SpellDescription": "CARDNAME deals 1 damage to any target. Put a -0/-1 counter on enchanted creature. Activate only if enchanted creature is untapped."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, draw a card at the beginning of the next turn's upkeep.",
+        "ValidCard": "Card.Self",
+        "Execute": "DelTrigSlowtrip"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

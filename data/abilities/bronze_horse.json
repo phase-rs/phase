@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Prevent": "True",
+        "Description": "As long as you control another creature, prevent all damage that would be dealt to CARDNAME by spells that target it.",
+        "IsPresent": "Creature.YouCtrl+Other",
+        "ValidCause": "Spell.IsTargeting Self",
+        "ValidTarget": "Creature.Self",
+        "CauseIsSource": "True"
+      }
+    }
+  ],
+  "faces": []
+}

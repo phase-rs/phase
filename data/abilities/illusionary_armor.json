@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "Execute": "TrigSac",
+        "ValidTarget": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted creature becomes the target of a spell or ability, sacrifice CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "4",
+        "AddPower": "4",
+        "Description": "Enchanted creature gets +4/+4.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

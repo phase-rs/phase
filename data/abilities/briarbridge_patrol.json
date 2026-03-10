@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals damage to one or more creatures, investigate. (Create a colorless Clue artifact token with \"{2}, Sacrifice this artifact: Draw a card.\")",
+        "ValidTarget": "Creature",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigInvestigate"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "ClueResearch",
+        "Execute": "TrigCheatCreature",
+        "TriggerDescription": "At the beginning of each end step, if you sacrificed three or more Clues this turn, you may put a creature card from your hand onto the battlefield.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "SVarCompare": "GE3"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

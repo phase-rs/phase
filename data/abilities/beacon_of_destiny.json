@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "AILogic": "NeedsPrevention",
+          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to CARDNAME instead.",
+          "Choices": "Card,Emblem",
+          "SubAbility": "DBEffect"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "NeedsPrevention",
+        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, that damage is dealt to CARDNAME instead.",
+        "Choices": "Card,Emblem",
+        "SubAbility": "DBEffect"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

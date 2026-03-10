@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature.token",
+          "ExileOnMoved": "Battlefield",
+          "TgtPrompt": "Select target creature token",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "SpellDescription": "Target creature token can't be blocked this turn.",
+          "StaticAbilities": "Unblockable"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature.token",
+        "ExileOnMoved": "Battlefield",
+        "TgtPrompt": "Select target creature token",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "SpellDescription": "Target creature token can't be blocked this turn.",
+        "StaticAbilities": "Unblockable"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCastOrCopy",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, create a 0/0 green and blue Fractal creature token. Put X +1/+1 counters on it, where X is that spell's mana value.",
+        "ValidCard": "Instant,Sorcery",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

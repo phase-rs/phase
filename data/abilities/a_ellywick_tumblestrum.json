@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Venture",
+        "params": {
+          "SpellDescription": "Venture into the dungeon.",
+          "Defined": "You",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Venture into the dungeon.",
+        "Defined": "You",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 6,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "Look at the top six cards of your library. You may reveal a creature card from among them and put it into your hand. If it's legendary, you gain 3 life. Put the rest on the bottom of your library in a random order.",
+        "RememberChanged": "True",
+        "RestRandomOrder": "True",
+        "ChangeNum": "1",
+        "ChangeValid": "Creature",
+        "ForceRevealToController": "True",
+        "Optional": "True",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "You get an emblem with \"Creatures you control have trample and haste and get +2/+2 for each differently named dungeon you've completed.\"",
+          "AILogic": "Always",
+          "Duration": "Permanent",
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "Name": "Emblem — Ellywick Tumblestrum",
+          "StaticAbilities": "STOverrun",
+          "Image": "emblem_ellywick_tumblestrum"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You get an emblem with \"Creatures you control have trample and haste and get +2/+2 for each differently named dungeon you've completed.\"",
+        "AILogic": "Always",
+        "Duration": "Permanent",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "Name": "Emblem — Ellywick Tumblestrum",
+        "StaticAbilities": "STOverrun",
+        "Image": "emblem_ellywick_tumblestrum"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

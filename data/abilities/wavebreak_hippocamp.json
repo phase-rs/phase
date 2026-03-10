@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "OpponentTurn": "True",
+        "TriggerDescription": "Whenever you cast your first spell during each opponent's turn, draw a card.",
+        "ActivatorThisTurnCast": "EQ1",
+        "ValidCard": "Card",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

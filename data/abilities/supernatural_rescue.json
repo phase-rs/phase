@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "When you cast this spell, tap up to two target creatures you don't control.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTap"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Spirit.YouCtrl",
+        "CharacteristicDefining": "True",
+        "Description": "This spell has flash as long as you control a Spirit.",
+        "AddKeyword": "Flash"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Enchanted creature gets +1/+2.",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

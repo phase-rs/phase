@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player draws their second card during their turn, you draw a card.",
+        "Number": "2",
+        "ValidPlayer": "Player.Active"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Player.Active",
+        "ActivatorThisTurnCast": "EQ2",
+        "TriggerDescription": "Whenever a player casts their second spell during their turn, you create a 2/2 white Knight creature token.",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

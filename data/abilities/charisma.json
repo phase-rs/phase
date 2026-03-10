@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "CharismaticControl",
+        "ValidTarget": "Creature",
+        "TriggerDescription": "Whenever enchanted creature deals damage to a creature, gain control of the other creature for as long as CARDNAME remains on the battlefield.",
+        "ValidSource": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

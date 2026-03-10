@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on target creature you control.",
+        "Execute": "TrigPut",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Affected": "Creature.counters_GE1_P1P1+YouCtrl",
+        "Description": "Each creature you control with a +1/+1 counter on it has trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Warrior enters under your team's control, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Warrior.Other+YourTeamCtrl",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

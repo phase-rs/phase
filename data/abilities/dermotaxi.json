@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "SpellDescription": "Until end of turn, CARDNAME becomes a copy of the exiled card, except it's a Vehicle artifact in addition to its other types.",
+          "ImprintRememberedNoCleanup": "True",
+          "AddTypes": "Vehicle & Artifact",
+          "Defined": "Imprinted",
+          "StackDescription": "Until end of turn, CARDNAME becomes a copy of {c:Imprinted}, except it's a Vehicle artifact in addition to its other types.",
+          "Duration": "UntilEndOfTurn"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<2/Creature>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Until end of turn, CARDNAME becomes a copy of the exiled card, except it's a Vehicle artifact in addition to its other types.",
+        "ImprintRememberedNoCleanup": "True",
+        "AddTypes": "Vehicle & Artifact",
+        "Defined": "Imprinted",
+        "StackDescription": "Until end of turn, CARDNAME becomes a copy of {c:Imprinted}, except it's a Vehicle artifact in addition to its other types.",
+        "Duration": "UntilEndOfTurn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

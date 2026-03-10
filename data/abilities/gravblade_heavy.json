@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you control an artifact, this creature gets +1/+0 and has deathtouch.",
+        "AddKeyword": "Deathtouch",
+        "IsPresent": "Artifact.YouCtrl",
+        "Affected": "Card.Self",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

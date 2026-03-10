@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self+IsSaddled",
+        "TriggerDescription": "Whenever this creature attacks while saddled, seek a land card and put it onto the battlefield tapped.",
+        "Execute": "TrigSeek",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When NICKNAME enters, each player mills four cards. Put a creature card with an even mana value from those cards onto the battlefield under your control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

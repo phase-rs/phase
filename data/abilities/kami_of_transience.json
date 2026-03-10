@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you cast an enchantment spell, put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Enchantment",
+        "ValidActivatingPlayer": "You"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "Phase": "End of Turn",
+        "CheckSVar": "X",
+        "OptionalDecider": "You",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "At the beginning of each end step, if an enchantment was put into your graveyard from the battlefield this turn, you may return CARDNAME from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

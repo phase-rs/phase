@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each upkeep, create a 1/1 green Elf Warrior creature token.",
+        "Execute": "TrigToken",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Elf you control enters, you gain life equal to its toughness.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Elf.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

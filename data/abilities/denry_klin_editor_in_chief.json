@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a nontoken creature you control enters, if NICKNAME has counters on it, put the same number of each kind of counter on that creature.",
+        "ValidCard": "Creature.!token+YouCtrl",
+        "Destination": "Battlefield",
+        "CheckSVar": "Count$CardCounters.ALL",
+        "Origin": "Any",
+        "Execute": "TrigPutCounters"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

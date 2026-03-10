@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPump",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of combat on your turn, you may forage. (Exile three cards from your graveyard or sacrifice a Food.)",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "Forage",
+      "params": {
+        "TriggerDescription": "Whenever you forage, put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

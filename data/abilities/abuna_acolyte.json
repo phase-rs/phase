@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "SpellDescription": "Prevent the next 1 damage that would be dealt to any target this turn.",
+          "ValidTgts": "Any",
+          "Amount": "1"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent the next 1 damage that would be dealt to any target this turn.",
+        "ValidTgts": "Any",
+        "Amount": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "Amount": "2",
+          "ValidTgts": "Creature.Artifact",
+          "TgtPrompt": "Select target artifact creature",
+          "SpellDescription": "Prevent the next 2 damage that would be dealt to target artifact creature this turn."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "2",
+        "ValidTgts": "Creature.Artifact",
+        "TgtPrompt": "Select target artifact creature",
+        "SpellDescription": "Prevent the next 2 damage that would be dealt to target artifact creature this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

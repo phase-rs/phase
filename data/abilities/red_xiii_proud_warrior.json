@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Cosmo Memory — When NICKNAME enters, return target Aura or Equipment card from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance & Trample",
+        "Description": "Other modified creatures you control have vigilance and trample. (Equipment, Auras you control, and counters are modifications.)",
+        "Affected": "Creature.Other+modified+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

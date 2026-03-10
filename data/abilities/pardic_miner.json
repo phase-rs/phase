@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "BeginningOfOppTurn",
+          "ValidTgts": "Player",
+          "SpellDescription": "Target player can't play lands this turn.",
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "STCantPlayLand"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "BeginningOfOppTurn",
+        "ValidTgts": "Player",
+        "SpellDescription": "Target player can't play lands this turn.",
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "STCantPlayLand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

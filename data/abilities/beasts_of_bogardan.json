@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "IsPresent": "Permanent.White+OppCtrl+!token",
+        "Description": "CARDNAME gets +1/+1 as long as an opponent controls a nontoken white permanent."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

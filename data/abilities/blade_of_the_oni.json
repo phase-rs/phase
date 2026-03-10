@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "SetPower": "5",
+        "AddKeyword": "Menace",
+        "AddColor": "Black",
+        "SetToughness": "5",
+        "AddType": "Demon",
+        "Description": "Equipped creature has base power and toughness 5/5, has menace, and is a black Demon in addition to its other colors and types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

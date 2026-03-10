@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.powerGE4"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Exile target creature with power 4 or greater.",
+        "TgtPrompt": "Select target creature with power 4 or greater"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "Prevent all noncombat damage that would be dealt to you and other permanents you control.",
+        "IsCombat": "False",
+        "Prevent": "True",
+        "ValidTarget": "You,Permanent.Other+YouCtrl",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

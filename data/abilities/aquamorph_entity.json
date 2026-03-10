@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "Layer": "Copy",
+        "ReplaceWith": "MorphChoice",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Description": "As CARDNAME enters or is turned face up, it becomes your choice of 5/1 or 1/5."
+      }
+    },
+    {
+      "event": "TurnFaceUp",
+      "params": {
+        "Secondary": "True",
+        "Layer": "Copy",
+        "ReplaceWith": "MorphChoice",
+        "Description": "As CARDNAME enters or is turned face up, it becomes your choice of 5/1 or 1/5.",
+        "ValidCard": "Card.Self",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

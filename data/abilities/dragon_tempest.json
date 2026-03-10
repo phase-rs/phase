@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.YouCtrl+withFlying",
+        "TriggerDescription": "Whenever a creature you control with flying enters, it gains haste until end of turn.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a Dragon you control enters, it deals X damage to any target, where X is the number of Dragons you control.",
+        "Destination": "Battlefield",
+        "ValidCard": "Dragon.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

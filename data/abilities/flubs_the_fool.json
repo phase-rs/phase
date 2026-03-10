@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card if you have no cards in hand. Otherwise, discard a card.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBranch"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever you play a land or cast a spell, draw a card if you have no cards in hand. Otherwise, discard a card.",
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBranch",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You may play an additional land on each of your turns.",
+        "AdjustLandPlays": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

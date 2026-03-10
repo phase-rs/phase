@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent.nonLand"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "7"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SorcerySpeed": "True",
+            "PrecostDesc": "Hero's Sundering —",
+            "SubAbility": "DBTransform",
+            "SpellDescription": "Exile target nonland permanent. Transform NICKNAME. Activate only as a sorcery.",
+            "TgtPrompt": "Select target nonland permanent"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidCard": "Legendary",
+            "TriggerDescription": "Whenever you cast a legendary spell, draw a card. This ability triggers only once each turn.",
+            "Execute": "TrigDraw",
+            "ActivationLimit": "1",
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "Blessing of Light — At the beginning of combat on your turn, put a +1/+1 counter on another target creature you control. Until your next turn, it gains indestructible. If that creature is legendary, draw a card.",
+            "Execute": "TrigPutCounter",
+            "Phase": "BeginCombat",
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

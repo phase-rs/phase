@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Affected": "Land",
+        "Description": "All lands have indestructible."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

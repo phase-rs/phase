@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "Player.EnchantedBy",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "DmgTwice",
+        "Description": "If a source would deal damage to enchanted player, it deals double that damage to that player instead."
+      }
+    }
+  ],
+  "faces": []
+}

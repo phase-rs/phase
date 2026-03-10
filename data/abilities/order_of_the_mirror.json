@@ -1,0 +1,58 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "AILogic": "Always",
+              "SorcerySpeed": "True",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({W/P} can be paid with either {W} or 2 life.)",
+              "Defined": "Self",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 WP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "AILogic": "Always",
+            "SorcerySpeed": "True",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery. ({W/P} can be paid with either {W} or 2 life.)",
+            "Defined": "Self",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackerBlockedByCreature",
+          "params": {
+            "ValidCard": "Card.Self",
+            "ValidBlocker": "Creature",
+            "Execute": "TrigPump",
+            "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, that creature gets -1/-1 until end of turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

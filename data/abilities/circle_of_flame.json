@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.withoutFlying",
+        "TriggerDescription": "Whenever a creature without flying attacks you or a planeswalker you control, CARDNAME deals 1 damage to that creature.",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "Attacked": "You,Planeswalker.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

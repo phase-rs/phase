@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Prevent": "True",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Creature.Snow",
+        "ValidSource": "Card.Self",
+        "Description": "Prevent all damage that CARDNAME would deal to snow creatures."
+      }
+    }
+  ],
+  "faces": []
+}

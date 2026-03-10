@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.DamagedBy",
+        "Execute": "DBGainLife",
+        "TriggerDescription": "Whenever a creature dealt damage by CARDNAME this turn dies, you gain 1 life and NICKNAME deals 1 damage to target player or planeswalker.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

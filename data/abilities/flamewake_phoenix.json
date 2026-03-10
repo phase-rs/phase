@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "Ferocious — At the beginning of combat on your turn, if you control a creature with power 4 or greater, you may pay {R}. If you do, return CARDNAME from your graveyard to the battlefield.",
+        "IsPresent": "Creature.YouCtrl+powerGE4",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Description": "CARDNAME attacks each combat if able.",
+        "ValidCreature": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

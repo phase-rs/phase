@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "DIVINITY",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.ChosenType+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a divinity counter on target creature you control of the chosen type.",
+        "TgtPrompt": "Select target creature you control of the chosen type"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each creature you control with a divinity counter on it has indestructible.",
+        "Affected": "Creature.YouCtrl+counters_GE1_DIVINITY",
+        "AddKeyword": "Indestructible"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

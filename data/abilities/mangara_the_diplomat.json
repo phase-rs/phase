@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "CheckSVar": "X",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, draw a card.",
+        "SVarCompare": "GE2",
+        "AttackingPlayer": "Player.Opponent",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an opponent casts their second spell each turn, draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "ActivatorThisTurnCast": "EQ2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

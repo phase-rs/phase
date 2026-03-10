@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 4,
+        "toughness": 4,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.blocking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target blocking creature gets +4/+4 until end of turn.",
+        "SubAbility": "DBDraw",
+        "TgtPrompt": "Select target blocking creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Each other creature you control that's a Wolf or a Werewolf gets +1/+1.",
+        "AddToughness": "1",
+        "Affected": "Creature.Wolf+Other+YouCtrl,Creature.Werewolf+Other+YouCtrl"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantTransform"
+      },
+      "params": {
+        "ValidCard": "Creature.Werewolf+nonHuman+YouCtrl",
+        "Description": "Non-Human Werewolves you control can't transform."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

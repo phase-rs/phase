@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Elf.!token+Other+YouOwn",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "OptionalDecider": "You",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever another nontoken Elf is put into your graveyard from the battlefield, you may create a 1/1 green Elf Warrior creature token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

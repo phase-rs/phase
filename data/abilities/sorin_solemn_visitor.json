@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 1,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.YouCtrl",
+        "Planeswalker": "True",
+        "KW": "Lifelink",
+        "SpellDescription": "Until your next turn, creatures you control get +1/+0 and gain lifelink.",
+        "Duration": "UntilYourNextTurn"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_2_2_vampire_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 2/2 black Vampire creature token with flying.",
+        "Planeswalker": "True",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "BOTTrig",
+          "Ultimate": "True",
+          "Duration": "Permanent",
+          "AILogic": "Always",
+          "Name": "Emblem — Sorin, Solemn Visitor",
+          "Planeswalker": "True",
+          "SpellDescription": "You get an emblem with \"At the beginning of each opponent's upkeep, that player sacrifices a creature.\""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "BOTTrig",
+        "Ultimate": "True",
+        "Duration": "Permanent",
+        "AILogic": "Always",
+        "Name": "Emblem — Sorin, Solemn Visitor",
+        "Planeswalker": "True",
+        "SpellDescription": "You get an emblem with \"At the beginning of each opponent's upkeep, that player sacrifices a creature.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

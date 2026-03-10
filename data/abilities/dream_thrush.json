@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Type": "Basic Land",
+          "SubAbility": "DBAnimate",
+          "SpellDescription": "Target land becomes the basic land type of your choice until end of turn.",
+          "Defined": "You"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Basic Land",
+        "SubAbility": "DBAnimate",
+        "SpellDescription": "Target land becomes the basic land type of your choice until end of turn.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

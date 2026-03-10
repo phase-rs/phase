@@ -1,0 +1,73 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouOwn+cmcLEX"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select any number of target creature cards in your graveyard with different mana value X or less",
+            "TargetMin": "0",
+            "TargetsWithDifferentCMC": "True",
+            "StackDescription": "{p:You} returns {c:Targeted} from the graveyard to the battlefield.",
+            "SpellDescription": "Return from your graveyard to the battlefield any number of target creature cards that each have a different mana value X or less.",
+            "TargetMax": "Y"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "DBTap",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped."
+          }
+        }
+      ]
+    }
+  ]
+}

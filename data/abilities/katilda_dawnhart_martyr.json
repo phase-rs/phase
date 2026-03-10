@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetToughness": "X",
+            "Description": "CARDNAME's power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.",
+            "SetPower": "X",
+            "CharacteristicDefining": "True"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "X",
+            "Description": "Enchanted creature has flying, lifelink, and protection from Vampires, and it gets +X/+X, where X is the number of permanents you control that are Spirits and/or enchantments.",
+            "AddPower": "X",
+            "AddKeyword": "Flying & Lifelink & Protection:Vampire",
+            "Affected": "Creature.EnchantedBy"
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "Destination": "Graveyard",
+            "ReplaceWith": "Exile"
+          }
+        }
+      ]
+    }
+  ]
+}

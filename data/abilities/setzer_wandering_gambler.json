@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken1",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME enters, create The Blackjack, a legendary 3/3 colorless Vehicle artifact token with flying and crew 2."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigFlip",
+        "TriggerDescription": "Whenever a Vehicle you control deals combat damage to a player, flip a coin.",
+        "ValidSource": "Vehicle.YouCtrl",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "FlippedCoin",
+      "params": {
+        "ValidResult": "Win",
+        "Execute": "TrigToken2",
+        "TriggerDescription": "Whenever you win a coin flip, create two tapped Treasure tokens.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

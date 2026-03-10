@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigMana",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME attacks, add {R} or {G}. Until end of turn, you don't lose this mana as steps and phases end."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigMana",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever CARDNAME attacks, add {R} or {G}. Until end of turn, you don't lose this mana as steps and phases end."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "1",
+            "Description": "Other Wolves and Werewolves you control get +1/+1.",
+            "Affected": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
+            "AddToughness": "1"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

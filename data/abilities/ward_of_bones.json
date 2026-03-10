@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Creature",
+        "Description": "Each opponent who controls more creatures than you can't cast creature spells. The same is true for artifacts and enchantments.",
+        "Caster": "Opponent.withMoreCreaturesThanYou"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Caster": "Opponent.withMoreArtifactsThanYou",
+        "ValidCard": "Artifact"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Caster": "Opponent.withMoreEnchantmentsThanYou",
+        "ValidCard": "Enchantment"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantPlayLand"
+      },
+      "params": {
+        "Description": "Each opponent who controls more lands than you can't play lands.",
+        "Player": "Opponent.withMoreLandsThanYou"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

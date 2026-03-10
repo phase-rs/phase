@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "BarricadePumped",
+        "Origin": "Any",
+        "Static": "True",
+        "Destination": "Battlefield",
+        "TriggerDescription": "If CARDNAME was kicked, it enters with a +1/+1 counter on it and with \"CARDNAME can attack as though it didn't have defender.\"",
+        "ValidCard": "Card.Self+kicked"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

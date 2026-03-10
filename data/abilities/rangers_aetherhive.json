@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidSA": "Activated.Exhaust",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you activate an exhaust ability, create a 1/1 colorless Thopter artifact creature token with flying.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

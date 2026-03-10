@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "Power": "2",
+          "ValidCards": "Forest.YouCtrl",
+          "Types": "Creature",
+          "Toughness": "3",
+          "SpellDescription": "Forests you control become 2/3 creatures until end of turn. They're still lands."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 G"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Power": "2",
+        "ValidCards": "Forest.YouCtrl",
+        "Types": "Creature",
+        "Toughness": "3",
+        "SpellDescription": "Forests you control become 2/3 creatures until end of turn. They're still lands."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals damage to that player equal to the number of Swamps they control.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player",
+        "Execute": "TrigDamage",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

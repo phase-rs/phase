@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self+IsSaddled",
+        "TriggerDescription": "Whenever CARDNAME attacks while saddled, put a +1/+1 counter on each other creature you control. You gain 1 life for each of those creatures.",
+        "Execute": "TrigPutCounterAll",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

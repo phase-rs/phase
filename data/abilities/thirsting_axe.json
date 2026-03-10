@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, if equipped creature didn't deal combat damage to a creature this turn, sacrifice it.",
+        "IsPresent": "Card.EquippedBy+!dealtCombatDamageThisTurn Creature",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "Execute": "SacrificeEquippee"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EquippedBy",
+        "AddPower": "4",
+        "Description": "Equipped creature gets +4/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

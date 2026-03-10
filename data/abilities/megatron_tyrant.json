@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "Execute": "TrigConvert",
+            "Phase": "Main2",
+            "TriggerZones": "Battlefield",
+            "OptionalDecider": "You",
+            "TriggerDescription": "At the beginning of each of your postcombat main phases, you may convert NICKNAME. If you do, add {C} for each 1 life your opponents have lost this turn."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "CantBeCast",
+          "params": {
+            "Caster": "Opponent",
+            "Description": "Your opponents can't cast spells during combat.",
+            "ValidCard": "Card",
+            "Phases": "BeginCombat->EndCombat"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever NICKNAME attacks, you may sacrifice another artifact. When you do, NICKNAME deals damage equal to the sacrificed artifact's mana value to target creature. If excess damage would be dealt to that creature this way, instead that damage is dealt to that creature's controller and you convert NICKNAME.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigImmediate"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

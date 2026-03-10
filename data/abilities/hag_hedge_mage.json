@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Swamps, you may have target player discard a card.",
+        "PresentCompare": "GE2",
+        "IsPresent": "Swamp.YouCtrl",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigChangeZone",
+        "IsPresent": "Forest.YouCtrl",
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Forests, you may put target card from your graveyard on top of your library.",
+        "PresentCompare": "GE2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

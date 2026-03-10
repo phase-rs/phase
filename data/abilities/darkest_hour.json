@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature",
+        "SetColor": "Black",
+        "Description": "All creatures are black."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

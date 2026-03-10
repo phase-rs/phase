@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AddKWs": "Haste",
+        "LoseControl": "EOT",
+        "SpellDescription": "Gain control of target artifact or creature until end of turn. Untap it. It gains haste until end of turn.",
+        "TgtPrompt": "Select target artifact or creature",
+        "Untap": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

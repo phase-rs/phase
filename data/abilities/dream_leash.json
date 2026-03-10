@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantTarget"
+      },
+      "params": {
+        "ValidSource": "Spell.Self",
+        "Description": "You can't choose an untapped permanent as this spell's target as you cast it.",
+        "ValidTarget": "Permanent.untapped",
+        "EffectZone": "Stack"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You control enchanted permanent.",
+        "Affected": "Card.EnchantedBy",
+        "GainControl": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

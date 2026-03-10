@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerDescription": "Whenever you tap a Swamp for mana, add an additional {B}.",
+        "TriggerZones": "Battlefield",
+        "Activator": "You",
+        "Execute": "TrigMana",
+        "ValidCard": "Swamp",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

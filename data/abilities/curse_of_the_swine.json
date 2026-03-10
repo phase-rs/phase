@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "Exile {c:Targeted}. For each creature exiled this way, its controller creates a 2/2 green Boar creature token.",
+        "SpellDescription": "Exile X target creatures. For each creature exiled this way, its controller creates a 2/2 green Boar creature token.",
+        "TargetMin": "X",
+        "SubAbility": "DBToken",
+        "RememberLKI": "True",
+        "TgtPrompt": "Select X target creatures",
+        "TargetMax": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

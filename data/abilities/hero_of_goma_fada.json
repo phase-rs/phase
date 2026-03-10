@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, creatures you control gain indestructible until end of turn.",
+        "Execute": "TrigPumpAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

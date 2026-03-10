@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature.withFlying",
+        "Execute": "TrigAnimate",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When an opponent casts a creature spell with flying, if CARDNAME is an enchantment, CARDNAME becomes a 3/5 Spider creature with reach. (It can block creatures with flying.)",
+        "IsPresent": "Card.Self+Enchantment"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidBlocker": "Creature.AttachedBy",
+        "Execute": "TrigAnimateAttacker",
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a creature, that creature loses all abilities until end of turn.",
+        "ValidCard": "Creature"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAnimateDefender",
+        "ValidCard": "Creature.AttachedBy",
+        "Secondary": "True",
+        "ValidBlocker": "Creature",
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a creature, that creature loses all abilities until end of turn."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1.",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

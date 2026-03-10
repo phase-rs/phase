@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": -2,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature (perpetual)",
+        "SubAbility": "DBPump",
+        "Duration": "Perpetual",
+        "IsCurse": "True",
+        "StackDescription": "REP Target creature_{c:ThisTargetedCard}",
+        "SpellDescription": "Target creature perpetually gets -2/-0.,,,,,,"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

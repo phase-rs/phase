@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeMardu",
+        "AddStaticAbility": "MarduHarmonicon",
+        "Description": "• Mardu — If a creature attacking causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+ChosenModeJeskai",
+        "Description": "• Jeskai — At the beginning of your upkeep, create a 1/1 red Goblin creature token. It gains lifelink and haste until end of turn.",
+        "AddTrigger": "JeskaiTrigger"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

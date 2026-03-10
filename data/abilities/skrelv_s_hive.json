@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, you lose 1 life and create a 1/1 colorless Phyrexian Mite artifact creature token with toxic 1 and \"This creature can't block.\"",
+        "ValidPlayer": "You",
+        "Execute": "TrigLoseLife",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "AddKeyword": "Lifelink",
+        "Description": "Corrupted — As long as an opponent has three or more poison counters, creatures you control with toxic have lifelink.",
+        "Affected": "Creature.YouCtrl+withToxic",
+        "SVarCompare": "GE3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

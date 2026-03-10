@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME gets +1/+1 for each Gate you control.",
+        "AddToughness": "X"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "GE2",
+        "AddKeyword": "Vigilance & Trample",
+        "CheckSVar": "X",
+        "Description": "As long as you control two or more Gates, CARDNAME has vigilance and trample.",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

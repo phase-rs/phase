@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo Any",
+        "params": {
+          "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast creature spells.",
+          "Amount": "2",
+          "RestrictValid": "Spell.Creature"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add two mana in any combination of colors. Spend this mana only to cast creature spells.",
+        "Amount": "2",
+        "RestrictValid": "Spell.Creature"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SpellDescription": "Each player's life total becomes the number of creatures they control. Activate only if creatures you control have total power 8 or greater.",
+          "RepeatSubAbility": "DBSetLife",
+          "RepeatPlayers": "Player",
+          "CheckSVar": "FormidableTest",
+          "PrecostDesc": "Formidable —",
+          "SVarCompare": "GE8"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "9 G G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each player's life total becomes the number of creatures they control. Activate only if creatures you control have total power 8 or greater.",
+        "RepeatSubAbility": "DBSetLife",
+        "RepeatPlayers": "Player",
+        "CheckSVar": "FormidableTest",
+        "PrecostDesc": "Formidable —",
+        "SVarCompare": "GE8"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, look at the top three cards of your library. Put one of them into your hand and the rest into your graveyard.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigDig",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

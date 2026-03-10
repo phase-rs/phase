@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, it deals 6 damage to target opponent or planeswalker.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked by creatures with power 2 or less.",
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.powerLE2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigMultiple",
+        "params": {
+          "DigNum": "5",
+          "Reveal": "True",
+          "ChangeValid": "Creature,Enchantment",
+          "DestinationZone2": "Graveyard",
+          "Optional": "True",
+          "SpellDescription": "Reveal the top five cards of your library. You may put a creature card and/or an enchantment card from among them into your hand. Put the rest into your graveyard."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DigNum": "5",
+        "Reveal": "True",
+        "ChangeValid": "Creature,Enchantment",
+        "DestinationZone2": "Graveyard",
+        "Optional": "True",
+        "SpellDescription": "Reveal the top five cards of your library. You may put a creature card and/or an enchantment card from among them into your hand. Put the rest into your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

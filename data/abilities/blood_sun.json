@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBDraw",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All lands lose all abilities except mana abilities.",
+        "Affected": "Land",
+        "RemoveNonManaAbilities": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

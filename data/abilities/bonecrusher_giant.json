@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "BecomesTarget",
+          "params": {
+            "ValidTarget": "Card.Self",
+            "TriggerZones": "Battlefield",
+            "ValidSource": "Spell",
+            "Execute": "TrigDmg",
+            "TriggerDescription": "When CARDNAME becomes the target of a spell, CARDNAME deals 2 damage to that spell's controller."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "AILogic": "Burn",
+              "SpellDescription": "Damage can't be prevented this turn. CARDNAME deals 2 damage to any target.",
+              "StaticAbilities": "STCantPrevent",
+              "SubAbility": "DBDamage"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "AILogic": "Burn",
+            "SpellDescription": "Damage can't be prevented this turn. CARDNAME deals 2 damage to any target.",
+            "StaticAbilities": "STCantPrevent",
+            "SubAbility": "DBDamage"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigBounce",
+        "IsPresent": "Artifact.YouCtrl,Enchantment.YouCtrl",
+        "TriggerDescription": "When CARDNAME enters, if you control an artifact or enchantment, return target creature an opponent controls to its owner's hand.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

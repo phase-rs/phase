@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "AddOneLessCounters",
+        "ValidCounterType": "M1M1",
+        "Description": "If one or more -1/-1 counters would be put on a creature you control, that many -1/-1 counters minus one are put on it instead."
+      }
+    }
+  ],
+  "faces": []
+}

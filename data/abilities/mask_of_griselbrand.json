@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigDraw",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever equipped creature dies, you may pay X life, where X is its power. If you do, draw X cards.",
+        "ValidCard": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying & Lifelink",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has flying and lifelink."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

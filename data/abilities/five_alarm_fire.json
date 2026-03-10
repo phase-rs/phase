@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 5
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<5/BLAZE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "It deals 5 damage to any target."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control deals combat damage, put a blaze counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

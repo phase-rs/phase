@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, suspect up to one target creature. (A suspected creature has menace and can't block.)",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSuspect",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+withMenace",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever a creature you control with menace attacks, create a Treasure token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

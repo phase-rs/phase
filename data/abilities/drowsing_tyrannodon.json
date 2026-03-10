@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "Description": "As long as you control a creature with power 4 or greater, CARDNAME can attack as though it didn't have defender.",
+        "IsPresent": "Creature.powerGE4+YouCtrl",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

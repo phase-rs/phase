@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card",
+        "NumLimitEachTurn": "1",
+        "Description": "You can't cast more than one spell each turn.",
+        "Caster": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

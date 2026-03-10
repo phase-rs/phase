@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "SpellDescription": "Add {G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "PrecostDesc": "Delirium —",
+          "ValidTgts": "Permanent.YouOwn",
+          "Activation": "Delirium",
+          "TgtZone": "Graveyard",
+          "TgtPrompt": "Select target permanent card in your graveyard",
+          "SpellDescription": "CARDNAME becomes a copy of target permanent card in your graveyard until end of turn. Activate only if there are four or more card types among cards in your graveyard.",
+          "Duration": "UntilEndOfTurn"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Delirium —",
+        "ValidTgts": "Permanent.YouOwn",
+        "Activation": "Delirium",
+        "TgtZone": "Graveyard",
+        "TgtPrompt": "Select target permanent card in your graveyard",
+        "SpellDescription": "CARDNAME becomes a copy of target permanent card in your graveyard until end of turn. Activate only if there are four or more card types among cards in your graveyard.",
+        "Duration": "UntilEndOfTurn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "LandTapped",
+        "Description": "CARDNAME enters tapped unless you control a Forest."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "Execute": "TrigCrank",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever you crank CARDNAME, target creature gets +X/+0 until end of turn, where X is the number of creatures you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

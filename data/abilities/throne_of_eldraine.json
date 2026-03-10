@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Chosen",
+        "params": {
+          "SpellDescription": "Add four mana of the chosen color. Spend this mana only to cast monocolored spells of that color.",
+          "Amount": "4",
+          "RestrictValid": "Spell.ChosenColor+MonoColor"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add four mana of the chosen color. Spend this mana only to cast monocolored spells of that color.",
+        "Amount": "4",
+        "RestrictValid": "Spell.ChosenColor+MonoColor"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ManaRestriction": "ChosenColor",
+        "SpellDescription": "Draw two cards. Spend only mana of the chosen color to activate this ability."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

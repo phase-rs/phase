@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you may have it fight target creature you don't control.",
+        "Destination": "Battlefield",
+        "Execute": "TrigFight",
+        "OptionalDecider": "You",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Fight",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "DelTrigPutCounter",
+        "TriggerDescription": "Whenever a creature you control fights, put two +1/+1 counters on it at the beginning of the next end step."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

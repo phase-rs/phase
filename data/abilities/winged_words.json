@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw two cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "1",
+        "EffectZone": "All",
+        "IsPresent": "Creature.YouCtrl+withFlying",
+        "ValidCard": "Card.Self",
+        "Description": "This spell costs {1} less to cast if you control a creature with flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

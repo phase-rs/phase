@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "LifeReduced"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+        "IsPresent": "Creature.YouCtrl",
+        "ReplaceWith": "ReduceLoss",
+        "IsDamage": "True",
+        "ValidPlayer": "You.lifeGE1",
+        "Result": "LT1"
+      }
+    }
+  ],
+  "faces": []
+}

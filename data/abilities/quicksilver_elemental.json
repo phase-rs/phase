@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature",
+          "Duration": "UntilHostLeavesPlayOrEOT",
+          "StaticAbilities": "STSteal",
+          "RememberLKI": "Targeted",
+          "SpellDescription": "CARDNAME gains all activated abilities of target creature until end of turn.",
+          "TgtPrompt": "Select target creature card",
+          "TgtZone": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "Duration": "UntilHostLeavesPlayOrEOT",
+        "StaticAbilities": "STSteal",
+        "RememberLKI": "Targeted",
+        "SpellDescription": "CARDNAME gains all activated abilities of target creature until end of turn.",
+        "TgtPrompt": "Select target creature card",
+        "TgtZone": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "ManaConvert"
+      },
+      "params": {
+        "ValidSA": "Activated",
+        "ValidPlayer": "You",
+        "ManaConversion": "Blue->AnyColor",
+        "Description": "You may spend blue mana as though it were mana of any color to pay the activation costs of CARDNAME's abilities.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

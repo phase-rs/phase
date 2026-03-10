@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever an opponent draws a card except the first one they draw in each of their draw steps, create a 1/1 green Snake creature token.",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.OppOwn",
+        "FirstCardInDrawStep": "False",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you and that player each draw that many cards.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

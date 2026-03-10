@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Land",
+          "Toughness": "3",
+          "ValidTgts": "Player",
+          "Types": "Creature",
+          "Power": "3",
+          "SpellDescription": "All lands target player controls become 3/3 creatures until end of turn. They're still lands."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 G"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<2/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Land",
+        "Toughness": "3",
+        "ValidTgts": "Player",
+        "Types": "Creature",
+        "Power": "3",
+        "SpellDescription": "All lands target player controls become 3/3 creatures until end of turn. They're still lands."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

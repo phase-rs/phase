@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_1_1_soldier",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 1/1 white Soldier creature token.",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 3,
+        "toughness": 3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Target creature gets +3/+3 and gains flying until end of turn.",
+        "KW": "Flying"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Emblem — Elspeth, Knight-Errant",
+          "Planeswalker": "True",
+          "Stackable": "False",
+          "AILogic": "Always",
+          "SpellDescription": "You get an emblem with \"Artifacts, creatures, enchantments, and lands you control have indestructible.\"",
+          "StaticAbilities": "STIndestructible",
+          "Duration": "Permanent",
+          "Image": "emblem_elspeth_knight_errant",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Emblem — Elspeth, Knight-Errant",
+        "Planeswalker": "True",
+        "Stackable": "False",
+        "AILogic": "Always",
+        "SpellDescription": "You get an emblem with \"Artifacts, creatures, enchantments, and lands you control have indestructible.\"",
+        "StaticAbilities": "STIndestructible",
+        "Duration": "Permanent",
+        "Image": "emblem_elspeth_knight_errant",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures you control with flying get +1/+1 until end of turn.",
+        "Planeswalker": "True",
+        "ValidCards": "Creature.withFlying+YouCtrl"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "w_4_4_angel_flying_vigilance",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 4/4 white Angel creature token with flying and vigilance."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "SpellDescription": "You get an emblem with \"If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.\"",
+          "Name": "Emblem — Serra the Benevolent",
+          "Image": "emblem_serra_the_benevolent",
+          "ReplacementEffects": "STWorship",
+          "Stackable": "False",
+          "Duration": "Permanent",
+          "AILogic": "Always",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "You get an emblem with \"If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.\"",
+        "Name": "Emblem — Serra the Benevolent",
+        "Image": "emblem_serra_the_benevolent",
+        "ReplacementEffects": "STWorship",
+        "Stackable": "False",
+        "Duration": "Permanent",
+        "AILogic": "Always",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

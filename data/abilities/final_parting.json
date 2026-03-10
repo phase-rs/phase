@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChangeZone1",
+        "RememberChanged": "True",
+        "ChangeType": "Card",
+        "Shuffle": "False",
+        "SpellDescription": "Search your library for two cards. Put one into your hand and the other into your graveyard. Then shuffle.",
+        "Mandatory": "True",
+        "StackDescription": "SpellDescription",
+        "ChangeNum": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

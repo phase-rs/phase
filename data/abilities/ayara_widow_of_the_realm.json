@@ -1,0 +1,93 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Variable",
+              "value": "X"
+            },
+            "target": {
+              "type": "Filtered",
+              "filter": "Opponent,Battle"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target opponent or battle",
+            "SubAbility": "DBGainLife",
+            "SpellDescription": "CARDNAME deals X damage to target opponent or battle and you gain X life, where X is the sacrificed permanent's mana value."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Mode": "Transform",
+              "SorcerySpeed": "True",
+              "AILogic": "Always",
+              "Defined": "Self",
+              "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "5 RP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Mode": "Transform",
+            "SorcerySpeed": "True",
+            "AILogic": "Always",
+            "Defined": "Self",
+            "SpellDescription": "Transform NICKNAME. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of combat on your turn, return up to one target artifact or creature card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step.",
+            "Phase": "BeginCombat",
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "You",
+            "Execute": "TrigChangeZone"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

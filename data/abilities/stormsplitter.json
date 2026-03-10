@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopy",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, create a token that's a copy of CARDNAME. Exile that token at the beginning of the next end step.",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

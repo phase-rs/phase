@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigDamage",
+        "ValidCard": "Permanent",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a permanent is turned face up, CARDNAME deals 1 damage to any target."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

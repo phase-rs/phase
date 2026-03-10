@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCastOrCopy",
+      "params": {
+        "TriggerDescription": "Magecraft — Whenever you cast or copy an instant or sorcery spell, CARDNAME can't be blocked this turn. If that spell has mana value 5 or greater, put a +1/+1 counter on CARDNAME.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "Execute": "TrigUnblockable",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

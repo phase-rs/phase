@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "Whenever enchanted artifact becomes tapped or a player activates an ability of enchanted artifact without {T} in its activation cost, CARDNAME deals 2 damage to that artifact's controller.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage"
+      }
+    },
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidSA": "Activated.!hasTapCost",
+        "Execute": "TrigDamage",
+        "Secondary": "True",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "Whenever an artifact becomes tapped or a player activates an ability of enchanted artifact without {T} in its activation cost, CARDNAME deals 2 damage to that artifact's controller.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

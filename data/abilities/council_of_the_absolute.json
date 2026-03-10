@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Caster": "Player.Opponent",
+        "Description": "Your opponents can't cast cards with the chosen name.",
+        "ValidCard": "Card.NamedCard"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "2",
+        "Description": "Spells with the chosen name you cast cost {2} less to cast.",
+        "ValidCard": "Card.NamedCard",
+        "Activator": "You",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

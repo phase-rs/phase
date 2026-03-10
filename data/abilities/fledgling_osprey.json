@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Description": "CARDNAME has flying as long as it's enchanted.",
+        "Affected": "Card.Self+enchanted"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

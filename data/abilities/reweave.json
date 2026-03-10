@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "SacrificeAll",
+        "params": {
+          "SpellDescription": "Target permanent's controller sacrifices it. If the player does, they reveal cards from the top of their library until they reveal a permanent card that shares a card type with the sacrificed permanent, put that card onto the battlefield, then shuffle.",
+          "Defined": "Targeted",
+          "StackDescription": "{p:TargetedController} sacrifices {c:Targeted}. If {p:TargetedController} does,",
+          "SubAbility": "DBDigUntil",
+          "ValidTgts": "Permanent",
+          "RememberSacrificed": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target permanent's controller sacrifices it. If the player does, they reveal cards from the top of their library until they reveal a permanent card that shares a card type with the sacrificed permanent, put that card onto the battlefield, then shuffle.",
+        "Defined": "Targeted",
+        "StackDescription": "{p:TargetedController} sacrifices {c:Targeted}. If {p:TargetedController} does,",
+        "SubAbility": "DBDigUntil",
+        "ValidTgts": "Permanent",
+        "RememberSacrificed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

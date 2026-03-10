@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Untap",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired",
+        "Description": "As long as CARDNAME is paired with another creature, each of those creatures have \"{2}{U}: Untap this creature.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

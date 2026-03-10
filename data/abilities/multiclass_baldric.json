@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Cleric.YouCtrl",
+        "Description": "Equipped creature has lifelink if you control a Cleric, deathtouch if you control a Rogue, haste if you control a Warrior, and flying if you control a Wizard.",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Lifelink"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Rogue.YouCtrl",
+        "AddKeyword": "Deathtouch",
+        "Affected": "Creature.EquippedBy",
+        "PresentCompare": "GE1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Haste",
+        "IsPresent": "Warrior.YouCtrl",
+        "PresentCompare": "GE1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Flying",
+        "PresentCompare": "GE1",
+        "IsPresent": "Wizard.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "As long as you have a full party, prevent all damage that would be dealt to equipped creature.",
+        "ActiveZones": "Battlefield",
+        "CheckSVar": "X",
+        "Prevent": "True",
+        "ValidTarget": "Creature.EquippedBy",
+        "SVarCompare": "EQ4"
+      }
+    }
+  ],
+  "faces": []
+}

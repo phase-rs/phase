@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "SpellDescription": "Add {U}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {U}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Defined": "ExiledWith",
+          "Optional": "True",
+          "Controller": "You",
+          "ConditionCheckSVar": "X",
+          "SpellDescription": "You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
+          "Amount": "All",
+          "WithoutManaCost": "True",
+          "ConditionSVarCompare": "LE20"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "ExiledWith",
+        "Optional": "True",
+        "Controller": "You",
+        "ConditionCheckSVar": "X",
+        "SpellDescription": "You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
+        "Amount": "All",
+        "WithoutManaCost": "True",
+        "ConditionSVarCompare": "LE20"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

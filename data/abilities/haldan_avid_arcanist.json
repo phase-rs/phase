@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Description": "You may play lands and cast noncreature spells from among cards you exiled that have fetch counters on them, and you may spend mana as though it were mana of any color to cast those spells.",
+        "AffectedZone": "Exile",
+        "MayPlayIgnoreColor": "True",
+        "Affected": "Card.nonCreature+ExiledByYou+counters_GE1_FETCH"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

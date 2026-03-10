@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Dragons you control have ward {1}. (Whenever a Dragon you control becomes the target of a spell or ability an opponent controls, counter it unless that player pays {1}.)",
+        "Affected": "Dragon.YouCtrl",
+        "AddKeyword": "Ward:1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl+Black,Creature.YouCtrl+Green"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Return up to two target [black or green] creature cards from your graveyard to your hand.",
+        "TargetMin": "0",
+        "TgtPrompt": "Choose up to two target black or green creature cards in your graveyard",
+        "TargetMax": "X",
+        "SubAbility": "DBReturnAnyTwo"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "2 BG BG",
+        "Description": "You may cast this spell for {2}{B/G}{B/G}. If you do, ignore the bracketed text.",
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

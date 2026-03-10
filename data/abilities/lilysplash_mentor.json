@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile another target creature you control, then return it to the battlefield under its owner's control with a +1/+1 counter on it. Activate only as a sorcery.",
+        "TgtPrompt": "Select another target creature you control",
+        "RememberChanged": "True",
+        "SorcerySpeed": "True",
+        "SubAbility": "DBReturn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

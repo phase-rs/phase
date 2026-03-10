@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "OptionalDecider": "You",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "Execute": "TrigClone",
+        "TriggerDescription": "At the beginning of combat on your turn, you may have CARDNAME become a copy of another target creature until end of turn, except it's 1/4 and has \"This creature can't be blocked.\"",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

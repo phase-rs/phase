@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each opponent sacrifices an artifact creature and a nonartifact creature.",
+        "Defined": "Opponent",
+        "SacValid": "Creature.Artifact & Creature.nonArtifact",
+        "AILogic": "WorstCard",
+        "SacEachValid": "True",
+        "Mandatory": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

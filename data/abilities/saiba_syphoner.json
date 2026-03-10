@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, return target instant or sorcery card from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "IsPresent": "Instant.YouOwn,Sorcery.YouOwn",
+        "PresentCompare": "EQ0",
+        "PresentZone": "Hand",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Amount": "2",
+        "Description": "This spell costs {2} less to cast if there are no instant or sorcery cards in your hand."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "ReplaceWith": "Exile",
+        "Description": "If CARDNAME would die, shuffle it into your library instead."
+      }
+    }
+  ],
+  "faces": []
+}

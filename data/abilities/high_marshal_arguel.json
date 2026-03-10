@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME dies, conjure a card named Arguel's Blood Fast onto the battlefield and you may transform it. If you control an enchantment named Arguel's Blood Fast and a land named Temple of Aclazotz, instead create two 4/3 white and black Vampire Demon creature tokens with flying.",
+        "Destination": "Graveyard",
+        "Execute": "TrigBranch",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

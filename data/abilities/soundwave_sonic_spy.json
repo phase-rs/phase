@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDoneOnce",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigCast",
+            "CombatDamage": "True",
+            "ValidSource": "Creature.token+YouCtrl",
+            "ValidTarget": "Player",
+            "TriggerDescription": "Whenever one or more creature tokens you control deal combat damage to a player, exile target instant or sorcery card with mana value equal to the damage dealt from their graveyard. Copy it. You may cast the copy without paying its mana cost. If you do, convert NICKNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "Whenever you cast a spell with an odd mana value, convert NICKNAME. If you do, create Ravage, a legendary 3/3 black Robot artifact creature token with menace and deathtouch.",
+            "ValidCard": "Card.cmcOdd",
+            "Execute": "TrigConvertRavage",
+            "TriggerZones": "Battlefield",
+            "ValidActivatingPlayer": "You"
+          }
+        },
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "Whenever you cast a spell with an even mana value, convert NICKNAME. If you do, create Laserbeak, a legendary 2/2 blue Robot artifact creature token with flying and hexproof.",
+            "ValidCard": "Card.cmcEven",
+            "Execute": "TrigConvertLaserbeak",
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

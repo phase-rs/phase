@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Flesh Hooks — Creatures you control that entered this turn have double strike.",
+        "Affected": "Creature.YouCtrl+ThisTurnEntered",
+        "AddKeyword": "Double Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

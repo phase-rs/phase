@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigReturn",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self+YouOwn",
+        "TriggerDescription": "When CARDNAME is put into your graveyard from the battlefield, return it to your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has \"Whenever this creature attacks, it deals X damage to defending player, where X is the number of cards in their hand.\"",
+        "Affected": "Creature.EnchantedBy",
+        "AddSVar": "AE",
+        "AddTrigger": "AttackTrigger"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

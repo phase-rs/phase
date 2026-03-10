@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigToken",
+            "TriggerDescription": "When this enchantment enters, create a 2/2 green Bird creature token with \"Whenever a land you control enters, this token gets +1/+0 until end of turn.\""
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "PresentCompare": "GE4",
+            "TriggerZones": "Battlefield",
+            "IsPresent": "Bird.YouCtrl",
+            "Phase": "Main1",
+            "TriggerDescription": "At the beginning of your first main phase, if you control four or more Birds, transform this enchantment.",
+            "Execute": "TrigTransform",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When this permanent transforms into CARDNAME, search your library for a land card, put it onto the battlefield tapped, then shuffle.",
+            "Execute": "TrigChangeZone"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigPumpAll",
+            "TriggerDescription": "Landfall — Whenever a land you control enters, Birds you control get +1/+0 until end of turn.",
+            "ValidCard": "Land.YouCtrl",
+            "Destination": "Battlefield",
+            "TriggerZones": "Battlefield",
+            "Origin": "Any"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a creature you control with the chosen name deals combat damage to a player, you may pay {U}. If you do, draw a card.",
+        "ValidTarget": "Player",
+        "TriggerZones": "Command",
+        "Execute": "TrigDraw",
+        "ValidSource": "Creature.NamedCard+YouCtrl",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

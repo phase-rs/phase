@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Aura and Equipment spells you cast cost {1} less to cast.",
+        "Activator": "You",
+        "Type": "Spell",
+        "Amount": "1",
+        "ValidCard": "Aura,Equipment"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

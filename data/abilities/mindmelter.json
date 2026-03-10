@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 C"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card",
+        "ChangeNum": "1",
+        "SorcerySpeed": "True",
+        "IsCurse": "True",
+        "Hidden": "True",
+        "Mandatory": "True",
+        "StackDescription": "{p:Targeted} exiles a card from their hand.",
+        "Chooser": "Targeted",
+        "SpellDescription": "Target opponent exiles a card from their hand. Activate only as a sorcery. ({C} represents colorless mana.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked.",
+        "ValidAttacker": "Creature.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

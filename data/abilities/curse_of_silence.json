@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.NamedCard",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever enchanted player casts a spell with the chosen name, you may sacrifice CARDNAME. If you do, draw a card.",
+        "ValidActivatingPlayer": "Player.EnchantedBy",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "2",
+        "Description": "Spells with the chosen name enchanted player casts cost {2} more to cast.",
+        "Type": "Spell",
+        "EffectZone": "Battlefield",
+        "Activator": "Player.EnchantedBy",
+        "ValidCard": "Card.NamedCard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "Execute": "TrigDamage",
+        "ValidCard": "Card.Self,Creature.EquippedBy",
+        "TriggerDescription": "Whenever CARDNAME or equipped creature becomes blocked, it deals 1 damage to defending player."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "Description": "Equipped creature gets +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

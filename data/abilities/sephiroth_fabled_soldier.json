@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDraw1",
+            "TriggerDescription": "Whenever NICKNAME enters or attacks, you may sacrifice another creature. If you do, draw a card.",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever NICKNAME enters or attacks, you may sacrifice another creature. If you do, draw a card.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDraw1",
+            "TriggerZones": "Battlefield",
+            "Secondary": "True"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigLoseLife",
+            "Origin": "Battlefield",
+            "TriggerDescription": "Whenever another creature dies, target opponent loses 1 life and you gain 1 life. If this is the fourth time this ability has resolved this turn, transform Sephiroth.",
+            "Destination": "Graveyard",
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Creature.Other"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever NICKNAME attacks, you may sacrifice any number of other creatures. If you do, draw that many cards.",
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDraw2"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": {
+            "Other": "Transform"
+          },
+          "params": {
+            "ReplaceWith": "DBEffect",
+            "ValidCard": "Card.Self",
+            "Description": "Super Nova — As this creature transforms into CARDNAME, you get an emblem with \"Whenever a creature dies, target opponent loses 1 life and you gain 1 life.\""
+          }
+        }
+      ]
+    }
+  ]
+}

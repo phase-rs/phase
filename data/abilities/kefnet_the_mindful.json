@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SubAbility": "DBChangeZone",
+        "SpellDescription": "Draw a card, then you may return a land you control to its owner's hand."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "IsPresent": "Card.YouOwn",
+        "PresentZone": "Hand",
+        "PresentCompare": "LE6",
+        "Description": "NICKNAME can't attack or block unless you have seven or more cards in hand."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

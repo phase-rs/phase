@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Creature",
+          "Abilities": "ThrowPunch",
+          "SpellDescription": "Until end of turn, all creatures gain \"{T}: This creature deals damage equal to its power to target creature.\""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "Abilities": "ThrowPunch",
+        "SpellDescription": "Until end of turn, all creatures gain \"{T}: This creature deals damage equal to its power to target creature.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

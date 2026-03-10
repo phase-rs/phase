@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand, destroy all creatures your opponents control, then tap all other creatures you control.",
+        "ValidCard": "Card.wasCastFromYourHandByYou+Self",
+        "Execute": "TrigDestroy",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigDestroyAll",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, destroy all Walls your opponents control.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDmg",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "Whenever CARDNAME attacks, if defending player controls no Walls, it deals 2 damage to each creature without flying that player controls.",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Wall.DefenderCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

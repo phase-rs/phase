@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Tap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.untapped+YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target untapped creature you control",
+        "TargetMin": "1",
+        "SpellDescription": "Tap one or two target untapped creatures you control. They each deal damage equal to their power to target creature an opponent controls.",
+        "TargetMax": "2",
+        "SubAbility": "DBEachDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

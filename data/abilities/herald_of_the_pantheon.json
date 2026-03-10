@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast an enchantment spell, you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Enchantment",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Enchantment spells you cast cost {1} less to cast.",
+        "Amount": "1",
+        "ValidCard": "Enchantment",
+        "Activator": "You",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

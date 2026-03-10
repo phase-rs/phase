@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, choose a card in your hand. It perpetually gains lifelink.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigChoose"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChoose",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, choose a card in your hand. It perpetually gains lifelink."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

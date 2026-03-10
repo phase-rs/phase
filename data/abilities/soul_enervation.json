@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, target creature gets -4/-4 until end of turn.",
+        "Origin": "Any",
+        "Execute": "TrigPump"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Creature.YouOwn",
+        "Destination": "Any",
+        "TriggerDescription": "Whenever one or more creature cards leave your graveyard, each opponent loses 1 life and you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "Execute": "LoseGain",
+        "Origin": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Blue creatures can't block creatures you control.",
+        "ValidAttacker": "Creature.YouCtrl",
+        "ValidBlocker": "Creature.Blue"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockUnless"
+      },
+      "params": {
+        "Cost": "PayLife<1>",
+        "Description": "Nonblue creatures can't block creatures you control unless their controller pays 1 life for each blocking creature they control.",
+        "ValidCard": "Creature.nonBlue",
+        "Attacker": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

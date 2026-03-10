@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.nonCreature+YouCtrl",
+        "AddHiddenKeyword": "Other players can't gain control of CARDNAME.",
+        "Description": "As long as CARDNAME is untapped, noncreature artifacts you control have indestructible, and other players can't gain control of them.",
+        "IsPresent": "Card.Self+untapped",
+        "AddKeyword": "Indestructible"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantAttach"
+      },
+      "params": {
+        "ValidCardToTarget": "Aura.!Attached",
+        "Target": "Artifact.nonCreature+YouCtrl",
+        "IsPresent": "Card.Self+untapped",
+        "Description": "As long as CARDNAME is untapped, noncreature artifacts you control can't be enchanted. This effect doesn't remove Auras already attached to those artifacts."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

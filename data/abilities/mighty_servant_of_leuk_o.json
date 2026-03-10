@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesCrewed",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes crewed for the first time each turn, if it was crewed by exactly two creatures, it gains \"Whenever this creature deals combat damage to a player, draw two cards\" until end of turn.",
+        "Execute": "DBAnimate",
+        "ValidCrewAmount": "2",
+        "ValidCard": "Card.Self",
+        "FirstTimeCrewed": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

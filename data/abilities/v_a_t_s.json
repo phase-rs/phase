@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Choose any number of target creatures with equal toughness. Destroy the chosen creatures.",
+        "TgtPrompt": "Choose any number of target creatures with equal toughness",
+        "TargetMin": "0",
+        "TargetMax": "Count$Valid Creature",
+        "TargetsWithEqualToughness": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

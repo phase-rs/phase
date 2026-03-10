@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, distribute three +1/+1 counters among one, two, or three target creatures you control.",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "DrawTrig",
+        "Description": "Modified creatures you control have trample and \"Whenever this creature deals combat damage to a player or planeswalker, draw a card.\" (Equipment, Auras you control, and counters are modifications.)",
+        "AddKeyword": "Trample",
+        "Affected": "Creature.modified+YouCtrl",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

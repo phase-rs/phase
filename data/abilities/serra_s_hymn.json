@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "Amount": "X",
+          "ValidTgts": "Any",
+          "TgtPrompt": "Select any target to prevent damage to",
+          "DividedAsYouChoose": "X",
+          "TargetMin": "0",
+          "SpellDescription": "Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on CARDNAME.",
+          "TargetMax": "MaxTgts"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "X",
+        "ValidTgts": "Any",
+        "TgtPrompt": "Select any target to prevent damage to",
+        "DividedAsYouChoose": "X",
+        "TargetMin": "0",
+        "SpellDescription": "Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on CARDNAME.",
+        "TargetMax": "MaxTgts"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may put a verse counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigPutCounter",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

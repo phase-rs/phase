@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": 0
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You gain 3 life plus an additional 3 life for each additional {1}{G} you paid.",
+        "Announce": "PseudoKicker"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Cost": "1 G",
+        "Amount": "PseudoKicker",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Description": "As an additional cost to cast this spell, you may pay {1}{G} any number of times.",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

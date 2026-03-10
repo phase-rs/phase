@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "Choices": "DestroyArtifact,DestroyCreature,DestroyEnchantment,DestroyLand,DestroyPlaneswalker",
+          "CharmNum": "5",
+          "MinCharmNum": "1"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "DestroyArtifact,DestroyCreature,DestroyEnchantment,DestroyLand,DestroyPlaneswalker",
+        "CharmNum": "5",
+        "MinCharmNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

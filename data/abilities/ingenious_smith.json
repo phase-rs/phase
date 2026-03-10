@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, look at the top four cards of your library. You may reveal an artifact card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDig"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ActivationLimit": "1",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever one or more artifacts you control enter, put a +1/+1 counter on CARDNAME. This ability triggers only once each turn.",
+        "ValidCards": "Artifact.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

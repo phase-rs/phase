@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.YouOwn",
+        "SetPower": "10",
+        "SetToughness": "10",
+        "Affected": "Card.Self",
+        "Description": "As long as there are no cards in your library, CARDNAME has base power and toughness 10/10 and has flying and vigilance.",
+        "PresentCompare": "EQ0",
+        "PresentZone": "Library",
+        "AddKeyword": "Flying & Vigilance"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "PresentCompare": "EQ0",
+        "IsPresent": "Card.YouOwn",
+        "ValidPlayer": "You",
+        "Description": "If you would draw a card while your library has no cards in it, skip that draw instead.",
+        "ActiveZones": "Battlefield",
+        "PresentZone": "Library",
+        "Prevent": "True"
+      }
+    }
+  ],
+  "faces": []
+}

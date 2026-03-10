@@ -1,0 +1,79 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "Execute": "TrigSurveil",
+            "TriggerDescription": "At the beginning of your upkeep, surveil 1. Then if you have seven or more cards in your graveyard, you may transform CARDNAME. (Look at the top card of your library. You may put that card into your graveyard.)",
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "U",
+            "params": {
+              "Amount": "1",
+              "SpellDescription": "Add {U}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "1",
+            "SpellDescription": "Add {U}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 4,
+            "destination": ""
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 U"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Optional": "True",
+            "ChangeValid": "Card.nonCreature+nonLand",
+            "ChangeNum": "1",
+            "SpellDescription": "Look at the top four cards of your library. You may reveal a noncreature, nonland card from among them and put it into your hand. Put the rest on the bottom of your library in any order."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

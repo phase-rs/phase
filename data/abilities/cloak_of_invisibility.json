@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Phasing",
+        "Description": "Enchanted creature has phasing and can't be blocked except by Walls.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Enchanted creature can't be blocked except by Walls.",
+        "Secondary": "True",
+        "ValidAttacker": "Creature.EnchantedBy",
+        "ValidBlocker": "Creature.nonWall"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackersAmount": "GE2",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack with two or more Spiders, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "ValidAttackers": "Spider",
+        "AttackingPlayer": "You"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "DamageAmount": "GE4",
+        "TriggerDescription": "Whenever CARDNAME deals 4 or more damage, exile the top card of your library. Until the end of your next turn, you may play that card.",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

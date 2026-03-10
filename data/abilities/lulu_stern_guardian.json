@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Proliferate"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerDescription": "Whenever an opponent attacks you, choose target creature attacking you. Put a stun counter on that creature.",
+        "AttackingPlayer": "Player.Opponent",
+        "TriggerZones": "Battlefield",
+        "Execute": "DBPutCounter",
+        "AttackedTarget": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigConjure",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME dies, conjure a card named Mephidross Slime into your graveyard. Perpetually double the power and toughness of CARDNAME and that card, then shuffle them into their owner's library."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

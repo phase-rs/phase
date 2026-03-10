@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a land card, put it onto the battlefield tapped, then shuffle.",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
+        "SetPower": "X",
+        "CharacteristicDefining": "True",
+        "SetToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Creature",
+          "Spirit"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Enchanted",
+        "Colors": "Green",
+        "SpellDescription": "Enchanted Forest becomes a 4/4 green Spirit creature until end of turn. It's still a land."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When enchanted Forest is put into a graveyard, you may return CARDNAME from your graveyard to your hand.",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturnOwner",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

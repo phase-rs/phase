@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Target Merfolk can't be blocked this turn.",
+          "StaticAbilities": "Unblockable",
+          "RememberObjects": "Targeted",
+          "ExileOnMoved": "Battlefield",
+          "ValidTgts": "Merfolk",
+          "StackDescription": "{c:Targeted} can't be blocked this turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target Merfolk can't be blocked this turn.",
+        "StaticAbilities": "Unblockable",
+        "RememberObjects": "Targeted",
+        "ExileOnMoved": "Battlefield",
+        "ValidTgts": "Merfolk",
+        "StackDescription": "{c:Targeted} can't be blocked this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 blue Merfolk creature tokens with hexproof."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

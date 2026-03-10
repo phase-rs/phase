@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile the top five cards of your library face down.",
+        "Origin": "Any",
+        "Execute": "TrigExile"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigChangeHandExile",
+        "TriggerDescription": "At the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with CARDNAME into your hand.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, discard a card.",
+        "Phase": "End of Turn",
+        "Execute": "TrigDiscard"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "GoToYard",
+        "TriggerDescription": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard.",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesController",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "GoToYard",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you lose control of CARDNAME, put all cards exiled with CARDNAME into their owner's graveyard."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

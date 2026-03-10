@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "UntapAll",
+        "params": {
+          "SubAbility": "DBAddCombat",
+          "ValidCards": "Creature.YouCtrl",
+          "SpellDescription": "Untap all creatures you control. After this main phase, there is an additional combat phase followed by an additional main phase. Activate only as a sorcery.",
+          "SorcerySpeed": "True"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 R R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAddCombat",
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Untap all creatures you control. After this main phase, there is an additional combat phase followed by an additional main phase. Activate only as a sorcery.",
+        "SorcerySpeed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Dragon.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMassacre",
+        "TriggerDescription": "Whenever a Dragon you control attacks, creatures defending player control each get -1/-1 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

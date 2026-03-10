@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "TrigDamage",
+          "SpellDescription": "Until end of turn, whenever one or more Gorgons and/or Snakes you control deal combat damage to a player, that player loses half their life, rounded up."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "TrigDamage",
+        "SpellDescription": "Until end of turn, whenever one or more Gorgons and/or Snakes you control deal combat damage to a player, that player loses half their life, rounded up."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME attacks, you may pay {1}{B/G}. If you do, create a 1/1 black Snake creature token with deathtouch.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

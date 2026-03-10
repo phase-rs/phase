@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "NumTurns": "1",
+          "SubAbility": "DBExile",
+          "SpellDescription": "Take an extra turn after this one. Exile CARDNAME."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "NumTurns": "1",
+        "SubAbility": "DBExile",
+        "SpellDescription": "Take an extra turn after this one. Exile CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

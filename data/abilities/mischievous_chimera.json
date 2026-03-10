@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OpponentTurn": "True",
+        "ValidCard": "Card",
+        "ActivatorThisTurnCast": "EQ1",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever you cast your first spell during each opponent's turn, CARDNAME deals 1 damage to each opponent. Scry 1."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

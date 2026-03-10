@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, put a blessing counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "Execute": "TrigCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control get +1/+1 for each blessing counter on CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

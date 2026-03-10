@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigEffect",
+        "TriggerDescription": "Whenever CARDNAME attacks, prevent all combat damage that would be dealt this turn to Dogs you control.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Dog.YouCtrl+Other",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Other Dogs you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Surveil",
+        "count": 1
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Surveil 1. Activate only once each turn.",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "MaxSpeed",
+        "Description": "Max speed — Whenever a nontoken creature you control dies, create a tapped 2/2 black Zombie creature token.",
+        "Affected": "Card.Self",
+        "AddTrigger": "TrigDies"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

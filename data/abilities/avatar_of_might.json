@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "SVarCompare": "LEY",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "CheckSVar": "X",
+        "Description": "If an opponent controls at least four more creatures than you, CARDNAME costs {6} less to cast.",
+        "Amount": "6"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

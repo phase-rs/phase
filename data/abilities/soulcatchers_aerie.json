@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Bird.YouOwn",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a Bird is put into your graveyard from the battlefield, put a feather counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Bird",
+        "AddPower": "X",
+        "Description": "Bird creatures get +1/+1 for each feather counter on CARDNAME.",
+        "AddToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

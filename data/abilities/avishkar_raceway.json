@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "ABDraw",
+        "Description": "Max speed — {3}, {T}, Discard a card: Draw a card.",
+        "CharacteristicDefining": "True",
+        "Affected": "Card.Self",
+        "Condition": "MaxSpeed"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

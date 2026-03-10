@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, it deals 5 damage to target creature an opponent controls.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ExcessDamageAll",
+      "params": {
+        "CombatDamage": "False",
+        "Execute": "TrigTreasure",
+        "TriggerDescription": "Whenever one or more creatures your opponents control are dealt excess noncombat damage, create a Treasure token.",
+        "ValidTarget": "Creature.OppCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

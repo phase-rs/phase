@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "DamageAll",
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted land has \"{T}: This land deals 1 damage to each creature and player.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

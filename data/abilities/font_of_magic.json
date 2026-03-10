@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Description": "Instant and sorcery spells you cast cost {1} less to cast for each time you've cast a commander from the command zone this game.",
+        "Amount": "X",
+        "ValidCard": "Instant,Sorcery",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

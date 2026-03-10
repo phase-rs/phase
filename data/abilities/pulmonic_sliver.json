@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Affected": "Creature.Sliver",
+        "Description": "All Sliver creatures have flying."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddReplacementEffect": "PulmonicMoveToLibrary",
+        "Affected": "Card.Sliver",
+        "Description": "All Slivers have \"If this permanent would be put into a graveyard, you may put it on top of its owner's library instead.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

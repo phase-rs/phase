@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "Planeswalker": "True",
+        "TargetMax": "2",
+        "SpellDescription": "Put a +1/+1 counter on each of up to two target creatures."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.Creature+cmcLE2+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature card with mana value 2 or less",
+        "SpellDescription": "Return target creature card with mana value 2 or less from your graveyard to the battlefield.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "Duration": "Permanent",
+          "Triggers": "EffPhase",
+          "Ultimate": "True",
+          "SpellDescription": "You get an emblem with \"At the beginning of your end step, create three 1/1 white Cat creature tokens with lifelink.\"",
+          "Name": "Emblem — Ajani, Adversary of Tyrants",
+          "Image": "emblem_ajani_adversary_of_tyrants"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Duration": "Permanent",
+        "Triggers": "EffPhase",
+        "Ultimate": "True",
+        "SpellDescription": "You get an emblem with \"At the beginning of your end step, create three 1/1 white Cat creature tokens with lifelink.\"",
+        "Name": "Emblem — Ajani, Adversary of Tyrants",
+        "Image": "emblem_ajani_adversary_of_tyrants"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

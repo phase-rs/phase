@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigLoseLife1",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, each opponent loses X life and you gain X life, where X is the number of Shrines you control."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever another Shrine you control enters, each opponent loses 1 life and you gain 1 life.",
+        "Execute": "TrigLoseLife2",
+        "ValidCard": "Shrine.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturnFromGraveyard",
+        "TriggerDescription": "When CARDNAME enters, return target creature card from your graveyard to the battlefield.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExileAndBounce",
+        "ValidCard": "Card.IsRemembered",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When the creature put onto the battlefield with CARDNAME dies, exile it and return CARDNAME to its owner's hand.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Execute": "TrigExileCreature",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, exile the creature put onto the battlefield with CARDNAME."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsRemembered",
+        "Origin": "Battlefield",
+        "Static": "True",
+        "Destination": "Exile",
+        "Execute": "DBCleanup",
+        "TriggerDescription": "Forget remembered card if it goes into Exile.",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Forget remembered card if it goes into Hand.",
+        "Static": "True",
+        "Destination": "Hand",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.IsRemembered",
+        "Execute": "DBCleanup"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Library",
+        "TriggerDescription": "Forget remembered card if it goes into Library.",
+        "Static": "True",
+        "Secondary": "True",
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup",
+        "ValidCard": "Card.IsRemembered"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

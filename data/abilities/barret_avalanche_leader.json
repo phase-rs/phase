@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Equipment.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Avalanche! — Whenever an Equipment you control enters, create a 2/2 red Rebel creature token."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "Execute": "TrigPump",
+        "TriggerDescription": "At the beginning of combat on your turn, attach up to one target Equipment you control to target Rebel you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

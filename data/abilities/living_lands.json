@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "Description": "All Forests are 1/1 creatures that are still lands.",
+        "SetPower": "1",
+        "Affected": "Forest",
+        "SetToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

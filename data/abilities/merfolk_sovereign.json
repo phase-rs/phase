@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Pump",
+          "ValidTgts": "Creature.Merfolk",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "Unblockable",
+          "TgtPrompt": "Select target Merfolk creature",
+          "SpellDescription": "Target Merfolk creature can't be blocked this turn.",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Pump",
+        "ValidTgts": "Creature.Merfolk",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "Unblockable",
+        "TgtPrompt": "Select target Merfolk creature",
+        "SpellDescription": "Target Merfolk creature can't be blocked this turn.",
+        "ExileOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Merfolk creatures you control get +1/+1.",
+        "Affected": "Creature.Merfolk+Other+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

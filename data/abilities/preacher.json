@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "For as long as CARDNAME remains tapped, gain control of target creature of an opponent's choice they control.",
+        "TgtPrompt": "Select target creature you control",
+        "LoseControl": "Untap,LeavesPlay",
+        "TargetingPlayerControls": "True",
+        "TargetingPlayer": "Player.Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

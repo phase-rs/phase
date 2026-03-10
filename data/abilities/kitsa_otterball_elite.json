@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card, then discard a card.",
+        "SubAbility": "DBDiscard"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "IsPresent": "Card.powerGE3+Self",
+          "AILogic": "Once",
+          "MayChooseTarget": "True",
+          "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
+          "TargetType": "Spell",
+          "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy. Activate only if NICKNAME's power is 3 or greater."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsPresent": "Card.powerGE3+Self",
+        "AILogic": "Once",
+        "MayChooseTarget": "True",
+        "ValidTgts": "Instant.YouCtrl,Sorcery.YouCtrl",
+        "TargetType": "Spell",
+        "SpellDescription": "Copy target instant or sorcery spell you control. You may choose new targets for the copy. Activate only if NICKNAME's power is 3 or greater."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

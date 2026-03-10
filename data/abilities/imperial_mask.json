@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+!token",
+        "TriggerDescription": "When CARDNAME enters, if it's not a token, each of your teammates creates a token that's a copy of CARDNAME.",
+        "Execute": "TrigCopyPermanent",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You have hexproof. (You can't be the target of spells or abilities your opponents control.)",
+        "AddKeyword": "Hexproof"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

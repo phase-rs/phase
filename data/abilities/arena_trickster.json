@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "Execute": "TrigPutCounter",
+        "ActivatorThisTurnCast": "EQ1",
+        "TriggerDescription": "Whenever you cast your first spell during each opponent's turn, put a +1/+1 counter on CARDNAME.",
+        "ValidActivatingPlayer": "You",
+        "OpponentTurn": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

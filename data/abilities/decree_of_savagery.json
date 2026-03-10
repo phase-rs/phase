@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterNum": "4",
+          "ValidCards": "Creature.YouCtrl",
+          "CounterType": "P1P1",
+          "SpellDescription": "Put four +1/+1 counters on each creature you control."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterNum": "4",
+        "ValidCards": "Creature.YouCtrl",
+        "CounterType": "P1P1",
+        "SpellDescription": "Put four +1/+1 counters on each creature you control."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cycle CARDNAME, you may put four +1/+1 counters on target creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

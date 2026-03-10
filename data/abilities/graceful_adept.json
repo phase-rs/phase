@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetMaxHandSize": "Unlimited",
+        "Affected": "You",
+        "Description": "You have no maximum hand size."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

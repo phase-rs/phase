@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Shuffle",
+        "params": {
+          "Defined": "You",
+          "SpellDescription": "Shuffle your library."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "Shuffle your library."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RearrangeTopOfLibrary",
+        "params": {
+          "NumCards": "X",
+          "SpellDescription": "Look at the top X cards of your library, then put them back in any order.",
+          "Defined": "You"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NumCards": "X",
+        "SpellDescription": "Look at the top X cards of your library, then put them back in any order.",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

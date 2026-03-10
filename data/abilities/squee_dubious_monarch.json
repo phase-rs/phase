@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, create a 1/1 red Goblin creature token that's tapped and attacking.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "EffectZone": "Graveyard",
+        "ValidSA": "Spell.Self",
+        "Description": "You may cast CARDNAME from your graveyard by paying {3}{R} and exiling four other cards from your graveyard rather than paying its mana cost.",
+        "Cost": "3 R ExileFromGrave<4/Card.Other/other cards>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Deathtouch",
+        "SetPower": "4",
+        "SetToughness": "3",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE2_LEVEL",
+        "Description": "LEVEL 1-2 4/3 Deathtouch"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "LEVEL 3+ 5/4 First strike, deathtouch",
+        "Affected": "Card.Self",
+        "SetToughness": "4",
+        "AddKeyword": "First Strike & Deathtouch",
+        "IsPresent": "Card.Self+counters_GE3_LEVEL",
+        "SetPower": "5"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

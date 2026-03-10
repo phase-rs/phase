@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "TgtPrompt": "Select target creature you control to redirect the damage to",
+          "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to target creature you control instead.",
+          "Name": "en-Kor Redirection",
+          "ValidTgts": "Creature.YouCtrl",
+          "Duration": "UntilHostLeavesPlayOrEOT",
+          "RememberObjects": "Targeted",
+          "ReplacementEffects": "EnKor",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature you control to redirect the damage to",
+        "SpellDescription": "The next 1 damage that would be dealt to CARDNAME this turn is dealt to target creature you control instead.",
+        "Name": "en-Kor Redirection",
+        "ValidTgts": "Creature.YouCtrl",
+        "Duration": "UntilHostLeavesPlayOrEOT",
+        "RememberObjects": "Targeted",
+        "ReplacementEffects": "EnKor",
+        "ExileOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

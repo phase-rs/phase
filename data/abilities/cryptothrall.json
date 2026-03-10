@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Affected": "Artifact.Creature+YouCtrl+Other",
+        "Description": "Protector — Other artifact creatures you control have hexproof."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

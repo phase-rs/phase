@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attacking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target attacking creature",
+        "SpellDescription": "Destroy target [attacking] creature."
+      }
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Cleave",
+        "CostDesc": "{5}{W}",
+        "NonBasicSpell": "True",
+        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

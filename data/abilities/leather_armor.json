@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +0/+1 and has ward {1}. (Whenever equipped creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {1}.)",
+        "AddToughness": "1",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Ward:1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

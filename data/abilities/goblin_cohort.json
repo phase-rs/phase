@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "SVarCompare": "EQ0",
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't attack unless you've cast a creature spell this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

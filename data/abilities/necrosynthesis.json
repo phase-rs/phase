@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When enchanted creature dies, look at the top X cards of your library, where X is its power. Put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.EnchantedBy",
+        "Execute": "TrigDig"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has \"Whenever another creature dies, put a +1/+1 counter on this creature.\"",
+        "Affected": "Creature.EnchantedBy",
+        "AddTrigger": "DiesTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

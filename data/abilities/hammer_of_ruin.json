@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidSource": "Creature.EquippedBy",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may destroy target Equipment that player controls.",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+0.",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "DBExile",
+        "Description": "If a creature dealt damage by enchanted creature this turn would die, exile it instead.",
+        "ValidLKI": "Creature.DamagedBy Enchanted",
+        "Destination": "Graveyard",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

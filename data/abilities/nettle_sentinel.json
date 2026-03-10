@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Green",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever you cast a green spell, you may untap this creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "Description": "This creature doesn't untap during your untap step.",
+        "ValidCard": "Card.Self",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

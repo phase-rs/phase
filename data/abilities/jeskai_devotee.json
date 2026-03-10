@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo U R W",
+        "params": {
+          "ActivationLimit": "1",
+          "SpellDescription": "Add {U}, {R}, or {W}. Activate only once each turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationLimit": "1",
+        "SpellDescription": "Add {U}, {R}, or {W}. Activate only once each turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl",
+        "ActivatorThisTurnCast": "EQ2",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Flurry — Whenever you cast your second spell each turn, this creature gets +1/+1 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

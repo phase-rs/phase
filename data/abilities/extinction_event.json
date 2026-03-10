@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseEvenOdd",
+        "params": {
+          "SubAbility": "DBExile",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Choose odd or even. Exile each creature with mana value of the chosen quality. (Zero is even.)"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBExile",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Choose odd or even. Exile each creature with mana value of the chosen quality. (Zero is even.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

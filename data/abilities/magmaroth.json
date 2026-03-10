@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, put a -1/-1 counter on CARDNAME.",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigRemoveCounter",
+        "ValidCard": "Card.nonCreature",
+        "TriggerDescription": "Whenever you cast a noncreature spell, remove a -1/-1 counter from CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

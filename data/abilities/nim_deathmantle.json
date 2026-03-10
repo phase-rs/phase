@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.!token+YouOwn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a nontoken creature is put into your graveyard from the battlefield, you may pay {4}. If you do, return that card to the battlefield and attach CARDNAME to it.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetColor": "Black",
+        "Affected": "Creature.EquippedBy",
+        "RemoveCreatureTypes": "True",
+        "Description": "Equipped creature gets +2/+2, has intimidate, and is a black Zombie.",
+        "AddKeyword": "Intimidate",
+        "AddType": "Zombie",
+        "AddPower": "2",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

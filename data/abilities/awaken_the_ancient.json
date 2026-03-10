@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "7",
+        "Affected": "Land.AttachedBy",
+        "SetColor": "Red",
+        "SetToughness": "7",
+        "Description": "Enchanted Mountain is a 7/7 red Giant creature with haste. It's still a land.",
+        "AddKeyword": "Haste",
+        "AddType": "Creature & Giant"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

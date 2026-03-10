@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 2 damage to any target.",
+        "Planeswalker": "true"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "If another red source you control would deal damage to a permanent or player, it deals that much damage plus 1 to that permanent or player instead.",
+        "ValidSource": "Card.RedSource+Other+YouCtrl",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Permanent,Player",
+        "ReplaceWith": "DmgPlus1"
+      }
+    }
+  ],
+  "faces": []
+}

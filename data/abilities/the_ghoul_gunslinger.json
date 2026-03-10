@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self,Zombie.!token+Other+YouCtrl,Mutant.!token+Other+YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRadiation",
+        "TriggerDescription": "Whenever NICKNAME or another nontoken Zombie or Mutant you control dies, target player gets two rad counters. If that player is you, create a Treasure token."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

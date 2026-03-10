@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "AILogic": "ReplaySpell",
+          "Optional": "True",
+          "SpellDescription": "You may cast target instant or sorcery card from an opponent's graveyard without paying its mana cost. If that spell would be put into their graveyard, exile it instead.",
+          "TgtPrompt": "Choose target instant or sorcery card from an opponent's graveyard",
+          "ValidTgts": "Instant.OppOwn,Sorcery.OppOwn",
+          "TgtZone": "Graveyard",
+          "WithoutManaCost": "True",
+          "ValidSA": "Spell",
+          "ReplaceGraveyard": "Exile"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "ReplaySpell",
+        "Optional": "True",
+        "SpellDescription": "You may cast target instant or sorcery card from an opponent's graveyard without paying its mana cost. If that spell would be put into their graveyard, exile it instead.",
+        "TgtPrompt": "Choose target instant or sorcery card from an opponent's graveyard",
+        "ValidTgts": "Instant.OppOwn,Sorcery.OppOwn",
+        "TgtZone": "Graveyard",
+        "WithoutManaCost": "True",
+        "ValidSA": "Spell",
+        "ReplaceGraveyard": "Exile"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

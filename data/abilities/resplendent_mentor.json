@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "GainLife",
+        "Affected": "Creature.White+YouCtrl",
+        "Description": "White creatures you control have \"{T}: You gain 1 life.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

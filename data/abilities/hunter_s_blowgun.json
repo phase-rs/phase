@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Deathtouch",
+        "Condition": "PlayerTurn",
+        "Description": "Equipped creature has deathtouch during your turn. Otherwise, it has reach."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Secondary": "True",
+        "AddKeyword": "Reach",
+        "Description": "Equipped creature has deathtouch as long as it's your turn. Otherwise, it has reach.",
+        "Affected": "Creature.EquippedBy",
+        "Condition": "NotPlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

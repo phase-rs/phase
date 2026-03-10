@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopy",
+        "ValidActivatingPlayer": "You",
+        "ActivationLimit": "1",
+        "ValidCard": "Instant,Sorcery,Artifact",
+        "TriggerDescription": "Whenever you cast an artifact, instant or sorcery spell, copy that spell. You may choose new targets for the copy. This ability triggers only once each turn. (A copy of a permanent spell becomes a token.)"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant,Sorcery,Artifact",
+        "ActivationLimit": "1",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "Whenever an opponent casts an artifact, instant or sorcery spell, counter that spell. This ability triggers only once each turn.",
+        "Execute": "TrigCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

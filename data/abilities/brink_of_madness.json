@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "At the beginning of your upkeep, if you have no cards in hand, sacrifice CARDNAME and target opponent discards their hand.",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.YouCtrl",
+        "PresentZone": "Hand",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigSacDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

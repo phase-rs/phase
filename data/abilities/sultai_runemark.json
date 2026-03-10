@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +2/+2.",
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "2",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has deathtouch as long as you control a green or blue permanent.",
+        "Affected": "Card.EnchantedBy",
+        "IsPresent": "Permanent.Green+YouCtrl,Permanent.Blue+YouCtrl",
+        "AddKeyword": "Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Draft",
+        "params": {
+          "SubAbility": "DBExile",
+          "SpellDescription": "Draft a card from CARDNAME's spellbook and exile it face down.",
+          "StackDescription": "REP Draft_{p:You} drafts & exile_they exile",
+          "RememberDrafted": "True",
+          "Spellbook": "Angel of Destiny,Resplendent Angel,Angel of Vitality,Righteous Valkyrie,Angel of Invention,Angel of Sanctions,Valkyrie Harbinger,Emancipation Angel,Youthful Valkyrie,Resplendent Marshal,Enduring Angel,Sigardian Savior,Serra Angel,Stalwart Valkyrie,Segovian Angel"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBExile",
+        "SpellDescription": "Draft a card from CARDNAME's spellbook and exile it face down.",
+        "StackDescription": "REP Draft_{p:You} drafts & exile_they exile",
+        "RememberDrafted": "True",
+        "Spellbook": "Angel of Destiny,Resplendent Angel,Angel of Vitality,Righteous Valkyrie,Angel of Invention,Angel of Sanctions,Valkyrie Harbinger,Emancipation Angel,Youthful Valkyrie,Resplendent Marshal,Enduring Angel,Sigardian Savior,Serra Angel,Stalwart Valkyrie,Segovian Angel"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Exile",
+        "destination": "Hand",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put each card exiled with CARDNAME into your hand.",
+        "ChangeType": "Card.IsRemembered+ExiledWithSource"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.IsRemembered+ExiledWithSource",
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Static": "True",
+        "Execute": "DBCleanup",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

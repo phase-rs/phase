@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Any",
+        "ActivationLimit": "1",
+        "Execute": "TrigInvestigate",
+        "ValidCards": "Creature.YouCtrl+Other",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever one or more other creatures you control leave the battlefield, investigate. This ability triggers only once each turn. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "ValidSA": "Spell",
+        "Caster": "You",
+        "ValidCard": "Creature",
+        "Description": "You may cast creature spells as though they had flash."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

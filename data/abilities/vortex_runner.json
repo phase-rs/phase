@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "1",
+        "IsPresent": "Land.YouCtrl",
+        "PresentCompare": "GE8",
+        "Description": "As long as you control eight or more lands, CARDNAME gets +1/+0 and can't be blocked."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self",
+        "IsPresent": "Land.YouCtrl",
+        "PresentCompare": "GE8"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

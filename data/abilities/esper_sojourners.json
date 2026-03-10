@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "Execute": "TrigTapOrUntap",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may tap or untap target permanent."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard",
+        "Secondary": "True",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may tap or untap target permanent.",
+        "Execute": "TrigTapOrUntap"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Destination": "Any",
+        "TriggerDescription": "Whenever NICKNAME or another nontoken creature you control leaves the battlefield, create a Mutagen token.",
+        "ValidCard": "Card.Self,Creature.Other+!token+YouCtrl",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

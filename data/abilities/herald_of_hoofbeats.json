@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Horsemanship",
+        "Description": "Other Knights you control have horsemanship.",
+        "Affected": "Knight.YouCtrl+Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

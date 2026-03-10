@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this Case enters, it deals 1 damage to any target."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentCompare": "GE3",
+        "IsPresent": "Creature.isDamaged",
+        "IsPresent2": "Card.Self+!IsSolved",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "To solve — Three or more creatures are damaged.",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "Execute": "TrigSolve"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Creature.YouCtrl",
+        "IsPresent": "Card.Self+IsSolved",
+        "Execute": "TrigDealDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Solved — Whenever you attack with one or more creatures, this Case deals that much damage divided as you choose among any number of targets."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "NoCleanupDamage"
+      },
+      "params": {
+        "ValidCard": "Creature",
+        "Description": "Damage isn't removed from creatures during cleanup steps."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

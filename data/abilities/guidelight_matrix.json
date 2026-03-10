@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AlterAttribute",
+        "params": {
+          "SpellDescription": "Target Mount you control becomes saddled until end of turn. Activate only as a sorcery.",
+          "Attributes": "Saddled",
+          "TgtPrompt": "Select target Mount you control",
+          "ValidTgts": "Mount.YouCtrl",
+          "SorcerySpeed": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target Mount you control becomes saddled until end of turn. Activate only as a sorcery.",
+        "Attributes": "Saddled",
+        "TgtPrompt": "Select target Mount you control",
+        "ValidTgts": "Mount.YouCtrl",
+        "SorcerySpeed": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Vehicle.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target Vehicle you control becomes an artifact creature until end of turn.",
+        "TgtPrompt": "Select target Vehicle you control"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When this artifact enters, draw a card.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

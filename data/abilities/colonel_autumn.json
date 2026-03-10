@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "Execute": "TrigPutCounterAll",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever a creature you control exploits a creature, put a +1/+1 counter on each creature you control.",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other legendary creatures you control have exploit.",
+        "Affected": "Creature.YouCtrl+Legendary+Other",
+        "AddKeyword": "Exploit"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

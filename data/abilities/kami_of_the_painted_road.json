@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigProtect",
+        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, CARDNAME gains protection from the color of your choice until end of turn.",
+        "ValidCard": "Spirit,Arcane",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

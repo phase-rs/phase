@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "You,Permanent.YouCtrl+inZoneBattlefield",
+        "TriggerDescription": "Whenever you or a permanent you control becomes the target of a spell or ability an opponent controls, counter that spell or ability unless its controller pays {1}.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCounter",
+        "ValidSource": "SpellAbility.OppCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddAbility": "AnyMana",
+            "Description": "Lands you control have \"{T}: Add one mana of any color.\"",
+            "Affected": "Land.YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "Execute": "TrigMill",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When you unlock this door, mill four cards, then return up to two permanent cards from among them to your hand.",
+            "ValidPlayer": "You",
+            "ThisDoor": "True"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

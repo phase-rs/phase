@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever an opponent casts a spell, put a +1/+1 counter on CARDNAME and you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

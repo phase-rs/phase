@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Deathtouch",
+        "Description": "Attacking tokens you control have deathtouch.",
+        "Affected": "Creature.token+attacking+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

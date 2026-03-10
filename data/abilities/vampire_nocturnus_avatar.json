@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Play with the top card of your library revealed.",
+        "EffectZone": "Command",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "GameStage": "Play",
+        "MayLookAt": "Player"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "TopCardOfLibraryIs": "Card.Black",
+        "AddToughness": "1",
+        "Affected": "Creature.Black+YouCtrl",
+        "AddPower": "2",
+        "Description": "As long as the top card of your library is black, black creatures you control get +2/+1.",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

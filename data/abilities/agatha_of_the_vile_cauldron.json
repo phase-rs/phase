@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 R G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Trample & Haste",
+        "SpellDescription": "Other creatures you control get +1/+1 and gain trample and haste until end of turn.",
+        "ValidCards": "Creature.YouCtrl+StrictlyOther"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "MinMana": "1",
+        "Description": "Activated abilities of creatures you control cost {X} less to activate, where X is CARDNAME's power. This effect can't reduce the mana in that cost to less than one mana.",
+        "Type": "Ability",
+        "Amount": "X",
+        "ValidCard": "Creature.YouCtrl",
+        "AffectedZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

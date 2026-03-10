@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature NumAtt$ +3"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 G"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature gets +3/+3 and gains reach until end of turn.",
+        "ActivationZone": "Hand",
+        "KW": "Reach",
+        "PrecostDesc": "Channel —"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Reach",
+        "AddPower": "3",
+        "AddToughness": "3",
+        "Description": "As long as enchanted permanent is a creature, it gets +3/+3 and has reach.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

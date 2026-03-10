@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P2P2",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Chimera"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPump",
+        "TgtPrompt": "Select target Chimera creature",
+        "SpellDescription": "Put a +2/+2 counter on target Chimera creature. It gains flying. (This effect lasts indefinitely.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

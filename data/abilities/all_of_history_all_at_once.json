@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "TimeTravel",
+        "params": {
+          "SpellDescription": "Time travel. (For each suspended card you own and each permanent you control with a time counter on it, you may add or remove a time counter.)"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Time travel. (For each suspended card you own and each permanent you control with a time counter on it, you may add or remove a time counter.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +2/+2 as long as you had another creature enter the battlefield under your control this turn.",
+        "AddPower": "2",
+        "CheckSVar": "X",
+        "Affected": "Card.Self",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

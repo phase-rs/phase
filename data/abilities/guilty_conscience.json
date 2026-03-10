@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "Execute": "TrigDamage",
+        "ValidSource": "Card.AttachedBy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever enchanted creature deals damage, CARDNAME deals that much damage to that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

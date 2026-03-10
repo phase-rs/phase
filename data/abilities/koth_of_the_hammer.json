@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Mountain"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target Mountain",
+        "Planeswalker": "True",
+        "SubAbility": "DBAnimate",
+        "SpellDescription": "Untap target Mountain. It becomes a 4/4 red Elemental creature until end of turn. It's still a land."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SpellDescription": "Add {R} for each Mountain you control.",
+          "Planeswalker": "True",
+          "Amount": "X"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R} for each Mountain you control.",
+        "Planeswalker": "True",
+        "Amount": "X"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "Name": "Emblem — Koth of the Hammer",
+          "SpellDescription": "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
+          "Stackable": "False",
+          "Image": "emblem_koth_of_the_hammer",
+          "Duration": "Permanent",
+          "StaticAbilities": "STDamage",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Name": "Emblem — Koth of the Hammer",
+        "SpellDescription": "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
+        "Stackable": "False",
+        "Image": "emblem_koth_of_the_hammer",
+        "Duration": "Permanent",
+        "StaticAbilities": "STDamage",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

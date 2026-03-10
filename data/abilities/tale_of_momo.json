@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Search your library and/or graveyard for an Ally creature card, reveal it, and put it into your hand. If you search your library this way, shuffle.",
+        "ChangeNum": "1",
+        "ShuffleNonMandatory": "True",
+        "ChangeTypeDesc": "Ally creature card",
+        "Optional": "True",
+        "OriginAlternative": "Graveyard",
+        "ChangeType": "Creature.Ally+YouOwn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Description": "This spell costs {2} less to cast if a creature left the battlefield under your control this turn.",
+        "Amount": "2",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

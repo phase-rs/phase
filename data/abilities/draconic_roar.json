@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDamageController",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "CARDNAME deals 3 damage to target creature. If you revealed a Dragon card or controlled a Dragon as you cast this spell, CARDNAME deals 3 damage to that creature's controller."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Cost": "Reveal<1/Dragon>",
+        "Description": "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

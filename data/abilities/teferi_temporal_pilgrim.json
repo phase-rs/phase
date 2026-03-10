@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "u_2_2_spirit_vigilance_drawcounter",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 2/2 blue Spirit creature token with vigilance and \"Whenever you draw a card, put a +1/+1 counter on this creature.\"",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -12
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "{p:Targeted} chooses a permanent they control and returns it to its owner's hand.",
+        "SpellDescription": "Target opponent chooses a permanent they control and returns it to its owner's hand.",
+        "Ultimate": "True",
+        "ChangeType": "Permanent.TargetedPlayerCtrl",
+        "Planeswalker": "True",
+        "Hidden": "True",
+        "Chooser": "Targeted",
+        "Mandatory": "True",
+        "SubAbility": "DBShuffleAll"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you draw a card, put a loyalty counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

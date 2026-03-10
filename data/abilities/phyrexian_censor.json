@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "NumLimitEachTurn": "1",
+        "Description": "Each player can't cast more than one non-Phyrexian spell each turn.",
+        "ValidCard": "Card.nonPhyrexian",
+        "Caster": "Player"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "Non-Phyrexian creatures enter tapped.",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.nonPhyrexian",
+        "ReplaceWith": "ETBTapped",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

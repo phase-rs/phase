@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a creature spell, put a +1/+1 counter on NICKNAME. If that spell's power is 4 or greater, draw a card. If that spell's power is 6 or greater, NICKNAME deals damage equal to NICKNAME's power to each opponent.",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 B"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<2>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveType": "Creature",
+        "Description": "As long as your devotion to black is less than 5, NICKNAME isn't a creature. (Each {B} in the mana costs of permanents you control counts towards your devotion to black.)",
+        "SVarCompare": "LT5",
+        "Affected": "Card.Self",
+        "CheckSVar": "X"
+      }
+    },
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "ValidPlayer": "Player.Opponent",
+        "Description": "Your opponents can't gain life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

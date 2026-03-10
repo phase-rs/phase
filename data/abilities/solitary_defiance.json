@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control attacks alone, seek two nonland cards, then discard a card.",
+        "Execute": "TrigSeek",
+        "Alone": "True",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you control exactly one creature, that creature has vigilance and ward {2}.",
+        "AddKeyword": "Vigilance & Ward:2",
+        "Affected": "Creature.YouCtrl",
+        "IsPresent": "Creature.YouCtrl",
+        "PresentCompare": "EQ1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

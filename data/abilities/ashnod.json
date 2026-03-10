@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a creature deals damage to you, destroy it.",
+        "ValidSource": "Creature",
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Command",
+        "ValidTarget": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, create a Treasure token for each nontoken creature that died this turn.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "IsPresent": "Artifact.YouCtrl",
+        "PresentCompare": "LE3",
+        "Description": "CARDNAME can't attack unless you control four or more artifacts."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

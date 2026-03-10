@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Faerie.Other+YouCtrl",
+        "TriggerDescription": "Whenever another Faerie you control dies, you draw a card and you lose 1 life.",
+        "Execute": "TrigDraw",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Other Faerie creatures you control get +1/+1.",
+        "Affected": "Creature.Faerie+Other+YouCtrl",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

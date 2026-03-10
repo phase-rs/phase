@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StackDescription": "X target creatures [{c:Targeted}] can't be blocked this turn.",
+          "StaticAbilities": "Unblockable",
+          "ValidTgts": "Creature",
+          "RememberObjects": "Targeted",
+          "AILogic": "Pump",
+          "TgtPrompt": "Select X target creatures",
+          "SpellDescription": "X target creatures can't be blocked this turn.",
+          "TargetMin": "X",
+          "TargetMax": "X",
+          "SubAbility": "DBAnimate"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "X target creatures [{c:Targeted}] can't be blocked this turn.",
+        "StaticAbilities": "Unblockable",
+        "ValidTgts": "Creature",
+        "RememberObjects": "Targeted",
+        "AILogic": "Pump",
+        "TgtPrompt": "Select X target creatures",
+        "SpellDescription": "X target creatures can't be blocked this turn.",
+        "TargetMin": "X",
+        "TargetMax": "X",
+        "SubAbility": "DBAnimate"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Giant creatures you control get +2/+2 and have trample.",
+        "Affected": "Creature.Giant+Other+YouCtrl",
+        "AddPower": "2",
+        "AddKeyword": "Trample",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

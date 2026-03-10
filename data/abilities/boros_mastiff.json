@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME gets lifelink until end of turn.",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Creature.attacking+Other",
+        "NoResolvingCheck": "True",
+        "PresentCompare": "GE2",
+        "Execute": "TrigBattalionPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

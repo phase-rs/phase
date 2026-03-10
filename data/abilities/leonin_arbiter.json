@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IgnoreEffectCost": "2",
+        "Description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
+        "AddKeyword": "CantSearchLibrary",
+        "Affected": "Player"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

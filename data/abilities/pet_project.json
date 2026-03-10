@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCrank",
+        "TriggerDescription": "Whenever you crank CARDNAME, put target creature card from an opponent's graveyard onto the battlefield under your control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

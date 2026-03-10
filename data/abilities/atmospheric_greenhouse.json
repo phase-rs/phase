@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this Spacecraft enters, put a +1/+1 counter on each creature you control.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCounters"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "Description": "STATION 8+ Flying, trample",
+        "AddKeyword": "Flying & Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "DamageMap": "True",
+          "RepeatSubAbility": "TyphoonDmg",
+          "SpellDescription": "CARDNAME deals damage to each opponent equal to the number of Islands that player controls.",
+          "RepeatPlayers": "Player.Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "DamageMap": "True",
+        "RepeatSubAbility": "TyphoonDmg",
+        "SpellDescription": "CARDNAME deals damage to each opponent equal to the number of Islands that player controls.",
+        "RepeatPlayers": "Player.Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't attack or block if an enchantment is on the battlefield.",
+        "IsPresent": "Enchantment"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

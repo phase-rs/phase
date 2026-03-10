@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Opponent",
+        "CombatDamage": "True",
+        "Execute": "TrigCloak",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an Assassin you control deals combat damage to an opponent, cloak the top card of that player's library.",
+        "ValidSource": "Assassin.YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Face-down creatures you control have \"{2}{U}{B}: Turn this creature face up. If you can't, exile it, then you may cast the exiled card without paying its mana cost.\"",
+        "Affected": "Creature.faceDown+YouCtrl",
+        "EffectZone": "Battlefield",
+        "AddAbility": "TurnFaceUp"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

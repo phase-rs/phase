@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ValidCard": "Card.Self",
+            "Destination": "Graveyard",
+            "ReplaceWith": "Exile"
+          }
+        }
+      ]
+    }
+  ]
+}

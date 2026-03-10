@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "KWPump",
+          "SpellDescription": "Target creature can't be blocked this turn except by artifact creatures and/or red creatures.",
+          "ValidTgts": "Creature.YouCtrl",
+          "RememberObjects": "Targeted"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "KWPump",
+        "SpellDescription": "Target creature can't be blocked this turn except by artifact creatures and/or red creatures.",
+        "ValidTgts": "Creature.YouCtrl",
+        "RememberObjects": "Targeted"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

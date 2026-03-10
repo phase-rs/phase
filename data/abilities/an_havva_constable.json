@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's toughness is equal to 1 plus the number of green creatures on the battlefield."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

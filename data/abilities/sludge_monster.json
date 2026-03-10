@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a slime counter on up to one other target creature."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, put a slime counter on up to one other target creature.",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.nonHorror+counters_GE1_SLIME",
+        "SetPower": "2",
+        "SetToughness": "2",
+        "Description": "Non-Horror creatures with slime counters on them lose all abilities and have base power and toughness 2/2.",
+        "RemoveAllAbilities": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

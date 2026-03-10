@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy all enchantments.",
+        "ValidCards": "Enchantment"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "CheckSVar": "X",
+        "EffectZone": "All",
+        "ValidSA": "Spell",
+        "Cost": "0",
+        "ValidCard": "Card.Self",
+        "ValidPlayer": "You",
+        "Description": "If you've cast another white spell this turn, you may cast this spell without paying its mana cost."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast your first Omen spell each turn, conjure a duplicate of that card onto the battlefield. It gains haste. At the beginning of the next end step, shuffle it into its owner's library.",
+        "ValidCard": "Omen",
+        "ValidActivatingPlayer": "You",
+        "ActivatorThisTurnCast": "EQ1",
+        "Execute": "TrigConjure"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

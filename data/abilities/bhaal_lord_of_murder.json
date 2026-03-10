@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DBPutCounter",
+        "TriggerDescription": "Whenever another nontoken creature you control dies, put a +1/+1 counter on target creature and goad it.",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.!token+Other+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "Affected": "Card.Self",
+        "AddKeyword": "Indestructible",
+        "Description": "As long as your life total is less than or equal to half your starting life total, CARDNAME has indestructible.",
+        "SVarCompare": "LEY"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

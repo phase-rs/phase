@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddHiddenKeyword": "All creatures able to block CARDNAME do so.",
+        "Affected": "Creature.EquippedBy",
+        "Description": "All creatures able to block equipped creature do so."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

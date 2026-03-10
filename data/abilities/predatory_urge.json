@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "DamageTgt",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has \"{T}: This creature deals damage equal to its power to target creature. That creature deals damage equal to its power to this creature.\"",
+        "AddSVar": "DamageThis & PredatoryX & PredatoryY"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

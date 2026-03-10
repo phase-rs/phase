@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or equipped creature dies, it perpetually gains \"Whenever an equipped creature you control deals combat damage to a player or planeswalker, return this card from your graveyard to the battlefield tapped.\"",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.EquippedBy,Creature.Self",
+        "Execute": "TrigAnimate",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has flying.",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

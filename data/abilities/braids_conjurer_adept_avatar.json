@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtOppEOT",
+        "DefinedPlayer": "Player",
+        "ActivationZone": "Command",
+        "ChangeType": "Land",
+        "Tapped": "True",
+        "SpellDescription": "Each player may put a land card from their hand onto the battlefield tapped.",
+        "ChangeNum": "1"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AtOppEOT",
+        "ChangeNum": "1",
+        "SpellDescription": "Each player may put a noncreature artifact card from their hand onto the battlefield.",
+        "ChangeType": "Artifact.nonCreature",
+        "DefinedPlayer": "Player",
+        "ActivationZone": "Command"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Command",
+        "ChangeNum": "1",
+        "SorcerySpeed": "True",
+        "ChangeType": "Creature",
+        "DefinedPlayer": "Player",
+        "SpellDescription": "Each player may put a creature card from their hand onto the battlefield. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

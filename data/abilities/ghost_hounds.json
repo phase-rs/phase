@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a white creature, CARDNAME gains first strike until end of turn.",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.White",
+        "ValidBlocker": "Card.Self"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidBlocker": "Creature.White",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a white creature, CARDNAME gains first strike until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

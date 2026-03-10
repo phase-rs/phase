@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "God.YouCtrl",
+        "Execute": "TrigExperience",
+        "TriggerDescription": "Whenever you attack with one or more Gods and whenever a God dies, you get an experience counter."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "God",
+        "TriggerDescription": "Whenever you attack with one or more Gods and whenever a God dies, you get an experience counter.",
+        "Secondary": "True",
+        "Execute": "TrigExperience"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, put a number of +1/+1 counters on target creature equal to the number of experience counters you have.",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

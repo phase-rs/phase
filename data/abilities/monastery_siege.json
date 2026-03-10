@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "• Khans — At the beginning of your draw step, draw an additional card, then discard a card.",
+        "Affected": "Card.Self+ChosenModeKhans",
+        "AddTrigger": "KhansTrigger"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "DragonsST",
+        "Description": "• Dragons — Spells your opponents cast that target you or a permanent you control cost {2} more to cast.",
+        "Affected": "Card.Self+ChosenModeDragons"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

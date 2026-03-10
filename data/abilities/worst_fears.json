@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ControlPlayer",
+        "params": {
+          "ValidTgts": "Player",
+          "SubAbility": "DBChange",
+          "SpellDescription": "You control target player during that player's next turn. Exile CARDNAME. (You see all cards that player could see and make all decisions for that player.)"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "SubAbility": "DBChange",
+        "SpellDescription": "You control target player during that player's next turn. Exile CARDNAME. (You see all cards that player could see and make all decisions for that player.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

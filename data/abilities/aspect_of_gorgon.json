@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "1",
+        "AddKeyword": "Deathtouch",
+        "AddToughness": "3",
+        "Description": "Enchanted creature gets +1/+3 and has deathtouch."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

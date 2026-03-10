@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Mutates",
+      "params": {
+        "TriggerDescription": "Whenever this creature mutates, each opponent loses X life and you gain X life, where X is the number of times this creature has mutated.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

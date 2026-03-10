@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Debuff",
+        "params": {
+          "Keywords": "Hexproof",
+          "SpellDescription": "Until end of turn, CARDNAME loses hexproof and gains first strike and deathtouch.",
+          "Defined": "Self",
+          "SubAbility": "DBPump"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Hexproof",
+        "SpellDescription": "Until end of turn, CARDNAME loses hexproof and gains first strike and deathtouch.",
+        "Defined": "Self",
+        "SubAbility": "DBPump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

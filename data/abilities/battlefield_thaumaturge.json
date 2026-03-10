@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, CARDNAME gains hexproof until end of turn.",
+        "TargetsValid": "Card.Self",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Relative": "True",
+        "ValidCard": "Instant.YouCtrl,Sorcery.YouCtrl",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Amount": "ReduceCost",
+        "Description": "Each instant and sorcery spell you cast costs {1} less to cast for each creature it targets."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "At the beginning of combat on your turn, target artifact creature you control gains lifelink and vigilance until end of turn.",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Crew:2",
+        "Description": "Vehicles you control have crew 2.",
+        "Affected": "Vehicle.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

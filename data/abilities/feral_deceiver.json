@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "NoReveal": "True",
+          "SpellDescription": "Look at the top card of your library."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NoReveal": "True",
+        "SpellDescription": "Look at the top card of your library."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "RememberRevealed": "True",
+          "NoPeek": "True",
+          "SubAbility": "DBPump",
+          "SpellDescription": "Reveal the top card of your library.",
+          "ActivationLimit": "1"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberRevealed": "True",
+        "NoPeek": "True",
+        "SubAbility": "DBPump",
+        "SpellDescription": "Reveal the top card of your library.",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

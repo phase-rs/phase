@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCrank",
+        "TriggerDescription": "Whenever you crank CARDNAME, create an X/X colorless Construct artifact creature token, where X is the number of artifacts you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may exile an artifact or creature card from your hand or graveyard and put a cage counter on it.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainsAbilitiesOfZones": "Exile",
+        "GainsAbilitiesOf": "Card.YouOwn+counters_GE1_CAGE",
+        "GainsAbilitiesLimitPerTurn": "1",
+        "Description": "CARDNAME has all activated abilities of all cards you own in exile with cage counters on them. You may activate each of those abilities only once each turn.",
+        "Affected": "Card.Self",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

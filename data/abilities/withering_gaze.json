@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "ValidTgts": "Opponent",
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Target opponent reveals their hand. You draw a card for each Forest and green card in it."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Opponent",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Target opponent reveals their hand. You draw a card for each Forest and green card in it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

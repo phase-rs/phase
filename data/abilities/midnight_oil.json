@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your draw step, draw an additional card and remove two hour counters from CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Phase": "Draw",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you discard a card, you lose 1 life.",
+        "Execute": "TrigLoseLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Your maximum hand size is equal to the number of hour counters on CARDNAME.",
+        "Affected": "You",
+        "SetMaxHandSize": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

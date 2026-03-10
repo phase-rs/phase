@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Warrior.Other+YourTeamCtrl",
+        "TriggerDescription": "Whenever CARDNAME attacks, if your team controls another Warrior, tap target creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

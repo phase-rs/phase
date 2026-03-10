@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Double Strike",
+        "Description": "Sliver creatures you control have double strike.",
+        "Affected": "Creature.Sliver+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

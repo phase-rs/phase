@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Equipped creature gets +1/+1 for each counter on it.",
+        "Affected": "Creature.EquippedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveType": "Planeswalker",
+        "Affected": "Permanent.EquippedBy",
+        "Description": "Equipped permanent isn't a planeswalker and is a creature in addition to its other types. (Loyalty abilities can still be activated.)",
+        "AddType": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

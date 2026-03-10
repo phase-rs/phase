@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 W U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Untap target creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CombatDamageToughness"
+      },
+      "params": {
+        "Description": "Each creature you control assigns combat damage equal to its toughness rather than its power.",
+        "ValidCard": "Creature.YouCtrl"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "Description": "Creatures you control can attack as though they didn't have defender."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

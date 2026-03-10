@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever another Elemental you control enters, it deals damage equal to its power to each opponent.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Elemental.Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "TriggerDescription": "When this creature leaves the battlefield, return the exiled card to its owner's hand.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Cost": "BeholdExile<1/Elemental>",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "As an additional cost to cast this spell, behold an Elemental and exile it. (Exile an Elemental you control or an Elemental card from your hand.)",
+        "Type": "Spell",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

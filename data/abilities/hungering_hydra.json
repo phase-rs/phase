@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME is dealt damage, put that many +1/+1 counters on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Max": "1",
+        "Description": "CARDNAME can't be blocked by more than one creature.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

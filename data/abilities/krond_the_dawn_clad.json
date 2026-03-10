@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, if it's enchanted, exile target permanent.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "IsPresent": "Card.Self+enchanted"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create a 2/2 green Wolf creature token, then attach CARDNAME to it.",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "Description": "Equipped creature gets +1/+1 and can't be blocked by more than one creature."
+      }
+    },
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Max": "1",
+        "ValidCard": "Creature.EquippedBy",
+        "Secondary": "True",
+        "Description": "Equipped creature can't be blocked by more than one creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

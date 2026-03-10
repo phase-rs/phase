@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Land",
+        "TriggerDescription": "Whenever an opponent taps a land for mana, tap all lands that player controls.",
+        "TriggerZones": "Battlefield",
+        "Activator": "Opponent",
+        "Execute": "TrigTapAll"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AttackRequirement"
+      },
+      "params": {
+        "ValidAttacker": "Creature.OppCtrl",
+        "ValidCard": "Creature.OppCtrl",
+        "Description": "If a creature an opponent controls attacks, all creatures that player controls attack if able."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

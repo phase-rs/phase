@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Permanent.token+ThisTurnEntered",
+          "TgtPrompt": "Select target token that entered this turn",
+          "TokenTapped": "True",
+          "SpellDescription": "Create a tapped token that's a copy of target token that entered this turn."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Permanent.token+ThisTurnEntered",
+        "TgtPrompt": "Select target token that entered this turn",
+        "TokenTapped": "True",
+        "SpellDescription": "Create a tapped token that's a copy of target token that entered this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

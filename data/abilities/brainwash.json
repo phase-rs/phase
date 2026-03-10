@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttackUnless"
+      },
+      "params": {
+        "Cost": "3",
+        "Description": "Enchanted creature can't attack unless its controller pays {3}.",
+        "ValidCard": "Creature.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

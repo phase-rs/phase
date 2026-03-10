@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a spell, draw two cards.",
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "Execute": "TrigDiscard",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, discard your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You may play an additional land on each of your turns.",
+        "AdjustLandPlays": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

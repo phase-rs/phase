@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "Permanent.ChosenCtrl,Player.Chosen",
+        "Description": "If a source would deal damage to the chosen player or a permanent they control, it deals double the damage instead.",
+        "ValidSource": "Card,Emblem",
+        "ReplaceWith": "DmgTwice",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

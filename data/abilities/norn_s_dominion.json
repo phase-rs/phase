@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedFrom",
+      "params": {
+        "ValidCard": "Plane.Self",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "When you planeswalk away from CARDNAME, destroy each nonland permanent without a fate counter on it, then remove all fate counters from all permanents."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever chaos ensues, you may put a fate counter on target permanent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

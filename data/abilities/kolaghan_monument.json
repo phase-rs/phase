@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo B R",
+        "params": {
+          "SpellDescription": "Add {B} or {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B} or {R}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Artifact",
+          "Creature",
+          "Dragon"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 B R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "RemoveCreatureTypes": "True",
+        "SpellDescription": "CARDNAME becomes a 4/4 black and red Dragon artifact creature with flying until end of turn.",
+        "Keywords": "Flying",
+        "OverwriteColors": "True",
+        "Colors": "Black,Red"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

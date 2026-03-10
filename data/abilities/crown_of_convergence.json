@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Library"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "LibraryPosition": "-1",
+        "SpellDescription": "Put the top card of your library on the bottom of your library.",
+        "Reveal": "False"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Play with the top card of your library revealed.",
+        "MayLookAt": "Player",
+        "AffectedZone": "Library",
+        "Affected": "Card.TopLibrary+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as the top card of your library is a creature card, creatures you control that share a color with that card get +1/+1.",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "TopCardOfLibraryIs": "Creature",
+        "Affected": "Creature.YouCtrl+SharesColorWith TopOfLibrary"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

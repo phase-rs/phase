@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Activation": "Metalcraft",
+          "PrecostDesc": "Metalcraft —",
+          "SpellDescription": "Add one mana of any color. Activate only if you control three or more artifacts."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Activation": "Metalcraft",
+        "PrecostDesc": "Metalcraft —",
+        "SpellDescription": "Add one mana of any color. Activate only if you control three or more artifacts."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

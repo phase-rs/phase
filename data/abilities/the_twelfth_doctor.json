@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCopy",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you copy a spell, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.YouCtrl+!wasCastFromYourHand",
+        "AddKeyword": "Demonstrate",
+        "CheckSVar": "X",
+        "Description": "The first spell you cast from anywhere other than your hand each turn has demonstrate. (When you cast that spell, you may copy it. If you do, choose an opponent to also copy it. A copy of a permanent spell becomes a token.)",
+        "AffectedZone": "Stack",
+        "SVarCompare": "EQ0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

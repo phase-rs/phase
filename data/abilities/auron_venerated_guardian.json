@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Creature.Self",
+        "TriggerDescription": "Shooting Star — Whenever NICKNAME attacks, put a +1/+1 counter on it. When you do, exile target creature defending player controls with power less than NICKNAME's power until NICKNAME leaves the battlefield.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

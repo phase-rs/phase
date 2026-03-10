@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self+wasCastByYou",
+            "TriggerDescription": "When CARDNAME enters, if you cast it, for each player, choose a creature with power 2 or less that player controls. Then destroy all creatures except creatures chosen this way.",
+            "Destination": "Battlefield",
+            "Execute": "TrigRepeat"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigEffect",
+            "TriggerDescription": "Whenever an opponent casts a spell during their turn, they can't attack you or planeswalkers you control this turn.",
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Card",
+            "ValidActivatingPlayer": "Player.Opponent+Active"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "CantBeCast",
+          "params": {
+            "Description": "Each opponent who attacked you or a planeswalker you control this turn can't cast spells.",
+            "Caster": "Player.Opponent+attackedYouTheirCurrentTurn,Player.Opponent+attackedYouCtrlTheirCurrentTurn_Planeswalker"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

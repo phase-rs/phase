@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 3,
+        "toughness": 2,
+        "types": [
+          "Creature",
+          "Spirit"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Colors": "Blue",
+        "Defined": "Enchanted",
+        "Keywords": "Flying",
+        "SpellDescription": "Enchanted Island becomes a 3/2 blue Spirit creature with flying until end of turn. It's still a land."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturnOwner",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When enchanted Island is put into a graveyard, you may return CARDNAME from your graveyard to your hand.",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

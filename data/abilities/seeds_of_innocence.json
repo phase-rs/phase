@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberDestroyed": "True",
+        "SubAbility": "DBRepeat",
+        "ValidCards": "Artifact",
+        "SpellDescription": "Destroy all artifacts. They can't be regenerated. The controller of each of those artifacts gains life equal to its mana value.",
+        "NoRegen": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

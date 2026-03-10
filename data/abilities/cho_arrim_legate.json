@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidPlayer": "You",
+        "EffectZone": "All",
+        "Description": "If an opponent controls a Swamp and you control a Plains, you may cast this spell without paying its mana cost.",
+        "CheckSVar": "X",
+        "CheckSecondSVar": "Y",
+        "Cost": "0",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature you control enters, put a charge counter on CARDNAME.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +1/+1 for each charge counter on CARDNAME and has vigilance.",
+        "AddKeyword": "Vigilance",
+        "Affected": "Card.EquippedBy",
+        "AddPower": "X",
+        "AddToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

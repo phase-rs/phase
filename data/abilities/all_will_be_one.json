@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterPlayerAddedAll",
+      "params": {
+        "ValidSource": "You",
+        "TriggerZones": "Battlefield",
+        "ValidObject": "Permanent.inRealZoneBattlefield,Player",
+        "TriggerDescription": "Whenever you put one or more counters on a permanent or player, CARDNAME deals that much damage to target opponent, creature an opponent controls, or planeswalker an opponent controls.",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

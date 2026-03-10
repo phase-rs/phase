@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Creature.YouCtrl",
+        "OptionalDecider": "You",
+        "Execute": "TrigCopy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack, you may create a tapped and attacking token that's a copy of target attacking legendary creature you control other than NICKNAME, except it's not legendary and it's a Synth artifact creature in addition to its other types."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When NICKNAME leaves the battlefield, exile all Synth tokens you control.",
+        "Origin": "Battlefield",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

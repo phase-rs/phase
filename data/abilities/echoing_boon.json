@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TargetsValid": "Creature.NamedCard+YouCtrl+inZoneBattlefield",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, if it targets a creature you control with the chosen name, you may copy that spell and may choose new targets for the copy.",
+        "Execute": "TrigCopySpell",
+        "ValidCard": "Instant,Sorcery",
+        "OptionalDecider": "You",
+        "TriggerZones": "Command",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidSource": "SpellAbility.OppCtrl",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature you control becomes the target of a spell or ability an opponent controls, you may draw a card.",
+        "OptionalDecider": "You",
+        "ValidTarget": "Creature.YouCtrl+inZoneBattlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

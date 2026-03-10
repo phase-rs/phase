@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 5,
+        "destination": "Battlefield"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 G U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestRandomOrder": "True",
+        "Optional": "True",
+        "ChangeValid": "Creature.nonHuman",
+        "SpellDescription": "Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+        "ForceRevealToController": "True",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Execute": "TrigMana",
+        "Static": "True",
+        "TriggerDescription": "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.",
+        "ValidCard": "Permanent.nonLand",
+        "Activator": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

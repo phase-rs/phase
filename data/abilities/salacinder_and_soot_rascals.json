@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters and whenever you cast an Elemental spell, ABILITY",
+        "Execute": "TrigCharm",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Elemental",
+        "Secondary": "True",
+        "Execute": "TrigCharm",
+        "TriggerDescription": "When NICKNAME enters and whenever you cast an Elemental spell, ABILITY",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

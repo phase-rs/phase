@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Subgame",
+        "params": {
+          "StartingLife": "5",
+          "RememberPlayers": "Win",
+          "SubAbility": "DBRepeatEachPlayer",
+          "SpellDescription": "Players play a Magic subgame, starting at 5 life and using their libraries as their decks.",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StartingLife": "5",
+        "RememberPlayers": "Win",
+        "SubAbility": "DBRepeatEachPlayer",
+        "SpellDescription": "Players play a Magic subgame, starting at 5 life and using their libraries as their decks.",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

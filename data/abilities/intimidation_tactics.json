@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "Defined": "Targeted",
+          "SpellDescription": "Target opponent reveals their hand. You choose an artifact or creature card from it. Exile that card.",
+          "ValidTgts": "Opponent",
+          "SubAbility": "ExileCard",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Targeted",
+        "SpellDescription": "Target opponent reveals their hand. You choose an artifact or creature card from it. Exile that card.",
+        "ValidTgts": "Opponent",
+        "SubAbility": "ExileCard",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

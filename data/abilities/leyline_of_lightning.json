@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card",
+        "TriggerDescription": "Whenever you cast a spell, you may pay {1}. If you do, CARDNAME deals 1 damage to target player or planeswalker.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

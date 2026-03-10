@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigRoll",
+        "TriggerDescription": "Whenever a creature dies, you may roll a six-sided die. If you roll a 1, sacrifice CARDNAME. Otherwise, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Creature",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

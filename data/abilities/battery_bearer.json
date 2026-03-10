@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Artifact.cmcGE6",
+        "ValidActivatingPlayer": "You",
+        "Execute": "DBDraw",
+        "TriggerDescription": "Whenever you cast an artifact spell with mana value 6 or greater, draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control have \"{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.\"",
+        "AddAbility": "AnyMana"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

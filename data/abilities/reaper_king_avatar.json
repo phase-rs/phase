@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "AddPower": "AffectedX",
+        "Affected": "Creature.YouCtrl",
+        "AddToughness": "AffectedX",
+        "AffectedZone": "Battlefield",
+        "Description": "Each creature you control gets +1/+1 for each of its colors."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

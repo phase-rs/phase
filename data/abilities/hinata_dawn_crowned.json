@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Description": "Spells you cast cost {1} less to cast for each target they have.",
+        "Type": "Spell",
+        "Amount": "X",
+        "Relative": "True"
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Relative": "True",
+        "Type": "Spell",
+        "Description": "Spells your opponents cast cost {1} more to cast for each target they have.",
+        "Amount": "X",
+        "Activator": "Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

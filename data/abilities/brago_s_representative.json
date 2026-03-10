@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "While voting, you get an additional vote. (The votes can be for different choices or for the same choice.)",
+        "Affected": "You",
+        "AdditionalVote": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

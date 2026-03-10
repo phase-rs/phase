@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "Choices": "DBSeekEngines,DBSeekNonLand",
+          "CharmNum": "X",
+          "AdditionalDescription": ". If you have max speed, choose both instead."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "DBSeekEngines,DBSeekNonLand",
+        "CharmNum": "X",
+        "AdditionalDescription": ". If you have max speed, choose both instead."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

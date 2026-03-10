@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "ICE",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 S"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put an ice counter on target permanent."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power and toughness are each equal to the number of snow permanents on the battlefield.",
+        "SetToughness": "X"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent.counters_GE1_ICE",
+        "AddType": "Snow",
+        "Description": "Permanents with ice counters on them are snow.",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

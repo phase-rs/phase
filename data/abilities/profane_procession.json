@@ -1,0 +1,94 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 W B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBTransform",
+            "SpellDescription": "Exile target creature. Then if there are three or more cards exiled with CARDNAME, transform it."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Any",
+            "params": {
+              "Amount": "1",
+              "SpellDescription": "Add one mana of any color."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "1",
+            "SpellDescription": "Add one mana of any color."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Exile",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 W B"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "GainControl": "True",
+            "Mandatory": "True",
+            "Hidden": "True",
+            "ChangeType": "Creature.ExiledWithSource",
+            "SpellDescription": "Put a creature card exiled with this permanent onto the battlefield under your control."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this Spacecraft enters, it deals damage equal to the number of artifacts you control to target creature an opponent controls.",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Description": "STATION 6+ Flying",
+        "Affected": "Card.Self+counters_GE6_CHARGE",
+        "AddType": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

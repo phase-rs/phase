@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "ValidCard": "Land.nonBasic",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player taps a nonbasic land for mana, CARDNAME deals 1 damage to that player.",
+        "Execute": "TrigDmg"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

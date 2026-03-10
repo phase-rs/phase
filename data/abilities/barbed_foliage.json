@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Attacked": "You",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature attacks you, it loses flanking until end of turn.",
+        "Execute": "TrigDebuff"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "Attacked": "You",
+        "TriggerDescription": "Whenever a creature without flying attacks you, CARDNAME deals 1 damage to it.",
+        "ValidCard": "Creature.withoutFlying"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

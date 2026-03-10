@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "FlipCoin",
+        "TriggerDescription": "Whenever CARDNAME attacks, flip a coin. If you win the flip, CARDNAME gets +1/+1 and gains flying until end of turn.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.AttachedBy",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever enchanted creature deals combat damage to a player, that player sacrifices a land.",
+        "Execute": "TrigSacrifice",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "EffRMoved",
+          "SpellDescription": "Until end of turn, if a nontoken creature would enter and it wasn't cast, exile it instead.",
+          "AILogic": "NonCastCreature"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "EffRMoved",
+        "SpellDescription": "Until end of turn, if a nontoken creature would enter and it wasn't cast, exile it instead.",
+        "AILogic": "NonCastCreature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

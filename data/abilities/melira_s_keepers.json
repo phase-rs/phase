@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPutCounter"
+      },
+      "params": {
+        "ValidCard": "Card.Self+inZoneBattlefield",
+        "Description": "CARDNAME can't have counters put on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

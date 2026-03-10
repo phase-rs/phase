@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Double Strike",
+        "Description": "Creatures you control with first strike have double strike.",
+        "Affected": "Creature.YouCtrl+withFirst Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

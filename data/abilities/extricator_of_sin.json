@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigToken",
+            "Origin": "Any",
+            "TriggerDescription": "When CARDNAME enters, you may sacrifice another permanent. If you do, create a 3/2 colorless Eldrazi Horror creature token.",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "ValidPlayer": "You",
+            "Delirium": "True",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Delirium — At the beginning of your upkeep, if there are four or more card types among cards in your graveyard, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "c_3_2_eldrazi_horror",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Create a 3/2 colorless Eldrazi Horror creature token.",
+            "TokenOwner": "You"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddKeyword": "Vigilance",
+            "Description": "Eldrazi you control have vigilance.",
+            "Affected": "Card.Eldrazi+YouCtrl"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

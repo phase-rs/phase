@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, you may sacrifice two Islands. If you do, untap this creature.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "OptionalDecider": "You",
+        "Execute": "TrigUntap"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttackUnless"
+      },
+      "params": {
+        "Description": "This creature can't attack unless you sacrifice two islands. (This cost is paid as attackers are declared.)",
+        "ValidCard": "Creature.Self",
+        "Cost": "Sac<2/Island>"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "Description": "This creature enters tapped.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen",
+        "ValidStepTurnToController": "You",
+        "Description": "This creature doesn't untap during your untap step."
+      }
+    }
+  ],
+  "faces": []
+}

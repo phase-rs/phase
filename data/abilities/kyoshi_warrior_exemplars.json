@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "PresentCompare": "GE8",
+        "Execute": "TrigPumpAll",
+        "IsPresent": "Land.YouCtrl",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever this creature attacks, if you control eight or more lands, creatures you control get +2/+2 until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

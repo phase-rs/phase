@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Artifact.EnchantedBy",
+        "AddSVar": "TrigDisruptionAura",
+        "AddTrigger": "TrigPhase",
+        "Description": "Enchanted artifact has \"At the beginning of your upkeep, sacrifice this artifact unless you pay its mana cost.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "TgtPrompt": "Select target attacking or blocking creature",
+          "ReplacementEffects": "RPrevent",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "Prevent all combat damage that would be dealt by target attacking or blocking creature this turn. If {R} was spent to cast this spell, CARDNAME deals damage to that creature's controller equal to the creature's power.",
+          "SubAbility": "DBDamage",
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature.attacking,Creature.blocking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target attacking or blocking creature",
+        "ReplacementEffects": "RPrevent",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "Prevent all combat damage that would be dealt by target attacking or blocking creature this turn. If {R} was spent to cast this spell, CARDNAME deals damage to that creature's controller equal to the creature's power.",
+        "SubAbility": "DBDamage",
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature.attacking,Creature.blocking"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

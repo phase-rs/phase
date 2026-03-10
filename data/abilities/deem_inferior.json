@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "The owner of target nonland permanent puts it into their library second from the top or on the bottom.",
+        "AlternativeDecider": "TargetedOwner",
+        "LibraryPosition": "1",
+        "LibraryPositionAlternative": "-1",
+        "DestinationAlternative": "Library",
+        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} into their library second from the top or on the bottom.",
+        "TgtPrompt": "Select target nonland permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Count$YouDrewThisTurn",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each card you've drawn this turn.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

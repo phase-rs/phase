@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this creature enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBToken",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Max": "1",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't be blocked by more than one creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

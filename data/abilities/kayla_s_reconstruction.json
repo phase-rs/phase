@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 7,
+        "destination": "Battlefield"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ChangeNum": "X",
+        "ChangeValid": "Creature.cmcLE3,Artifact.cmcLE3",
+        "RestRandomOrder": "True",
+        "SpellDescription": "Look at the top seven cards of your library. Put up to X artifact and/or creature cards with mana value 3 or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+        "AILogic": "PayX"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

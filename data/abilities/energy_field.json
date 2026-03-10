@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "ValidCard": "Card.!token+YouOwn+Other",
+        "TriggerDescription": "When a card is put into your graveyard from anywhere, sacrifice CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Prevent": "True",
+        "ValidTarget": "You",
+        "Description": "Prevent all damage that would be dealt to you by sources you don't control.",
+        "ActiveZones": "Battlefield",
+        "ValidSource": "Card.YouDontCtrl,Emblem.YouDontCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

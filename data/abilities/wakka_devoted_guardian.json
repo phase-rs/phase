@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, destroy target artifact that player controls and put a +1/+1 counter on NICKNAME.",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDestroy"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Blitzball Captain — At the beginning of your end step, if a counter was put on NICKNAME this turn, put a +1/+1 counter on each other creature you control.",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "Execute": "TrigPutCounterAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

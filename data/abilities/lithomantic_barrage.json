@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "AITgts": "Creature.White,Creature.Blue,Planeswalker.White,Planeswalker.Blue",
+        "SpellDescription": "CARDNAME deals 1 damage to target creature or planeswalker. It deals 5 damage instead if that target is white and/or blue.",
+        "TgtPrompt": "Select target creature or planeswalker",
+        "StackDescription": "REP target creature or planeswalker_{c:Targeted}"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self",
+        "Description": "This spell can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

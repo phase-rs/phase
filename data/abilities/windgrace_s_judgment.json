@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand+OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "OneEach",
+        "TargetsForEachPlayer": "True",
+        "TgtPrompt": "Select target nonland permanent an opponent controls to destroy.",
+        "TargetMin": "0",
+        "SpellDescription": "For any number of opponents, destroy target nonland permanent that player controls."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

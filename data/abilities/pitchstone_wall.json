@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "Whenever you discard a card, you may sacrifice CARDNAME. If you do, return the discarded card from your graveyard to your hand.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChange",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

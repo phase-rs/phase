@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME enters, return target creature card with mana value 3 or less from your graveyard to the battlefield and attach CARDNAME to it.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+2 and has vigilance.",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "Destination": "Graveyard",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Blood Chalice — Whenever another creature you control dies, CARDNAME deals 1 damage to any target."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

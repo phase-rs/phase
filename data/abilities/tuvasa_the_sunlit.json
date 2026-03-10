@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Enchantment",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast your first enchantment spell each turn, draw a card.",
+        "ActivatorThisTurnCast": "EQ1",
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +1/+1 for each enchantment you control.",
+        "AddToughness": "X",
+        "AddPower": "X",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

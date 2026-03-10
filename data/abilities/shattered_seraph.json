@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ForgetOnMoved": "Exile",
+          "ValidTgts": "Land",
+          "StaticAbilities": "Land,MayPlay",
+          "RememberObjects": "Targeted & Self",
+          "Duration": "Permanent",
+          "SpellDescription": "Target land gains \"{T}: Add {W}, {U}, or {B}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+          "ActivationZone": "Hand",
+          "ImprintCards": "Self",
+          "Triggers": "Cast"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromHand<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ForgetOnMoved": "Exile",
+        "ValidTgts": "Land",
+        "StaticAbilities": "Land,MayPlay",
+        "RememberObjects": "Targeted & Self",
+        "Duration": "Permanent",
+        "SpellDescription": "Target land gains \"{T}: Add {W}, {U}, or {B}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+        "ActivationZone": "Hand",
+        "ImprintCards": "Self",
+        "Triggers": "Cast"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, you gain 3 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

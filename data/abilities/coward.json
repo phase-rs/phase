@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Animate",
+            "power": null,
+            "toughness": null,
+            "types": [
+              "Coward"
+            ],
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "StackDescription": "REP Target creature_{c:Targeted}",
+            "SpellDescription": "Target creature can't block this turn and becomes a Coward in addition to its other types until end of turn.",
+            "HiddenKeywords": "CARDNAME can't block.",
+            "SubAbility": "DBTimeTravel",
+            "IsCurse": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 3
+            },
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME deals 3 damage to target creature and each other creature that shares a creature type with it.",
+            "StackDescription": "REP target creature_{c:Targeted}",
+            "DamageMap": "True",
+            "SubAbility": "DamageSame"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

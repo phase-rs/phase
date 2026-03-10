@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "AddKeyword": "Protection:Player.Opponent:each of your opponents",
+        "Description": "You have protection from each of your opponents. (You can't be dealt damage, enchanted, or targeted by anything controlled by your opponents.)"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Description": "This spell can't be countered.",
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

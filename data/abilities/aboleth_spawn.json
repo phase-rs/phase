@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityTriggered",
+      "params": {
+        "ValidMode": "ChangesZone,ChangesZoneAll",
+        "TriggeredOwnAbility": "True",
+        "ValidSource": "Creature.OppCtrl",
+        "ValidDestination": "Battlefield",
+        "TriggerDescription": "Probing Telepathy — Whenever a creature entering under an opponent's control causes a triggered ability of that creature to trigger, you may copy that ability. You may choose new targets for the copy.",
+        "TriggerZones": "Battlefield",
+        "Execute": "DBProbingTelepathy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

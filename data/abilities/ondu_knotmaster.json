@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "Whenever another modified creature you control dies, put two +1/+1 counters on CARDNAME.",
+            "ValidCard": "Creature.Other+modified+YouCtrl",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": 2,
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Distribute two +1/+1 counters among one or two target creatures.",
+            "TargetMax": "2",
+            "TgtPrompt": "Select one or two creatures to distribute counters to",
+            "DividedAsYouChoose": "2",
+            "TargetMin": "1"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

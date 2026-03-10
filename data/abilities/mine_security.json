@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When this creature enters, conjure a card named Flametongue Kavu into the top eight cards of your library at random. It perpetually gains \"You may pay {0} rather than pay this spell's mana cost.\""
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

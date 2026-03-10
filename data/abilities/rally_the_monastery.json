@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "Defined": "You",
+          "Choices": "DBToken,DBPump,DBDestroy"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "Choices": "DBToken,DBPump,DBDestroy"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "Description": "This spell costs {2} less to cast if you've cast another spell this turn.",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

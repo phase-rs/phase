@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a permanent is turned face up, you may draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Permanent",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

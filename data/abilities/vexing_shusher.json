@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "TargetedSource",
+          "ReplacementEffects": "AntiMagic",
+          "ForgetOnMoved": "Stack",
+          "ValidTgts": "Card",
+          "TgtZone": "Stack",
+          "TargetType": "Spell",
+          "SpellDescription": "Target spell can't be countered."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "RG"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "TargetedSource",
+        "ReplacementEffects": "AntiMagic",
+        "ForgetOnMoved": "Stack",
+        "ValidTgts": "Card",
+        "TgtZone": "Stack",
+        "TargetType": "Spell",
+        "SpellDescription": "Target spell can't be countered."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

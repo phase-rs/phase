@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exerted",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTap",
+        "TriggerDescription": "Whenever you exert a creature, tap target creature an opponent controls."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "You may exert CARDNAME as it attacks. (It won't untap during your next untap step.)",
+        "Cost": "Exert<1/CARDNAME>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

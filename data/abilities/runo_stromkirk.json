@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME enters, put up to one target creature card from your graveyard on top of your library.",
+            "Execute": "TrigChangeZone",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "Phase": "Upkeep",
+            "Execute": "TrigPeek",
+            "TriggerDescription": "At the beginning of your upkeep, look at the top card of your library. You may reveal that card. If a creature card with mana value 6 or greater is revealed this way, transform CARDNAME.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigCopy",
+            "TriggerDescription": "Whenever CARDNAME attacks, create a tapped and attacking token that's a copy of another target attacking creature. If that creature is a Kraken, Leviathan, Octopus, or Serpent, create two of those tokens instead."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

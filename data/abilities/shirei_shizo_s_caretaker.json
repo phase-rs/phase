@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "DelTrig",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.powerLE1+YouOwn",
+        "TriggerDescription": "Whenever a creature with power 1 or less is put into your graveyard from the battlefield, you may return that card to the battlefield at the beginning of the next end step if CARDNAME is still on the battlefield."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+powerLE1+YouOwn",
+        "AddSVar": "Sac"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

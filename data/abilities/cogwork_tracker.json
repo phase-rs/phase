@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Card.Self",
+        "Description": "CARDNAME attacks each combat if able."
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "ValidCreature": "Card.Self",
+        "Description": "CARDNAME attacks a player you noted for cards named Cogwork Tracker each combat if able.",
+        "ValidPlayer": "Opponent.NotedDefender"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

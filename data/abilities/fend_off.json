@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature",
+          "ReplacementEffects": "RPrevent",
+          "SpellDescription": "Prevent all combat damage that would be dealt by target creature this turn.",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature",
+        "ReplacementEffects": "RPrevent",
+        "SpellDescription": "Prevent all combat damage that would be dealt by target creature this turn.",
+        "ExileOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

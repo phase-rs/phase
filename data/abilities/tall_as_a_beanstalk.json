@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Reach",
+        "Description": "Enchanted creature gets +3/+3, has reach, and is a Giant in addition to its other types.",
+        "AddToughness": "3",
+        "AddPower": "3",
+        "AddType": "Giant",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

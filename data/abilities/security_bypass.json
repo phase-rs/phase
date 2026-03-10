@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "As long as enchanted creature is attacking alone, it can't be blocked.",
+        "IsPresent": "Creature.attacking+!EnchantedBy",
+        "PresentCompare": "EQ0",
+        "ValidAttacker": "Creature.EnchantedBy+attacking"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "DamageDone",
+        "Affected": "Creature.EnchantedBy",
+        "AddSVar": "TrigConnive",
+        "Description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, it connives.\" (Its controller draws a card, then discards a card. If they discarded a nonland card, they put a +1/+1 counter on this creature.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigPump",
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME gets +1/+1 until end of turn.",
+            "ValidCard": "Instant,Sorcery",
+            "ValidActivatingPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME gets +2/+2 until end of turn.",
+            "ValidActivatingPlayer": "You",
+            "Execute": "TrigPump",
+            "ValidCard": "Instant,Sorcery",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever an opponent casts a noncreature spell, you may draw a card unless that player pays {4}.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.nonCreature",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

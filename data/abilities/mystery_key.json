@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigSacrifice",
+        "ValidSource": "Creature.EquippedBy",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerDescription": "When equipped creature deals combat damage to a player, sacrifice CARDNAME. If you do, draw three cards.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

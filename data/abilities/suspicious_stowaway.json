@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "ValidSource": "Card.Self",
+            "CombatDamage": "True",
+            "Execute": "TrigDraw",
+            "TriggerZones": "Battlefield",
+            "ValidTarget": "Player",
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card, then discard a card."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "Description": "CARDNAME can't be blocked.",
+            "ValidAttacker": "Creature.Self"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "CombatDamage": "True",
+            "Execute": "TrigDrawN",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card.",
+            "ValidSource": "Card.Self",
+            "ValidTarget": "Player"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "ValidAttacker": "Creature.Self",
+            "Description": "CARDNAME can't be blocked."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

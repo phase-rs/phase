@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigAnimate",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, CARDNAME becomes a 5/5 Demon creature with flying and haste in addition to its other types until end of turn.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

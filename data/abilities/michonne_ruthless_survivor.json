@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME enters, create two Walker tokens."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump",
+        "SVarCompare": "GE2",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "Zombies",
+        "TriggerDescription": "Whenever NICKNAME and at least two Zombies attack, she gains indestructible until end of turn.",
+        "NoResolvingCheck": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+equipped",
+        "AddHiddenKeyword": "CARDNAME must be blocked if able.",
+        "Description": "As long as NICKNAME is equipped, she must be blocked if able."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

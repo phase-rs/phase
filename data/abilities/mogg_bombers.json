@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigSac",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When another creature enters, sacrifice CARDNAME and it deals 3 damage to target player or planeswalker.",
+        "ValidCard": "Creature.Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

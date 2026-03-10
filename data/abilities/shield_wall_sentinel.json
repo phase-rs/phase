@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a creature card with defender, reveal it, put it into your hand, then shuffle.",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "DBSearch",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever one or more face-down creatures you control deal combat damage to a player, draw a card.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.faceDown+YouCtrl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a face-down creature you control dies, return it to the battlefield face down under its owner's control if it's a permanent card, then turn it face up.",
+        "Execute": "TrigReturn",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.faceDown+YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+Other",
+        "Description": "Other creatures you control have haste.",
+        "AddKeyword": "Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

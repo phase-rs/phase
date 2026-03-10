@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.nonCreature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "Destination": "Exile",
+        "TgtPrompt": "Select target noncreature spell",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Counter target noncreature spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "ExileFromHand<1/Card.Blue+Other>",
+        "EffectZone": "All",
+        "Condition": "NotPlayerTurn",
+        "Description": "If it's not your turn, you may exile a blue card from your hand rather than pay this spell's mana cost.",
+        "ValidSA": "Spell.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

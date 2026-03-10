@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card.Self+IsSaddled",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever this creature attacks while saddled, it deals 2 damage to any target."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

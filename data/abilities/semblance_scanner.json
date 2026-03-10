@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigConjure",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever CARDNAME or equipped creature deals combat damage to a player, if it's not a token, conjure a duplicate of it into your hand.",
+        "ValidSource": "Card.Self+!token,Creature.EquippedBy+!token"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

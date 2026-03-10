@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigMoveCounter",
+        "TriggerDescription": "At the beginning of your upkeep, move a +1/+1 counter from CARDNAME onto target creature.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "IsPresent": "Card.Self+counters_EQ0_P1P1",
+        "Execute": "TrigSac",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME has no +1/+1 counters on it, sacrifice it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

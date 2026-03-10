@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "ValidTgts": "Beast",
+          "SpellDescription": "Regenerate target Beast.",
+          "TgtPrompt": "Select target Beast"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Beast",
+        "SpellDescription": "Regenerate target Beast.",
+        "TgtPrompt": "Select target Beast"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Amount": "1",
+        "ValidCard": "Beast",
+        "Description": "Beast spells you cast cost {1} less to cast.",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.EquippedBy",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, exile the top two cards of your library. You may play those cards this turn. You may play an additional land this turn.",
+        "ValidTarget": "Player",
+        "Execute": "ExileTwo"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Protection from red & Protection from green",
+        "Description": "Equipped creature gets +2/+2 and has protection from red and from green.",
+        "AddPower": "2",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

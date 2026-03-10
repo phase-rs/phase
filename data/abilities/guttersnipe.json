@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Instant,Sorcery",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, CARDNAME deals 2 damage to each opponent.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

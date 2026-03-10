@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Manifest",
+        "params": {
+          "SpellDescription": "Manifest the top card of your library."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Manifest the top card of your library."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidCard": "Permanent.YouCtrl",
+        "TriggerDescription": "Whenever a permanent you control is turned face up, you gain 1 life for each creature you control.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

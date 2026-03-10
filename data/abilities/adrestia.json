@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "CheckSVar": "X",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME attacks, if an Assassin crewed it this turn, draw a card. CARDNAME becomes an Assassin in addition to its other types until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

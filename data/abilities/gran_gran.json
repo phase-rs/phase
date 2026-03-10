@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME becomes tapped, draw a card, then discard a card.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "IsPresent": "Lesson.YouOwn",
+        "PresentZone": "Graveyard",
+        "PresentCompare": "GE3",
+        "Amount": "1",
+        "ValidCard": "Card.nonCreature",
+        "Description": "Noncreature spells you cast cost {1} less to cast as long as there are three or more Lesson cards in your graveyard.",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

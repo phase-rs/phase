@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Artifact.Creature+YouCtrl",
+          "SpellDescription": "Choose target artifact creature you control. For each creature chosen this way, create a token that's a copy of it.",
+          "TgtPrompt": "Select target artifact creature you control"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Artifact.Creature+YouCtrl",
+        "SpellDescription": "Choose target artifact creature you control. For each creature chosen this way, create a token that's a copy of it.",
+        "TgtPrompt": "Select target artifact creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

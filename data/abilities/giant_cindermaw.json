@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "ValidPlayer": "Player",
+        "Description": "Players can't gain life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

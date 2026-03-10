@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked as long as it's enchanted.",
+        "ValidAttacker": "Card.Self+enchanted"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

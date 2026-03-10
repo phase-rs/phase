@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 4,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attacking,Creature.blocking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AtEOT": "Destroy",
+        "SpellDescription": "Cast CARDNAME only before the combat damage step. Target attacking or blocking creature gets +4/+0 until end of turn. Destroy that creature at the beginning of the next end step.",
+        "ActivationFirstCombat": "True",
+        "ActivationPhases": "Upkeep->Declare Blockers",
+        "TgtPrompt": "Select target attacking or blocking creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

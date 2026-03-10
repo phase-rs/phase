@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Fear",
+        "IsPresent": "Land.YouCtrl+untapped",
+        "Affected": "Card.Self",
+        "PresentCompare": "EQ0",
+        "Description": "CARDNAME has fear as long as you control no untapped lands. (It can't be blocked except by artifact creatures and/or black creatures.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

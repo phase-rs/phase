@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When CARDNAME enters, conjure a card named Darksteel Ingot and a card named Darksteel Plate into your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetToughness": "Y",
+        "Description": "CARDNAME's power and toughness are each equal to twice the number of oil counters on it.",
+        "SetPower": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

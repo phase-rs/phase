@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures you control gain indestructible until end of turn.",
+        "ValidCards": "Creature.YouCtrl",
+        "KW": "Indestructible"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell",
+        "Cost": "0",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Card.IsCommander+YouCtrl",
+        "Description": "If you control a commander, you may cast this spell without paying its mana cost.",
+        "ValidPlayer": "You",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

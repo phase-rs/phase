@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPumpAll",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may pay {2}{R}. If you do, creatures you control get +X/+0 until end of turn, where X is the number of opponents you have.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self",
+        "Description": "During your turn, CARDNAME has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

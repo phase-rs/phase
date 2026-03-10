@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigImmediateTrig",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may exile five cards from your graveyard. When you do, return target creature card from your graveyard to the battlefield."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may exile five cards from your graveyard. When you do, return target creature card from your graveyard to the battlefield.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigImmediateTrig"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

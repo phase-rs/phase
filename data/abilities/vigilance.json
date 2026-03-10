@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has vigilance. (Attacking doesn't cause it to tap.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

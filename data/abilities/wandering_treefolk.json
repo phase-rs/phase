@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "ReduceCost": "X",
+          "Type": "Creature",
+          "PrecostDesc": "Domain —",
+          "SpellDescription": "Seek a creature card. This ability costs {1} less to activate for each basic land type among lands you control."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "7 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReduceCost": "X",
+        "Type": "Creature",
+        "PrecostDesc": "Domain —",
+        "SpellDescription": "Seek a creature card. This ability costs {1} less to activate for each basic land type among lands you control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

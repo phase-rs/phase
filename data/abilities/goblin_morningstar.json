@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigRollDice",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, ABILITY"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "1",
+        "AddKeyword": "Trample",
+        "Description": "Equipped creature gets +1/+0 and has trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

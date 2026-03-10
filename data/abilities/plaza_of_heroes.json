@@ -1,0 +1,105 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Amount": "1",
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Amount": "1",
+          "SpellDescription": "Add one mana of any color. Spend this mana only to cast a legendary spell.",
+          "RestrictValid": "Spell.Legendary"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "SpellDescription": "Add one mana of any color. Spend this mana only to cast a legendary spell.",
+        "RestrictValid": "Spell.Legendary"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ManaReflected",
+        "params": {
+          "Valid": "Permanent.Legendary+YouCtrl",
+          "ReflectProperty": "Is",
+          "SpellDescription": "Add one mana of any color among legendary permanents you control.",
+          "ColorOrType": "Color"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Permanent.Legendary+YouCtrl",
+        "ReflectProperty": "Is",
+        "SpellDescription": "Add one mana of any color among legendary permanents you control.",
+        "ColorOrType": "Color"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Legendary"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target legendary creature gains hexproof and indestructible until end of turn.",
+        "KW": "Hexproof & Indestructible"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

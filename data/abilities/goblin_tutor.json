@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "SpellDescription": "Roll a six-sided die. If you roll a 1, CARDNAME has no effect. Otherwise, search your library for the indicated card, reveal it, put it into your hand, then shuffle.",
+          "ResultSubAbilities": "2:GetGobTut,3:GetEnch,4:GetArtif,5:GetCreat,6:GetSpell"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Roll a six-sided die. If you roll a 1, CARDNAME has no effect. Otherwise, search your library for the indicated card, reveal it, put it into your hand, then shuffle.",
+        "ResultSubAbilities": "2:GetGobTut,3:GetEnch,4:GetArtif,5:GetCreat,6:GetSpell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

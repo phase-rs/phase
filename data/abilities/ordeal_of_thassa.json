@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever enchanted creature attacks, put a +1/+1 counter on it. Then if it has three or more +1/+1 counters on it, sacrifice CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidPlayer": "You",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When you sacrifice CARDNAME, draw two cards."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.AttachedBy",
+        "AddSVar": "AE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

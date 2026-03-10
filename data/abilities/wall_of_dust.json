@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidBlocker": "Card.Self",
+        "Execute": "DelTrig",
+        "TriggerDescription": "Whenever CARDNAME blocks a creature, that creature can't attack during its controller's next turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

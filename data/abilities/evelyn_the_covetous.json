@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or another Vampire you control enters, exile the top card of each player's library with a collection counter on it.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Vampire.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Exile",
+        "Affected": "Card.ExiledByYou+counters_GE1_COLLECTION",
+        "MayPlay": "True",
+        "MayPlayIgnoreColor": "True",
+        "Description": "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were any color to cast it.",
+        "MayPlayLimit": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

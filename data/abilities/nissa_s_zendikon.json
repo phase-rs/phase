@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted land dies, return that card to its owner's hand.",
+        "Execute": "TrigChangeZone",
+        "ValidCard": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "4",
+        "AddType": "Creature & Elemental",
+        "Description": "Enchanted land is a 4/4 Elemental creature with reach and haste. It's still a land.",
+        "SetPower": "4",
+        "Affected": "Land.AttachedBy",
+        "AddKeyword": "Reach & Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

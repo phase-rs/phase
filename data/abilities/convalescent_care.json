@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "LifeAmount": "LE5",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "LifeTotal": "You",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "At the beginning of your upkeep, if you have 5 life or less, you gain 3 life and draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

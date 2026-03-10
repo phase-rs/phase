@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "TgtPrompt": "Select target Zombie",
+          "ValidTgts": "Zombie",
+          "SpellDescription": "Regenerate target Zombie."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target Zombie",
+        "ValidTgts": "Zombie",
+        "SpellDescription": "Regenerate target Zombie."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a creature an opponent controls dies, you may pay {1}{B}. If you do, return that card to the battlefield under your control. If it's a creature, it's a Zombie in addition to its other creature types.",
+        "ValidCard": "Creature.OppCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

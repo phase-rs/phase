@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever CARDNAME attack or block, sacrifice a permanent unless you discard a card."
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "Whenever CARDNAME attack or block, sacrifice a permanent unless you discard a card.",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

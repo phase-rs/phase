@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterRemoved",
+      "params": {
+        "Execute": "TrigPut",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, you may put a +1/+1 counter on target creature.",
+        "CounterType": "TIME",
+        "TriggerZones": "Exile",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "Y",
+        "CharacteristicDefining": "True",
+        "SetToughness": "Y",
+        "Description": "CARDNAME's power and toughness are each equal to the number of +1/+1 counters on creatures you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

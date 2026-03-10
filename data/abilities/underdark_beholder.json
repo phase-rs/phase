@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDig",
+        "TriggerDescription": "Whenever CARDNAME attacks, reveal cards from the top of your library until you reveal an instant, sorcery, or enchantment card with converted mana cost less than the number of eyestalk counters on CARDNAME. You may cast it without paying its mana cost. Shuffle your library.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "Counters",
+        "ValidTarget": "Card.Self",
+        "Description": "If damage would be dealt to CARDNAME, instead remove that many eyestalk counters from it. If you can't, sacrifice it.",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw three cards.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a spell, you lose 1 life.",
+        "ValidCard": "Card",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigLoseLife",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "Execute": "TrigSac",
+        "TriggerDescription": "When CARDNAME becomes the target of a spell or ability, sacrifice it.",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

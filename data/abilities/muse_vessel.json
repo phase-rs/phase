@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "Chooser": "Targeted",
+        "IsCurse": "True",
+        "Mandatory": "True",
+        "ChangeNum": "1",
+        "Hidden": "True",
+        "ChangeType": "Card",
+        "SpellDescription": "Target player exiles a card from their hand. Activate only as a sorcery."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Card.ExiledWithSource"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect",
+        "ChoiceZone": "Exile",
+        "Amount": "1",
+        "ChoiceTitle": "Choose a card exiled with Muse Vessel",
+        "AILogic": "Never",
+        "SpellDescription": "Choose a card exiled with CARDNAME. You may play that card this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

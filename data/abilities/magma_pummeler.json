@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "If damage would be dealt to CARDNAME while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it. When one or more counters are removed from CARDNAME this way, it deals that much damage to any target.",
+        "PreventionEffect": "True",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Card.Self+counters_GE1_P1P1",
+        "ReplaceWith": "Counters",
+        "AlwaysReplace": "True"
+      }
+    }
+  ],
+  "faces": []
+}

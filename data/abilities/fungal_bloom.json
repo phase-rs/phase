@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "SPORE",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Fungus"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a spore counter on target Fungus.",
+        "TgtPrompt": "Select target Fungus"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

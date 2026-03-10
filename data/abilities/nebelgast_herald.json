@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigTap",
+        "ValidCard": "Card.Self,Spirit.YouCtrl+Other",
+        "TriggerDescription": "Whenever CARDNAME or another Spirit you control enters, tap target creature an opponent controls.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

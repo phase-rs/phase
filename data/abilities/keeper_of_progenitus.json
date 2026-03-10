@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Static": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player taps a Mountain, Forest, or Plains for mana, that player adds one mana of any type that land produced.",
+        "ValidCard": "Mountain,Forest,Plains",
+        "Execute": "TrigMana"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

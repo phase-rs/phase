@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Draft",
+        "params": {
+          "Spellbook": "Cultivator's Caravan,Bomat Bazaar Barge,Raiders' Karve,Demolition Stomper,Futurist Sentinel,Mechtitan Core,Reckoner Bankbuster,High-Speed Hoverbike,Mindlink Mech,Silent Submersible,Mobile Garrison,Untethered Express,Ovalchase Dragster,Daredevil Dragster,Thundering Chariot",
+          "SpellDescription": "Draft a card from CARDNAME's spellbook."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<2/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Spellbook": "Cultivator's Caravan,Bomat Bazaar Barge,Raiders' Karve,Demolition Stomper,Futurist Sentinel,Mechtitan Core,Reckoner Bankbuster,High-Speed Hoverbike,Mindlink Mech,Silent Submersible,Mobile Garrison,Untethered Express,Ovalchase Dragster,Daredevil Dragster,Thundering Chariot",
+        "SpellDescription": "Draft a card from CARDNAME's spellbook."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "TapPowerValue"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidSA": "Activated.Crew+Vehicle",
+        "Description": "CARDNAME crews Vehicles as though its power were 2 greater.",
+        "Value": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.AttachedBy",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted land dies, return that card to its owner's hand.",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Affected": "Land.AttachedBy",
+        "SetPower": "2",
+        "SetColor": "Blue",
+        "AddType": "Creature & Elemental",
+        "SetToughness": "2",
+        "Description": "Enchanted land is a 2/2 blue Elemental creature with flying. It's still a land."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

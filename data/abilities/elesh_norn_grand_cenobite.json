@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Other creatures you control get +2/+2.",
+        "Affected": "Creature.YouCtrl+Other"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures your opponents control get -2/-2.",
+        "Affected": "Creature.OppCtrl",
+        "AddPower": "-2",
+        "AddToughness": "-2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

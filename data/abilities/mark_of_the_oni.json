@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "IsPresent": "Demon.YouCtrl",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "At the beginning of the end step, if you control no Demons, sacrifice CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You control enchanted creature.",
+        "GainControl": "You",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

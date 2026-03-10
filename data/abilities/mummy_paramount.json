@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Zombie you control enters, CARDNAME gets +1/+1 until end of turn.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "ValidCard": "Zombie.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

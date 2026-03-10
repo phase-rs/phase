@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Creature.Self",
+        "Description": "CARDNAME can't block and can't be blocked."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Affected": "Card.Self",
+        "EffectZone": "Graveyard",
+        "AffectedZone": "Graveyard",
+        "Description": "You may cast CARDNAME from you graveyard as long as you control a black or green permanent.",
+        "IsPresent": "Permanent.Black+YouCtrl,Permanent.Green+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

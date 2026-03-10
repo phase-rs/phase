@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self,Creature.EquippedBy",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME or equipped creature deals combat damage to a player, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

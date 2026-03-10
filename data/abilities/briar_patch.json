@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Attacked": "You",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever a creature attacks you, it gets -1/-0 until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

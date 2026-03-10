@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "DoubleCounters",
+        "Description": "If one or more counters would be put on a creature, Spacecraft, or Planet you control, twice that many of each of those kinds of counters are put on it instead.",
+        "ValidCard": "Creature.YouCtrl+inZoneBattlefield,Spacecraft.YouCtrl+inZoneBattlefield,Planet.YouCtrl+inZoneBattlefield"
+      }
+    }
+  ],
+  "faces": []
+}

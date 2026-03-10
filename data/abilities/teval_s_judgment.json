@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Origin": "Graveyard",
+        "TriggerDescription": "Whenever one or more cards leave your graveyard, ABILITY",
+        "ValidCards": "Card.YouOwn",
+        "Destination": "Any",
+        "Execute": "TrigCharm",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

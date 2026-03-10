@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Assassin.Legendary+YouCtrl",
+        "TriggerDescription": "At the beginning of combat on your turn, if you control a legendary Assassin, CARDNAME gets +1/+0 until end of turn and can't be blocked this turn.",
+        "Execute": "TrigPump",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

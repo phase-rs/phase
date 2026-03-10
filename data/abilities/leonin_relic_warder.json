@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may exile target artifact or enchantment.",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "TrigReturn",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, return the exiled card to the battlefield under its owner's control.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

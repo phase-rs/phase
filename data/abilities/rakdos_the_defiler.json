@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigSac",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, sacrifice half the non-Demon permanents you control, rounded up."
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, that player sacrifices half the non-Demon permanents they control, rounded up.",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigSac2",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

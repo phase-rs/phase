@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME enters, exile cards from the top of your library until you exile two nonland cards with mana value 4 or less. You may cast one of those two cards without paying its mana cost. Put one of them into your hand. Then put the other cards exiled this way on the bottom of your library in a random order.",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "Execute": "TrigDig"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Draw",
+            "count": 2
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidTgts": "Player",
+            "SubAbility": "DBChangeZone",
+            "SpellDescription": "Target player draws two cards."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "CARDNAME is all colors.",
+            "Affected": "Card.Self",
+            "CharacteristicDefining": "True",
+            "SetColor": "All"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DmgMinus1",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Creature.YouCtrl",
+        "Description": "If a source would deal damage to a creature you control, it deals that much damage minus 1 to that creature instead."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "AddKeyword": "Protection:ChosenName",
+        "Description": "You have protection from the chosen card name. (You can't be targeted, dealt damage, or enchanted by anything with that name.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

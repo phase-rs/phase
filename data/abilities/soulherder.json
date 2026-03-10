@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exiled",
+      "params": {
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature is exiled from the battlefield, put a +1/+1 counter on CARDNAME.",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, you may exile another target creature you control, then return it to the battlefield under its owner's control.",
+        "Execute": "ConjurerExile",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TuktukDestroy",
+        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may destroy target artifact. If that artifact is put into a graveyard this way, CARDNAME deals damage to that artifact's controller equal to the number of Allies you control.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

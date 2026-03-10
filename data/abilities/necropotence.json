@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayLife<1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Necropotence",
+        "AILifeThreshold": "1",
+        "ExileFaceDown": "True",
+        "RememberChanged": "True",
+        "Defined": "TopOfLibrary",
+        "SpellDescription": "Exile the top card of your library face down. Put that card into your hand at the beginning of your next end step.",
+        "SubAbility": "DelayedReturn"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "Execute": "TrigChange",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerDescription": "Whenever you discard a card, exile that card from your graveyard.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "Phase": "Draw",
+        "Skip": "True",
+        "ValidPlayer": "You",
+        "ActiveZones": "Battlefield",
+        "Description": "Skip your draw step."
+      }
+    }
+  ],
+  "faces": []
+}

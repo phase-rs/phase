@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a player casts a spell, you may put a +1/+1 counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may move any number of +1/+1 counters from CARDNAME onto other creatures.",
+        "Phase": "Upkeep",
+        "Execute": "TrigMoveCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

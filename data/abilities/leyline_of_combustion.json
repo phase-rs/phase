@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTargetOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you and/or at least one permanent you control becomes the target of a spell or ability an opponent controls, CARDNAME deals 2 damage to that player.",
+        "Execute": "TrigDmg",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "ValidTarget": "You,Permanent.YouCtrl+inZoneBattlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

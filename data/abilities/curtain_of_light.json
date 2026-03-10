@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "BecomesBlocked",
+        "params": {
+          "TgtPrompt": "Select target unblocked attacking creature",
+          "SubAbility": "Draw",
+          "ActivationPhases": "Declare Blockers->EndCombat",
+          "ActivationAfterBlockers": "True",
+          "ValidTgts": "Creature.attacking+unblocked",
+          "SpellDescription": "Target unblocked attacking creature becomes blocked. (This spell works on creatures that can't be blocked.) Draw a card."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target unblocked attacking creature",
+        "SubAbility": "Draw",
+        "ActivationPhases": "Declare Blockers->EndCombat",
+        "ActivationAfterBlockers": "True",
+        "ValidTgts": "Creature.attacking+unblocked",
+        "SpellDescription": "Target unblocked attacking creature becomes blocked. (This spell works on creatures that can't be blocked.) Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

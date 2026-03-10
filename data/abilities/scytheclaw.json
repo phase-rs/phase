@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigLoseLifeOpp",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, that player loses half their life, rounded up.",
+        "ValidSource": "Creature.EquippedBy",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

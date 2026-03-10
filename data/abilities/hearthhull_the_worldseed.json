@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE2_CHARGE",
+        "AddAbility": "HearthhullDraw",
+        "Description": "STATION 2+ {1}, {T}, Sacrifice a land: Draw two cards. You may play an additional land this turn."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "AddKeyword": "Flying & Vigilance & Haste",
+        "AddType": "Creature",
+        "AddTrigger": "SacrificeTrig",
+        "Description": "STATION 8+ Flying, vigilance, haste,,,Whenever you sacrifice a land, each opponent loses 2 life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

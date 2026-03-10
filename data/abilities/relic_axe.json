@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAttach",
+        "TriggerDescription": "When CARDNAME enters, attach it to target creature you control.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +1/+1. If it's a Warrior, it gets +2/+1 instead.",
+        "AddPower": "X",
+        "AddToughness": "1",
+        "Affected": "Card.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

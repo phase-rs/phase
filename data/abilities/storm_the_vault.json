@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDoneOnce",
+          "params": {
+            "ValidSource": "Creature.YouCtrl",
+            "Execute": "DBToken",
+            "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player this turn, create a Treasure token.",
+            "TriggerZones": "Battlefield",
+            "ValidTarget": "Player",
+            "CombatDamage": "True"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "End of Turn",
+            "ValidPlayer": "You",
+            "PresentCompare": "GE5",
+            "TriggerDescription": "At the beginning of your end step, if you control five or more artifacts, transform CARDNAME.",
+            "IsPresent": "Artifact.YouCtrl",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Any",
+            "params": {
+              "Amount": "1",
+              "SpellDescription": "Add one mana of any color."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "1",
+            "SpellDescription": "Add one mana of any color."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "U",
+            "params": {
+              "Amount": "X",
+              "SpellDescription": "Add {U} for each artifact you control."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "X",
+            "SpellDescription": "Add {U} for each artifact you control."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

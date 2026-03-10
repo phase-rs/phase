@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "SubAbility": "DBEffect",
+          "SpellDescription": "The next time a source of your choice would deal damage this turn, that damage is dealt to that source's controller instead.",
+          "Choices": "Card,Emblem"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "The next time a source of your choice would deal damage this turn, that damage is dealt to that source's controller instead.",
+        "Choices": "Card,Emblem"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

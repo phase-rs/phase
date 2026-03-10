@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.",
+        "AddKeyword": "MustBeBlockedBy Creature.Eldrazi",
+        "AddPower": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

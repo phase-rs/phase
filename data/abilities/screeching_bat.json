@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of your upkeep, you may pay {2}{B}{B}. If you do, transform CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "Phase": "Upkeep",
+            "ValidPlayer": "You",
+            "OptionalDecider": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Phase": "Upkeep",
+            "ValidPlayer": "You",
+            "OptionalDecider": "You",
+            "TriggerDescription": "At the beginning of your upkeep, you may pay {2}{B}{B}. If you do, transform CARDNAME.",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

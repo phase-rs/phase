@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ReplacementEffects": "CountersAdded",
+          "SpellDescription": "Until end of turn, if you would put one or more +1/+1 counters on a creature you control, put that many plus one +1/+1 counters on it instead."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ReplacementEffects": "CountersAdded",
+        "SpellDescription": "Until end of turn, if you would put one or more +1/+1 counters on a creature you control, put that many plus one +1/+1 counters on it instead."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "CheckSVar": "X",
+        "SVarCompare": "LT1",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if you haven't cast a spell from your hand this turn, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

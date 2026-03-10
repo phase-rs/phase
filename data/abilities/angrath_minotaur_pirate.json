@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 1 damage to target opponent or planeswalker and each creature that player or that planeswalker's controller controls.",
+        "DamageMap": "True",
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target opponent or planeswalker",
+        "SubAbility": "DmgAll"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.Pirate+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target Pirate card in your graveyard",
+        "SpellDescription": "Return target Pirate card from your graveyard to the battlefield.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -11
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "RememberAllObjects": "True",
+        "Planeswalker": "True",
+        "ValidDescription": "all creatures targeted opponent controls",
+        "SubAbility": "DBDealDamage",
+        "SpellDescription": "Destroy all creatures target opponent controls. CARDNAME deals damage to that player equal to their total power.",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

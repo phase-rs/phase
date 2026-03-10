@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may have Ally creatures you control gain first strike until end of turn.",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

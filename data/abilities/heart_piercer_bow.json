@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature attacks, CARDNAME deals 1 damage to target creature defending player controls.",
+        "Execute": "TrigDamage",
+        "ValidCard": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AE",
+        "Affected": "Creature.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

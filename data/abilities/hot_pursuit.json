@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSuspect",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, suspect target creature an opponent controls. As long as CARDNAME remains on the battlefield, that creature is also goaded."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "SVarCompare": "GE2",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "At the beginning of combat on your turn, if two or more players have lost the game, gain control of all goaded and/or suspected creatures until end of turn. Untap them. They gain haste until end of turn.",
+        "CheckSVar": "PlayerCountHasLost$Amount",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

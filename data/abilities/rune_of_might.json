@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Description": "As long as enchanted permanent is a creature, it gets +1/+1 and has trample.",
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "RuneMightST",
+        "Affected": "Equipment.EnchantedBy",
+        "Description": "As long as enchanted permanent is an Equipment, it has \"Equipped creature gets +1/+1 and has trample.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

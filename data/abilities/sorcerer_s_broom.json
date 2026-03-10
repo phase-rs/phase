@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Permanent.Other",
+        "TriggerDescription": "Whenever you sacrifice another permanent, you may pay {3}. If you do, create a token that's a copy of CARDNAME.",
+        "Execute": "TrigCopy",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

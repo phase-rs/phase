@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl+withFlying",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control with flying enters, put a +1/+1 counter on target creature you control without flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other",
+        "AddToughness": "-1",
+        "AddPower": "-1",
+        "Description": "Other creatures get -1/-1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

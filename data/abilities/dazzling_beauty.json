@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "BecomesBlocked",
+        "params": {
+          "SpellDescription": "Target unblocked attacking creature becomes blocked. (This spell works on creatures that can't be blocked.) Draw a card at the beginning of the next turn's upkeep.",
+          "SubAbility": "DelTrigSlowtrip",
+          "ActivationPhases": "Declare Blockers",
+          "ValidTgts": "Creature.attacking+unblocked",
+          "TgtPrompt": "Select target unblocked attacking creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target unblocked attacking creature becomes blocked. (This spell works on creatures that can't be blocked.) Draw a card at the beginning of the next turn's upkeep.",
+        "SubAbility": "DelTrigSlowtrip",
+        "ActivationPhases": "Declare Blockers",
+        "ValidTgts": "Creature.attacking+unblocked",
+        "TgtPrompt": "Select target unblocked attacking creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

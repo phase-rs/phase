@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate NICKNAME."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate NICKNAME."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Card.namedKorlash, Heir to Blackblade>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "2",
+        "SpellDescription": "Search your library for up to two Swamp cards, put them onto the battlefield tapped, then shuffle.",
+        "Tapped": "True",
+        "ChangeType": "Swamp",
+        "CostDesc": "Grandeur — Discard another card named Korlash, Heir to Blackblade:"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the number of Swamps you control.",
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "SetToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

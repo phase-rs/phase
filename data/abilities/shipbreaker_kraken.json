@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "6 U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Monstrosity": "4"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "BecomeMonstrous",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTap",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When this creature becomes monstrous, tap up to four target creatures. Those creatures don't untap during their controllers' untap steps for as long as you control this creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

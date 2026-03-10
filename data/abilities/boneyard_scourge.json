@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "Origin": "Battlefield",
+        "ValidCard": "Dragon.YouCtrl",
+        "TriggerZones": "Graveyard",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a Dragon you control dies while CARDNAME is in your graveyard, you may pay {1}{B}. If you do, return CARDNAME from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

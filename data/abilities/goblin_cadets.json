@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "ChangeControl",
+        "ValidBlocked": "Creature",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, target opponent gains control of it. (This removes CARDNAME from combat.)",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, target opponent gains control of it. (This removes CARDNAME from combat.)",
+        "ValidBlocked": "Card.Self",
+        "ValidCard": "Creature",
+        "Execute": "ChangeControl",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

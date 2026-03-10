@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_1_1_a_construct_defender",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 colorless Construct artifact creature token with defender.",
+        "Planeswalker": "True",
+        "TokenOwner": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "UnlessCost": "Sac<1/Artifact>",
+        "TgtPrompt": "Select target artifact or creature",
+        "Planeswalker": "True",
+        "UnlessPayer": "You",
+        "UnlessSwitched": "True",
+        "SpellDescription": "You may sacrifice an artifact. If you do, destroy target artifact or creature."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "TgtPrompt": "Select target artifact card in a graveyard or artifact on the battlefield",
+          "ValidTgts": "Artifact",
+          "TgtZone": "Battlefield,Graveyard",
+          "SpellDescription": "Choose target artifact card in a graveyard or artifact on the battlefield. Create three tokens that are copies of it.",
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "NumCopies": "3"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact card in a graveyard or artifact on the battlefield",
+        "ValidTgts": "Artifact",
+        "TgtZone": "Battlefield,Graveyard",
+        "SpellDescription": "Choose target artifact card in a graveyard or artifact on the battlefield. Create three tokens that are copies of it.",
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "NumCopies": "3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

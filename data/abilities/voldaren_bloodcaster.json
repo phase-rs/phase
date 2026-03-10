@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Battlefield",
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self,Creature.Other+!token+YouCtrl",
+            "Execute": "TrigToken",
+            "TriggerDescription": "Whenever CARDNAME or another nontoken creature you control dies, create a Blood token. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.\")"
+          }
+        },
+        {
+          "mode": "TokenCreated",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "IsPresent": "Blood.token+YouCtrl",
+            "ValidToken": "Blood",
+            "TriggerDescription": "Whenever you create a Blood token, if you control five or more Blood tokens, transform CARDNAME.",
+            "ValidPlayer": "You",
+            "PresentCompare": "GE5",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of combat on your turn, up to one target Blood token you control becomes a 2/2 black Bat creature with flying and haste in addition to its other types.",
+            "Phase": "BeginCombat",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigAnimate"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

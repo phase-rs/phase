@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Stack",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.Instant,Card.Sorcery"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile target instant or sorcery spell that targets you. (The spell has no effect.)",
+        "TargetValidTargeting": "You",
+        "TgtPrompt": "Choose target instant or sorcery spell that targets you"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "ValidSA": "Spell",
+          "ValidZone": "Exile",
+          "SpellDescription": "You may cast a spell from among cards exiled with CARDNAME without paying its mana cost.",
+          "Amount": "1",
+          "WithoutManaCost": "True",
+          "Valid": "Card.ExiledWithSource",
+          "Controller": "You",
+          "Optional": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidSA": "Spell",
+        "ValidZone": "Exile",
+        "SpellDescription": "You may cast a spell from among cards exiled with CARDNAME without paying its mana cost.",
+        "Amount": "1",
+        "WithoutManaCost": "True",
+        "Valid": "Card.ExiledWithSource",
+        "Controller": "You",
+        "Optional": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

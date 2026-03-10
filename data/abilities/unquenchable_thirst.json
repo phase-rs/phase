@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigTap",
+        "TriggerDescription": "When CARDNAME enters, if you control a Desert or there is a Desert card in your graveyard, tap enchanted creature.",
+        "Desert": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield",
+        "ValidStepTurnToController": "You",
+        "ValidCard": "Creature.AttachedBy",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step."
+      }
+    }
+  ],
+  "faces": []
+}

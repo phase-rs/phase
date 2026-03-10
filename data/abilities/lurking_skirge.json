@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "IsPresent": "Card.Self+Enchantment",
+        "ValidCard": "Creature.OppOwn",
+        "TriggerDescription": "When a creature is put into an opponent's graveyard from the battlefield, if CARDNAME is an enchantment, CARDNAME becomes a 3/2 Phyrexian Imp creature with flying.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigAnimate"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

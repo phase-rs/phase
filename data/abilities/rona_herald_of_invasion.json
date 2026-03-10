@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Draw a card, then discard a card.",
+            "SubAbility": "DBDiscard"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "Defined": "Self",
+              "SpellDescription": "Transform NICKNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
+              "AILogic": "Always",
+              "Mode": "Transform",
+              "SorcerySpeed": "True"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "5 BP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Defined": "Self",
+            "SpellDescription": "Transform NICKNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",
+            "AILogic": "Always",
+            "Mode": "Transform",
+            "SorcerySpeed": "True"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "TriggerDescription": "Whenever you cast a legendary spell, untap CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "ValidActivatingPlayer": "You",
+            "ValidCard": "Card.Legendary",
+            "Execute": "TrigUntap"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "TriggerDescription": "Whenever a source deals damage to CARDNAME, that source's controller exiles a card from their hand at random. If it's a land card, you may put it onto the battlefield under your control. Otherwise, you may cast it without paying its mana cost.",
+            "Execute": "TrigExile",
+            "ValidTarget": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commander creatures you own have \"{2}, Sacrifice an artifact: Put a +1/+1 counter on this creature and draw a card.\"",
+        "AddAbility": "SacArt",
+        "Affected": "Creature.IsCommander+YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

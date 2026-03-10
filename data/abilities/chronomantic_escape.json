@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Duration": "UntilYourNextTurn",
+          "StaticAbilities": "STCantAttack",
+          "SubAbility": "DBChange",
+          "SpellDescription": "Until your next turn, creatures can't attack you. Exile CARDNAME with three time counters on it."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "UntilYourNextTurn",
+        "StaticAbilities": "STCantAttack",
+        "SubAbility": "DBChange",
+        "SpellDescription": "Until your next turn, creatures can't attack you. Exile CARDNAME with three time counters on it."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

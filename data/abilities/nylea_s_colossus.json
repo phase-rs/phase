@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Constellation Whenever CARDNAME or another enchantment you control enters, double target creature's power and toughness until end of turn.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

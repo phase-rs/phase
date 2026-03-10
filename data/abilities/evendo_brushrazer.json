@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R R",
+        "params": {
+          "SpellDescription": "Add {R}{R}."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}{R}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Permanent.!token",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigExile",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you sacrifice a nontoken permanent, exile the top card of your library."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "CheckSVar": "X",
+        "Description": "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with this creature.",
+        "Affected": "Card.ExiledWithSource",
+        "AffectedZone": "Exile",
+        "Condition": "PlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

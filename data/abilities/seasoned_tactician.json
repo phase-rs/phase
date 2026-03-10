@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "SubAbility": "DBEffect",
+          "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage.",
+          "Choices": "Card,Emblem",
+          "AILogic": "NeedsPrevention"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromTop<4/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect",
+        "SpellDescription": "The next time a source of your choice would deal damage to you this turn, prevent that damage.",
+        "Choices": "Card,Emblem",
+        "AILogic": "NeedsPrevention"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

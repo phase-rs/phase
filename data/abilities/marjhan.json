@@ -1,0 +1,95 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "U U"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationPhases": "Upkeep",
+        "PlayerTurn": "True",
+        "SpellDescription": "Untap this creature. Activate only during your upkeep."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.attacking+withoutFlying"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target attacking creature without flying",
+        "SpellDescription": "This creature gets -1/-0 until end of turn and deals 1 damage to target attacking creature without flying.",
+        "SubAbility": "DBPump"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When you control no Islands, sacrifice this creature.",
+        "PresentCompare": "EQ0",
+        "IsPresent": "Island.YouCtrl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "UnlessDefender": "controlsIsland",
+        "Description": "This creature can't attack unless defending player controls an Island.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self",
+        "ValidStepTurnToController": "You",
+        "Description": "This creature doesn't untap during your untap step."
+      }
+    }
+  ],
+  "faces": []
+}

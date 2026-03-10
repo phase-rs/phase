@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "IsPresent": "Card.Other+attacking",
+            "ValidAttacker": "Card.Self+attacking",
+            "Description": "CARDNAME can't be blocked as long as it's attacking alone.",
+            "PresentCompare": "EQ0"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.EnchantedBy",
+            "AddPower": "3",
+            "Description": "Enchanted creature gets +3/+0. It can't be blocked as long as it's attacking alone."
+          }
+        },
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "IsPresent": "Card.attacking",
+            "PresentCompare": "EQ1",
+            "ValidAttacker": "Creature.EnchantedBy+attacking",
+            "Secondary": "True",
+            "Description": "It can't be blocked as long as it's attacking alone."
+          }
+        }
+      ],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "Exile",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ValidCard": "Card.Self",
+            "Destination": "Graveyard"
+          }
+        }
+      ]
+    }
+  ]
+}

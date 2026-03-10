@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill three cards, then return a land card from your graveyard to the battlefield tapped.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMill",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, mill three cards, then return a land card from your graveyard to the battlefield tapped."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "Type": "Ability",
+        "ValidCard": "Land.YouCtrl",
+        "Description": "Activated abilities of lands you control cost {1} less to activate.",
+        "AffectedZone": "Battlefield"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Land+YouCtrl",
+        "Description": "Land creatures you control get +1/+1.",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

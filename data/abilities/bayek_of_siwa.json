@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Historic+Other+YouCtrl",
+        "AddKeyword": "Double Strike",
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, other historic creatures you control have double strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

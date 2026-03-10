@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "Valid": "Creature",
+          "ValidTgts": "Opponent",
+          "RevealedDestination": "Graveyard",
+          "FoundDestination": "Battlefield",
+          "IsCurse": "True",
+          "GainControl": "True",
+          "ValidDescription": "creature",
+          "SpellDescription": "Target opponent reveals cards from the top of their library until they reveal a creature card. That player puts all noncreature cards revealed this way into their graveyard, then you put the creature card onto the battlefield under your control."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Creature",
+        "ValidTgts": "Opponent",
+        "RevealedDestination": "Graveyard",
+        "FoundDestination": "Battlefield",
+        "IsCurse": "True",
+        "GainControl": "True",
+        "ValidDescription": "creature",
+        "SpellDescription": "Target opponent reveals cards from the top of their library until they reveal a creature card. That player puts all noncreature cards revealed this way into their graveyard, then you put the creature card onto the battlefield under your control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

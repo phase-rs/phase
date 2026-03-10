@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidCard": "Card.White",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player casts a white spell, you may pay {1}. If you do, gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

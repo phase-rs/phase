@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Execute": "TrigSpellweaverExile",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile two target sorcery cards from a single graveyard.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever a player casts a card, if it has the same name as one of the cards exiled with CARDNAME, you may copy the other. If you do, you may cast the copy without paying its mana cost.",
+        "ValidCard": "Card.sharesNameWith Imprinted+!token",
+        "Execute": "TrigSpellweaverCopy",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Execute": "DBCleanImprinted"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

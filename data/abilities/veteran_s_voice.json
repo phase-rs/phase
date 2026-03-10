@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 2,
+        "toughness": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.!EnchantedBy"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<1/Creature.EnchantedBy/Enchanted Creature>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature other than the creature tapped this way gets +2/+1 until end of turn. Activate only if enchanted creature is untapped.",
+        "CostDesc": "Tap enchanted creature:",
+        "TgtPrompt": "Select target creature other than the creature tapped"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

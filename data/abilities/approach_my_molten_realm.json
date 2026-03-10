@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SetInMotion",
+      "params": {
+        "TriggerZones": "Command",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you set this scheme in motion, until your next turn, if a source would deal damage, it deals double that damage instead.",
+        "Execute": "MoltenEffect"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

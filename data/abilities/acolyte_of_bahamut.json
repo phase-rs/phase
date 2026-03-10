@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commander creatures you own have \"The first Dragon spell you cast each turn costs {2} less to cast.\"",
+        "AddStaticAbility": "DragonReduce",
+        "Affected": "Creature.IsCommander+YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

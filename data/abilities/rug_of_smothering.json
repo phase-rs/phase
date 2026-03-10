@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidActivatingPlayer": "Player",
+        "TriggerDescription": "Whenever a player casts a spell, they lose 1 life for each spell they've cast this turn.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

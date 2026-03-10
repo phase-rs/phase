@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "SpellCastTrig",
+          "SpellDescription": "The next time you cast an instant or sorcery spell from your hand this turn, put that card into your hand instead of into your graveyard as it resolves."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 UR UR"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "SpellCastTrig",
+        "SpellDescription": "The next time you cast an instant or sorcery spell from your hand this turn, put that card into your hand instead of into your graveyard as it resolves."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Stack",
+        "Description": "Instant and sorcery spells you control have lifelink.",
+        "AddKeyword": "Lifelink",
+        "Affected": "Instant.YouCtrl,Sorcery.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "PeekAmount": "5",
+          "RememberPeeked": "True",
+          "SubAbility": "DBRepeat",
+          "SpellDescription": "Look at the top five cards of your library.",
+          "NoReveal": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "PeekAmount": "5",
+        "RememberPeeked": "True",
+        "SubAbility": "DBRepeat",
+        "SpellDescription": "Look at the top five cards of your library.",
+        "NoReveal": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Creature.Other",
+        "Execute": "TrigDamage",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another creature enters, CARDNAME deals 1 damage to that creature's controller."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "ValidPlayer": "Player",
+        "Description": "Players can't gain life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

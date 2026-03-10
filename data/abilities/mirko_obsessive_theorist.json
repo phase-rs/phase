@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Surveil",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you surveil, put a +1/+1 counter on CARDNAME.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, you may return target creature card with power less than NICKNAME's from your graveyard to the battlefield with a finality counter on it. (If it would die, exile it instead.)",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

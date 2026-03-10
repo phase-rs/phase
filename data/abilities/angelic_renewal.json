@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReturn",
+        "ValidCard": "Creature.YouOwn",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever a creature is put into your graveyard from the battlefield, you may sacrifice CARDNAME. If you do, return that card to the battlefield.",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

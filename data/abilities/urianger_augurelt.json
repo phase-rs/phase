@@ -1,0 +1,72 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileFaceDown": "True",
+        "PrecostDesc": "Draw Arcanum",
+        "DestinationZone2": "Library",
+        "WithMayLook": "True",
+        "SpellDescription": "Look at the top card of your library. You may exile it face down.",
+        "LibraryPosition2": "0",
+        "Optional": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Until end of turn, you may play cards exiled with CARDNAME. Spells you cast this way cost {2} less to cast.",
+          "PrecostDesc": "Play Arcanum",
+          "StaticAbilities": "SMayPlay,SReduceCost"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Until end of turn, you may play cards exiled with CARDNAME. Spells you cast this way cost {2} less to cast.",
+        "PrecostDesc": "Play Arcanum",
+        "StaticAbilities": "SMayPlay,SReduceCost"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Origin": "Exile",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, you gain 2 life."
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.wasCastFromExile",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, you gain 2 life.",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Never",
+          "Stackable": "False",
+          "SpellDescription": "Until end of turn, if you tap a land for mana, it produces one mana of a color of your choice instead of any other type and amount.",
+          "ReplacementEffects": "HarvestReplacement"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Never",
+        "Stackable": "False",
+        "SpellDescription": "Until end of turn, if you tap a land for mana, it produces one mana of a color of your choice instead of any other type and amount.",
+        "ReplacementEffects": "HarvestReplacement"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.YouCtrl+!token+Other",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever another nontoken creature you control enters, put a +1/+1 counter on target creature.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

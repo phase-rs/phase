@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "You can't cast creature spells.",
+        "ValidCard": "Creature",
+        "Caster": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

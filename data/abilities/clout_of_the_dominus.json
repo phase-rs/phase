@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Shroud",
+        "Description": "As long as enchanted creature is blue, it gets +1/+1 and has shroud. (It can't be the target of spells or abilities.)",
+        "Affected": "Creature.EnchantedBy+Blue",
+        "AddToughness": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Description": "As long as enchanted creature is red, it gets +1/+1 and has haste.",
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy+Red",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

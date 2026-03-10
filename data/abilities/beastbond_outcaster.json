@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "IsPresent": "Creature.YouCtrl+powerGE4",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, if you control a creature with power 4 or greater, draw a card.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

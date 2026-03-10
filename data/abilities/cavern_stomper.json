@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "Unblockable",
+          "SpellDescription": "CARDNAME can't be blocked by creatures with power 2 or less this turn.",
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Self"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "Unblockable",
+        "SpellDescription": "CARDNAME can't be blocked by creatures with power 2 or less this turn.",
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Self"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigScry",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, scry 2. (Look at the top two cards of your library, then put any number of them on the bottom and the rest on top in any order.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

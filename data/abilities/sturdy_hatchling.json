@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "GU"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME gains shroud until end of turn.",
+        "KW": "Shroud"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigRemoveCounter",
+        "TriggerDescription": "Whenever you cast a green spell, remove a -1/-1 counter from CARDNAME.",
+        "ValidCard": "Card.Green"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigRemoveCounter",
+        "TriggerDescription": "Whenever you cast a blue spell, remove a -1/-1 counter from CARDNAME.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.Blue",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

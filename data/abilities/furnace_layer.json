@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "ValidCard": "Plane.Self",
+        "Execute": "FurnaceDiscard",
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, select target player at random. That player discards a card. If that player discards a land card this way, they lose 3 life."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Command",
+        "ValidPlayer": "You",
+        "Execute": "FurnaceDiscard",
+        "Secondary": "True",
+        "Phase": "Upkeep",
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, select target player at random. That player discards a card. If that player discards a land card this way, they lose 3 life."
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever chaos ensues, you may destroy target nonland permanent.",
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

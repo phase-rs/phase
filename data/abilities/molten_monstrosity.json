@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {X} less to cast, where X is the greatest power among creatures you control.",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Amount": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

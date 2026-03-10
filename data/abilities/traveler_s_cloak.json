@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has landwalk of the chosen type. (It can't be blocked as long as defending player controls a land of that type.)",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Landwalk:ChosenType"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Cleric",
+        "Description": "Cleric spells you cast cost {W}{B} less to cast. This effect reduces only the amount of colored mana you pay. (For example, if you cast a Cleric spell with mana cost {1}{W}, it costs {1} to cast.)",
+        "Activator": "You",
+        "Amount": "1",
+        "Color": "W B",
+        "Type": "Spell",
+        "IgnoreGeneric": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SpellDescription": "Add {R}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "Optional": "True",
+          "SpellDescription": "You may play the exiled card without paying its mana cost if an opponent was dealt 7 or more damage this turn.",
+          "Controller": "You",
+          "ConditionCheckSVar": "X",
+          "ConditionSVarCompare": "GE7",
+          "WithoutManaCost": "True",
+          "Defined": "ExiledWith",
+          "Amount": "All"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "SpellDescription": "You may play the exiled card without paying its mana cost if an opponent was dealt 7 or more damage this turn.",
+        "Controller": "You",
+        "ConditionCheckSVar": "X",
+        "ConditionSVarCompare": "GE7",
+        "WithoutManaCost": "True",
+        "Defined": "ExiledWith",
+        "Amount": "All"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped.",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

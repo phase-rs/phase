@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.hasXCost"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "UnlessCost": "3",
+        "SpellDescription": "Counter target spell with {X} in its mana cost unless its controller pays {3}.",
+        "TgtPrompt": "Select target spell with X in its mana cost"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigBattalionEffect",
+        "ValidCard": "Card.Self",
+        "PresentCompare": "GE2",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, creatures you control gain indestructible until end of turn.",
+        "NoResolvingCheck": "True",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature.attacking+Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

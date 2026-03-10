@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each creature you control.",
+        "Execute": "TrigPutCounters",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
+        "AddType": "Artifact",
+        "Description": "Creatures you control with +1/+1 counters on them are artifacts in addition to their other types."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.nonArtifact",
+        "AffectedZone": "Battlefield",
+        "AddPower": "-1",
+        "AddToughness": "-1",
+        "Description": "Nonartifact creatures get -1/-1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

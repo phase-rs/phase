@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonEnchantment"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChooseRandom",
+        "TgtPrompt": "Select target nonenchantment permanent",
+        "IsCurse": "True",
+        "TargetMin": "3",
+        "TargetMax": "3",
+        "StackDescription": "None",
+        "SpellDescription": "Choose three target nonenchantment permanents. Destroy one of them at random."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile all creatures.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME leaves the battlefield, put all cards exiled with it into their owners' graveyards.",
+        "Execute": "TrigReturn",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerController": "TriggeredPlayer",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of each player's upkeep, that player chooses a card exiled with CARDNAME at random and puts it onto the battlefield.",
+        "ValidPlayer": "Player",
+        "Execute": "TrigGetCreature",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

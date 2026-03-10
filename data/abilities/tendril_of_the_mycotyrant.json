@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 7,
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.nonCreature+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAnimate",
+        "SpellDescription": "Put seven +1/+1 counters on target noncreature land you control. It becomes a 0/0 Fungus creature with haste. It's still a land.",
+        "TgtPrompt": "Select target noncreature land you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

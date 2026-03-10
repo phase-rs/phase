@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When this enchantment enters, create a 2/1 green Spider creature token with reach, then you gain 1 life for each Spider you control."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Spiders you control get +1/+1 and can't be blocked by creatures with defender.",
+        "Affected": "Spider.YouCtrl",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Spiders you control get +1/+1 and can't be blocked by creatures with defender.",
+        "Secondary": "True",
+        "ValidAttacker": "Spider.YouCtrl",
+        "ValidBlocker": "Creature.withDefender"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

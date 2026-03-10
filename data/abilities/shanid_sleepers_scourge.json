@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.Legendary+YouCtrl",
+        "TriggerDescription": "Whenever you play a legendary land or cast a legendary spell, you draw a card and you lose 1 life.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Card.Legendary+YouCtrl",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you play a legendary land or cast a legendary spell, you draw a card and you lose 1 life.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Legendary+Other+YouCtrl",
+        "AddKeyword": "Menace",
+        "Description": "Other legendary creatures you control have menace."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

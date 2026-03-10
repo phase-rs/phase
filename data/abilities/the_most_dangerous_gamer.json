@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, open an Attraction.",
+        "Origin": "Any",
+        "Execute": "DBOpen",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DBOpen",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, open an Attraction.",
+        "ValidCard": "Card.Self",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever you open an Attraction, put a +1/+1 counter on CARDNAME.",
+        "Origin": "AttractionDeck",
+        "Execute": "DBCounter",
+        "Destination": "Battlefield",
+        "ValidCard": "Attraction.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ClaimPrize",
+      "params": {
+        "ValidCard": "Attraction.YouCtrl",
+        "TriggerDescription": "Whenever you claim the prize of an Attraction, destroy target permanent.",
+        "Execute": "DBDestroy",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

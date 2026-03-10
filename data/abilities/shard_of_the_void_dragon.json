@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Sphere of the Void Dragon — Whenever CARDNAME attacks, each opponent sacrifices a nonland permanent.",
+        "Execute": "DBSacrifice",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigCounter",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard,Exile",
+        "TriggerDescription": "Matter Absorption — Whenever an artifact is put into a graveyard from the battlefield or is put into exile from the battlefield, put two +1/+1 counters on CARDNAME.",
+        "ValidCard": "Artifact"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

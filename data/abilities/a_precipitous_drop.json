@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigVenture",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, venture into the dungeon.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "-X",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets -2/-2. It gets -5/-5 instead as long as you've completed a dungeon.",
+        "AddPower": "-X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

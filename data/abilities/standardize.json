@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Type": "Creature",
+          "SpellDescription": "Choose a creature type other than Wall. Each creature becomes that type until end of turn.",
+          "Defined": "You",
+          "InvalidTypes": "Wall",
+          "SubAbility": "DBAnimateAll"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Type": "Creature",
+        "SpellDescription": "Choose a creature type other than Wall. Each creature becomes that type until end of turn.",
+        "Defined": "You",
+        "InvalidTypes": "Wall",
+        "SubAbility": "DBAnimateAll"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

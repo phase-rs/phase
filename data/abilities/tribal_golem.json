@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "IsPresent": "Beast.YouCtrl",
+        "Description": "CARDNAME has trample as long as you control a Beast,",
+        "AddKeyword": "Trample"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Haste",
+        "IsPresent": "Goblin.YouCtrl",
+        "Description": "CARDNAME has haste as long as you control a Goblin,"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "First Strike",
+        "IsPresent": "Soldier.YouCtrl",
+        "Description": "CARDNAME has first strike as long as you control a Soldier,"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "IsPresent": "Wizard.YouCtrl",
+        "Description": "CARDNAME has flying as long as you control a Wizard,",
+        "AddKeyword": "Flying"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Regen",
+        "IsPresent": "Zombie.YouCtrl",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has \"{B}: Regenerate CARDNAME\" as long as you control a Zombie."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

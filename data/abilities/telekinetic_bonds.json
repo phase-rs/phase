@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigTapOrUntap",
+        "TriggerDescription": "Whenever a player discards a card, you may pay {1}{U}. If you do, you may tap or untap target permanent.",
+        "OptionalDecider": "You",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

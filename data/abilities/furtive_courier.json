@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME attacks, draw a card, then discard a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self+attacking",
+        "CheckSVar": "SaccedThisTurn",
+        "Description": "CARDNAME can't be blocked as long as you've sacrificed an artifact this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

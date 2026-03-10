@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Play with the top card of your library revealed.",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "Player",
+        "AffectedZone": "Library"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Goblin.TopLibrary+YouCtrl+nonLand",
+        "Description": "You may cast Goblin spells from the top of your library.",
+        "AffectedZone": "Library",
+        "MayPlay": "True"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "TopCardOfLibraryIs": "Goblin",
+        "EffectZone": "Battlefield",
+        "GainsAbilitiesOfZones": "Library",
+        "Description": "As long as the top card of your library is a Goblin card, CARDNAME has all activated abilities of that card.",
+        "Affected": "Card.Self",
+        "GainsAbilitiesOf": "Goblin.TopLibrary+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

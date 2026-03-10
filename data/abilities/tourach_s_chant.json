@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigUpkeep",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {B}.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Forest",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever a player puts a Forest onto the battlefield, CARDNAME deals 3 damage to that player unless they put a -1/-1 counter on a creature they control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

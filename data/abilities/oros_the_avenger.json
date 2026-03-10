@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may pay {2}{W}. If you do, NICKNAME deals 3 damage to each nonwhite creature.",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigDamageAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

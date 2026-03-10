@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "IsPresent": "Permanent.EnchantedBy+greatestPower",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, if enchanted permanent is a creature with the greatest power among creatures on the battlefield, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "2",
+        "Description": "As long as enchanted permanent is a creature, it gets +2/+1.",
+        "Affected": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

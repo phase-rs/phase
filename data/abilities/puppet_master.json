@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "ValidCard": "Card.EnchantedBy",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted creature dies, return that card to its owner's hand. If that card is returned to its owner's hand this way, you may pay {U}{U}{U}. If you do, return CARDNAME to its owner's hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.AttachedBy",
+        "AddSVar": "Sac"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

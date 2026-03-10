@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.Eldrazi+cmcGE7",
+        "TriggerDescription": "Whenever you cast an Eldrazi creature spell with mana value 7 or greater, draw two cards.",
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigSeek",
+        "TriggerDescription": "Whenever you cast a creature spell, seek a land card and put it onto the battlefield tapped.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.IsCommander+YouCtrl",
+        "Description": "Aegis of the Emperor — Commanders you control have protection from everything.",
+        "AddKeyword": "Protection from everything"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

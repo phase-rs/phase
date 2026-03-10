@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Player",
+        "AddKeyword": "UntapAdjust:Creature:1",
+        "Description": "Players can't untap more than one creature during their untap steps."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

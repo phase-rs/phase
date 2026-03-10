@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "-1",
+        "AddPower": "-1",
+        "Description": "Enchanted creature gets -1/-1 and its activated abilities can't be activated."
+      }
+    },
+    {
+      "mode": "CantBeActivated",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Creature.EnchantedBy",
+        "Description": "Enchanted creature's activated abilities can't be activated."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

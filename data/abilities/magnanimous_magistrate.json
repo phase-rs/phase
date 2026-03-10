@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.Other+YouCtrl+!token+cmcGE1",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "Whenever another nontoken creature you control dies, if its mana value was 1 or greater, you may remove that many reprieve counters from CARDNAME. If you do, return that card to the battlefield under its owner's control.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

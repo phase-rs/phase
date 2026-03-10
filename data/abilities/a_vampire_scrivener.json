@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you gain life during your turn, put a +1/+1 counter on CARDNAME.",
+        "PlayerTurn": "True",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "LifeLost",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You",
+        "PlayerTurn": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you lose life during your turn, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

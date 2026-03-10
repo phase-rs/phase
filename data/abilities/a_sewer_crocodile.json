@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "CARDNAME can't be blocked this turn. This ability costs {3} less to activate if there are five or more mana values among cards in your graveyard.",
+          "ReduceCost": "X",
+          "StaticAbilities": "Unblockable",
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Self",
+          "StackDescription": "CARDNAME can't be blocked this turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME can't be blocked this turn. This ability costs {3} less to activate if there are five or more mana values among cards in your graveyard.",
+        "ReduceCost": "X",
+        "StaticAbilities": "Unblockable",
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Self",
+        "StackDescription": "CARDNAME can't be blocked this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

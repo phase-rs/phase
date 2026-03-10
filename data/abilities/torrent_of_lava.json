@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals X damage to each creature without flying.",
+        "StackDescription": "SpellDescription",
+        "ValidCards": "Creature.withoutFlying"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "TOPrevent",
+        "EffectZone": "Stack",
+        "Description": "As long as CARDNAME is on the stack, each creature has \"{T}: Prevent the next 1 damage that would be dealt to this creature by CARDNAME this turn.\"",
+        "Affected": "Creature",
+        "AddSVar": "DBPrevent & DBReplace"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

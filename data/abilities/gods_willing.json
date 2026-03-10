@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "SubAbility": "DBScry",
+          "TgtPrompt": "Select target creature you control",
+          "Gains": "Choice",
+          "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn. Scry 1.",
+          "Choices": "AnyColor",
+          "ValidTgts": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBScry",
+        "TgtPrompt": "Select target creature you control",
+        "Gains": "Choice",
+        "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn. Scry 1.",
+        "Choices": "AnyColor",
+        "ValidTgts": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

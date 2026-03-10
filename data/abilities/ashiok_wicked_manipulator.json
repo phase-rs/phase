@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 2,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at the top two cards of your library. Exile one of them and put the other into your hand.",
+        "DestinationZone2": "Exile",
+        "ChangeNum": "1",
+        "Planeswalker": "True",
+        "NoReveal": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_1_1_nightmare_exile_counter",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TokenAmount": "2",
+        "TokenOwner": "You",
+        "SpellDescription": "Create two 1/1 black Nightmare creature tokens with \"At the beginning of combat on your turn, if a card was put into exile this turn, put a +1/+1 counter on this creature.\""
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player exiles the top X cards of their library, where X is the total mana value of cards you own in exile.",
+        "Ultimate": "True",
+        "ChangeNum": "All",
+        "ValidTgts": "Player",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "PayLife"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "ExileTop",
+        "ValidPlayer": "You",
+        "Amount": "LEY",
+        "Description": "If you would pay life while your library has at least that many cards in it, exile that many cards from the top of your library instead."
+      }
+    }
+  ],
+  "faces": []
+}

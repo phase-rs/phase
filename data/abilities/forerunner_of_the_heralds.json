@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may search your library for a Merfolk card, reveal it, then shuffle and put that card on top.",
+        "Execute": "TrigChange",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another Merfolk you control enters, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Permanent.Merfolk+YouCtrl+Other",
+        "Execute": "TrigCounters"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

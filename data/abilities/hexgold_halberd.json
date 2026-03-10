@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, equipped creature has first strike and trample.",
+        "AddKeyword": "First Strike & Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

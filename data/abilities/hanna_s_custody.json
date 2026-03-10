@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All artifacts have shroud. (They can't be the targets of spells or abilities.)",
+        "AddKeyword": "Shroud",
+        "Affected": "Artifact"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

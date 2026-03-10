@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Burn",
+          "SubAbility": "DBDmg",
+          "ConditionPresent": "Creature.YouCtrl+powerGE4",
+          "StaticAbilities": "STCantPrevent",
+          "SpellDescription": "Ferocious — If you control a creature with power 4 or greater, damage can't be prevented this turn. CARDNAME deals 2 damage to any target."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Burn",
+        "SubAbility": "DBDmg",
+        "ConditionPresent": "Creature.YouCtrl+powerGE4",
+        "StaticAbilities": "STCantPrevent",
+        "SpellDescription": "Ferocious — If you control a creature with power 4 or greater, damage can't be prevented this turn. CARDNAME deals 2 damage to any target."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

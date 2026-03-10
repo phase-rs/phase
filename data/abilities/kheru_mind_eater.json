@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, that player exiles a card from their hand face down.",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Origin": "Exile",
+        "ValidCard": "Card.IsRemembered",
+        "Execute": "DBForget",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "DBCleanup"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "You",
+        "Description": "You may look at cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
+        "MayPlay": "True",
+        "Affected": "Card.IsRemembered",
+        "AffectedZone": "Exile"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

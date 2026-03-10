@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "IsPresent": "Creature.YouOwn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Self",
+        "PresentZone": "Graveyard",
+        "TriggerDescription": "Whenever CARDNAME attacks, if there are three or more creature cards in your graveyard, draw a card.",
+        "PresentCompare": "GE3"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Surveil",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "1",
+        "SpellDescription": "Surveil 1. (Look at the top card of your library. You may put it into your graveyard.)"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigAnimate",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if you haven't cast a spell from your hand this turn and CARDNAME isn't a creature, it becomes a 3/3 Spirit creature with flying in addition to its other types.",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "PresentCompare": "EQ0",
+        "IsPresent": "Creature.Self",
+        "SVarCompare": "EQ0",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

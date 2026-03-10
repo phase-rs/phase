@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Execute": "TrigChangeZone",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, return target instant or sorcery card from your graveyard to your hand.",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "R",
+            "params": {
+              "SpellDescription": "Add {R}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {R}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "Destination": "Battlefield",
+            "ReplaceWith": "DBTap"
+          }
+        }
+      ]
+    }
+  ]
+}

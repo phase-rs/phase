@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 5,
+        "destination": ""
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "ForceRevealToController": "True",
+        "SpellDescription": "Look at the top five cards of your library. You may reveal a creature or land card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+        "ChangeValidDesc": "creature or land",
+        "RestRandomOrder": "True",
+        "ChangeNum": "1",
+        "ChangeValid": "Card.Creature,Card.Land"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Cost": "0",
+        "CheckSVar": "X",
+        "EffectZone": "All",
+        "ValidPlayer": "You",
+        "SVarCompare": "EQ0",
+        "ValidSA": "Spell",
+        "Description": "If this spell is the first spell you've cast this game, you may cast it without paying its mana cost.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

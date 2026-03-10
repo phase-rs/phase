@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you cast a noncreature spell, create an X/X blue Shark creature token with flying, where X is that spell's mana value.",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card.nonCreature",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken2",
+        "TriggerDescription": "When you cycle CARDNAME, create an X/X blue Shark creature token with flying."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

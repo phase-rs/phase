@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Creature.NotedNameNobleBanneret+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddKeyword": "Lifelink",
+        "Affected": "Card.Self,Creature.NotedNameNobleBanneret+YouCtrl",
+        "Description": "As long as you control one or more creatures with a name you noted for cards named Noble Banneret, CARDNAME and those creatures get +1/+1 and have lifelink."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

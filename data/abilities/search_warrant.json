@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "SpellDescription": "Target player reveals their hand. You gain life equal to the number of cards in that player's hand.",
+          "SubAbility": "DBGainLife",
+          "ValidTgts": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player reveals their hand. You gain life equal to the number of cards in that player's hand.",
+        "SubAbility": "DBGainLife",
+        "ValidTgts": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

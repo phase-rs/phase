@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if you've cast two or more spells this turn, draw a card.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "SVarCompare": "GE2",
+        "Destination": "Battlefield",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

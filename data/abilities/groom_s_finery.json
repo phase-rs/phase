@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+0. It gets an additional +0/+2 and has deathtouch as long as an Equipment named Bride's Gown is attached to a creature you control.",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Deathtouch",
+        "Secondary": "True",
+        "AddToughness": "2",
+        "IsPresent": "Equipment.AttachedTo Creature.YouCtrl+namedBride's Gown"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

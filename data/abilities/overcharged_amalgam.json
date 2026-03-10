@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exploited",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCounter",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "When CARDNAME exploits a creature, counter target spell, activated ability, or triggered ability.",
+        "ValidCard": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

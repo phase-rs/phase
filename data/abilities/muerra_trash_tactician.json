@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your first main phase, add {R} or {G} for each Raccoon you control.",
+        "Execute": "TrigGetMana",
+        "Phase": "Main1",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ManaExpend",
+      "params": {
+        "Player": "You",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever you expend 4, you gain 3 life. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
+        "Amount": "4",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ManaExpend",
+      "params": {
+        "Player": "You",
+        "Amount": "8",
+        "Execute": "TrigExile",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you expend 8, exile the top two cards of your library. Until the end of your next turn, you may play those cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

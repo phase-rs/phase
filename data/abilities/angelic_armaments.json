@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Angel",
+        "AddKeyword": "Flying",
+        "AddColor": "White",
+        "AddPower": "2",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +2/+2, has flying and is a white Angel in addition to its other colors and types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigFight",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control enters, CARDNAME fights up to one target creature you don't control.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Dragon.YouCtrl",
+        "Execute": "TrigTap",
+        "TriggerDescription": "Whenever a Dragon you control attacks, tap target nonland permanent an opponent controls. It doesn't untap during its controller's next untap step.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

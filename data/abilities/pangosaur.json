@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Execute": "TrigBounce",
+        "TriggerDescription": "Whenever a player plays a land, return CARDNAME to its owner's hand.",
+        "ValidCard": "Land",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

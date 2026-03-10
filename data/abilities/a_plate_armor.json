@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "3",
+        "AddPower": "3",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Ward:1",
+        "Description": "Equipped creature gets +3/+3 and has ward {1}."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Tap",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent.Other+nonLand"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Mana",
+                "cost": "SubCounter<1/NET>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Tap another target nonland permanent.",
+            "TgtPrompt": "Select another target nonland permanent",
+            "SubAbility": "DBEffect"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "3 U"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Draw a card for each artifact you control,",
+            "SubAbility": "DBChangeZone"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

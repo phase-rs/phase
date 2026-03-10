@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Untaps",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever a permanent you control becomes untapped, CARDNAME gets +1/+1 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Permanent.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

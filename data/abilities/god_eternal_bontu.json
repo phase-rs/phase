@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigSac",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, sacrifice any number of other permanents, then draw that many cards.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard,Exile",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TriReturn",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME dies or is put into exile from the battlefield, you may put it into its owner's library third from the top."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When this Spacecraft enters, return target creature or enchantment card from your graveyard to the battlefield.",
+        "Execute": "TrigChangeZone",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+counters_GE10_CHARGE",
+        "AddType": "Creature",
+        "AddKeyword": "Flying",
+        "Description": "STATION 10+ Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

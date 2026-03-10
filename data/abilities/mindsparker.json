@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Player.Opponent",
+        "TriggerDescription": "Whenever an opponent casts a white or blue instant or sorcery spell, CARDNAME deals 2 damage to that player.",
+        "Execute": "TrigDamage",
+        "ValidCard": "Instant.Blue,Instant.White,Sorcery.Blue,Sorcery.White",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

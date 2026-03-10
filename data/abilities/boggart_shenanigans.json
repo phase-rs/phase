@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigDamage",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Goblin.Other+YouCtrl",
+        "TriggerDescription": "Whenever another Goblin you control is put into a graveyard from the battlefield, you may have CARDNAME deal 1 damage to target player or planeswalker."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

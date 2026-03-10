@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "NotPlayerTurn",
+        "AddKeyword": "Hexproof",
+        "Description": "As long as it's not your turn, tapped creatures you control have hexproof.",
+        "Affected": "Creature.tapped+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

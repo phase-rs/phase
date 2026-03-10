@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Remembered",
+          "StaticAbilities": "MayPlay",
+          "Triggers": "TrigSpellCast",
+          "SpellDescription": "Until end of turn, you may cast a creature spell from among cards exiled with CARDNAME without paying its mana cost."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Remembered",
+        "StaticAbilities": "MayPlay",
+        "Triggers": "TrigSpellCast",
+        "SpellDescription": "Until end of turn, you may cast a creature spell from among cards exiled with CARDNAME without paying its mana cost."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile all creature cards with mana value 3 or less from your graveyard until CARDNAME leaves the battlefield.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

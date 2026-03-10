@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.White",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever you cast a white spell or a Plains you control enters, you gain 1 life."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever you cast a white spell or a Plains you control enters, you gain 1 life.",
+        "Secondary": "True",
+        "ValidCard": "Plains.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

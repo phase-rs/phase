@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Creature & Citizen",
+        "RemoveCreatureTypes": "True",
+        "Description": "Enchanted creature loses all abilities and is a green and white Citizen creature with base power and toughness 1/1 named Legitimate Businessperson. (It loses all other colors, card types, creature types, and names.)",
+        "Affected": "Creature.EnchantedBy",
+        "RemoveAllAbilities": "True",
+        "SetToughness": "1",
+        "SetColor": "Green & White",
+        "RemoveCardTypes": "True",
+        "SetName": "Legitimate Businessperson",
+        "SetPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "SVarCompare": "GTX",
+        "TriggerDescription": "At the beginning of each combat, if you have more life than an opponent, CARDNAME gains double strike until end of turn.",
+        "CheckSVar": "Y",
+        "Execute": "TrigPump",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

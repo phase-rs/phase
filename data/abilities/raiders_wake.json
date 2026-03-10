@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "ValidCard": "Card.OppOwn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "Whenever an opponent discards a card, that player loses 2 life."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDiscard",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "TriggerDescription": "Raid — At the beginning of your end step, if you attacked this turn, target opponent discards a card.",
+        "CheckSVar": "RaidTest"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

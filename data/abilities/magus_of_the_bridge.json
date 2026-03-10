@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+!token",
+        "TriggerDescription": "Whenever a nontoken creature is put into your graveyard from the battlefield, create a 2/2 black Zombie creature token.",
+        "Destination": "Graveyard",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.OppOwn",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When a creature is put into an opponent's graveyard from the battlefield, exile CARDNAME.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

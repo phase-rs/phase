@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Opponent",
+        "TriggerDescription": "At the beginning of each opponent's upkeep, CARDNAME deals X damage to that player, where X is the number of cards in their hand minus 4.",
+        "Phase": "Upkeep",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

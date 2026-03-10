@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "2",
+        "SubAbility": "DBLoseLife",
+        "DestinationZone2": "Graveyard",
+        "SpellDescription": "Look at the top four cards of your library. Put two of them into your hand and the rest into your graveyard. You lose 2 life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

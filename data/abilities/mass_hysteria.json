@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Affected": "Creature",
+        "Description": "All creatures have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

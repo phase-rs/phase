@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "ValidSA": "Spell",
+          "Amount": "All",
+          "SpellDescription": "You may cast any number of spells from among cards exiled with CARDNAME with total mana value X or less without paying their mana costs.",
+          "Optional": "True",
+          "Defined": "ExiledWith",
+          "AILogic": "WithTotalCMC",
+          "WithTotalCMC": "X",
+          "WithoutManaCost": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidSA": "Spell",
+        "Amount": "All",
+        "SpellDescription": "You may cast any number of spells from among cards exiled with CARDNAME with total mana value X or less without paying their mana costs.",
+        "Optional": "True",
+        "Defined": "ExiledWith",
+        "AILogic": "WithTotalCMC",
+        "WithTotalCMC": "X",
+        "WithoutManaCost": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigEffect",
+        "TriggerDescription": "Whenever a player casts an instant or sorcery spell, exile it instead of putting it into a graveyard as it resolves.",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

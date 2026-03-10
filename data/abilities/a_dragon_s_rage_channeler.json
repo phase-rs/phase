@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "TriggerZones": "Battlefield",
+        "Execute": "DBSurveil",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a noncreature spell, surveil 1."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Condition": "Delirium",
+        "Description": "Delirium — As long as there are four or more card types in your graveyard, CARDNAME gets +2/+0, has flying, and attacks each combat if able.",
+        "AddKeyword": "Flying",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "MustAttack",
+      "params": {
+        "Condition": "Delirium",
+        "ValidCreature": "Card.Self",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

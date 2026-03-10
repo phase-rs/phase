@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has indestructible.",
+        "AddKeyword": "Indestructible"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Indestructible",
+        "Affected": "Equipment.namedSword of Kaldra,Equipment.namedShield of Kaldra,Equipment.namedHelm of Kaldra",
+        "Description": "Equipment named Sword of Kaldra, Shield of Kaldra, and Helm of Kaldra have indestructible."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

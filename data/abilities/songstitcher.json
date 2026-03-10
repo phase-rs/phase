@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Prevent all combat damage that would be dealt this turn by target attacking creature with flying.",
+          "TgtPrompt": "Select target attacking creature with flying",
+          "RememberObjects": "Targeted",
+          "ReplacementEffects": "RPrevent",
+          "ExileOnMoved": "Battlefield",
+          "ValidTgts": "Creature.attacking+withFlying"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent all combat damage that would be dealt this turn by target attacking creature with flying.",
+        "TgtPrompt": "Select target attacking creature with flying",
+        "RememberObjects": "Targeted",
+        "ReplacementEffects": "RPrevent",
+        "ExileOnMoved": "Battlefield",
+        "ValidTgts": "Creature.attacking+withFlying"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

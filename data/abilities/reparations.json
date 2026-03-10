@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "TargetsValid": "You,Creature.YouCtrl+inZoneBattlefield",
+        "ValidCard": "Card",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an opponent casts a spell that targets you or a creature you control, you may draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

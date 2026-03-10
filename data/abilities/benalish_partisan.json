@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.Other",
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Whenever you cycle another card, you may pay {1}{W}. If you do, return CARDNAME from your graveyard to the battlefield tapped and it perpetually gets +1/+0.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

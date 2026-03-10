@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "Enchanted creature can't attack or block.",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "PilloryLoseLife",
+        "Affected": "Creature.EnchantedBy",
+        "AddTrigger": "TriggerTheSleepless",
+        "Description": "Enchanted creature can't attack or block. Enchanted creature has \"At the beginning of your upkeep, you lose 1 life.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

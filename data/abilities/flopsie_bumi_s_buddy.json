@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, put a +1/+1 counter on each creature you control.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounterAll"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "Description": "Each creature you control with power 4 or greater can't be blocked by more than one creature.",
+        "ValidCard": "Creature.YouCtrl+powerGE4",
+        "Max": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "If CARDNAME is your commander, choose a color before the game begins. CARDNAME is the chosen color.",
+        "SetColor": "ChosenColor",
+        "Affected": "Card.Self",
+        "CharacteristicDefining": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self",
+        "CheckSVar": "X",
+        "SVarCompare": "LT3",
+        "Description": "CARDNAME can't be blocked unless defending player controls three or more creatures that share a creature type."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

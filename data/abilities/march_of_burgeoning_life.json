@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.cmcLTX"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AnnounceTitle": "how many green cards to exile",
+        "TgtPrompt": "Choose target creature with mana value less than X",
+        "StackDescription": "None",
+        "SpellDescription": "Choose target creature with mana value less than X. Search your library for a creature card with the same name as that creature, put it onto the battlefield tapped, then shuffle.",
+        "SubAbility": "DBSearch",
+        "Announce": "Exiled"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Cost": "ExileFromHand<Y/Card.Green/green cards>",
+        "Description": "As an additional cost to cast this spell, you may exile any number of green cards from your hand. This spell costs {2} less to cast for each card exiled this way.",
+        "EffectZone": "All"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "Z",
+        "Description": "This spell costs {2} less to cast for each card exiled this way.",
+        "Secondary": "True",
+        "Relative": "True",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

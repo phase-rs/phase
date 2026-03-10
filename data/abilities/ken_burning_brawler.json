@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "RW"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "KW": "First Strike",
+        "SpellDescription": "NICKNAME gains first strike until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "CombatDamage": "True",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Shoryuken — When NICKNAME deals combat damage, you may cast a sorcery spell from your hand with mana value less than or equal to that damage without paying its mana cost.",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigCast"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

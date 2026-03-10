@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBDiscard",
+        "SpellDescription": "Draw two cards, then discard a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SpellDescription": "Look at the top two cards of each other player's library, then put any number of them on the bottom of that library and the rest on top in any order.",
+          "SubAbility": "DBScry",
+          "RepeatPlayers": "Opponent",
+          "RepeatSubAbility": "DBDig",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Look at the top two cards of each other player's library, then put any number of them on the bottom of that library and the rest on top in any order.",
+        "SubAbility": "DBScry",
+        "RepeatPlayers": "Opponent",
+        "RepeatSubAbility": "DBDig",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Duration": "Permanent",
+          "Ultimate": "True",
+          "SpellDescription": "You get an emblem with \"Your opponents play with their hands revealed\" and \"Whenever an opponent draws a card, this emblem deals 1 damage to them.\"",
+          "Name": "Emblem — Inzerva, Master of Insights",
+          "StaticAbilities": "STReveal",
+          "Triggers": "TrigDraw",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "Ultimate": "True",
+        "SpellDescription": "You get an emblem with \"Your opponents play with their hands revealed\" and \"Whenever an opponent draws a card, this emblem deals 1 damage to them.\"",
+        "Name": "Emblem — Inzerva, Master of Insights",
+        "StaticAbilities": "STReveal",
+        "Triggers": "TrigDraw",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Enlisted",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enlists a nontoken creature, you may conjure a duplicate of that creature into the top five cards of your library at random. The duplicate perpetually gets +1/+0 and gains haste.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigConjure",
+        "ValidEnlisted": "Creature.!token"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

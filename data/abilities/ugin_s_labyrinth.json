@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "Amount": "X",
+          "SpellDescription": "Add {C}. If a card is exiled with CARDNAME, add {C}{C} instead."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "X",
+        "SpellDescription": "Add {C}. If a card is exiled with CARDNAME, add {C}{C} instead."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Exile",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "ReturnCastable",
+        "Defined": "ExiledWith",
+        "SpellDescription": "Return the exiled card to its owner's hand."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile a colorless card with mana value 7 or greater from your hand.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

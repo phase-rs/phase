@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "IgnoreLegendRule"
+      },
+      "params": {
+        "ValidCard": "Permanent.YouCtrl",
+        "Description": "The \"legend rule\" doesn't apply to permanents you control."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Legendary+YouCtrl",
+        "Description": "Each legendary creature you control gets +1/+1.",
+        "AddToughness": "1",
+        "AddPower": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each nontoken creature you control gets +1/+1 for each other creature you control with the same name as that creature.",
+        "AddPower": "AffectedX",
+        "Affected": "Creature.!token+YouCtrl",
+        "AddToughness": "AffectedX"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

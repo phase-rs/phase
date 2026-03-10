@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "ValidTgts": "Permanent",
+          "SpellDescription": "Create a token that's a copy of target permanent.",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Permanent",
+        "SpellDescription": "Create a token that's a copy of target permanent.",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "EffectZone": "All",
+        "Caster": "You",
+        "Description": "You may cast this spell as though it had flash if it targets a permanent you control.",
+        "ValidSA": "Spell.IsTargeting Valid Permanent.YouCtrl",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

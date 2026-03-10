@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Self",
+          "PrecostDesc": "Cunning Action —",
+          "StaticAbilities": "Unblockable",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "CARDNAME can't be blocked this turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Self",
+        "PrecostDesc": "Cunning Action —",
+        "StaticAbilities": "Unblockable",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "CARDNAME can't be blocked this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, put a +1/+1 counter on it.",
+        "CombatDamage": "True",
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

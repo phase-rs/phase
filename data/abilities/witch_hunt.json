@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDmg",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 4 damage to you.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "At the beginning of your end step, target opponent chosen at random gains control of CARDNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantGainLife",
+      "params": {
+        "ValidPlayer": "Player",
+        "Description": "Players can't gain life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

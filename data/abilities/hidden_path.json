@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Landwalk:Forest",
+        "Description": "Green creatures have forestwalk. (They can't be blocked as long as defending player controls a Forest.)",
+        "Affected": "Creature.Green"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

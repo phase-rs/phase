@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapOrUntap",
+        "params": {
+          "IsPresent": "Card.EquippedBy",
+          "Defined": "Equipped",
+          "SpellDescription": "You may tap or untap equipped creature."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "IsPresent": "Card.EquippedBy",
+        "Defined": "Equipped",
+        "SpellDescription": "You may tap or untap equipped creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.EquippedBy+tapped",
+        "Description": "As long as equipped creature is tapped, tapped creatures you control get +2/+0.",
+        "Affected": "Creature.tapped+YouCtrl",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as equipped creature is untapped, untapped creatures you control get +0/+2.",
+        "Affected": "Creature.untapped+YouCtrl",
+        "IsPresent": "Card.EquippedBy+untapped",
+        "AddToughness": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

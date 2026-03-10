@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever an Angel you control enters, you gain 4 life.",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "ValidCard": "Angel.YouCtrl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigToken",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever an Angel you control dies, create a 1/1 white Spirit creature token with flying.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Angel.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigDestroy",
+            "TriggerDescription": "When CARDNAME enters, destroy target non-Elf creature an opponent controls with power X or less, where X is the number of lands you control.",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetPower": "X",
+            "SetToughness": "X",
+            "CharacteristicDefining": "True",
+            "Description": "CARDNAME's power and toughness are each equal to the number of lands you control."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

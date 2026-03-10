@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, he deals X damage to each other creature without flying and each player, where X is the number of Mountains you control.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigDamageAllNonFlyers",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Cost": "Exert<1/CARDNAME>",
+        "Trigger": "TrigPump",
+        "Description": "You may exert CARDNAME as it attacks. When you do, he gains flying until end of turn. (An exerted creature won't untap during your next untap step.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

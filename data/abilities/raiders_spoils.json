@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a Warrior you control deals combat damage to a player, you may pay 1 life. If you do, draw a card.",
+        "CombatDamage": "True",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.Warrior+YouCtrl",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control get +1/+0.",
+        "Affected": "Creature.YouCtrl",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

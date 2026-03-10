@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Enchantment.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, put a +1/+1 counter on target creature.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever NICKNAME or an enchanted creature you control deals combat damage to a player, you may create a token that's a copy of a nonlegendary enchantment you control. Do this only once each turn.",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self,Creature.enchanted+YouCtrl",
+        "ResolvedLimit": "1",
+        "Execute": "TrigToken",
+        "ValidTarget": "Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

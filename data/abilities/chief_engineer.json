@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Stack",
+        "Affected": "Card.Artifact+YouCtrl+wasCast",
+        "AddKeyword": "Convoke",
+        "Description": "Artifact spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting an artifact spell pays for {1} or one mana of that creature's color.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

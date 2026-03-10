@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "LifePaidOnETB",
+        "CharacteristicDefining": "True",
+        "SetToughness": "LifePaidOnETB",
+        "Description": "CARDNAME's power and toughness are each equal to the life paid as it entered."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "As CARDNAME enters, pay any amount of life.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "PayLife"
+      }
+    }
+  ],
+  "faces": []
+}

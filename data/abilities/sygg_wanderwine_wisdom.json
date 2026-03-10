@@ -1,0 +1,90 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, target creature gains \"Whenever this creature deals combat damage to a player or planeswalker, draw a card\" until end of turn.",
+            "ValidCard": "Card.Self",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "Execute": "TrigAnimate"
+          }
+        },
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, target creature gains \"Whenever this creature deals combat damage to a player or planeswalker, draw a card\" until end of turn.",
+            "Secondary": "True",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigAnimate"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Main1",
+            "Execute": "TrigTransform",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {W}. If you do, transform NICKNAME."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "ValidAttacker": "Creature.Self",
+            "Description": "NICKNAME can't be blocked."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "Whenever this creature transforms into CARDNAME, target creature you control gains protection from each color until your next turn.",
+            "Execute": "TrigProt",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Main1",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {U}. If you do, transform NICKNAME.",
+            "Execute": "TrigTransform",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": {
+            "Other": "CantBlockBy"
+          },
+          "params": {
+            "ValidAttacker": "Creature.Self",
+            "Description": "NICKNAME can't be blocked."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

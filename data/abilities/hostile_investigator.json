@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, target opponent discards a card.",
+        "Execute": "TrigDiscard",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "DiscardedAll",
+      "params": {
+        "ActivationLimit": "1",
+        "ValidPlayer": "Player",
+        "Execute": "TrigInvestigate",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more players discard one or more cards, investigate. This ability triggers only once each turn. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this artifact: Draw a card.\")",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

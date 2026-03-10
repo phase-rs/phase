@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "Valid": "Permanent.nonland",
+          "FoundDestination": "Battlefield",
+          "ValidDescription": "nonland permanent",
+          "OptionalFoundMove": "True",
+          "RevealRandomOrder": "True",
+          "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland permanent card. You may put that card onto the battlefield. Then put all cards revealed this way that weren't put onto the battlefield on the bottom of your library in a random order.",
+          "RevealedDestination": "Library",
+          "RevealedLibraryPosition": "-1"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Permanent.nonland",
+        "FoundDestination": "Battlefield",
+        "ValidDescription": "nonland permanent",
+        "OptionalFoundMove": "True",
+        "RevealRandomOrder": "True",
+        "SpellDescription": "Reveal cards from the top of your library until you reveal a nonland permanent card. You may put that card onto the battlefield. Then put all cards revealed this way that weren't put onto the battlefield on the bottom of your library in a random order.",
+        "RevealedDestination": "Library",
+        "RevealedLibraryPosition": "-1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigCopy",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When you cast this spell, copy it for each time you've cast your commander from the command zone this game."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

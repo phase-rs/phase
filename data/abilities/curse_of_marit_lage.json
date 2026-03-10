@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, tap all Islands.",
+        "Origin": "Any",
+        "Execute": "TrigTapAll"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Description": "Islands don't untap during their controllers' untap steps.",
+        "ValidCard": "Island",
+        "Layer": "CantHappen",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

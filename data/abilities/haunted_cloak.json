@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Vigilance & Trample & Haste",
+        "Description": "Equipped creature has vigilance, trample, and haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetsWithSameController": "True",
+        "StackDescription": "SpellDescription",
+        "IsCurse": "True",
+        "TargetMax": "2",
+        "TargetMin": "2",
+        "SpellDescription": "Choose two target creatures controlled by the same opponent. That player chooses one of those creatures. CARDNAME deals 5 damage to that creature, and the other can't block this turn.",
+        "SubAbility": "DBChoose",
+        "TgtPrompt": "Select two target creatures controlled by the same opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

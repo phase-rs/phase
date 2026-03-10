@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "Description": "As long as an opponent has eight or more cards in their graveyard, CARDNAME can attack as though it didn't have defender and it can't be blocked.",
+        "SVarCompare": "GE8"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Card.Self",
+        "CheckSVar": "X",
+        "SVarCompare": "GE8"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

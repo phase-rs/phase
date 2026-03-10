@@ -1,0 +1,23 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "LE10",
+        "CheckSecondSVar": "Y",
+        "Affected": "Card.Self",
+        "SecondSVarCompare": "GE30",
+        "Description": "As long as you have 30 or more life and an opponent has 10 or less life, CARDNAME gets +6/+6 and has flying.",
+        "AddKeyword": "Flying",
+        "AddPower": "6",
+        "AddToughness": "6",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

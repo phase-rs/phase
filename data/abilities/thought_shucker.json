@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Threshold —",
+        "SpellDescription": "Put a +1/+1 counter on CARDNAME and draw a card. Activate only if there are seven or more cards in your graveyard and only once.",
+        "SubAbility": "DBDraw",
+        "Activation": "Threshold",
+        "GameActivationLimit": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

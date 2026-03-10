@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card",
+        "Mandatory": "True",
+        "ChangeNum": "3",
+        "SubAbility": "DelTrigSlowtrip",
+        "SpellDescription": "Search your library for three cards, exile them, then shuffle. Draw a card at the beginning of the next turn's upkeep."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, flip a coin until you lose a flip.",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigFlip"
+      }
+    },
+    {
+      "mode": "FlippedCoin",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidResult": "Win",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player wins a coin flip, double NICKNAME's power and toughness until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

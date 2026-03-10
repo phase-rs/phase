@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSubAbility": "DBChooseColor",
+          "SubAbility": "ExileAll",
+          "RepeatPlayers": "Player",
+          "SpellDescription": "Each player chooses a color."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "DBChooseColor",
+        "SubAbility": "ExileAll",
+        "RepeatPlayers": "Player",
+        "SpellDescription": "Each player chooses a color."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

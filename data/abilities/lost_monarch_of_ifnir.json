@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "Execute": "TrigMill",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "PhaseCount": "2",
+        "Phase": "Main",
+        "TriggerDescription": "At the beginning of your second main phase, if a player was dealt combat damage by a Zombie this turn, mill three cards, then you may return a creature card from your graveyard to your hand."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Zombies you control have afflict 3.",
+        "Affected": "Zombie.Other+YouCtrl",
+        "AddKeyword": "Afflict:3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

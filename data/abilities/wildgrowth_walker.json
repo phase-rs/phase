@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Explored",
+      "params": {
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "DBPutCounter",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature you control explores, put a +1/+1 counter on CARDNAME and you gain 3 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

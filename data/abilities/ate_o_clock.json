@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "SubAbility": "DBProlif",
+          "Populate": "True",
+          "SpellDescription": "Populate. Proliferate. Investigate. Regenerate target creature."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBProlif",
+        "Populate": "True",
+        "SpellDescription": "Populate. Proliferate. Investigate. Regenerate target creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

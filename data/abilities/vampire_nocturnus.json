@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "Description": "Play with the top card of your library revealed.",
+        "AffectedZone": "Library",
+        "MayLookAt": "Player"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "TopCardOfLibraryIs": "Card.Black",
+        "Description": "As long as the top card of your library is black, CARDNAME and other Vampire creatures you control get +2/+1 and have flying.",
+        "Affected": "Creature.Vampire+Other+YouCtrl,Card.Self",
+        "AddPower": "2",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

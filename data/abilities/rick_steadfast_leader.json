@@ -1,0 +1,61 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Execute": "ResetSVars",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike & Vigilance",
+        "SVarCompare": "EQ1",
+        "CheckSVar": "VarFSVig",
+        "Affected": "Human.YouCtrl",
+        "Description": "Humans you control have each of the chosen abilities."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Secondary": "True",
+        "AddKeyword": "Vigilance & Lifelink",
+        "Affected": "Human.YouCtrl",
+        "CheckSVar": "VarVigLif",
+        "SVarCompare": "EQ1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike & Lifelink",
+        "Secondary": "True",
+        "SVarCompare": "EQ1",
+        "Affected": "Human.YouCtrl",
+        "CheckSVar": "VarFSLif"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "IsPresent": "Human.YouCtrl",
+        "PresentCompare": "GE4",
+        "Description": "As long as you control four or more Humans, Humans you control get +2/+2.",
+        "AddPower": "2",
+        "Affected": "Human.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

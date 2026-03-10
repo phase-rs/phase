@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.tapped"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "REP Target creature_{c:Targeted}",
+        "SubAbility": "DBDealDamage",
+        "TgtPrompt": "Select target tapped creature",
+        "Duration": "Perpetual",
+        "SpellDescription": "Target tapped creature perpetually loses all abilities, then CARDNAME deals 4 damage to it.",
+        "RemoveAllAbilities": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

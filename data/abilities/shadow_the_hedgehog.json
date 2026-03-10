@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl+withFlash,Creature.Other+YouCtrl+withHaste",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control with flash or haste dies, draw a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Stack",
+        "Affected": "Card.wasCastByYou+CastSa Spell.ManaFromArtifact",
+        "AddKeyword": "Split second",
+        "Description": "Chaos Control — Each spell you cast has split second if mana from an artifact was spent to cast it. (As long as it's on the stack, players can't cast spells or activate abilities that aren't mana abilities.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted land dies, return that card to its owner's hand.",
+        "ValidCard": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetColor": "White",
+        "SetToughness": "6",
+        "Description": "Enchanted land is a 2/6 white Wall creature with defender. It's still a land.",
+        "AddType": "Creature & Wall",
+        "SetPower": "2",
+        "AddKeyword": "Defender",
+        "Affected": "Land.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

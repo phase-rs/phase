@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "LEVEL 1-4 1/4 If a source would deal damage to you or a creature you control, prevent 1 of that damage.",
+        "SetPower": "1",
+        "SetToughness": "4",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE4_LEVEL",
+        "Affected": "Card.Self",
+        "AddReplacementEffect": "RDamage1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "LEVEL 5+ 2/5 If a source would deal damage to you or a creature you control, prevent 2 of that damage.",
+        "AddReplacementEffect": "RDamage2",
+        "SetPower": "2",
+        "Affected": "Card.Self",
+        "SetToughness": "5",
+        "IsPresent": "Card.Self+counters_GE5_LEVEL"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

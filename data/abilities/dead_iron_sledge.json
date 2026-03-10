@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Battlefield",
+        "ValidBlocker": "Creature.AttachedBy",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a creature, destroy both creatures."
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by a creature, destroy both creatures.",
+        "ValidCard": "Creature.AttachedBy",
+        "ValidBlocker": "Creature",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

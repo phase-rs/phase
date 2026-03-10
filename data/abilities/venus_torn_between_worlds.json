@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever NICKNAME is dealt damage, put that many +1/+1 counters on her. (She must survive the damage to get the counters.)",
+        "ValidTarget": "Card.Self"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Creature.YouCtrl+HasCounters",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever a creature you control with a counter on it deals combat damage to a player, you may pay {U}. If you do, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

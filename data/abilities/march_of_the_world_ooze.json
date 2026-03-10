@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever an opponent casts a spell, if it's not their turn, you create a 3/3 green Elephant creature token.",
+        "ValidActivatingPlayer": "Opponent.NonActive",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Battlefield",
+        "SetPower": "6",
+        "SetToughness": "6",
+        "AddType": "Ooze",
+        "Description": "Creatures you control have base power and toughness 6/6 and are Oozes in addition to their other creature types.",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

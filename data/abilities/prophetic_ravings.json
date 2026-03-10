@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "ProphetDraw",
+        "AddKeyword": "Haste",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has haste and \"{T}, Discard a card: Draw a card.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

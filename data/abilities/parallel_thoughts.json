@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigSearch",
+        "TriggerDescription": "When CARDNAME enters, search your library for seven cards, exile them in a face-down pile, and shuffle that pile. Then shuffle your library.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsRemembered",
+        "Static": "True",
+        "Destination": "Any",
+        "Origin": "Exile",
+        "Execute": "TrigForget"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigReset",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "RepParallelThoughts",
+        "Optional": "True",
+        "OptionalDecider": "You",
+        "Description": "If you would draw a card, you may instead put the top card of the pile you exiled into your hand.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "faces": []
+}

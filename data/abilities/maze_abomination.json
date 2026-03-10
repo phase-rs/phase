@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.MultiColor+YouCtrl",
+        "AddKeyword": "Deathtouch",
+        "Description": "Multicolored creatures you control have deathtouch."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

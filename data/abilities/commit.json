@@ -1,0 +1,65 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield,Stack",
+            "destination": "Library",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent.nonLand,Card.inZoneStack"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target spell or nonland permanent",
+            "LibraryPosition": "1",
+            "TgtZone": "Stack,Battlefield",
+            "SpellDescription": "Put target spell or nonland permanent into its owner's library second from the top."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZoneAll",
+            "origin": "Hand,Graveyard",
+            "destination": "Library",
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBDraw",
+            "AILogic": "TimeTwister",
+            "SpellDescription": "Each player shuffles their graveyard and hand into their library, then draws seven cards.",
+            "ChangeType": "Card",
+            "Shuffle": "True",
+            "UseAllOriginZones": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters or whenever you cast a spell from your graveyard, create a 1/1 blue Bird creature token with flying and \"This creature can block only creatures with flying.\"",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.wasCastFromYourGraveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters or whenever you cast a spell from your graveyard, create a 1/1 blue Bird creature token with flying and \"This creature can block only creatures with flying.\"",
+        "Secondary": "True",
+        "Execute": "TrigToken",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

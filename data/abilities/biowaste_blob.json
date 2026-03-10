@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Card.IsCommander+YouCtrl",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if you control a commander, create a token that's a copy of CARDNAME.",
+        "ValidPlayer": "You",
+        "Execute": "TrigCopy",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Oozes you control get +1/+1.",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Ooze.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

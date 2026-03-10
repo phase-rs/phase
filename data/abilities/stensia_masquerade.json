@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever a Vampire you control deals combat damage to a player, put a +1/+1 counter on it.",
+        "ValidTarget": "Player",
+        "ValidSource": "Vampire.YouCtrl",
+        "CombatDamage": "True",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Attacking creatures you control have first strike.",
+        "Affected": "Creature.attacking+YouCtrl",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

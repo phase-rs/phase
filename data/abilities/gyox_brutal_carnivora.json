@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, put an oil counter on up to one target creature.",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigConjure",
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.YouCtrl+!token+counters_GE1_OIL",
+        "TriggerDescription": "Whenever a nontoken creature you control with one or more oil counters on it dies, conjure X duplicates of it into exile, where X is the number of oil counters on it. Those duplicates perpetually get +X/+X. Then shuffle those duplicates into your library.",
+        "Origin": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

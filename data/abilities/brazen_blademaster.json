@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "PresentCompare": "GE2",
+        "TriggerDescription": "Whenever CARDNAME attacks while you control two or more artifacts, it gets +2/+1 until end of turn.",
+        "ValidCard": "Card.Self",
+        "NoResolvingCheck": "True",
+        "IsPresent": "Artifact.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

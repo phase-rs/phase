@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "Affected": "Creature.Sliver",
+        "Description": "All Sliver creatures have first strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

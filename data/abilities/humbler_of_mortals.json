@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, creatures you control gain trample until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

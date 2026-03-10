@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidSA": "Spell.MayPlaySource",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card",
+        "TriggerDescription": "Once during each of your turns, you may play a land from your graveyard or cast a permanent spell with mana value 3 or less from your graveyard. If you do, it gains \"When this permanent is put into a graveyard from the battlefield, exile it and you gain 2 life.\"",
+        "Secondary": "True",
+        "Static": "True",
+        "Execute": "DBAnimate"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Static": "True",
+        "ValidCard": "Land",
+        "Execute": "DBAnimate",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Once during each of your turns, you may play a land from your graveyard or cast a permanent spell with mana value 3 or less from your graveyard. If you do, it gains \"When this permanent is put into a graveyard from the battlefield, exile it and you gain 2 life.\"",
+        "ValidSA": "SpellAbility.MayPlaySource",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Condition": "PlayerTurn",
+        "EffectZone": "Battlefield",
+        "ValidAfterStack": "Spell.cmcLE3",
+        "AffectedZone": "Graveyard",
+        "MayPlayLimit": "1",
+        "Affected": "Permanent.YouOwn+cmcLE3,Land.YouOwn",
+        "Description": "Once during each of your turns, you may play a land from your graveyard or cast a permanent spell with mana value 3 or less from your graveyard. If you do, it gains \"When this permanent is put into a graveyard from the battlefield, exile it and you gain 2 life.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

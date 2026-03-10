@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Creature",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Command",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever a creature you control deals damage to a creature, destroy the other creature. It can't be regenerated."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

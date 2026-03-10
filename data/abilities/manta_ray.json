@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "IsPresent": "Island.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "When you control no Islands, sacrifice CARDNAME.",
+        "Execute": "TrigSac"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't attack unless defending player controls an Island.",
+        "UnlessDefender": "controlsIsland"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.nonBlue",
+        "Description": "CARDNAME can't be blocked except by blue creatures.",
+        "ValidAttacker": "Creature.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

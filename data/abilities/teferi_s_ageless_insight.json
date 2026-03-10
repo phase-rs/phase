@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Description": "If you would draw a card except the first one you draw in each of your draw steps, draw two cards instead.",
+        "NotFirstCardInDrawStep": "True",
+        "ReplaceWith": "DrawTwo"
+      }
+    }
+  ],
+  "faces": []
+}

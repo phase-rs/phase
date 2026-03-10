@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 2 damage divided as you choose among one or two targets. Activate only if CARDNAME has a +1/+1 counter on it.",
+        "DividedAsYouChoose": "2",
+        "TargetMax": "2",
+        "TgtPrompt": "Select any target to distribute damage to",
+        "IsPresent": "Card.Self+counters_GE1_P1P1",
+        "TargetMin": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

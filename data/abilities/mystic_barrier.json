@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or at the beginning of your upkeep, choose left or right.",
+        "Origin": "Any",
+        "Execute": "TrigChooseDirection",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChooseDirection",
+        "TriggerDescription": "When CARDNAME enters or at the beginning of your upkeep, choose left or right.",
+        "ValidPlayer": "You",
+        "Secondary": "True",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "DefenderNotNearestToYouInChosenDirection": "True",
+        "Description": "Each player may attack only the nearest opponent in the last chosen direction and planeswalkers controlled by that opponent."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

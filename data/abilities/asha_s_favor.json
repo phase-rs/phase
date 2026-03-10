@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Flying & First Strike & Vigilance",
+        "Description": "Enchanted creature has flying, first strike, and vigilance."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

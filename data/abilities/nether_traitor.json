@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "Whenever another creature is put into your graveyard from the battlefield, you may pay {B}. If you do, return CARDNAME from your graveyard to the battlefield.",
+        "Destination": "Graveyard",
+        "OptionalDecider": "You",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

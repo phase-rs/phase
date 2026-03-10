@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigAttach",
+        "ValidCard": "Card.Self+PromisedGift",
+        "TriggerDescription": "When CARDNAME enters, if the gift was promised, attach CARDNAME to target creature you control.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "3",
+        "RemoveKeyword": "Flying",
+        "Description": "Equipped creature gets +3/+3 and loses flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

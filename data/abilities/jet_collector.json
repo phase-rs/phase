@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouOwn+cmcEQX"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put target creature card with mana value X from your graveyard onto the battlefield with a finality counter on it. Activate only as a sorcery.",
+        "TgtPrompt": "Choose target creature card in your graveyard",
+        "SorcerySpeed": "True",
+        "WithCountersType": "FINALITY"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.YouOwn",
+        "PresentCompare": "GE4",
+        "Execute": "TrigConjure",
+        "GameActivationLimit": "1",
+        "TriggerDescription": "At the beginning of your postcombat main phase, if four or more cards are in your graveyard, conjure a card named Mox Jet into your hand. This ability triggers only once.",
+        "Phase": "Main2",
+        "PresentZone": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

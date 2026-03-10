@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When NICKNAME enters, search your library for an Equipment card, reveal it, put it into your hand, then shuffle.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChange",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "Description": "As long as NICKNAME is equipped, if an ability of NICKNAME or an Equipment attached to it triggers, that ability triggers an additional time.",
+        "ValidCard": "Card.Self+equipped,Equipment.Attached"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Creature.YouCtrl",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, ABILITY",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "Execute": "TrigCharm"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

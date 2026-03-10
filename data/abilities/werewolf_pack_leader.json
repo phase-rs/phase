@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 5,
+        "toughness": 3,
+        "types": [],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Trample",
+        "Defined": "Self",
+        "SpellDescription": "Until end of turn, CARDNAME has base power and toughness 5/3, gains trample, and isn't a Human.",
+        "RemoveTypes": "Human"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDraw",
+        "SVarCompare": "GE6",
+        "ValidCard": "Card.Self",
+        "NoResolvingCheck": "True",
+        "CheckSVar": "PackTactics",
+        "TriggerDescription": "Pack tactics — Whenever CARDNAME attacks, if you attacked with creatures with total power 6 or greater this combat, draw a card.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

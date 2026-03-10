@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ManaSpent": "B",
+        "Origin": "Any",
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When CARDNAME enters, if {B} was spent to cast it, target player discards a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

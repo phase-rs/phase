@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals X damage to any target."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPreventDamage"
+      },
+      "params": {
+        "CheckSVar": "X",
+        "EffectZone": "Stack",
+        "SVarCompare": "GE5",
+        "Description": "If X is 5 or more, CARDNAME can't be countered by spells or abilities and the damage can't be prevented.",
+        "ValidSource": "Spell.Self"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "Description": "If X is 5 or more, CARDNAME can't be countered by spells or abilities and the damage can't be prevented.",
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "SVarCompare": "GE5",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChooseCard",
+        "StackDescription": "SpellDescription",
+        "ValidCards": "Creature.nonVehicle",
+        "SpellDescription": "Destroy all non-Vehicle creatures. Then choose a Vehicle you control. It perpetually becomes an artifact creature."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

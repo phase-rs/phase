@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TrigDamageDone",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has \"Whenever this creature deals combat damage to a player, draw a card.\""
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as enchanted creature is legendary, it gets +1/+1 and has ward {1}. (Whenever enchanted creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {1}.)",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Affected": "Creature.EnchantedBy+Legendary",
+        "AddKeyword": "Ward:1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

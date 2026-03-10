@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "RemoveCounter",
+        "counter_type": "Any",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X BP"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberRemoved": "True",
+        "SubAbility": "DBPump",
+        "SpellDescription": "Remove up to X counters from target permanent. For each counter removed this way, CARDNAME gets +1/+0 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

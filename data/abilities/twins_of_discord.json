@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerDescription": "Whenever you attack, choose odd or even. Creatures with mana value of that quality can't block this turn.",
+        "Execute": "TrigGenericChoice",
+        "TriggerZones": "Battlefield",
+        "AttackingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each other colorless creature you control has bloodthirst 2.",
+        "AddKeyword": "Bloodthirst:2",
+        "Affected": "Creature.Other+YouCtrl+Colorless"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

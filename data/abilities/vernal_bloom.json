@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "Execute": "TrigMana",
+        "Static": "True",
+        "TriggerDescription": "Whenever a Forest is tapped for mana, its controller adds an additional {G}.",
+        "ValidCard": "Forest",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

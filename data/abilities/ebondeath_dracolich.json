@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may cast CARDNAME from your graveyard if a creature not named Ebondeath, Dracolich died this turn.",
+        "AffectedZone": "Graveyard",
+        "EffectZone": "Graveyard",
+        "MayPlay": "True",
+        "Affected": "Card.Self",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

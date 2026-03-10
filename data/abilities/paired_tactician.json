@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME and at least one other Warrior attack, put a +1/+1 counter on CARDNAME.",
+        "NoResolvingCheck": "True",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Warrior.attacking+Other",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

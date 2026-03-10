@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "AddsKeywordsValid": "Spell.Creature",
+          "AddsKeywordsUntil": "UntilEOT",
+          "SpellDescription": "Add {C}{C}. If that mana is spent on a creature spell, it gains haste until end of turn.",
+          "Amount": "2",
+          "AddsKeywords": "Haste"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AddsKeywordsValid": "Spell.Creature",
+        "AddsKeywordsUntil": "UntilEOT",
+        "SpellDescription": "Add {C}{C}. If that mana is spent on a creature spell, it gains haste until end of turn.",
+        "Amount": "2",
+        "AddsKeywords": "Haste"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

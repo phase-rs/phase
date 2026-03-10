@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has \"{T}, Unattach CARDNAME: Tap target creature.\"",
+        "Affected": "Creature.EquippedBy",
+        "AddAbility": "BolaTap"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

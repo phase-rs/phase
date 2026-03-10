@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Ally+YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "MaxTotalTargetCMC": "8",
+        "TargetMin": "0",
+        "SpellDescription": "Return any number of target Ally creature cards with total mana value 8 or less from your graveyard to the battlefield.",
+        "TargetMax": "X",
+        "TgtPrompt": "Select target Ally creature card in your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

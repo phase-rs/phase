@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste & Hexproof",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has hexproof and haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

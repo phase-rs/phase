@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "3",
+        "Affected": "Card.Self",
+        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LE6_LEVEL",
+        "SetPower": "3",
+        "AddKeyword": "First Strike",
+        "Description": "LEVEL 2-6 3/3 First strike"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "4",
+        "IsPresent": "Card.Self+counters_GE7_LEVEL",
+        "Description": "LEVEL 7+ 4/4 Double strike",
+        "AddKeyword": "Double Strike",
+        "SetPower": "4",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

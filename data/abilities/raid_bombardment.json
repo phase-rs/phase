@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever a creature you control with power 2 or less attacks, CARDNAME deals 1 damage to the player or planeswalker that creature is attacking.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.powerLE2+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

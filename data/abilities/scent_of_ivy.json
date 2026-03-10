@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "RememberRevealed": "True",
+          "RevealValid": "Card.Green",
+          "SpellDescription": "Reveal any number of green cards in your hand. Target creature gets +X/+X until end of turn, where X is the number of cards revealed this way.",
+          "Defined": "You",
+          "SubAbility": "DBScentOfIvyPump",
+          "AnyNumber": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberRevealed": "True",
+        "RevealValid": "Card.Green",
+        "SpellDescription": "Reveal any number of green cards in your hand. Target creature gets +X/+X until end of turn, where X is the number of cards revealed this way.",
+        "Defined": "You",
+        "SubAbility": "DBScentOfIvyPump",
+        "AnyNumber": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "RemoveKeywords": "Hexproof & Indestructible",
+          "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn.",
+          "ValidCards": "Permanent.OppCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveKeywords": "Hexproof & Indestructible",
+        "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn.",
+        "ValidCards": "Permanent.OppCtrl"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you may tap it. When you do, destroy target creature with power 4 or less.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigImmediateTrigger",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

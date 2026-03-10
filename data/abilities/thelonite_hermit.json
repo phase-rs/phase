@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME is turned face up, create four 1/1 green Saproling creature tokens.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Saproling",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "All Saprolings get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

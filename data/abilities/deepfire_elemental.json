@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.cmcEQX,Creature.cmcEQX"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X X 1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact or creature",
+        "AILogic": "AtOpponentsCombatOrAfter",
+        "SpellDescription": "Destroy target artifact or creature with mana value X."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

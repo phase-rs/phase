@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature gains wither until end of turn. (It deals damage to creatures in the form of -1/-1 counters.)",
+        "Execute": "TrigPumpAttacker",
+        "ValidCard": "Creature",
+        "ValidBlocker": "Card.Self",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature gains wither until end of turn. (It deals damage to creatures in the form of -1/-1 counters.)",
+        "Secondary": "True",
+        "ValidBlocker": "Creature",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpBlocker",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME deals damage to an opponent, remove all -1/-1 counters from it.",
+        "ValidTarget": "Opponent",
+        "Execute": "TrigRemoveCounter",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

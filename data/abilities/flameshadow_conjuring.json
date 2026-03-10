@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigCopy",
+        "ValidCard": "Creature.!token+YouCtrl",
+        "TriggerDescription": "Whenever a nontoken creature you control enters, you may pay {R}. If you do, create a token that's a copy of that creature.That token gains haste. Exile it at the beginning of the next end step.",
+        "Origin": "Any",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

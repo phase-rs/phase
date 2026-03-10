@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Permanent.YouOwn",
+        "Affected": "Card.Self",
+        "PresentCompare": "GE4",
+        "PresentZone": "Graveyard",
+        "AddPower": "2",
+        "Description": "Descend 4 — CARDNAME gets +2/+0 as long as there are four or more permanent cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

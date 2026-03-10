@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Creature.Self",
+        "TriggerDescription": "Whenever a source deals damage to CARDNAME, create a 2/2 black Phyrexian Zombie creature token.",
+        "Execute": "TrigZombie"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

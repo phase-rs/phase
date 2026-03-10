@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "Valid": "Card.cmcEQX",
+          "ImprintFound": "True",
+          "RevealedDestination": "Library",
+          "SpellDescription": "Target opponent reveals cards from the top of their library until they reveal a card with mana value equal to 1 plus the exiled spell's mana value. Exile that card, then that player shuffles. You may cast that exiled card without paying its mana cost.",
+          "ValidTgts": "Opponent",
+          "Shuffle": "True",
+          "FoundDestination": "Exile",
+          "SubAbility": "DBPlay"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 UP"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromStack<1/Card.YouCtrl/spell you control>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Card.cmcEQX",
+        "ImprintFound": "True",
+        "RevealedDestination": "Library",
+        "SpellDescription": "Target opponent reveals cards from the top of their library until they reveal a card with mana value equal to 1 plus the exiled spell's mana value. Exile that card, then that player shuffles. You may cast that exiled card without paying its mana cost.",
+        "ValidTgts": "Opponent",
+        "Shuffle": "True",
+        "FoundDestination": "Exile",
+        "SubAbility": "DBPlay"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "Sacrifice",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "Equipped creature can't be blocked this turn. Sacrifice it at the beginning of the next end step.",
+          "StackDescription": "{c:Equipped} can't be blocked this turn. Sacrifice it at the beginning of the next end step.",
+          "RememberObjects": "Equipped",
+          "StaticAbilities": "Unblockable"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "Sacrifice",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "Equipped creature can't be blocked this turn. Sacrifice it at the beginning of the next end step.",
+        "StackDescription": "{c:Equipped} can't be blocked this turn. Sacrifice it at the beginning of the next end step.",
+        "RememberObjects": "Equipped",
+        "StaticAbilities": "Unblockable"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

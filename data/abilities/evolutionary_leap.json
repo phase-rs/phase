@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "Valid": "Card.Creature",
+          "FoundDestination": "Hand",
+          "SpellDescription": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+          "RevealRandomOrder": "True",
+          "ValidDescription": "creature",
+          "RevealedLibraryPosition": "-1",
+          "RevealedDestination": "Library"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Valid": "Card.Creature",
+        "FoundDestination": "Hand",
+        "SpellDescription": "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+        "RevealRandomOrder": "True",
+        "ValidDescription": "creature",
+        "RevealedLibraryPosition": "-1",
+        "RevealedDestination": "Library"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

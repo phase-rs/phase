@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackDefender"
+      },
+      "params": {
+        "ValidCard": "Creature.YouCtrl+modified",
+        "Description": "Modified creatures you control can attack as though they didn't have defender."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

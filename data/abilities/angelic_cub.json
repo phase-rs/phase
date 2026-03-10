@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME becomes the target of a spell or ability for the first time each turn, put a +1/+1 counter on it.",
+        "FirstTime": "True",
+        "Execute": "TrigCounter",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Affected": "Card.Self+counters_GE3_P1P1",
+        "Description": "As long as CARDNAME has three or more +1/+1 counters on it, it has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

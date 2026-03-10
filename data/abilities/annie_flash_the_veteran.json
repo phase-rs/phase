@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME enters, if you cast it, return target permanent card with mana value 3 or less from your graveyard to the battlefield tapped.",
+        "ValidCard": "Card.Self+wasCastByYou"
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME becomes tapped, exile the top two cards of your library. You may play those cards this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "ExileTwo"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

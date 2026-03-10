@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "X",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Description": "This spell costs {1} less to cast for each modified creature you control. (Equipment, Auras you control, and counters are modifications.)"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Affected": "Card.Self+untapped",
+        "Description": "CARDNAME has hexproof as long as it's untapped. (It can't be the target of spells or abilities your opponents control.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

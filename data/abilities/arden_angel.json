@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME is in your graveyard, roll a four-sided die. If the result is 1, return CARDNAME from your graveyard to the battlefield.",
+        "Execute": "TrigRoll",
+        "PresentZone": "Graveyard",
+        "TriggerZones": "Graveyard",
+        "IsPresent": "Card.StrictlySelf",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

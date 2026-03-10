@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ConjureAll",
+      "params": {
+        "TriggerDescription": "Whenever you conjure one or more other cards, CARDNAME perpetually gets +1/+1. This ability also triggers if CARDNAME is in your graveyard.",
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield,Graveyard",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

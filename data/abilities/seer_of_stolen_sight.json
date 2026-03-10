@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Execute": "TrigSurveil",
+        "Destination": "Graveyard",
+        "ValidCards": "Artifact.YouCtrl,Creature.YouCtrl",
+        "TriggerDescription": "Whenever one or more artifacts and/or creatures you control are put into a graveyard from the battlefield, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

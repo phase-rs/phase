@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "B"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "KW": "Indestructible",
+        "SpellDescription": "CARDNAME gains indestructible until end of turn. Tap it.",
+        "SubAbility": "DBTap"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "Hellbent — CARDNAME has lifelink as long as you have no cards in hand.",
+        "AddKeyword": "Lifelink",
+        "Condition": "Hellbent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

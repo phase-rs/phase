@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "AILogic": "ManaRitual",
+          "SpellDescription": "Add {R}{R}{R}{R}{R}{R}{R}. Spend this mana only to cast artifact or creature spells.",
+          "RestrictValid": "Spell.Artifact,Spell.Creature",
+          "AINoRecursiveCheck": "True",
+          "Amount": "7"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "ManaRitual",
+        "SpellDescription": "Add {R}{R}{R}{R}{R}{R}{R}. Spend this mana only to cast artifact or creature spells.",
+        "RestrictValid": "Spell.Artifact,Spell.Creature",
+        "AINoRecursiveCheck": "True",
+        "Amount": "7"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

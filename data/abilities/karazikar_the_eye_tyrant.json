@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you attack a player, tap target creature that player controls and goad it. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)",
+        "ValidAttackers": "Creature.YouCtrl",
+        "AttackedTarget": "Player",
+        "Execute": "TrigTap"
+      }
+    },
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "Execute": "TrigDraw",
+        "AttackingPlayer": "Player.Opponent",
+        "AttackedTarget": "Opponent",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent attacks another one of your opponents, you and the attacking player each draw a card and lose 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

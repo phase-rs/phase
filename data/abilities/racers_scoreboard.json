@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this artifact enters, draw two cards, then discard a card.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "MaxSpeedStatic",
+        "Description": "Max speed — Spells you cast cost {1} less to cast.",
+        "Affected": "Card.Self",
+        "Condition": "MaxSpeed"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

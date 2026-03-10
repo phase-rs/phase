@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +3/+0."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EquippedBy+Human",
+        "AddKeyword": "Lifelink",
+        "Description": "As long as equipped creature is a Human, it has lifelink."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

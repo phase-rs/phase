@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another legendary creature or creature with mana value one enters the battlefield under your control, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.Legendary+Other+YouCtrl,Creature.cmcEQ1+Other+YouCtrl",
+        "Execute": "TrigCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

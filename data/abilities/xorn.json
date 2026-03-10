@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "Description": "If you would create one or more Treasure tokens, instead create those tokens plus an additional Treasure token.",
+        "ValidPlayer": "You",
+        "ActiveZones": "Battlefield",
+        "ValidToken": "Treasure",
+        "ReplaceWith": "DBReplace"
+      }
+    }
+  ],
+  "faces": []
+}

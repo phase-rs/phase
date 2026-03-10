@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Human",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever a Human deals damage to you, destroy it.",
+        "ValidTarget": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Battlefield",
+        "AddToughness": "1",
+        "Description": "Other non-Human creatures you control get +1/+1 and have undying.",
+        "AddPower": "1",
+        "AddKeyword": "Undying",
+        "Affected": "Creature.nonHuman+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

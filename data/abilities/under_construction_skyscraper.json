@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "LEVEL 1-7 {T}: Add {W}, {B}, {G}, or {C}.",
+        "AddAbility": "ABManaAbzan",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE7_LEVEL",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Self+counters_GE8_LEVEL",
+        "Description": "LEVEL 8+ {T}: Add {W}, {B}, {G}, or {C}. Scry 1.",
+        "AddAbility": "ABManaScry",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

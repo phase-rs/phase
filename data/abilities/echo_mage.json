@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "4",
+        "AddAbility": "CopyOnce",
+        "Affected": "Card.Self",
+        "SetPower": "2",
+        "IsPresent": "Card.Self+counters_GE2_LEVEL+counters_LT4_LEVEL",
+        "Description": "LEVEL 2-3 2/4 {U}{U}, {T}: Copy target instant or sorcery spell. You may choose new targets for the copy."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "5",
+        "Description": "LEVEL 4+ 2/5 {U}{U}, {T}: Copy target instant or sorcery spell twice. You may choose new targets for the copies.",
+        "Affected": "Card.Self",
+        "AddAbility": "CopyTwice",
+        "IsPresent": "Card.Self+counters_GE4_LEVEL",
+        "SetPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Execute": "TrigToken",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, create a 2/2 white and blue Knight creature token with vigilance."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.YouCtrl",
+            "AddPower": "1",
+            "AddToughness": "1",
+            "Description": "Creatures you control get +1/+1."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

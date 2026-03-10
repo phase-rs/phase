@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "ValidSA": "Spell.singleTarget",
+        "Execute": "TrigChangeTarget",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a spell, if it has a single target, change the target to enchanted creature if able.",
+        "OrderDuplicates": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Description": "Enchanted creature can't attack.",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

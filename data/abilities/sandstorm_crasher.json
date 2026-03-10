@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "Trigger": "TrigCopy",
+        "Description": "You may exert CARDNAME as it attacks. When you do, create a tapped and attacking token that's a copy of target creature you control. Sacrifice the token at the beginning of the next end step. (An exerted creature won't untap during your next untap step.)",
+        "ValidCard": "Card.Self",
+        "Cost": "Exert<1/CARDNAME>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,125 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "C",
+            "params": {
+              "SpellDescription": "Add {C}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {C}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "Investigate",
+            "params": {
+              "SpellDescription": "Investigate."
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "4"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Investigate."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "ValidPlayer": "You",
+            "SVarCompare": "GE3",
+            "TriggerZones": "Battlefield",
+            "CheckSVar": "ClueResearch",
+            "Execute": "TrigTransform",
+            "Phase": "End of Turn",
+            "TriggerDescription": "At the beginning of your end step, if you sacrificed three or more clues this turn, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Mana",
+                "cost": "PayLife<1>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "When this land transforms into CARDNAME, return target creature card from your graveyard to the battlefield.",
+            "Execute": "TrigReturn",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When the creature card put onto the battlefield with CARDNAME leaves the battlefield, transform CARDNAME.",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.IsRemembered",
+            "Destination": "Any",
+            "Execute": "TrigTransform2",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

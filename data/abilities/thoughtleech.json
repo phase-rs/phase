@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Island.OppCtrl",
+        "Execute": "TrigGainLife",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever an Island an opponent controls becomes tapped, you may gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

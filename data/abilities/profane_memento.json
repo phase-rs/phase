@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature card is put into an opponent's graveyard from anywhere, you gain 1 life.",
+        "Destination": "Graveyard",
+        "Origin": "Any",
+        "ValidCard": "Creature.!token+OppOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

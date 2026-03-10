@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidCard": "Creature.YouCtrl+equipped",
+        "TriggerDescription": "Whenever an equipped creature you control attacks, you draw a card and you lose 1 life."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Equip:0:Creature.YouCtrl+Knight:Knight",
+        "Description": "Equipment you control have equip Knight {0}.",
+        "Affected": "Equipment.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

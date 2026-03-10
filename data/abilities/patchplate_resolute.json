@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, you get a boon with \"When you cast your next creature spell, that creature enters with an additional +1/+1 counter on it.\"",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigBoon"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Secondary": "True",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, you get a boon with \"When you cast your next creature spell, that creature enters with an additional +1/+1 counter on it.\"",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Execute": "TrigBoon"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

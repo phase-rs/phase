@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "4",
+        "PresentCompare": "GE8",
+        "AddKeyword": "Trample",
+        "Description": "As long as you control eight or more lands, CARDNAME gets +4/+4 and has trample. (It can deal excess combat damage to the player or planeswalker it's attacking.)",
+        "AddToughness": "4",
+        "Affected": "Card.Self",
+        "IsPresent": "Land.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

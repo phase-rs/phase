@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, if you descended this turn, create a 1/1 black Fungus creature token with \"This creature can't block.\" (You descended if a permanent card was put into your graveyard from anywhere.)",
+        "ValidPlayer": "You.descended",
+        "Execute": "TrigToken",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

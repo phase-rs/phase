@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 10
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME deals 10 damage to any target.",
+        "Announce": "Tapped",
+        "AnnounceTitle": "how many creatures to tap"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Cost": "tapXType<Tapped/Creature>",
+        "Type": "Spell",
+        "Description": "As an additional cost to cast this spell, you may tap any number of untapped creatures you control. This spell costs {1} less to cast for each creature tapped this way."
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "Tapped",
+        "Description": "This spell costs {1} less to cast for each creature tapped this way.",
+        "Relative": "True",
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

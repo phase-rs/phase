@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.nonCreature+cmcLE1+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target noncreature artifact card with mana value 1 or less from your graveyard",
+        "SpellDescription": "Return target noncreature artifact card with mana value 1 or less from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature dies, you may untap CARDNAME.",
+        "Execute": "TrigUntap",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "OptionalDecider": "You",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

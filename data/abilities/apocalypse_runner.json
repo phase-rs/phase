@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.powerLE2+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Lifelink",
+        "SubAbility": "DBUnblockable",
+        "SpellDescription": "Target creature you control with power 2 or less gains lifelink until end of turn and can't be blocked this turn.",
+        "TgtPrompt": "Select target creature you control with power 2 or less"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

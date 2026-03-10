@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantTarget"
+      },
+      "params": {
+        "ValidSource": "Card.Black,Card.Red",
+        "Description": "CARDNAME can't be the target of black or red spells your opponents control.",
+        "ValidTarget": "Card.Self",
+        "ValidSA": "Spell",
+        "Activator": "Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

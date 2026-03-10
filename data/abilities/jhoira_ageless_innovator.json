@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "INGENUITY",
+        "count": 2,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChangeZone",
+        "StackDescription": "{p:You} puts two ingenuity counters on CARDNAME, then {p:You} may put an artifact card with mana value X or less from hand onto the battlefield, where X is the number of ingenuity counters on NICKNAME.",
+        "SpellDescription": "Put two ingenuity counters on CARDNAME, then you may put an artifact card with mana value X or less from your hand onto the battlefield, where X is the number of ingenuity counters on NICKNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDealtOnce",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "When a spell you control deals damage, transform CARDNAME.",
+            "Execute": "TrigTransform",
+            "ValidSource": "Spell.YouCtrl"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Dig",
+            "count": 1,
+            "destination": "Exile"
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1"
+              },
+              {
+                "type": "Mana",
+                "cost": "SubCounter<1/FLAME>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Exile the top card of your library. You may play that card this turn.",
+            "RememberChanged": "True",
+            "ChangeNum": "All",
+            "Defined": "You",
+            "SubAbility": "DBEffect"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "DamageDealtOnce",
+          "params": {
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "Whenever a spell you control deals damage, put a flame counter on CARDNAME.",
+            "TriggerZones": "Battlefield",
+            "ValidSource": "Spell.YouCtrl"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

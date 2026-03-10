@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "ValidAttackers": "Creature.YouCtrl+powerLE1",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you attack a player or planeswalker with one or more creatures with power 1 or less, draw a card.",
+        "TriggerZones": "Battlefield",
+        "AttackedTarget": "Player,Planeswalker"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

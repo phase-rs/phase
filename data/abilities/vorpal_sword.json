@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 B B B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAddSVar",
+        "SpellDescription": "Until end of turn, CARDNAME gains \"Whenever equipped creature deals combat damage to a player, that player loses the game.\"",
+        "Defined": "Self",
+        "Triggers": "TrigDamageDone"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +2/+0 and has deathtouch.",
+        "AddPower": "2",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

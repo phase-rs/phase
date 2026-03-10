@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "PresentCompare": "GE4",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your upkeep, if you control four or more creatures, transform CARDNAME.",
+            "Phase": "Upkeep",
+            "IsPresent": "Creature.YouCtrl",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigToken",
+            "TriggerDescription": "At the beginning of your end step, create a 1/1 white and black Human Cleric creature token.",
+            "Phase": "End of Turn",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "SetToughness": "X",
+            "CharacteristicDefining": "True",
+            "SetPower": "X",
+            "Description": "CARDNAME's power and toughness are each equal to the number of creatures you control."
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

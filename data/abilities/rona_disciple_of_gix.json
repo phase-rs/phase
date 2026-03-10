@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "All",
+        "Defined": "You",
+        "SpellDescription": "Exile the top card of your library."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "HistoricExile",
+        "TriggerDescription": "When CARDNAME enters, you may exile target historic card from your graveyard. (Artifacts, legendaries, and Sagas are historic.)",
+        "Origin": "Any",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.nonLand+ExiledWithSource",
+        "MayPlay": "True",
+        "AffectedZone": "Exile",
+        "Description": "You may cast spells from among cards exiled with NICKNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

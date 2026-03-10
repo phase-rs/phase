@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters, exile target creature an opponent controls until CARDNAME leaves the battlefield. If that creature had power 2 or less, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

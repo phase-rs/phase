@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.White+YouCtrl",
+        "AddKeyword": "Protection from black",
+        "Description": "White creatures you control have protection from black."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection from white",
+        "Description": "Black creatures you control have protection from white.",
+        "Affected": "Creature.Black+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

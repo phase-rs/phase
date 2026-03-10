@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigSetLife",
+        "CheckSVar": "X",
+        "SVarCompare": "LTY",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if your life total is lower than your starting life total, it becomes equal to your starting life total.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

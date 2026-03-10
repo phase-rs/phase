@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)",
+        "Affected": "Opponent",
+        "AdditionalVillainousChoice": "1"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AdditionalOptionalVote": "1",
+        "Description": "While voting, you may vote an additional time.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

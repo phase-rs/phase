@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "Land,MayPlay",
+          "RememberObjects": "Targeted & Self",
+          "ImprintCards": "Self",
+          "SpellDescription": "Target land gains \"{T}: Add {R}, {G}, or {W}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+          "ActivationZone": "Hand",
+          "Duration": "Permanent",
+          "ForgetOnMoved": "Exile",
+          "Triggers": "Cast",
+          "ValidTgts": "Land"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromHand<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "Land,MayPlay",
+        "RememberObjects": "Targeted & Self",
+        "ImprintCards": "Self",
+        "SpellDescription": "Target land gains \"{T}: Add {R}, {G}, or {W}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+        "ActivationZone": "Hand",
+        "Duration": "Permanent",
+        "ForgetOnMoved": "Exile",
+        "Triggers": "Cast",
+        "ValidTgts": "Land"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 green and white Citizen creature token.",
+        "Origin": "Any",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

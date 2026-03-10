@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Creature",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever a creature enters, that creature's controller may have it deal damage equal to its power to any target of their choice.",
+        "Origin": "Any",
+        "TriggerZones": "Command",
+        "OptionalDecider": "TriggeredCardController"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, exile target creature, then return it to the battlefield under its owner's control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

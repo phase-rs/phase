@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may create a 1/1 white Soldier creature token.",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When you cycle CARDNAME or it dies, you may create a 1/1 white Soldier creature token.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

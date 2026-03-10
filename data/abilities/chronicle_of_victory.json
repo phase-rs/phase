@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a spell of the chosen type, draw a card.",
+        "ValidCard": "Card.ChosenType",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "AddToughness": "2",
+        "AddKeyword": "First Strike & Trample",
+        "Affected": "Creature.ChosenType+YouCtrl",
+        "Description": "Creatures you control of the chosen type get +2/+2 and have first strike and trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

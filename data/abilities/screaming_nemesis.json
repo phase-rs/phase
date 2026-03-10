@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "ValidTarget": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME is dealt damage, it deals that much damage to any other target. If a player is dealt damage this way, they can't gain life for the rest of the game."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

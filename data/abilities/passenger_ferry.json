@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "When this Vehicle attacks, you may pay {U}. When you do, another target attacking creature can't be blocked this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigImmediateTrig",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

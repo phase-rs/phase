@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "RestrictValid": "Spell.Cleric,Spell.Rogue,Spell.Warrior,Spell.Wizard,Activated.Cleric+inZoneBattlefield,Activated.Rogue+inZoneBattlefield,Activated.Warrior+inZoneBattlefield,Activated.Wizard+inZoneBattlefield",
+          "SpellDescription": "Add one mana of any color. Spend this mana only to cast a Cleric, Rogue, Warrior, or Wizard spell or to activate an ability of a Cleric, Rogue, Warrior, or Wizard."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.Cleric,Spell.Rogue,Spell.Warrior,Spell.Wizard,Activated.Cleric+inZoneBattlefield,Activated.Rogue+inZoneBattlefield,Activated.Warrior+inZoneBattlefield,Activated.Wizard+inZoneBattlefield",
+        "SpellDescription": "Add one mana of any color. Spend this mana only to cast a Cleric, Rogue, Warrior, or Wizard spell or to activate an ability of a Cleric, Rogue, Warrior, or Wizard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

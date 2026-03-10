@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Mystic Arcanum — At the beginning of your end step, exile the top card of your library. Until the end of your next turn, you may play that card.",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.wasCastFromExile+!token",
+        "TriggerDescription": "Pact Boon — Whenever you play a card from exile, create a Treasure token.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Secondary": "True",
+        "Origin": "Exile",
+        "TriggerDescription": "Pact Boon — Whenever you play a card from exile, create a Treasure token.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

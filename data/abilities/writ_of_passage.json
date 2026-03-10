@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "StaticAbilities": "Unblockable",
+          "Forecast": "True",
+          "TgtPrompt": "Choose target creature with power 2 or less",
+          "RememberObjects": "Targeted",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "SpellDescription": "Target creature with power 2 or less can't be blocked this turn. (Activate only during your upkeep and only once each turn.)",
+          "ValidTgts": "Creature.powerLE2"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 U"
+          },
+          {
+            "type": "Mana",
+            "cost": "Reveal<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "StaticAbilities": "Unblockable",
+        "Forecast": "True",
+        "TgtPrompt": "Choose target creature with power 2 or less",
+        "RememberObjects": "Targeted",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "SpellDescription": "Target creature with power 2 or less can't be blocked this turn. (Activate only during your upkeep and only once each turn.)",
+        "ValidTgts": "Creature.powerLE2"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy+powerLE2",
+        "TriggerDescription": "Whenever enchanted creature attacks, if its power is 2 or less, it can't be blocked this turn.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigUnblockable"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AE",
+        "Affected": "Creature.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

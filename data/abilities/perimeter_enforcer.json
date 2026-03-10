@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "Origin": "Any",
+        "ValidCard": "Detective.YouCtrl+Other",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever another Detective you control enters and whenever a Detective you control is turned face up, CARDNAME gets +1/+1 until end of turn."
+      }
+    },
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another Detective you control enters and whenever a Detective you control is turned face up, CARDNAME gets +1/+1 until end of turn.",
+        "ValidCard": "Detective.YouCtrl",
+        "Execute": "TrigPump",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

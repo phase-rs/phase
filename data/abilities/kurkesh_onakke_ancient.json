@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopyAbility",
+        "ValidSA": "SpellAbility.!ManaAbility",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you activate an ability of an artifact, if it isn't a mana ability, you may pay {R}. If you do, copy that ability. You may choose new targets for the copy.",
+        "ValidCard": "Artifact"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

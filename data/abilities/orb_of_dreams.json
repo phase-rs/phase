@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Permanent",
+        "Description": "Permanents enter tapped.",
+        "ReplacementResult": "Updated",
+        "ActiveZones": "Battlefield",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

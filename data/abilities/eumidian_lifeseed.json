@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "RestrictValid": "Activated.Land",
+          "SpellDescription": "Add one mana of any color. Spend this mana only to activate abilities of land sources.",
+          "Amount": "1"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Activated.Land",
+        "SpellDescription": "Add one mana of any color. Spend this mana only to activate abilities of land sources.",
+        "Amount": "1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this artifact enters, draft a card from CARDNAME's spellbook.",
+        "Execute": "TrigDraft",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

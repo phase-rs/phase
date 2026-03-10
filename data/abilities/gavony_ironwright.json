@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "4",
+        "Affected": "Creature.YouCtrl+Other",
+        "Condition": "FatefulHour",
+        "Description": "Fateful hour — As long as you have 5 or less life, other creatures you control get +1/+4."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

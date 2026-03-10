@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever a creature you control deals damage to a creature or player, you gain 1 life.",
+        "ValidSource": "Creature.YouCtrl",
+        "ValidTarget": "Creature,Player"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

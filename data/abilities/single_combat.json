@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Creature",
+          "Planeswalker"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "StackDescription": "SpellDescription",
+        "Defined": "Player",
+        "SubAbility": "SacAllOthers",
+        "Mandatory": "True",
+        "ChoiceTitle": "Choose a creature or planeswalker to keep",
+        "SpellDescription": "Each player chooses a creature or planeswalker they control, then sacrifices the rest. Players can't cast creature or planeswalker spells until the end of your next turn.",
+        "ControlledByPlayer": "Chooser"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

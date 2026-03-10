@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.nonCreature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionCompare": "EQ0",
+        "SpellDescription": "Counter target noncreature spell unless its controller pays {1}. Ferocious — If you control a creature with power 4 or greater, counter that spell instead.",
+        "ConditionPresent": "Creature.YouCtrl+powerGE4",
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select target noncreature spell",
+        "TargetType": "Spell",
+        "UnlessCost": "1",
+        "SubAbility": "DBCounter"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

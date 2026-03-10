@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "SpellDescription": "Roll a d20.",
+          "Sides": "20",
+          "ResultSubAbilities": "1:Trapped,2-9:DBToken,10-19:DBGainLife,20:DBChangeZone"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Roll a d20.",
+        "Sides": "20",
+        "ResultSubAbilities": "1:Trapped,2-9:DBToken,10-19:DBGainLife,20:DBChangeZone"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

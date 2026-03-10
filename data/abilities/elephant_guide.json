@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.AttachedBy",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When enchanted creature dies, create a 3/3 green Elephant creature token."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "3",
+        "AddPower": "3",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +3/+3."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

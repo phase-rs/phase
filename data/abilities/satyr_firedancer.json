@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player.Opponent",
+        "Execute": "TrigDmg",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Instant.YouCtrl,Sorcery.YouCtrl",
+        "TriggerDescription": "Whenever an instant or sorcery spell you control deals damage to an opponent, CARDNAME deals that much damage to target creature that player controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

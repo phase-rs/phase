@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DayTime",
+        "params": {
+          "SorcerySpeed": "True",
+          "Value": "Switch",
+          "SpellDescription": "If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "Value": "Switch",
+        "SpellDescription": "If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DayTimeChanges",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.",
+        "Execute": "DBGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "ValidCard": "Card.Self",
+        "DayTime": "Neither",
+        "ReplaceWith": "DoDay",
+        "Description": "If it's neither day nor night, it becomes day as CARDNAME enters.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

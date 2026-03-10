@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, put a +1/+1 counter on that creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Unlock Ability — Creatures you control with +1/+1 counters on them have reach and trample.",
+        "Affected": "Creature.YouCtrl+counters_GE1_P1P1",
+        "AddKeyword": "Reach & Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

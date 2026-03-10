@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Hundred Hand Slap — Whenever CARDNAME attacks, up to one hundred target creatures each get +0/+X until end of turn, where X is the number of cards in your hand.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CombatDamageToughness"
+      },
+      "params": {
+        "Description": "Sumo Spirit — As long as it's your turn, each creature assigns combat damage equal to its toughness rather than its power.",
+        "Condition": "PlayerTurn",
+        "ValidCard": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

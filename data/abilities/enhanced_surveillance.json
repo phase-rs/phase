@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Graveyard",
+        "destination": "Library",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Exile<1/CARDNAME>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card.YouOwn",
+        "SpellDescription": "Shuffle your graveyard into your library.",
+        "Shuffle": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "SurveilNum"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "Num": "2",
+        "Description": "You may look at an additional two cards each time you surveil.",
+        "Optional": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

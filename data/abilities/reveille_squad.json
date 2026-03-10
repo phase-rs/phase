@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "IsPresent": "Card.untapped",
+        "AttackedTarget": "You",
+        "Execute": "TrigUntapAll",
+        "PresentDefined": "Self",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever one or more creatures attack you, if CARDNAME is untapped, you may untap all creatures you control.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

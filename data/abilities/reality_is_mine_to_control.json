@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever you cast a spell, you may abandon this scheme. If you do, copy that spell, and you may choose new targets for the copy.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigAbandon",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

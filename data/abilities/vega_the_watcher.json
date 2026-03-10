@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.!wasCastFromYourHand",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a spell from anywhere other than your hand, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

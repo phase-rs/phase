@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your draw step, draw an additional card.",
+        "Phase": "Draw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeActivated",
+      "params": {
+        "ValidCard": "Planeswalker",
+        "Activator": "Player",
+        "Description": "Players can't activate planeswalkers' loyalty abilities.",
+        "ValidSA": "Activated.Loyalty"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Description": "Spells you cast cost {1} less to cast.",
+        "Amount": "1",
+        "Activator": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Creatures you control get +1/+1.",
+        "Affected": "Creature.YouCtrl",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

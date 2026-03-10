@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "TriggerZones": "Battlefield",
+        "ActivationLimit": "1",
+        "TriggerDescription": "Whenever another permanent you control leaves the battlefield during your turn, create a 1/1 while Ally creature token. This ability triggers only once each turn.",
+        "Origin": "Battlefield",
+        "ValidCard": "Permanent.YouCtrl+Other",
+        "PlayerTurn": "True",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.Other+YouCtrl",
+        "Description": "Other creatures you control get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

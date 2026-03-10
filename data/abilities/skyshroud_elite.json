@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddToughness": "2",
+        "Description": "CARDNAME gets +1/+2 as long as an opponent controls a nonbasic land.",
+        "IsPresent": "Land.OppCtrl+nonBasic",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

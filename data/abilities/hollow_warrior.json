@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttackUnless"
+      },
+      "params": {
+        "Description": "CARDNAME can't attack or block unless you tap an untapped creature you control not declared as an attacking or blocking creature this combat. (This cost is paid as attackers or blockers are declared.)",
+        "ValidCard": "Card.Self",
+        "Cost": "tapXType<1/Creature.!attacking>"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockUnless"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Cost": "tapXType<1/Creature.!blocking>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

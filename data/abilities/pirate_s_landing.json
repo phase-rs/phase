@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "TrueSubAbility": "DBSeek",
+          "FalseSubAbility": "DBDraw",
+          "BranchConditionSVarCompare": "GE1",
+          "SpellDescription": "Draw a card. If mana from a Treasure was spent to cast this spell, seek a Pirate card instead.",
+          "BranchConditionSVar": "TreasureCheck"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TrueSubAbility": "DBSeek",
+        "FalseSubAbility": "DBDraw",
+        "BranchConditionSVarCompare": "GE1",
+        "SpellDescription": "Draw a card. If mana from a Treasure was spent to cast this spell, seek a Pirate card instead.",
+        "BranchConditionSVar": "TreasureCheck"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

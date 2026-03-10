@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Instant,Sorcery"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter target instant or sorcery spell unless its controller pays {X}, where X is CARDNAME's power.",
+        "TgtPrompt": "Select target instant or sorcery spell",
+        "TargetType": "Spell",
+        "UnlessCost": "X"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another Spirit you control enters, CARDNAME gets +1/+1 until end of turn.",
+        "Execute": "TrigPump",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Spirit+Other+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

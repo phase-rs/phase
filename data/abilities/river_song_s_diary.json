@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigEffect",
+        "TriggerDescription": "Imprint — Whenever a player casts an instant or sorcery spell from their hand, exile it instead of putting it into a graveyard as it resolves.",
+        "ValidCard": "Instant.wasCastFromTheirHand,Sorcery.wasCastFromTheirHand",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if there are four or more cards exiled with CARDNAME, choose one of them at random. You may cast it without paying its mana cost.",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "SVarCompare": "GE4",
+        "Execute": "TrigChooseRandom"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

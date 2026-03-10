@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "SubAbility": "DBPumpAll",
+          "ValidCards": "Vehicle.YouCtrl",
+          "Types": "Creature,Artifact",
+          "SpellDescription": "Vehicles you control become artifact creatures until end of turn. Creatures you control get +2/+0 until end of turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPumpAll",
+        "ValidCards": "Vehicle.YouCtrl",
+        "Types": "Creature,Artifact",
+        "SpellDescription": "Vehicles you control become artifact creatures until end of turn. Creatures you control get +2/+0 until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

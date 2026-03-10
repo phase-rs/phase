@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of combat on your turn, creatures you control with flying get +1/+1 and gain vigilance until end of turn.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPumpAll",
+        "Phase": "BeginCombat"
+      }
+    },
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Creature.attacking+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChangeZone",
+        "OptionalDecider": "You",
+        "ResolvedLimit": "1",
+        "TriggerDescription": "Whenever one or more attacking creatures you control die, you may return one of them to the battlefield tapped under its owner's control with a flying counter on it. Do this only once each turn.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

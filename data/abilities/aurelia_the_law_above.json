@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerDescription": "Whenever a player attacks with three or more creatures, you draw a card.",
+        "ValidAttackersAmount": "GE3",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "AttackingPlayer": "Player",
+        "ValidAttackers": "Creature"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "Player",
+        "TriggerDescription": "Whenever a player attacks with five or more creatures, CARDNAME deals 3 damage to each of your opponents and you gain 3 life.",
+        "Execute": "TrigDamage",
+        "ValidAttackersAmount": "GE5",
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "Whenever a player activates an ability that isn't a mana ability, CARDNAME deals 1 damage to that player.",
+        "ValidActivatingPlayer": "Player",
+        "ValidSA": "SpellAbility.!ManaAbility"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

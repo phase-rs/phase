@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "ValidCards": "Creature.withoutFlying",
+        "SpellDescription": "CARDNAME deals X damage to each creature without flying and each player.",
+        "ValidPlayers": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Self+kicked",
+        "CharacteristicDefining": "True",
+        "Description": "If this spell was kicked, it has split second. (As long as this spell is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)",
+        "PresentZone": "Stack",
+        "AddKeyword": "Split second"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

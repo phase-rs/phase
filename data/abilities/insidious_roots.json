@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Any",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more creature cards leave your graveyard, create a 0/1 green Plant creature token, then put a +1/+1 counter on each Plant you control.",
+        "ValidCards": "Creature.YouOwn",
+        "Execute": "TrigToken",
+        "Origin": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.token+YouCtrl",
+        "AddAbility": "AnyMana",
+        "Description": "Creature tokens you control have \"{T}: Add one mana of any color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

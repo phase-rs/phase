@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Sliver+YouCtrl",
+        "Description": "Sliver creatures you control have \"When this creature enters, you may exile target creature an opponent controls until this creature leaves the battlefield.\"",
+        "AddTrigger": "ConstrictingTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

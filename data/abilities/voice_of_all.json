@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection:Card.ChosenColor:chosenColor",
+        "Affected": "Card.Self",
+        "Description": "CARDNAME has protection from the chosen color."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Card.IsCommander+YouOwn"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChoiceZone": "Command,Battlefield",
+        "Mandatory": "True",
+        "ChoiceTitle": "Choose a commander you own",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "You draw X cards and you lose X life, where X is the mana value of a commander you own on the battlefield or in the command zone."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

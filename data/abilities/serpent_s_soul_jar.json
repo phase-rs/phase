@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Until end of turn, you may cast a creature spell from among cards exiled with CARDNAME.",
+          "StaticAbilities": "MayCast"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "PayLife<2>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Until end of turn, you may cast a creature spell from among cards exiled with CARDNAME.",
+        "StaticAbilities": "MayCast"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Whenever an Elf you control dies, exile it.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "ValidCard": "Elf.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

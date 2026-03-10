@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "Execute": "TrigNote",
+        "ValidSource": "Creature.YouCtrl",
+        "ValidTarget": "Player",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Cleanup",
+        "Execute": "TrigReset",
+        "Static": "True"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At end of combat, for each creature you controlled at the time it dealt combat damage to a player this turn, copy a random card with the same mana cost as that creature. You may pay {3}. If you do, choose one of those copies. If a copy of a permanent card is chosen, you may create a token that's a copy of that card. If a copy of an instant or sorcery card is chosen, you may cast the copy without paying its mana cost.",
+        "Phase": "EndCombat",
+        "ValidPlayer": "Player",
+        "TriggerZones": "Command",
+        "Execute": "TrigRepeatEach",
+        "CheckSVar": "Hits"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

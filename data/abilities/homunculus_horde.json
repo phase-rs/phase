@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you draw your second card each turn, create a token that's a copy of this creature.",
+        "Execute": "TrigCopy",
+        "Number": "2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

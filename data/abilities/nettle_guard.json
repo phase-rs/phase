@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Enchantment"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact or enchantment",
+        "SpellDescription": "Destroy target artifact or enchantment."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, it gets +0/+2 until end of turn.",
+        "ValidSource": "SpellAbility.YouCtrl",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "Valiant": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

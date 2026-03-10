@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME dies, create a 1/1 green Snake creature token for each +1/+1 counter on it.",
+        "Destination": "Graveyard",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "TurnFaceUp",
+      "params": {
+        "Description": "As CARDNAME is turned face up, put five +1/+1 counters on it.",
+        "ReplaceWith": "AddCounters",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

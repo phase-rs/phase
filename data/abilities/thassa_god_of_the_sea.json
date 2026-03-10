@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature.YouCtrl",
+          "TgtPrompt": "Select target creature you control",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "Target creature you control can't be blocked this turn.",
+          "StaticAbilities": "Unblockable"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature.YouCtrl",
+        "TgtPrompt": "Select target creature you control",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "Target creature you control can't be blocked this turn.",
+        "StaticAbilities": "Unblockable"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, scry 1.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigScry"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveType": "Creature",
+        "SVarCompare": "LT5",
+        "Affected": "Card.Self",
+        "CheckSVar": "X",
+        "Description": "As long as your devotion to blue is less than 5, NICKNAME isn't a creature. (Each {U} in the mana costs of permanents you control counts towards your devotion to blue.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

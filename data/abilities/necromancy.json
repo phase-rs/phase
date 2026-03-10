@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "IsPresent": "Card.StrictlySelf",
+        "Execute": "RaiseDead",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with CARDNAME.\" Put target creature card from a graveyard onto the battlefield under your control and attach CARDNAME to it. When CARDNAME leaves the battlefield, that creature's controller sacrifices it."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

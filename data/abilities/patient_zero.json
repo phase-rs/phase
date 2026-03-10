@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "NoCleanupDamage"
+      },
+      "params": {
+        "Description": "Damage isn't removed from creatures your opponents control during cleanup steps.",
+        "ValidCard": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

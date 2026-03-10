@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Curse",
+        "RemoveAllAbilities": "True",
+        "Defined": "Self",
+        "SpellDescription": "CARDNAME loses all abilities until end of turn. Any player may activate this ability.",
+        "Activator": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card.nonCreature",
+        "Caster": "You",
+        "Description": "You can't cast noncreature spells."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "SurpriseETB",
+        "ValidCard": "Card.Self",
+        "Description": "If a spell or ability an opponent controls causes you to discard CARDNAME, put it onto the battlefield instead of putting it into your graveyard.",
+        "ActiveZones": "Hand",
+        "Discard": "True",
+        "EffectOnly": "True",
+        "ValidCause": "SpellAbility.OppCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

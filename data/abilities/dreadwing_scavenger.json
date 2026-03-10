@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever this creature enters or attacks, draw a card, then discard a card.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever this creature enters or attacks, draw a card, then discard a card."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Affected": "Card.Self",
+        "AddKeyword": "Deathtouch",
+        "Condition": "Threshold",
+        "Description": "Threshold — This creature gets +1/+1 and has deathtouch as long as there are seven or more cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Sliver",
+        "Description": "All Slivers have \"{2}: Regenerate this permanent.\"",
+        "AddAbility": "Pump"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

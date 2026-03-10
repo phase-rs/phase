@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseSource",
+        "params": {
+          "Choices": "Card,Emblem",
+          "AILogic": "NeedsPrevention",
+          "SubAbility": "DBEffect",
+          "UnlessCost": "1",
+          "SpellDescription": "Any player may pay {1}. If no one does, the next time a source of your choice would deal damage to you this turn, prevent that damage.",
+          "UnlessPayer": "Player"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "Card,Emblem",
+        "AILogic": "NeedsPrevention",
+        "SubAbility": "DBEffect",
+        "UnlessCost": "1",
+        "SpellDescription": "Any player may pay {1}. If no one does, the next time a source of your choice would deal damage to you this turn, prevent that damage.",
+        "UnlessPayer": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "AddType": "Warrior",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +3/+2 and is a Warrior in addition to its other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

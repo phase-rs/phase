@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +1/+1."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "GE3",
+        "Description": "Corrupted — As long as an opponent has three or more poison counters, enchanted creature gets an additional +1/+0 and has first strike.",
+        "AddKeyword": "First Strike",
+        "Affected": "Creature.EnchantedBy",
+        "CheckSVar": "X",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

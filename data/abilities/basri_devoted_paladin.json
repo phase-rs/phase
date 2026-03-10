@@ -1,0 +1,78 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "SubAbility": "DBPump",
+        "TargetMax": "1",
+        "Planeswalker": "True",
+        "SpellDescription": "Put a +1/+1 counter on up to one target creature. It gains vigilance until end of turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Whenever a creature attacks this turn, put a +1/+1 counter on it.",
+          "Planeswalker": "True",
+          "Triggers": "TrigAttack"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Whenever a creature attacks this turn, put a +1/+1 counter on it.",
+        "Planeswalker": "True",
+        "Triggers": "TrigAttack"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 2,
+        "toughness": 2,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "SpellDescription": "Creatures you control get +2/+2 and gain flying until end of turn.",
+        "ValidCards": "Creature.YouCtrl",
+        "KW": "Flying",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "AddKeywords": "Haste",
+          "TgtPrompt": "Select target creature you control",
+          "SpellDescription": "Create a token that's a copy of target creature you control, except it has haste and \"At the beginning of the end step, sacrifice this token.\"",
+          "ValidTgts": "Creature.YouCtrl",
+          "AtEOTTrig": "Sacrifice"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AddKeywords": "Haste",
+        "TgtPrompt": "Select target creature you control",
+        "SpellDescription": "Create a token that's a copy of target creature you control, except it has haste and \"At the beginning of the end step, sacrifice this token.\"",
+        "ValidTgts": "Creature.YouCtrl",
+        "AtEOTTrig": "Sacrifice"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

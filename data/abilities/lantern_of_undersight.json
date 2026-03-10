@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "You draw cards from the bottom of your library instead of the top of your library.",
+        "Affected": "You",
+        "Description": "You draw cards from the bottom of your library instead of the top of your library."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

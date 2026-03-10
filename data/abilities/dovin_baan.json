@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": -3,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMax": "1",
+        "Duration": "UntilYourNextTurn",
+        "SubAbility": "DBEffect",
+        "TargetMin": "0",
+        "SpellDescription": "Until your next turn, up to one target creature gets -3/-0 and its activated abilities can't be activated.",
+        "IsCurse": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainLife",
+        "amount": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "Planeswalker": "True",
+        "Defined": "You",
+        "SpellDescription": "You gain 2 life and draw a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Emblem — Dovin Baan",
+          "Planeswalker": "True",
+          "Stackable": "False",
+          "Duration": "Permanent",
+          "StaticAbilities": "STDovin",
+          "Image": "Emblem_dovin_baan",
+          "AILogic": "Always",
+          "Ultimate": "True",
+          "SpellDescription": "You get an emblem with \"Your opponents can't untap more than two permanents during their untap steps.\""
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Emblem — Dovin Baan",
+        "Planeswalker": "True",
+        "Stackable": "False",
+        "Duration": "Permanent",
+        "StaticAbilities": "STDovin",
+        "Image": "Emblem_dovin_baan",
+        "AILogic": "Always",
+        "Ultimate": "True",
+        "SpellDescription": "You get an emblem with \"Your opponents can't untap more than two permanents during their untap steps.\""
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

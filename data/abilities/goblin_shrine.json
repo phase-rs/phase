@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, it deals 1 damage to each Goblin creature.",
+        "Execute": "TrigDealDamage",
+        "ValidCard": "Card.Self",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Land.AttachedBy+Basic+Mountain",
+        "Affected": "Creature.Goblin",
+        "AddPower": "1",
+        "Description": "If enchanted land is a basic Mountain, Goblin creatures get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

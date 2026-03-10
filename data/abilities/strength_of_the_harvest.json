@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Enchanted creature gets +1/+1 for each creature and/or enchantment you control.",
+            "AddToughness": "X",
+            "Affected": "Creature.EnchantedBy",
+            "AddPower": "X"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Combo G W",
+            "params": {
+              "SpellDescription": "Add {G} or {W}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {G} or {W}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "ETBTapped",
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "Description": "CARDNAME enters tapped.",
+            "Destination": "Battlefield"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.ChosenType",
+        "TriggerDescription": "Whenever you cast a spell of the chosen type, put a charge counter on CARDNAME.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.ChosenType+YouCtrl",
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Creatures you control of the chosen type get +1/+1 for each charge counter on CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

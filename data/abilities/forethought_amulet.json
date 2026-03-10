@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {3}.",
+        "Execute": "TrigUpkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "Dmg2",
+        "ValidTarget": "You",
+        "ValidSource": "Instant,Sorcery",
+        "ActiveZones": "Battlefield",
+        "DamageAmount": "GE3",
+        "Description": "If an instant or sorcery source would deal 3 or more damage to you, it deals 2 damage to you instead."
+      }
+    }
+  ],
+  "faces": []
+}

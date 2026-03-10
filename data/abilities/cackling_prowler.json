@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "Phase": "End of Turn",
+        "CheckSVar": "Morbid",
+        "TriggerDescription": "Morbid — At the beginning of your end step, if a creature died this turn, put a +1/+1 counter on this creature.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

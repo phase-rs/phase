@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "SpellDescription": "Add {G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 5,
+        "toughness": 3,
+        "types": [
+          "Creature",
+          "Artifact",
+          "Treefolk"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 G G G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "OverwriteColors": "True",
+        "Colors": "Green",
+        "RemoveCreatureTypes": "True",
+        "SpellDescription": "CARDNAME becomes a 5/3 green Treefolk artifact creature with trample until end of turn.",
+        "Defined": "Self",
+        "Keywords": "Trample"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, if it was a creature, return this card to its owner's hand.",
+        "ValidCard": "Card.Self+Creature",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

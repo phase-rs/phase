@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Council's dilemma — When CARDNAME enters, starting with you, each player votes for sprout or harvest. Put two +1/+1 counters on CARDNAME for each sprout vote. You gain 3 life for each harvest vote.",
+        "Origin": "Any",
+        "Execute": "TrigChangeZone"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

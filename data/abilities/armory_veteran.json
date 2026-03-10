@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+equipped",
+        "Description": "As long as CARDNAME is equipped, it has menace. (It can't be blocked except by two or more creatures.)",
+        "AddKeyword": "Menace"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

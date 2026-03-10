@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Battlefield",
+        "Description": "Creatures controlled by players who chose war get +3/+0.",
+        "AddPower": "3",
+        "Affected": "Creature.ControlledBy Player.NotedForWar"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures controlled by players who chose peace get +0/+3.",
+        "AddToughness": "3",
+        "Affected": "Creature.ControlledBy Player.NotedForPeace",
+        "AffectedZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

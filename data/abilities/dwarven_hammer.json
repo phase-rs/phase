@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may pay {2}. If you do, create a 2/1 red Dwarf Berserker creature token, then attach CARDNAME to it.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "AddKeyword": "Trample",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +3/+0 and has trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

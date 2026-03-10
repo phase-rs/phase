@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeActivated",
+      "params": {
+        "ValidSA": "Activated.Cycling",
+        "Description": "Players can't cycle cards."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

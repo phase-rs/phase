@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 C"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBReturn",
+        "TargetMin": "1",
+        "ForgetOtherTargets": "True",
+        "TgtPrompt": "Select another target creature",
+        "SpellDescription": "Exile another target creature, then return it to the battlefield tapped under its owner's control. ({C} represents colorless mana.)",
+        "RememberTargets": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

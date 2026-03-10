@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "Sides": "20",
+          "ResultSubAbilities": "1-9:LoseTwo,10-19:LoseGain,20:LoseTrea",
+          "PrecostDesc": "Circle of Death —",
+          "SpellDescription": "Roll a d20."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Sides": "20",
+        "ResultSubAbilities": "1-9:LoseTwo,10-19:LoseGain,20:LoseTrea",
+        "PrecostDesc": "Circle of Death —",
+        "SpellDescription": "Roll a d20."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

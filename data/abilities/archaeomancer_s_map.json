@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSearch",
+        "TriggerDescription": "When CARDNAME enters, search your library for up to two basic Plains cards, reveal them, put them into your hand, then shuffle."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Land.OppCtrl+ControllerControlsMoreLand",
+        "TriggerDescription": "Whenever a land enters under an opponent's control, if that player controls more lands than you, you may put a land card from your hand onto the battlefield.",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigChangeZone",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

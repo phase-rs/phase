@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, put two -1/-1 counters on target creature you control.",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "Execute": "RemoveCounter",
+        "TriggerDescription": "Whenever you put one or more -1/-1 counters on CARDNAME, remove a -1/-1 counter from another target creature you control.",
+        "ValidCard": "Creature.Self",
+        "CounterType": "M1M1",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures your opponents control have base toughness 1.",
+        "SetToughness": "1",
+        "Affected": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SpellDescription": "Transform CARDNAME.",
+              "Defined": "Self",
+              "Mode": "Transform"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "6 G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Transform CARDNAME.",
+            "Defined": "Self",
+            "Mode": "Transform"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "CanBlockAmount": "1",
+            "Description": "CARDNAME can block an additional creature each combat.",
+            "Affected": "Card.Self"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "CARDNAME can block an additional creature each combat.",
+            "CanBlockAmount": "1",
+            "Affected": "Card.Self"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

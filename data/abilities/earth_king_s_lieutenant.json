@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this creature enters, put a +1/+1 counter on each other Ally creature you control.",
+        "Execute": "TrigPutCounterAll",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever another Ally you control enters, put a +1/+1 counter on this creature.",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Ally.Other+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

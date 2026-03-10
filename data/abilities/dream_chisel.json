@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Creature",
+        "ValidSpell": "Spell.isCastFaceDown",
+        "Activator": "You",
+        "Description": "Face-down creature spells you cast cost {1} less to cast.",
+        "Amount": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

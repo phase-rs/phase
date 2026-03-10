@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "SpellDescription": "Create a 1/1 green Insect creature token with flying named Butterfly at the beginning of the next end step.",
+          "Mode": "Phase",
+          "Phase": "End of Turn",
+          "Execute": "TrigToken"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 1/1 green Insect creature token with flying named Butterfly at the beginning of the next end step.",
+        "Mode": "Phase",
+        "Phase": "End of Turn",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

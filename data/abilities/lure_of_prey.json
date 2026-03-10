@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "SpellDescription": "You may put a green creature card from your hand onto the battlefield.",
+        "ChangeType": "Creature.Green"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "CheckSVar": "X",
+        "Description": "Cast this spell only if an opponent cast a creature spell this turn.",
+        "SVarCompare": "LE0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

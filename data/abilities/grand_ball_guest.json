@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Celebration — CARDNAME gets +1/+1 and has trample as long as two or more nonland permanents entered the battlefield under your control this turn.",
+        "CheckSVar": "Celebration",
+        "SVarCompare": "GE2",
+        "AddKeyword": "Trample",
+        "AddPower": "1",
+        "Affected": "Card.Self",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

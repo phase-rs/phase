@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Card.Self,Creature.blockingSource,Creature.blockedBySource",
+        "Shuffle": "True",
+        "SpellDescription": "Put CARDNAME and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.",
+        "LibraryPosition": "0"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MustBlock",
+        "params": {
+          "TgtPrompt": "Select target creature that must block this creature this turn",
+          "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature that must block this creature this turn",
+        "SpellDescription": "Target creature blocks CARDNAME this turn if able.",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

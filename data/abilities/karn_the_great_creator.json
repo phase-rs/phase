@@ -1,0 +1,76 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.nonCreature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "Planeswalker": "True",
+        "TargetMax": "1",
+        "AILogic": "PTByCMC",
+        "Duration": "UntilYourNextTurn",
+        "TgtPrompt": "Select target noncreature artifact",
+        "SpellDescription": "Until your next turn, up to one target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Sideboard,Exile",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
+        "Planeswalker": "True",
+        "ChangeNum": "1",
+        "AILogic": "AnyMainPhase",
+        "ChangeTypeDesc": "artifact they own",
+        "Hidden": "True",
+        "StackDescription": "{p:You} may reveal an artifact card they own from outside the game or in exile and put it into their hand.",
+        "Reveal": "True",
+        "ChangeType": "Artifact.YouOwn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeActivated",
+      "params": {
+        "ValidSA": "Activated",
+        "ValidCard": "Artifact.OppCtrl",
+        "AffectedZone": "Battlefield",
+        "Description": "Activated abilities of artifacts your opponents control can't be activated."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Destroy target creature. You gain 2 life.",
+        "SubAbility": "DBLifeGain"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "IsPresent": "Villain.YouCtrl",
+        "Amount": "2",
+        "Description": "This spell costs {2} less to cast if you control a Villain."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

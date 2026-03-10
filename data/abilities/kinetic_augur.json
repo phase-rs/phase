@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, discard up to two cards, then draw that many cards.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDiscard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power is equal to the number of instant and sorcery cards in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target player who lost life this turn",
+        "SpellDescription": "Target player who lost life this turn loses 1 life.",
+        "ValidTgts": "Player.LostLifeThisTurn"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": -1,
+        "toughness": -1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.blocking"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target blocking creature gets -1/-1 until end of turn.",
+        "TgtPrompt": "Select target blocking creature",
+        "IsCurse": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

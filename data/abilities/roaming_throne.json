@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddType": "ChosenType",
+        "Description": "CARDNAME is the chosen type in addition to its other types."
+      }
+    },
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl+ChosenType",
+        "Description": "If a triggered ability of another creature you control of the chosen type triggers, it triggers an additional time."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

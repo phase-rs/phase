@@ -1,0 +1,84 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "AILogic": "PayUnlessCost",
+          "Planeswalker": "True",
+          "Defined": "Opponent",
+          "TempRemember": "Chooser",
+          "FallbackAbility": "LoseLifeFallback",
+          "Choices": "SacNonland,Discard",
+          "SpellDescription": "Each opponent loses 3 life unless that player sacrifices a nonland permanent or discards a card."
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "PayUnlessCost",
+        "Planeswalker": "True",
+        "Defined": "Opponent",
+        "TempRemember": "Chooser",
+        "FallbackAbility": "LoseLifeFallback",
+        "Choices": "SacNonland,Discard",
+        "SpellDescription": "Each opponent loses 3 life unless that player sacrifices a nonland permanent or discards a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Destroy target creature. Draw a card."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 7
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -11
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Opponent",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SubAbility": "DBDrawSeven",
+        "SpellDescription": "CARDNAME deals 7 damage to each opponent. You draw seven cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

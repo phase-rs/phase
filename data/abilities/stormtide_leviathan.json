@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Island",
+        "Description": "All lands are Islands in addition to their other types.",
+        "Affected": "Land"
+      }
+    },
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature.withoutFlying+!hasKeywordLandwalk:Island",
+        "Description": "Creatures without flying or islandwalk can't attack."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

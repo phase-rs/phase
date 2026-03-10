@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever CARDNAME attacks while saddled, it gets +X/+X until end of turn, where X is the number of Mounts you control.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self+IsSaddled"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

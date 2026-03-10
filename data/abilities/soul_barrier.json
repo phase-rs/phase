@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a creature spell, CARDNAME deals 2 damage to that player unless they pay {2}.",
+        "ValidCard": "Creature",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

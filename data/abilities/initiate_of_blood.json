@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.wasDealtDamageThisTurn"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target creature that was dealt damage this turn",
+            "SubAbility": "DBDelayedTrigger",
+            "SpellDescription": "CARDNAME deals 1 damage to target creature that was dealt damage this turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 4
+            },
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.wasDealtDamageThisTurn"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target creature that was dealt damage this turn.",
+            "SpellDescription": "CARDNAME deals 4 damage to target creature that was dealt damage this turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

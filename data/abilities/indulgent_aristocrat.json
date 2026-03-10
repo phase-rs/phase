@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterType": "P1P1",
+          "SpellDescription": "Put a +1/+1 counter on each Vampire you control.",
+          "ValidCards": "Vampire.YouCtrl",
+          "AILogic": "AtOppEOT",
+          "ValidCardsDesc": "Vampire you control",
+          "CounterNum": "1"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterType": "P1P1",
+        "SpellDescription": "Put a +1/+1 counter on each Vampire you control.",
+        "ValidCards": "Vampire.YouCtrl",
+        "AILogic": "AtOppEOT",
+        "ValidCardsDesc": "Vampire you control",
+        "CounterNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

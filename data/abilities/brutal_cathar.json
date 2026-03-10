@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "TriggerDescription": "When this creature enters or transforms into CARDNAME, exile target creature an opponent controls until this creature leaves the battlefield.",
+            "Execute": "TrigExile"
+          }
+        },
+        {
+          "mode": "Transformed",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Secondary": "True",
+            "TriggerDescription": "When this creature enters or transforms into CARDNAME, exile target creature an opponent controls until this creature leaves the battlefield.",
+            "Execute": "TrigExile"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

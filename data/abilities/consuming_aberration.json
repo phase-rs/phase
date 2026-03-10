@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a spell, each opponent reveals cards from the top of their library until they reveal a land card, then puts those cards into their graveyard.",
+        "Execute": "Grind",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetPower": "ConsumingPT",
+        "SetToughness": "ConsumingPT",
+        "Description": "CARDNAME's power and toughness are each equal to the number of cards in your opponents' graveyards."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

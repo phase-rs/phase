@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseType",
+        "params": {
+          "Defined": "You",
+          "SubAbility": "DBAnimate",
+          "Type": "Basic Land",
+          "SpellDescription": "Until end of turn, target land you control becomes the basic land type of your choice in addition to its other types."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SubAbility": "DBAnimate",
+        "Type": "Basic Land",
+        "SpellDescription": "Until end of turn, target land you control becomes the basic land type of your choice in addition to its other types."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you gain 3 life.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

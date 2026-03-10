@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopyPermanent",
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, create a token that's a copy of CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+withFlanking+YouCtrl",
+        "Description": "Other creatures you control with flanking have flanking. (Each instance of flanking triggers separately.)",
+        "AddKeyword": "Flanking"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

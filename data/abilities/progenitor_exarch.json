@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetState",
+        "params": {
+          "ValidTgts": "Incubator.token+YouCtrl",
+          "TgtPrompt": "Select target Incubator token you control",
+          "SpellDescription": "Transform target Incubator token you control.",
+          "Mode": "Transform"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Incubator.token+YouCtrl",
+        "TgtPrompt": "Select target Incubator token you control",
+        "SpellDescription": "Transform target Incubator token you control.",
+        "Mode": "Transform"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigIncubate",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, incubate 3 X times. (To incubate 3, create an Incubator token with three +1/+1 counters on it and \"{2}: Transform this artifact.\" It transforms into a 0/0 Phyrexian artifact creature.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

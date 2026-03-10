@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigPoison",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.OppCtrl",
+        "ValidTarget": "You",
+        "TriggerDescription": "Whenever one or more creatures an opponent controls deal combat damage to you, that player gets a poison counter.",
+        "CombatDamage": "True"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a player attacks, if one or more players being attacked are poisoned, the attacking player draws a card.",
+        "Execute": "TrigDraw",
+        "AttackedTarget": "Player.IsPoisoned"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.YouDontOwn+nonCreature",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a noncreature spell you don't own, create two tapped Treasure tokens.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouDontOwn+YouCtrl",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Each creature you control but don't own gets +2/+2, has menace and deathtouch, and is a Pirate in addition to its other types.",
+        "AddType": "Pirate",
+        "AddKeyword": "Menace & Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

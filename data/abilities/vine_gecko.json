@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.kicked+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a kicked spell, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "Type": "Spell",
+        "OnlyFirstSpell": "True",
+        "ValidSpell": "Spell.Kicked",
+        "Description": "The first kicked spell you cast each turn costs {1} less to cast.",
+        "Amount": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

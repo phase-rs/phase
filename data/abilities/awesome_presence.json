@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockUnless"
+      },
+      "params": {
+        "Cost": "3",
+        "Description": "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.",
+        "Attacker": "Creature.AttachedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

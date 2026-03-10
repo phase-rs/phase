@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P0",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "ActivationPhases": "Upkeep",
+        "SpellDescription": "Put up to X +1/+0 counters on CARDNAME. This ability can't cause the total number of +1/+0 counters on CARDNAME to be greater than four. Activate only during your upkeep.",
+        "UpTo": "True",
+        "MaxFromEffect": "4",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSubCounter",
+        "TriggerDescription": "At end of combat, if CARDNAME attacked or blocked this combat, remove a +1/+0 counter from it.",
+        "Phase": "EndCombat",
+        "IsPresent": "Card.Self+attackedThisCombat,Card.Self+blockedThisCombat",
+        "ValidPlayer": "Player"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.Wall",
+        "Description": "CARDNAME can't be blocked by Walls.",
+        "ValidAttacker": "Creature.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

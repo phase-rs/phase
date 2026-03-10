@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Conjure": "True",
+          "Name": "Hollowhenge Beast",
+          "StackDescription": "Conjure a card named Hollowhenge Beast into your hand.",
+          "AdditionalActivationZone": "Graveyard",
+          "SpellDescription": "Conjure a card named Hollowhenge Beast into your hand. You may also activate this ability while CARDNAME is in your graveyard.",
+          "Zone": "Hand"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Land/land>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Conjure": "True",
+        "Name": "Hollowhenge Beast",
+        "StackDescription": "Conjure a card named Hollowhenge Beast into your hand.",
+        "AdditionalActivationZone": "Graveyard",
+        "SpellDescription": "Conjure a card named Hollowhenge Beast into your hand. You may also activate this ability while CARDNAME is in your graveyard.",
+        "Zone": "Hand"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigSeek",
+        "TriggerDescription": "When CARDNAME enters, seek a land card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

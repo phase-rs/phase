@@ -1,0 +1,88 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "ub_2_3_nightmare_mill",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "SpellDescription": "Create a 2/3 blue and black Nightmare creature token with \"Whenever this creature attacks or blocks, each opponent exiles the top two cards of their library.\"",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target nonland permanent to its owner's hand, then that player exiles a card from their hand.",
+        "SubAbility": "DBExile",
+        "TgtPrompt": "Select target nonland permanent",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "ValidZone": "Exile",
+          "Planeswalker": "True",
+          "SpellDescription": "You may cast up to three spells from among face-up cards your opponents own from exile without paying their mana costs.",
+          "WithoutManaCost": "True",
+          "Ultimate": "True",
+          "Valid": "Card.faceUp+OwnedBy Player.Opponent",
+          "Amount": "3",
+          "Optional": "True",
+          "ValidSA": "Spell"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -7
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidZone": "Exile",
+        "Planeswalker": "True",
+        "SpellDescription": "You may cast up to three spells from among face-up cards your opponents own from exile without paying their mana costs.",
+        "WithoutManaCost": "True",
+        "Ultimate": "True",
+        "Valid": "Card.faceUp+OwnedBy Player.Opponent",
+        "Amount": "3",
+        "Optional": "True",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

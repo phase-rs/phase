@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Artifact"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "UP"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Colors": "Blue",
+        "SorcerySpeed": "True",
+        "SpellDescription": "Until end of turn, target creature you control becomes a blue artifact in addition to its other colors and types. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other blue creatures you control have \"Whenever this creature becomes tapped, draw a card, then discard a card.\"",
+        "Affected": "Creature.Other+Blue+YouCtrl",
+        "AddTrigger": "LootTrig"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Artifact+Other+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Description": "Other artifact creatures you control get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

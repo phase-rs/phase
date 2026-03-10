@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "IgnoreLegendRule"
+      },
+      "params": {
+        "PresentCompare": "EQ2",
+        "IsPresent": "Permanent.namedBrothers Yamazaki",
+        "ValidCard": "Permanent.namedBrothers Yamazaki",
+        "Description": "If there are exactly two permanents named Brothers Yamazaki on the battlefield, the \"legend rule\" doesn't apply to them."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Each other creature named Brothers Yamazaki gets +2/+2 and has haste.",
+        "Affected": "Creature.Other+namedBrothers Yamazaki",
+        "AddKeyword": "Haste",
+        "AddToughness": "2",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

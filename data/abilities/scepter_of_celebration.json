@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, create that many 1/1 green and white Citizen creature tokens.",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.EquippedBy",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+0 and has trample.",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

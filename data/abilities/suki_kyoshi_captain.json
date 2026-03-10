@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Warrior.attacking+YouCtrl",
+        "SpellDescription": "Attacking Warriors you control gain double strike until end of turn.",
+        "KW": "Double Strike"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Warrior+Other+YouCtrl",
+        "Description": "Other Warriors you control get +1/+1.",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

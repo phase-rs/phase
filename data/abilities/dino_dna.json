@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "SpellDescription": "Exile target creature card from a graveyard. Activate only as a sorcery.",
+        "PrecostDesc": "Imprint —",
+        "Imprint": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "SetColor": "Green",
+          "SetToughness": "6",
+          "SpellDescription": "Create a token that's a copy of target creature card exiled with CARDNAME, except it's a 6/6 green Dinosaur creature with trample. Activate only as a sorcery.",
+          "Defined": "Targeted",
+          "TgtPrompt": "Select target creature card exiled with CARDNAME",
+          "TgtZone": "Exile",
+          "ValidTgts": "Creature.IsImprinted+ExiledWithSource",
+          "SetPower": "6",
+          "RemoveCardTypes": "True",
+          "AddKeywords": "Trample",
+          "RemoveSubTypes": "True",
+          "SorcerySpeed": "True",
+          "AddTypes": "Creature & Dinosaur"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "6"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SetColor": "Green",
+        "SetToughness": "6",
+        "SpellDescription": "Create a token that's a copy of target creature card exiled with CARDNAME, except it's a 6/6 green Dinosaur creature with trample. Activate only as a sorcery.",
+        "Defined": "Targeted",
+        "TgtPrompt": "Select target creature card exiled with CARDNAME",
+        "TgtZone": "Exile",
+        "ValidTgts": "Creature.IsImprinted+ExiledWithSource",
+        "SetPower": "6",
+        "RemoveCardTypes": "True",
+        "AddKeywords": "Trample",
+        "RemoveSubTypes": "True",
+        "SorcerySpeed": "True",
+        "AddTypes": "Creature & Dinosaur"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

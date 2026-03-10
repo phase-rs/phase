@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "SpellDescription": "Put a +1/+1 counter on target creature or that creature gains banding, first strike, or trample.",
+          "ValidTgts": "Creature",
+          "Choices": "DBPutCounter,DBBanding,DBFirstStrike,DBTrample",
+          "Defined": "You"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G W"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Put a +1/+1 counter on target creature or that creature gains banding, first strike, or trample.",
+        "ValidTgts": "Creature",
+        "Choices": "DBPutCounter,DBBanding,DBFirstStrike,DBTrample",
+        "Defined": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

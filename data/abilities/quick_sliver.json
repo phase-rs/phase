@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Description": "Any player may cast Sliver spells as though they had flash.",
+        "Caster": "Player",
+        "ValidSA": "Spell",
+        "ValidCard": "Sliver"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

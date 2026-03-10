@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "RememberRevealed": "True",
+          "NoPeek": "True",
+          "SubAbility": "DBCandlesChangeZone",
+          "SpellDescription": "Reveal the top card of your library."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberRevealed": "True",
+        "NoPeek": "True",
+        "SubAbility": "DBCandlesChangeZone",
+        "SpellDescription": "Reveal the top card of your library."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

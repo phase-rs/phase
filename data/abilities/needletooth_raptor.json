@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, it deals 5 damage to target creature an opponent controls.",
+        "TriggerZones": "Battlefield",
+        "Execute": "DealDamage",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

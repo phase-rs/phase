@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigPlay",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Player",
+        "SVarCompare": "GT0",
+        "CheckSVar": "X",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, if there are cards exiled with it, you may play one of them without paying its mana cost.",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

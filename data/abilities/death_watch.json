@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "When enchanted creature dies, its controller loses life equal to its power and you gain life equal to its toughness.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigLose"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

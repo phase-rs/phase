@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, create a 2/2 blue Drake creature token with flying.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+kicked",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast a kicked spell, create a 2/2 blue Drake creature token with flying.",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouCtrl+kicked"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

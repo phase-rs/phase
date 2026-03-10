@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChange",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, gain control of target permanent."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDraw",
+        "IsPresent": "Permanent.YouDontOwn+YouCtrl",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if you control three or more permanents you don't own, draw three cards.",
+        "Phase": "End of Turn",
+        "PresentCompare": "GE3",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

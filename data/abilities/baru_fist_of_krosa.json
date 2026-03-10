@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_x_x_wurm",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Discard<1/Card.namedBaru, Fist of Krosa>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenOwner": "You",
+        "CostDesc": "Grandeur — Discard another card named Baru, Fist of Krosa:",
+        "SpellDescription": "Create an X/X green Wurm creature token, where X is the number of lands you control."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidCard": "Forest",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a Forest enters, green creatures you control get +1/+1 and gain trample until end of turn.",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

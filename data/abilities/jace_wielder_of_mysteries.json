@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 2,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Target player mills two cards. Draw a card.",
+        "SubAbility": "DBDraw"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 7
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Ultimate": "True",
+        "SubAbility": "WinGame",
+        "SpellDescription": "Draw seven cards. Then if your library has no cards in it, you win the game.",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Draw",
+      "params": {
+        "ValidPlayer": "You",
+        "PresentCompare": "EQ0",
+        "IsPresent": "Card.YouOwn",
+        "ReplaceWith": "Win",
+        "PresentZone": "Library",
+        "ActiveZones": "Battlefield",
+        "Description": "If you would draw a card while your library has no cards in it, you win the game instead."
+      }
+    }
+  ],
+  "faces": []
+}

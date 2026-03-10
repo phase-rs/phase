@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSurveil",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters or dies, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigSurveil",
+        "Origin": "Battlefield",
+        "Secondary": "True",
+        "TriggerDescription": "When CARDNAME enters or dies, surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

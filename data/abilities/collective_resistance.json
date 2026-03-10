@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Charm",
+        "params": {
+          "Choices": "DBDestroyArtifact,DBDestroyEnchantment,DBPump",
+          "MinCharmNum": "1",
+          "CharmNum": "3"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "DBDestroyArtifact,DBDestroyEnchantment,DBPump",
+        "MinCharmNum": "1",
+        "CharmNum": "3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

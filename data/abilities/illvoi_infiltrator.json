@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Opponent",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever this creature deals combat damage to an opponent, draw a card.",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "SVarCompare": "GE2",
+        "Description": "This creature can't be blocked if you've cast two or more spells this turn.",
+        "ValidAttacker": "Card.Self",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

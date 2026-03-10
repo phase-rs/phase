@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Creature",
+          "Bear"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.token+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Colors": "Green",
+        "TgtPrompt": "Select target token you control",
+        "SpellDescription": "Until end of turn, target token you control becomes a green Bear creature with base power and toughness 4/4 in addition to its other types and colors."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

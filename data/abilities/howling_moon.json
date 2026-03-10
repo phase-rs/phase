@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerDescription": "At the beginning of combat on your turn, target Wolf or Werewolf you control gets +2/+2 until end of turn.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ActivatorThisTurnCast": "EQ2",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever an opponent casts their second spell each turn, create a 2/2 green Wolf creature token.",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

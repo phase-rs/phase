@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "ShowChoice": "ExceptSelf",
+          "SubAbility": "DBGrandWheel",
+          "SpellDescription": "Each player may discard their hand and draw cards equal to the greatest mana value of a commander they own on the battlefield or in the command zone.",
+          "Choices": "Discard,No",
+          "TempRemember": "Chooser",
+          "StackDescription": "REP Each player may_{p:Player} may each & they own_that player owns",
+          "Defined": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ShowChoice": "ExceptSelf",
+        "SubAbility": "DBGrandWheel",
+        "SpellDescription": "Each player may discard their hand and draw cards equal to the greatest mana value of a commander they own on the battlefield or in the command zone.",
+        "Choices": "Discard,No",
+        "TempRemember": "Chooser",
+        "StackDescription": "REP Each player may_{p:Player} may each & they own_that player owns",
+        "Defined": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

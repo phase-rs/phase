@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "U",
+        "params": {
+          "RestrictValid": "Spell.nonCreature",
+          "Amount": "X",
+          "SpellDescription": "Add {U} for each counter on NICKNAME. Spend this mana only to cast noncreature spells."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.nonCreature",
+        "Amount": "X",
+        "SpellDescription": "Add {U} for each counter on NICKNAME. Spend this mana only to cast noncreature spells."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

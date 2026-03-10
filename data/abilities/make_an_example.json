@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "RepeatSubAbility": "DBTwoPiles",
+          "SubAbility": "DBSac",
+          "SpellDescription": "Each opponent separates the creatures they control into two piles. For each opponent, you choose one of their piles.",
+          "RepeatPlayers": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RepeatSubAbility": "DBTwoPiles",
+        "SubAbility": "DBSac",
+        "SpellDescription": "Each opponent separates the creatures they control into two piles. For each opponent, you choose one of their piles.",
+        "RepeatPlayers": "Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

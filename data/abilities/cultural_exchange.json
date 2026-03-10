@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ExchangeControlVariant",
+        "params": {
+          "TargetMax": "2",
+          "Type": "Creature",
+          "SpellDescription": "Choose any number of creatures target player controls. Choose the same number of creatures another target player controls. Those players exchange control of those creatures. (This effect lasts indefinitely.)",
+          "ValidTgts": "Player",
+          "Zone": "Battlefield",
+          "TargetMin": "2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "2",
+        "Type": "Creature",
+        "SpellDescription": "Choose any number of creatures target player controls. Choose the same number of creatures another target player controls. Those players exchange control of those creatures. (This effect lasts indefinitely.)",
+        "ValidTgts": "Player",
+        "Zone": "Battlefield",
+        "TargetMin": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

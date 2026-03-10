@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+Other+EnchantedBy Aura.YouCtrl",
+        "Description": "Other creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.",
+        "AddKeyword": "Flying",
+        "SetToughness": "4",
+        "SetPower": "4"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

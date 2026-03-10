@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "AILogic": "DuplicatePerms",
+          "SpellDescription": "For each token you control, create a token that's a copy of that permanent.",
+          "Defined": "Valid Permanent.token+YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "DuplicatePerms",
+        "SpellDescription": "For each token you control, create a token that's a copy of that permanent.",
+        "Defined": "Valid Permanent.token+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

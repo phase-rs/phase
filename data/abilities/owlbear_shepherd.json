@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "ValidPlayer": "You",
+        "SVarCompare": "GE8",
+        "TriggerDescription": "At the beginning of your end step, if creatures you control have total power 8 or greater, draw a card.",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

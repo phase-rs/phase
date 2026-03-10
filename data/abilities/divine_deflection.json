@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "StoreSVar",
+        "params": {
+          "SpellDescription": "Prevent the next X damage that would be dealt to you and/or permanents you control this turn. If damage is prevented this way, CARDNAME deals that much damage to any target.",
+          "StackDescription": "SpellDescription",
+          "SVar": "ShieldAmount",
+          "Type": "Calculate",
+          "SubAbility": "DBEffect",
+          "Expression": "X"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Prevent the next X damage that would be dealt to you and/or permanents you control this turn. If damage is prevented this way, CARDNAME deals that much damage to any target.",
+        "StackDescription": "SpellDescription",
+        "SVar": "ShieldAmount",
+        "Type": "Calculate",
+        "SubAbility": "DBEffect",
+        "Expression": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

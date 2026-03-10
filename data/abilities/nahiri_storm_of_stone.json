@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.tapped"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<X/LOYALTY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target tapped creature",
+        "SpellDescription": "CARDNAME deals X damage to target tapped creature.",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "EffectZone": "Battlefield",
+        "Affected": "Creature.YouCtrl",
+        "Condition": "PlayerTurn",
+        "Description": "During your turn, creatures you control have first strike and equip abilities you activate cost {1} less to activate."
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Secondary": "True",
+        "ValidCard": "Card",
+        "Amount": "1",
+        "ValidSpell": "Activated.Equip",
+        "Activator": "You",
+        "Description": "Equip abilities you activate cost {1} less to activate."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Debuff",
+        "params": {
+          "SubAbility": "Flight",
+          "Keywords": "Defender",
+          "Defined": "Self",
+          "SpellDescription": "Until end of turn, CARDNAME loses defender and gains flying."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "Flight",
+        "Keywords": "Defender",
+        "Defined": "Self",
+        "SpellDescription": "Until end of turn, CARDNAME loses defender and gains flying."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

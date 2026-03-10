@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, put an indestructible counter on target creature you control that attacked this turn.",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Affected": "Creature",
+        "Description": "All creatures have \"Boast — {1}: Put a +1/+1 counter on this creature.\" (Activate only if that creature attacked this turn and only once each turn.)",
+        "AddAbility": "ABBoast"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

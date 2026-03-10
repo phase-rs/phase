@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "SorcerySpeed": "True",
+          "ValidSupportedCopy": "Creature.cmcEQX",
+          "StackDescription": "SpellDescription",
+          "AILogic": "MomirAvatar",
+          "RandomNum": "1",
+          "RandomCopied": "True",
+          "SpellDescription": "Create a token that's a copy of a random creature card with mana value X. Activate only as a sorcery."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "ValidSupportedCopy": "Creature.cmcEQX",
+        "StackDescription": "SpellDescription",
+        "AILogic": "MomirAvatar",
+        "RandomNum": "1",
+        "RandomCopied": "True",
+        "SpellDescription": "Create a token that's a copy of a random creature card with mana value X. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

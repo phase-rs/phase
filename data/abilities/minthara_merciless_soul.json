@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Revolt": "True",
+        "Phase": "End of Turn",
+        "Execute": "TrigExperience",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your end step, if a permanent you controlled left the battlefield this turn, you get an experience counter."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control get +1/+0 for each experience counter you have.",
+        "AddPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

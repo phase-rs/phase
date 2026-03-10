@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, scry 2.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigScry"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "CARDNAME costs {2}{U} less to cast if you've cast an instant or sorcery spell this turn.",
+        "EffectZone": "All",
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Amount": "2"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Color": "U",
+        "ValidCard": "Card.Self",
+        "Amount": "1",
+        "CheckSVar": "X",
+        "Type": "Spell",
+        "Secondary": "True",
+        "Description": "CARDNAME costs {2}{U} less to cast if you've cast an instant or sorcery spell this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

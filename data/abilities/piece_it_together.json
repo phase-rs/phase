@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Branch",
+        "params": {
+          "SpellDescription": "Draw a card. If CARDNAME's intensity is 4, instead take an extra turn after this one. Perpetually increase CARDNAME's intensity and the intensity of cards named Piece It Together in your graveyard, hand, and library by 1.",
+          "TrueSubAbility": "DBExtraTurn",
+          "BranchConditionSVar": "X",
+          "BranchConditionSVarCompare": "EQ4",
+          "FalseSubAbility": "DBDraw"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card. If CARDNAME's intensity is 4, instead take an extra turn after this one. Perpetually increase CARDNAME's intensity and the intensity of cards named Piece It Together in your graveyard, hand, and library by 1.",
+        "TrueSubAbility": "DBExtraTurn",
+        "BranchConditionSVar": "X",
+        "BranchConditionSVarCompare": "EQ4",
+        "FalseSubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

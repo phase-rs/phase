@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigUntap",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, untap it. After this combat phase, there is an additional combat phase."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Target": "Player.attackedBySourceThisTurn",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't attack a player it has already attacked this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

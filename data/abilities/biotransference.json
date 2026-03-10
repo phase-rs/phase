@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Artifact",
+        "Execute": "DBLoseLife",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast an artifact spell, you lose 1 life and create a 2/2 black Necron Warrior artifact creature token.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Artifact",
+        "Affected": "Creature.YouCtrl",
+        "Description": "Creatures you control are artifacts in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
+        "AffectedZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

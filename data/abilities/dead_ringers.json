@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "NoRegen": "True",
+        "ConditionPresentCompare": "EQ2",
+        "TargetMin": "2",
+        "TargetMax": "2",
+        "TgtPrompt": "Select target nonblack creatures",
+        "ConditionNoDifferentColors": "Targeted",
+        "ConditionDefined": "Targeted",
+        "SpellDescription": "Destroy two target nonblack creatures unless either one is a color the other isn't. They can't be regenerated.",
+        "ConditionPresent": "Card"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

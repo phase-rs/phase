@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TemperedDmgTrig",
+        "Description": "Sliver creatures you control have \"Whenever this creature deals combat damage to a player, put a +1/+1 counter on it.\"",
+        "Affected": "Creature.Sliver+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

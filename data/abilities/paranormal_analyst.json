@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ManifestDread",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you manifest dread, put a card you put into your graveyard this way into your hand.",
+        "ValidPlayer": "You",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

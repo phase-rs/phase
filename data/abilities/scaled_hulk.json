@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Spirit,Arcane",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a Spirit or Arcane spell, CARDNAME gets +2/+2 until end of turn.",
+        "Execute": "TrigPump",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

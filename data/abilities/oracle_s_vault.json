@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect1",
+        "AILogic": "ExileAndPlayUntilEOT",
+        "SpellDescription": "Exile the top card of your library. Until end of turn, you may play that card. Put a brick counter on CARDNAME.",
+        "RememberChanged": "True",
+        "Defined": "You",
+        "ChangeNum": "All"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CheckSVar": "X",
+        "AILogic": "ExileAndPlayUntilEOT",
+        "SVarCompare": "GE3",
+        "ChangeNum": "All",
+        "RememberChanged": "True",
+        "Defined": "You",
+        "SubAbility": "DBEffect2",
+        "SpellDescription": "Exile the top card of your library. Until end of turn, you may play that card without paying its mana cost. Activate only if there are three or more brick counters on CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, mill a card. If a land card was milled this way, prevent all combat damage CARDNAME would deal this turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, mill a card. If a land card was milled this way, prevent all combat damage CARDNAME would deal this turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigMill",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

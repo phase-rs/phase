@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "B",
+        "params": {
+          "SpellDescription": "Add {B}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {B}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AlterAttribute",
+        "params": {
+          "Attributes": "Harnessed",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Harness CARDNAME. (Once harnessed, its ∞ ability is active.)",
+          "Defined": "Self"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "6 B"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/Creature>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Attributes": "Harnessed",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Harness CARDNAME. (Once harnessed, its ∞ ability is active.)",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+harnessed",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "∞ — At the beginning of your upkeep, return target creature card from your graveyard to the battlefield."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

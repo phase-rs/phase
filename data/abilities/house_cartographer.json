@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Main",
+        "TriggerDescription": "Survival — At the beginning of your second main phase, if CARDNAME is tapped, reveal cards from the top of your library until you reveal a land card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+        "ValidPlayer": "You",
+        "Execute": "TrigDigUntil",
+        "PresentDefined": "Self",
+        "PhaseCount": "2",
+        "IsPresent": "Card.tapped"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

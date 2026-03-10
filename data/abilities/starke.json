@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Draw",
+        "ValidPlayer": "You",
+        "TriggerZones": "Command",
+        "Execute": "SituationalEthics",
+        "TriggerDescription": "At the beginning of your draw step, you may draw an additional card. If you do, put a card from your hand on the bottom of your library.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

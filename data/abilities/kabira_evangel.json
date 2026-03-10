@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigProt",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever CARDNAME or another Ally you control enters, you may choose a color. If you do, Allies you control gain protection from the chosen color until end of turn.",
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

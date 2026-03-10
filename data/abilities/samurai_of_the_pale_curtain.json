@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "If a permanent would be put into a graveyard, exile it instead.",
+        "ReplaceWith": "Exile",
+        "ValidCard": "Permanent",
+        "ActiveZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "faces": []
+}

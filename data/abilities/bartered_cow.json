@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerController": "TriggeredCardController",
+        "Origin": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME dies or when you discard it, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+        "ValidCard": "Card.Self",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "Execute": "TrigToken",
+        "Secondary": "True",
+        "TriggerDescription": "When CARDNAME dies or when you discard it, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+        "ValidCard": "Card.Self",
+        "TriggerController": "TriggeredCardController"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

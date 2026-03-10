@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "LifeTotal": "You",
+        "TriggerDescription": "At the beginning of your upkeep, if you have 10 life or less, you gain 1 life.",
+        "LifeAmount": "LE10",
+        "ValidPlayer": "You",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

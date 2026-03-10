@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Creature",
+        "Activator": "You",
+        "Amount": "2",
+        "Description": "Creature spells you cast cost {2} less to cast."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "-1",
+        "AddToughness": "-1",
+        "Description": "Creatures you control get -1/-1.",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

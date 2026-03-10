@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "You",
+        "Description": "You have shroud. (You can't be the target of spells or abilities.)",
+        "AddKeyword": "Shroud"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

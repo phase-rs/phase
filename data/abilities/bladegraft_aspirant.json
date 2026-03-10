@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "1",
+        "Description": "Equipment spells you cast cost {1} less to cast.",
+        "Type": "Spell",
+        "Activator": "You",
+        "ValidCard": "Equipment"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Equipment.YouCtrl",
+        "Activator": "You",
+        "ValidTarget": "Card.Self",
+        "Type": "Ability",
+        "Amount": "1",
+        "Description": "Activated abilities of Equipment you control that target CARDNAME cost {1} less to activate."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

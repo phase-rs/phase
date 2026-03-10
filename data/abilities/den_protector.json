@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME is turned face up, return target card from your graveyard to your hand.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.powerLTX",
+        "ValidAttacker": "Creature.Self",
+        "Description": "Creatures with power less than CARDNAME's power can't block it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

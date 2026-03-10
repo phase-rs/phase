@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature",
+        "SpellDescription": "CARDNAME deals 2 damage to each creature and each player.",
+        "ValidPlayers": "Player",
+        "ValidDescription": "each creature and each player."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "You may exile a red card from your hand rather than pay this spell's mana cost.",
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "ExileFromHand<1/Card.Red+Other>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

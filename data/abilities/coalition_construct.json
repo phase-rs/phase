@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "When CARDNAME enters, other creatures you control of the chosen type and creature cards of that type in your hand perpetually get +1/+1."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME is the chosen type in addition to its other types.",
+        "CharacteristicDefining": "True",
+        "AddType": "ChosenType"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

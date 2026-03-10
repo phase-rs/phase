@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ReplaceWith": "DBRemoveCounters",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Card.Self",
+        "AlwaysReplace": "True",
+        "PreventionEffect": "True",
+        "Description": "If damage would be dealt to CARDNAME, prevent that damage. Remove a +1/+1 counter from CARDNAME."
+      }
+    }
+  ],
+  "faces": []
+}

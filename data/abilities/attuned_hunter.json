@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidCards": "Card.YouOwn",
+        "PlayerTurn": "True",
+        "Origin": "Graveyard",
+        "TriggerDescription": "Whenever one or more cards leave your graveyard during your turn, put a +1/+1 counter on this creature.",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

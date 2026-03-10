@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigEffect",
+        "TriggerDescription": "When you encounter CARDNAME, each player sacrifices a nonland permanent, then you flip a coin. If you lose the flip, repeat this process. (Then planeswalk away from this phenomenon.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

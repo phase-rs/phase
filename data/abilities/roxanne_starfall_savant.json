@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a tapped colorless artifact token named Meteorite with \"When Meteorite enters, it deals 2 damage to any target\" and \"{T}: Add one mana of any color.\"",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, create a tapped colorless artifact token named Meteorite with \"When Meteorite enters, it deals 2 damage to any target\" and \"{T}: Add one mana of any color.\"",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerDescription": "Whenever you tap an artifact token for mana, add one mana of any type that permanent produced.",
+        "ValidCard": "Artifact.token",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigMana",
+        "Static": "True",
+        "Activator": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

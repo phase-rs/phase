@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Graveyard",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Dragon",
+        "SubAbility": "ScionCopy",
+        "SpellDescription": "Search your library for a Dragon permanent card and put it into your graveyard. If you do, CARDNAME becomes a copy of that card until end of turn. Then shuffle.",
+        "Shuffle": "True",
+        "RememberChanged": "True",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.!wasCastFromYourHand",
+        "TriggerDescription": "Curse of the Walking Pox — Whenever you cast a spell from anywhere other than your hand, return CARDNAME from your graveyard to the battlefield tapped.",
+        "TriggerZones": "Graveyard",
+        "Execute": "TrigChange",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

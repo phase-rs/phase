@@ -1,0 +1,104 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Library",
+            "destination": "Hand",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "3"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Search your library for a basic land card and put that card into your hand, then shuffle.",
+            "ChangeTypeDesc": "basic land",
+            "ChangeType": "Land.Basic"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "IsPresent": "Land.YouCtrl",
+            "PresentCompare": "GE7",
+            "Phase": "End of Turn",
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "You",
+            "Execute": "DBTransform",
+            "TriggerDescription": "At the beginning of your end step, if you control seven or more lands, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "C",
+            "params": {
+              "SpellDescription": "Add {C}.",
+              "Amount": "1"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {C}.",
+            "Amount": "1"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Untap",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.attacking+OppCtrl"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtPrompt": "Select target attacking creature an opponent controls",
+            "IsCurse": "True",
+            "SubAbility": "RemCombat",
+            "SpellDescription": "Untap target attacking creature an opponent controls and remove it from combat."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

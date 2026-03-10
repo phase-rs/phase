@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.cmcLE2,Planeswalker.cmcLE2"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "AssumeAtLeastOneTarget",
+        "SubAbility": "DBDestroy",
+        "TgtPrompt": "Select target creature or planeswalker with mana value 2 or less",
+        "TargetMin": "X",
+        "StackDescription": "SpellDescription",
+        "TargetMax": "X",
+        "SpellDescription": "Destroy target creature or planeswalker with mana value 2 or less."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

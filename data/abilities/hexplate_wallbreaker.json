@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature attacks, if it's the first combat phase of the turn, untap each attacking creature. After this phase, there is an additional combat phase.",
+        "Execute": "TrigUntap",
+        "ValidCard": "Card.EquippedBy",
+        "FirstCombat": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "2",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +2/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

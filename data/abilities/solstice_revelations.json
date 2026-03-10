@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "SubAbility": "DBCast",
+          "RememberFound": "True",
+          "NoPutDesc": "True",
+          "SpellDescription": "Exile cards from the top of your library until you exile a nonland card. You may cast that card without paying its mana cost if the spell's mana value is less than the number of Mountains you control. If you don't cast that card this way, put it into your hand.",
+          "ValidDescription": "nonland",
+          "FoundDestination": "Exile",
+          "Valid": "Card.nonLand",
+          "RevealedDestination": "Exile"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBCast",
+        "RememberFound": "True",
+        "NoPutDesc": "True",
+        "SpellDescription": "Exile cards from the top of your library until you exile a nonland card. You may cast that card without paying its mana cost if the spell's mana value is less than the number of Mountains you control. If you don't cast that card this way, put it into your hand.",
+        "ValidDescription": "nonland",
+        "FoundDestination": "Exile",
+        "Valid": "Card.nonLand",
+        "RevealedDestination": "Exile"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

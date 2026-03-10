@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever a player casts a black spell, you may pay {1}. If you do, target player loses 1 life.",
+        "Execute": "TrigLoseLife",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Black"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

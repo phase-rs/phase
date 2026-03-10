@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a noncreature spell, put a +1/+1 counter on CARDNAME. It gains flying until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.nonCreature",
+        "Execute": "TrigCounter"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "PhaseCount": "2",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "Phase": "Main",
+        "TriggerDescription": "At the beginning of your second main phase, you draw X cards and lose X life, where X is the number of your opponents who were dealt combat damage by CARDNAME or a Dragon this turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature",
+        "Execute": "TakenumaDraw",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever a creature leaves the battlefield, its controller draws a card.",
+        "Destination": "Any",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, return target creature you control to its owner's hand.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

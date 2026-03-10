@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "SpellDescription": "Transform CARDNAME.",
+              "Mode": "Transform",
+              "Defined": "Self",
+              "AILogic": "Always"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "5 G G"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Transform CARDNAME.",
+            "Mode": "Transform",
+            "Defined": "Self",
+            "AILogic": "Always"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "1",
+            "Description": "Other creatures you control get +1/+1 and have trample and haste.",
+            "AddKeyword": "Trample & Haste",
+            "Affected": "Creature.YouCtrl+Other",
+            "AddToughness": "1"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

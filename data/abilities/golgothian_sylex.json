@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SacrificeAll",
+        "params": {
+          "ValidCards": "Permanent.!token+setATQ",
+          "SpellDescription": "Each nontoken permanent with a name originally printed in the Antiquities expansion is sacrificed by its controller."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Permanent.!token+setATQ",
+        "SpellDescription": "Each nontoken permanent with a name originally printed in the Antiquities expansion is sacrificed by its controller."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

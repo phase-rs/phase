@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When this Aura enters, exile target creature an opponent controls until this Aura leaves the battlefield."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Ward:1",
+        "Description": "Enchanted permanent has ward {1}.",
+        "Affected": "Permanent.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

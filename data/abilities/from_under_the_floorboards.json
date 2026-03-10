@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "b_2_2_zombie",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create three tapped 2/2 black Zombie creature tokens and you gain 3 life. If CARDNAME's madness cost was paid, instead create X of those tokens and you gain X life.",
+        "SubAbility": "DBGainLife",
+        "TokenOwner": "You",
+        "TokenAmount": "Y",
+        "TokenTapped": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

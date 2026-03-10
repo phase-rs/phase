@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "NumTurns": "1",
+          "SpellDescription": "Take an extra turn after this one."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "PayEnergy<8>"
+          },
+          {
+            "type": "Mana",
+            "cost": "Exile<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "NumTurns": "1",
+        "SpellDescription": "Take an extra turn after this one."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigEnergy",
+        "TriggerDescription": "Whenever CARDNAME or another artifact you control enters, you get {E}{E} (two energy counters).",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigEnergy",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME or another artifact you control enters, you get {E}{E} (two energy counters).",
+        "ValidCard": "Artifact.Other+YouCtrl",
+        "Secondary": "True",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

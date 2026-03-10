@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Protection:Creature.ChosenType:ChosenType",
+        "Affected": "Creature.Human+YouCtrl",
+        "Description": "Human creatures you control have protection from creatures of the chosen type."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

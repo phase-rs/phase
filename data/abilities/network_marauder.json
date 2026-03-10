@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this creature enters and whenever another artifact you control with mana value 3 or greater enters, all artifact creature cards and Spacecraft cards you own perpetually get +1/+1.",
+        "ValidCard": "Card.Self,Artifact.YouCtrl+cmcGE3",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

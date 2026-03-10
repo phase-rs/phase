@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Hand",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "StackDescription": "SpellDescription",
+            "ChangeType": "Instant,Sorcery",
+            "RememberChanged": "True",
+            "ChangeNum": "1",
+            "SubAbility": "DBPutCounter",
+            "SpellDescription": "You may exile an instant or sorcery card from your hand and put three hone counters on it. It gains \"At the beginning of your upkeep, if this card is exiled, remove a hone counter from it\" and \"When the last hone counter is removed from this card, if it's exiled, you may cast it. It costs {4} less to cast this way.\""
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigExile",
+            "ValidPlayer": "You",
+            "Phase": "Upkeep",
+            "TriggerDescription": "At the beginning of your upkeep, exile the top card of each opponent's library. Until end of turn, you may cast spells from among those exiled cards, and you may spend mana as though it were mana of any color to cast those spells.",
+            "TriggerZones": "Battlefield"
+          }
+        },
+        {
+          "mode": "SpellCast",
+          "params": {
+            "Execute": "TrigPutCounter",
+            "ValidCard": "Card.wasCastFromExile",
+            "ValidActivatingPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever you cast a spell from exile, put a +1/+1 counter on CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

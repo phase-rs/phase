@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, you may attach target Equipment you control with mana value 2 or 3 to NICKNAME.",
+        "Execute": "DBAttach",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Execute": "DBAttach",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may attach target Equipment you control with mana value 2 or 3 to NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "PlayerTurn": "True",
+        "Description": "During your turn, prevent all damage that would be dealt to NICKNAME.",
+        "Prevent": "True",
+        "ValidTarget": "Card.Self"
+      }
+    }
+  ],
+  "faces": []
+}

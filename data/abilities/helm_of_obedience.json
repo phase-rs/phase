@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Repeat",
+        "params": {
+          "MaxRepeat": "MaxRepeats",
+          "RepeatCheckSVar": "AccumulatedMilled",
+          "StackDescription": "SpellDescription",
+          "RepeatSVarCompare": "LTX",
+          "AILogic": "MaxXAtOppEOT",
+          "SubAbility": "DBSacHelm",
+          "SpellDescription": "Target opponent mills a card, then repeats this process until a creature card or X cards have been put into their graveyard this way, whichever comes first. If one or more creature cards were put into that graveyard this way, sacrifice CARDNAME and put one of them onto the battlefield under your control. X can't be 0.",
+          "RepeatSubAbility": "DBCleanBeforeRepeat",
+          "ValidTgts": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "XMin1 X"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "MaxRepeat": "MaxRepeats",
+        "RepeatCheckSVar": "AccumulatedMilled",
+        "StackDescription": "SpellDescription",
+        "RepeatSVarCompare": "LTX",
+        "AILogic": "MaxXAtOppEOT",
+        "SubAbility": "DBSacHelm",
+        "SpellDescription": "Target opponent mills a card, then repeats this process until a creature card or X cards have been put into their graveyard this way, whichever comes first. If one or more creature cards were put into that graveyard this way, sacrifice CARDNAME and put one of them onto the battlefield under your control. X can't be 0.",
+        "RepeatSubAbility": "DBCleanBeforeRepeat",
+        "ValidTgts": "Opponent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

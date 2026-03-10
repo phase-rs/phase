@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attached",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Creature",
+        "ActivationLimit": "1",
+        "TriggerDescription": "Whenever CARDNAME becomes attached to a creature, create a token that's a copy of CARDNAME, except it doesn't have this ability. This ability triggers only once each turn.",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Description": "Equipped creature gets +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

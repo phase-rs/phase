@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, take an extra turn after this one.",
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "AffectedZone": "Graveyard",
+        "AddKeyword": "Flashback",
+        "Description": "Instant and sorcery cards in graveyards have flashback. The flashback cost is equal to the card's mana cost. (Its owner may cast the card from their graveyard for its mana cost. Then they exile it.)",
+        "Affected": "Instant,Sorcery"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Secondary": "True",
+        "Affected": "Instant.wasCastFromGraveyard,Sorcery.wasCastFromGraveyard",
+        "AffectedZone": "Stack",
+        "AddKeyword": "Flashback",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

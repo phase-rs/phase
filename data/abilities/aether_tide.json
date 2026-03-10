@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "X U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select X target creatures",
+        "TargetMin": "X",
+        "SpellDescription": "Return X target creatures to their owners' hands.",
+        "TargetMax": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "Cost": "Discard<X/Creature/creature(s)>",
+        "EffectZone": "All",
+        "Description": "As an additional cost to cast this spell, discard X creature cards.",
+        "ValidCard": "Card.Self",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

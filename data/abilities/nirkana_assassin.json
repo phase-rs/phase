@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you gain life, CARDNAME gains deathtouch until end of turn. (Any amount of damage it deals to a creature is enough to destroy it.)",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

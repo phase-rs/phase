@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, add {R} for each attacking creature.",
+        "Execute": "TrigMana",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Unleash",
+        "Description": "Other Dogs you control have unleash.",
+        "Affected": "Dog.Other+YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl+HasCounters",
+        "AddKeyword": "Haste",
+        "Description": "Creatures you control with counters on them have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

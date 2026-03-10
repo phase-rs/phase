@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each player's upkeep, that player gains control of CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player",
+        "Phase": "Upkeep",
+        "Execute": "TrigGainControl"
+      }
+    },
+    {
+      "mode": "ChangesController",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidOriginalController": "Player.Other",
+        "Execute": "TrigChoose",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When you gain control of CARDNAME from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

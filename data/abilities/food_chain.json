@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add X mana of any one color, where X is 1 plus the exiled creature's mana value. Spend this mana only to cast creature spells.",
+          "Amount": "X",
+          "RestrictValid": "Spell.Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "Exile<1/Creature>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add X mana of any one color, where X is 1 plus the exiled creature's mana value. Spend this mana only to cast creature spells.",
+        "Amount": "X",
+        "RestrictValid": "Spell.Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

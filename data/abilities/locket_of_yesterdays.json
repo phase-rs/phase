@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "Activator": "You",
+        "Amount": "AffectedX",
+        "ValidCard": "Card",
+        "Description": "Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

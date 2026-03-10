@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever chaos ensues, until end of turn, whenever you tap a land for mana, add one mana of any type that land produced."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "EffectOnly": "True",
+        "ReplaceWith": "DoubleToken",
+        "Description": "If an effect would create one or more tokens, it creates twice that many of those tokens instead.",
+        "ActiveZones": "Command"
+      }
+    },
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "Description": "If an effect would put one or more counters on a permanent, it puts twice that many of those counters on that permanent instead.",
+        "ReplaceWith": "DoubleCounters",
+        "ActiveZones": "Command",
+        "EffectOnly": "True",
+        "ValidCard": "Permanent.inZoneBattlefield"
+      }
+    }
+  ],
+  "faces": []
+}

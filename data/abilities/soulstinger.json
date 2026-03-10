@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter1",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, put two -1/-1 counters on target creature you control."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "OptionalDecider": "You",
+        "Execute": "TrigPutCounter2",
+        "TriggerDescription": "When CARDNAME dies, you may put a -1/-1 counter on target creature for each -1/-1 counter on CARDNAME.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

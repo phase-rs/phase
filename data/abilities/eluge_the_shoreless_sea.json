@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, put a flood counter on target land. It's an Island in addition to its other types for as long as it has a flood counter on it."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, put a flood counter on target land. It's an Island in addition to its other types for as long as it has a flood counter on it.",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "NICKNAME's power and toughness are each equal to the number of Islands you control.",
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "SetToughness": "X"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "Battlefield",
+        "Amount": "Y",
+        "Description": "The first instant or sorcery spell you cast each turn costs {U} (or {1}) less to cast for each land you control with a flood counter on it.",
+        "ValidCard": "Instant,Sorcery",
+        "Activator": "You",
+        "OnlyFirstSpell": "True",
+        "Type": "Spell",
+        "Color": "U"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

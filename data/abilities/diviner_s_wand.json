@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigAttach",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.Wizard",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a Wizard creature enters, you may attach CARDNAME to it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "DivinerDraw",
+        "Affected": "Card.EquippedBy",
+        "AddSVar": "DivinerTrigPump",
+        "AddTrigger": "TrigDraw",
+        "Description": "Equipped creature has \"Whenever you draw a card, this creature gets +1/+1 and gains flying until end of turn\" and \"{4}: Draw a card.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

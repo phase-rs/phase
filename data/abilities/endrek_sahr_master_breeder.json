@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a creature spell, create X 1/1 black Thrull creature tokens, where X is that spell's mana value.",
+        "ValidCard": "Creature",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerDescription": "When you control seven or more Thrulls, sacrifice CARDNAME.",
+        "PresentCompare": "GE7",
+        "Execute": "TrigSac",
+        "IsPresent": "Card.Thrull+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

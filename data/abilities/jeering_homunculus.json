@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigGoad",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may goad target creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

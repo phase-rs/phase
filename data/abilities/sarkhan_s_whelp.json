@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever you activate an ability of a Sarkhan planeswalker, CARDNAME deals 1 damage to any target.",
+        "ValidCard": "Planeswalker.Sarkhan",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

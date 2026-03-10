@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target nonland permanent",
+        "SpellDescription": "Return up to two target nonland permanents to their owner's hands.",
+        "TargetMin": "0",
+        "TargetMax": "2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidTarget": "Permanent.YouCtrl",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "Description": "This spell costs {3} less to cast if it targets a permanent you control.",
+        "ValidCard": "Card.Self",
+        "Amount": "3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

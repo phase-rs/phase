@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME enters, draw a card, then discard a card.",
+            "Origin": "Any",
+            "Execute": "TrigDraw",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever CARDNAME attacks, draw a card, then discard a card.",
+            "Execute": "TrigDraw",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "Exile",
+            "ValidCard": "Card.Self",
+            "Destination": "Graveyard",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead."
+          }
+        }
+      ]
+    }
+  ]
+}

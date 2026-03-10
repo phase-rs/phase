@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "Number": "2",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever you draw your second card each turn, create a 2/2 red and white Dinosaur Cat creature token.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Activated.Cycling",
+        "CostDesc": "0",
+        "Description": "You may pay {0} rather than pay the cycling cost of the first card you cycle each turn.",
+        "ValidPlayer": "You",
+        "Cost": "Discard<1/CARDNAME>",
+        "CheckSVar": "X",
+        "SVarCompare": "LT1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

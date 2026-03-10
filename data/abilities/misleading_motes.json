@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AlternativeDecider": "TargetedOwner",
+        "DestinationAlternative": "Library",
+        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
+        "LibraryPositionAlternative": "-1",
+        "SpellDescription": "Target creature's owner puts it on the top or bottom of their library."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

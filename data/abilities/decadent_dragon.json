@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigToken",
+            "TriggerDescription": "Whenever CARDNAME attacks, create a Treasure token."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Dig",
+            "count": 2,
+            "destination": "Exile"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidTgts": "Opponent",
+            "RememberChanged": "True",
+            "SubAbility": "DBEffect",
+            "ExileFaceDown": "True",
+            "ChangeNum": "All",
+            "WithMayLook": "True",
+            "SpellDescription": "Exile the top two cards of target opponent's library face down. You may look at and play those cards for as long as they remain exiled."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

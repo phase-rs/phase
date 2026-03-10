@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When this creature dies, create a 1/1 colorless Servo artifact creature token.",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Condition": "MaxSpeed",
+        "Description": "Max speed — This creature gets +1/+0.",
+        "AddStaticAbility": "MaxSpeedStatic"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

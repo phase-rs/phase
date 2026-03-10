@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature or planeswalker you control dies, you may sacrifice CARDNAME. If you do, create a 4/4 white Avatar creature token with flying.",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.YouCtrl,Planeswalker.YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDiesToken"
+      }
+    },
+    {
+      "mode": "Discarded",
+      "params": {
+        "TriggerDescription": "When a spell or ability an opponent controls causes you to discard this card, if you control a Plains, create a 4/4 white Avatar creature token with flying.",
+        "ValidCard": "Card.Self",
+        "ValidCause": "SpellAbility.OppCtrl",
+        "IsPresent": "Plains.YouCtrl",
+        "Execute": "TrigDiscardedToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

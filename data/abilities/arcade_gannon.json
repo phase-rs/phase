@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card,",
+        "SubAbility": "DBDiscard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Graveyard",
+        "MayPlayLimit": "1",
+        "EffectZone": "Battlefield",
+        "Affected": "Artifact.nonLand+YouOwn+cmcLEX,Human.nonLand+YouOwn+cmcLEX",
+        "Condition": "PlayerTurn",
+        "MayPlay": "True",
+        "Description": "For Auld Lang Syne — Once during each of your turns, you may cast an artifact or Human spell from your graveyard with mana value less than or equal to the number of quest counters on CARDNAME."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

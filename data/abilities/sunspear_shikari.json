@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as CARDNAME is equipped, it has first strike and lifelink.",
+        "Affected": "Card.Self+equipped",
+        "AddKeyword": "First Strike & Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

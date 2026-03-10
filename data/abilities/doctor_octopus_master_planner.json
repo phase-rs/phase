@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "LT8",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if you have fewer than eight cards in hand, draw cards equal to the difference.",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "2",
+        "Affected": "Villain.Other+YouCtrl",
+        "Description": "Other Villains you control get +2/+2.",
+        "AddPower": "2"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetMaxHandSize": "8",
+        "Description": "Your maximum hand size is eight.",
+        "Affected": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

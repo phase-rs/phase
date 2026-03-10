@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters and at the beginning of your first main phase, exile target creature an opponent controls until CARDNAME leaves the battlefield.",
+        "Secondary": "True",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters and at the beginning of your first main phase, exile target creature an opponent controls until CARDNAME leaves the battlefield.",
+        "Execute": "TrigExile",
+        "Phase": "Main1",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

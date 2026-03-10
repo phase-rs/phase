@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, populate. (Create a token that's a copy of a creature token you control.)",
+        "ValidTarget": "Player",
+        "Execute": "DBCopy",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CharacteristicDefining": "True",
+        "SetPower": "X",
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of creatures you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

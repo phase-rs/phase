@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "Whenever equipped creature attacks, it deals damage equal to its power to the player or planeswalker it's attacking.",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.AttachedBy",
+        "AddSVar": "AE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

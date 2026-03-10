@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Imprint — When CARDNAME enters, search your library for a land card, exile it, then shuffle.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Static": "True",
+        "Execute": "DBCleanup",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.IsImprinted+ExiledWithSourceLKI",
+        "Origin": "Exile",
+        "Execute": "DBForget",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Affected": "Card.EquippedBy",
+        "Description": "Equipped creature gets +1/+1 for each land on the battlefield with the same name as the exiled card.",
+        "AddToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

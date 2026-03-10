@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self,Creature.powerGE4+Other",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigImmediateTrig",
+        "TriggerDescription": "Whenever NICKNAME or another creature with power 4 or greater enters, you may pay {1}{R/G}. When you do, NICKNAME fights target creature you don't control."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Beast spells you cast cost {2} less to cast.",
+        "ValidCard": "Beast",
+        "Type": "Spell",
+        "Amount": "2",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an Assassin you control deals combat damage to a player, draw a card.",
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Permanent.Assassin+YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

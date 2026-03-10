@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets +4/+4 and has first strike, and all creatures able to block it do so.",
+        "AddPower": "4",
+        "AddToughness": "4",
+        "AddHiddenKeyword": "All creatures able to block CARDNAME do so."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

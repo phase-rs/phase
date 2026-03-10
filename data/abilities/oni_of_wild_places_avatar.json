@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "PresentPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, return a creature you control to its owner's hand.",
+        "PresentZone": "Battlefield",
+        "IsPresent": "Creature",
+        "Execute": "TrigBounce",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Affected": "Creature.YouCtrl",
+        "AddKeyword": "Haste",
+        "Description": "Creatures you control have haste.",
+        "AffectedZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "AILogic": "Always",
+              "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+              "Defined": "Self",
+              "Mode": "Transform",
+              "SorcerySpeed": "True"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "3 UP"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "AILogic": "Always",
+            "SpellDescription": "Transform CARDNAME. Activate only as a sorcery.",
+            "Defined": "Self",
+            "Mode": "Transform",
+            "SorcerySpeed": "True"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, return target enchantment card that isn't a God from your graveyard to your hand.",
+            "Execute": "TrigChangeZone",
+            "Origin": "Any"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "CastWithFlash",
+          "params": {
+            "Description": "You may cast spells as though they had flash.",
+            "Caster": "You",
+            "ValidCard": "Card",
+            "ValidSA": "Spell"
+          }
+        },
+        {
+          "mode": "ReduceCost",
+          "params": {
+            "Description": "Spells you cast cost {1} less to cast for each card your opponents have drawn this turn.",
+            "Type": "Spell",
+            "Activator": "You",
+            "Amount": "X"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

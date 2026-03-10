@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Draw",
+        "TriggerDescription": "At the beginning of your draw step, destroy each creature with mana value equal to the number of age counters on CARDNAME. They can't be regenerated.",
+        "Execute": "TrigDestroyAll",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

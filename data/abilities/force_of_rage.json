@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "r_3_1_elemental_trample_haste",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create two 3/1 red Elemental creature tokens with trample and haste. Sacrifice those tokens at the beginning of your next upkeep.",
+        "TokenAmount": "2",
+        "AtEOT": "YourSacrificeUpkeep",
+        "TokenOwner": "You"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "ValidSA": "Spell.Self",
+        "Condition": "NotPlayerTurn",
+        "Description": "If it's not your turn, you may exile a red card from your hand rather than pay this spell's mana cost.",
+        "EffectZone": "All",
+        "Cost": "ExileFromHand<1/Card.Red+Other>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

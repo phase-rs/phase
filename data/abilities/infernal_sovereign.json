@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you play a land or cast a spell, you draw a card and you lose 1 life.",
+        "Execute": "TrigDraw",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Card"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "TriggerDescription": "Whenever you play a land or cast a spell, you draw a card and you lose 1 life.",
+        "Execute": "TrigDraw",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "Phase": "Draw",
+        "Description": "Skip your draw step.",
+        "ActiveZones": "Battlefield",
+        "Skip": "True",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "faces": []
+}

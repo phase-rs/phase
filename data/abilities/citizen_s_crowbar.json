@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 green and white Citizen creature token, then attach CARDNAME to it.",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1 and has \"{W}, {T}, Sacrifice CARDNAME: Destroy target artifact or enchantment.\"",
+        "AddToughness": "1",
+        "AddAbility": "ABDestroy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

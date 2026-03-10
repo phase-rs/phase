@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "VillainousChoice",
+        "params": {
+          "SpellDescription": "Each opponent faces a villainous choice — They exile cards from the top of their library until they exile a nonland card, then you may cast that card without paying its mana cost, or that player exiles the top four cards of their library and CARDNAME deals damage equal to the total mana value of those exiled cards to that player.",
+          "Defined": "Opponent",
+          "Choices": "DBDig,DBDamage"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Each opponent faces a villainous choice — They exile cards from the top of their library until they exile a nonland card, then you may cast that card without paying its mana cost, or that player exiles the top four cards of their library and CARDNAME deals damage equal to the total mana value of those exiled cards to that player.",
+        "Defined": "Opponent",
+        "Choices": "DBDig,DBDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,82 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "all_3_3_kavu_trample",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a 3/3 Kavu creature token with trample that's all colors.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 1,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterNumPerDefined": "X",
+        "TgtPrompt": "Choose up to two target creatures",
+        "StackDescription": "For each of {c:Targeted}, put a number of +1/+1 counters on it equal to the number of colors it is.",
+        "TargetMin": "0",
+        "SpellDescription": "Choose up to two target creatures. For each of them, put a number of +1/+1 counters on it equal to the number of colors it is.",
+        "Planeswalker": "True",
+        "Defined": "Targeted",
+        "TargetMax": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.MultiColor+YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberChanged": "True",
+        "Ultimate": "True",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Return target multicolored card from your graveyard to your hand.",
+        "TgtPrompt": "Select target multicolored card in your graveyard",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

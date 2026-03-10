@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "ActivationLimit": "1",
+          "SpellDescription": "Add {G}. Activate only once each turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "AddCounter<1/M0M1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationLimit": "1",
+        "SpellDescription": "Add {G}. Activate only once each turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "TriggerDescription": "Whenever one or more +1/+1 counters are put on CARDNAME, you may create a 1/1 green Squirrel creature token.",
+        "CounterType": "P1P1",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSquirrel",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

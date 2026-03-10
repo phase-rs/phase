@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Counter",
+        "Affected": "Card.EnchantedBy",
+        "Description": "Enchanted land has \"{T}: Counter target spell unless its controller pays {1}.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

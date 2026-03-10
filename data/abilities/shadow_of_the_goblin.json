@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigDiscard",
+        "TriggerZones": "Battlefield",
+        "Phase": "Main1",
+        "TriggerDescription": "Unreliable Visions — At the beginning of your first main phase, discard a card. If you do, draw a card."
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Origin": "Ante,Command,Exile,Graveyard,Library",
+        "Execute": "TrigDamage",
+        "ValidCard": "Land.YouCtrl",
+        "TriggerDescription": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
+        "ValidCard": "Land.YouCtrl+YouDontOwn",
+        "Origin": "Hand",
+        "Execute": "TrigDamage"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Card.!wasCastFromYourHand"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

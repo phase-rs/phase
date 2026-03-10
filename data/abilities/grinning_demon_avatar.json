@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+!token",
+        "TriggerZones": "Command",
+        "Execute": "GrinningDiscard",
+        "TriggerDescription": "Whenever a nontoken creature you control dies, target opponent discards a card.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

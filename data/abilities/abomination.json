@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a green or white creature, destroy that creature at end of combat.",
+        "ValidCard": "Creature.Green,Creature.White",
+        "ValidBlocker": "Card.Self",
+        "Execute": "DelTrigBlocked"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Creature.Green,Creature.White",
+        "ValidCard": "Card.Self",
+        "Execute": "DelTrigBlocker",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a green or white creature, destroy that creature at end of combat."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

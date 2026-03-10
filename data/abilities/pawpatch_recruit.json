@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Creature.YouCtrl+inZoneBattlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "TriggerDescription": "Whenever a creature you control becomes the target of a spell or ability an opponent controls, put a +1/+1 counter on target creature you control other than that creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

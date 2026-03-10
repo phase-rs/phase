@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CrankContraption",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever you crank CARDNAME, roll two six-sided dice. CARDNAME deals damage to target creature equal to the difference between those results.",
+        "Execute": "TrigCrank"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

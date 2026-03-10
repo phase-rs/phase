@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionPresent": "Card",
+        "SpellDescription": "Each opponent sacrifices a creature.",
+        "ConditionCompare": "EQ0",
+        "Defined": "Opponent",
+        "SubAbility": "EvidenceCollected",
+        "ConditionDefined": "Collected",
+        "SacValid": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "ValidSA": "Spell",
+        "Cost": "CollectEvidence<6>",
+        "EffectZone": "All",
+        "Description": "As an additional cost to cast this spell, you may collect evidence 6. (Exile cards with total mana value 6 or greater from your graveyard.)",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

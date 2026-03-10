@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Creatures with power less than CARDNAME's power can't block it.",
+        "ValidAttacker": "Creature.Self",
+        "ValidBlocker": "Creature.powerLTX"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

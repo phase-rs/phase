@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever enchanted creature attacks, scry 1.",
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "DBScry",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.EnchantedBy",
+        "Description": "Enchanted creature can't be blocked."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddSVar": "AE"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

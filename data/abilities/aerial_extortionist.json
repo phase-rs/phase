@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or deals combat damage to a player, exile up to one target nonland permanent. For as long as that card remains exiled, its owner may cast it.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "Execute": "TrigExile",
+        "ValidSource": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME enters or deals combat damage to a player, exile up to one target nonland permanent. For as long as that card remains exiled, its owner may cast it.",
+        "ValidTarget": "Player"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.!wasCastFromTheirHand",
+        "TriggerDescription": "Whenever another player casts a spell from anywhere other than their hand, draw a card.",
+        "ValidActivatingPlayer": "Player.Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidSA": "Activated.!hasTapCost",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Artifact",
+        "TriggerDescription": "Whenever an artifact becomes tapped or a player activates an artifact's ability without {T} in its activation cost, CARDNAME deals 1 damage to that artifact's controller."
+      }
+    },
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerDescription": "Whenever an artifact becomes tapped or a player activates an artifact's ability without {T} in its activation cost, CARDNAME deals 1 damage to that artifact's controller.",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Artifact"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

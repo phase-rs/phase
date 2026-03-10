@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever an opponent casts a creature spell, put a +1/+1 counter on enchanted creature.",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

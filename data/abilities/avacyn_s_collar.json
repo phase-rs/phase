@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Whenever equipped creature dies, if it was a Human, create a 1/1 white Spirit creature token with flying.",
+        "ValidCard": "Card.AttachedBy+Human"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance",
+        "Description": "Equipped creature gets +1/+0 and has vigilance.",
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

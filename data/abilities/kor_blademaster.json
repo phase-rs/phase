@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Warrior.YouCtrl+equipped",
+        "AddKeyword": "Double Strike",
+        "Description": "Equipped Warriors you control have double strike."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

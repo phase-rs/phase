@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "Whenever another green creature you control enters, put a +1/+1 counter on NICKNAME. Then if that creature's power is greater than NICKNAME's power, put another +1/+1 counter on NICKNAME.",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "ValidCard": "Creature.Other+YouCtrl+Green",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

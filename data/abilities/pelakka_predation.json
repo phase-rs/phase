@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "RevealHand",
+            "params": {
+              "SubAbility": "DBChoose",
+              "RememberRevealed": "True",
+              "StackDescription": "{p:Targeted} reveals their hand.",
+              "ValidTgts": "Opponent",
+              "SpellDescription": "Target opponent reveals their hand. You choose a card from it with mana value 3 or greater. That player discards that card."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBChoose",
+            "RememberRevealed": "True",
+            "StackDescription": "{p:Targeted} reveals their hand.",
+            "ValidTgts": "Opponent",
+            "SpellDescription": "Target opponent reveals their hand. You choose a card from it with mana value 3 or greater. That player discards that card."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "B",
+            "params": {
+              "SpellDescription": "Add {B}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {B}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated",
+            "ReplaceWith": "ETBTapped",
+            "Description": "CARDNAME enters tapped."
+          }
+        }
+      ]
+    }
+  ]
+}

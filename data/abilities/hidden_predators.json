@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLurkingJackalsAnimate",
+        "IsPresent2": "Card.Self+Enchantment",
+        "ResolvingCheck": "IsPresent2",
+        "IsPresent": "Creature.powerGE4+OppCtrl",
+        "TriggerDescription": "When an opponent controls a creature with power 4 or greater, if CARDNAME is an enchantment, CARDNAME becomes a 4/4 Beast creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

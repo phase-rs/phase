@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land",
+        "Description": "All lands are no longer snow.",
+        "RemoveType": "Snow"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

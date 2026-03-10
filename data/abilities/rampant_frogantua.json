@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigMill",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may mill that many cards. Put any number of land cards from among them onto the battlefield tapped.",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddToughness": "X",
+        "AddPower": "X",
+        "Description": "CARDNAME gets +10/+10 for each player who has lost the game."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

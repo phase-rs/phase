@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidSource": "Creature.AttachedBy",
+            "CombatDamage": "True",
+            "Execute": "TrigTransform",
+            "ValidTarget": "Player",
+            "TriggerDescription": "Whenever equipped creature deals combat damage to a player, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Creature.EquippedBy",
+            "AddPower": "1",
+            "Description": "Equipped creature gets +1/+0."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "LosesGame",
+          "params": {
+            "TriggerDescription": "Whenever a player loses the game, put thirteen +1/+1 counters on CARDNAME.",
+            "Execute": "TrigCounter"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

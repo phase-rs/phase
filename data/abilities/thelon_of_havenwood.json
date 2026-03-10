@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterNum": "1",
+          "SpellDescription": "Put a spore counter on each Fungus on the battlefield.",
+          "ValidCards": "Fungus",
+          "CounterType": "SPORE"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "B G"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileAnyGrave<1/Fungus>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterNum": "1",
+        "SpellDescription": "Put a spore counter on each Fungus on the battlefield.",
+        "ValidCards": "Fungus",
+        "CounterType": "SPORE"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "AffectedX",
+        "Affected": "Creature.Fungus",
+        "AddToughness": "AffectedX",
+        "AffectedZone": "Battlefield",
+        "Description": "Each Fungus creature gets +1/+1 for each spore counter on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

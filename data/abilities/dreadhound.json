@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigMill",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, mill three cards. (Put the top three cards of your library into your graveyard.)"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigLoseLife",
+        "ValidCard": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigLoseLife",
+        "Secondary": "True",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
+        "Origin": "Library"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

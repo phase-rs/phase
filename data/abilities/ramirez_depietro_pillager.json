@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "When CARDNAME enters, you lose 2 life and create two Treasure tokens."
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "ValidSource": "Pirate.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDig",
+        "TriggerDescription": "Whenever one or more Pirates you control deal combat damage to a player, exile the top card of that player's library. You may cast that card for as long as it remains exiled."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

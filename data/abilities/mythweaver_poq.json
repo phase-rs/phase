@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCards": "Land.YouCtrl+!token",
+        "TriggerDescription": "Whenever one or more nontoken lands you control enter, for each of them, conjure a duplicate of it onto the battlefield. This ability triggers only once each turn.",
+        "Execute": "TrigConjure",
+        "ActivationLimit": "1"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of lands you control.",
+        "CharacteristicDefining": "True",
+        "SetPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

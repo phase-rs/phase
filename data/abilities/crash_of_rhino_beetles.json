@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "10",
+        "AddToughness": "10",
+        "PresentCompare": "GE10",
+        "Description": "CARDNAME gets +10/+10 as long as you control ten or more lands.",
+        "IsPresent": "Land.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

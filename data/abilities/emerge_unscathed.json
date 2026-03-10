@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn.",
+          "Choices": "AnyColor",
+          "ValidTgts": "Creature.YouCtrl",
+          "Gains": "Choice",
+          "TgtPrompt": "Select target creature you control"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target creature you control gains protection from the color of your choice until end of turn.",
+        "Choices": "AnyColor",
+        "ValidTgts": "Creature.YouCtrl",
+        "Gains": "Choice",
+        "TgtPrompt": "Select target creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

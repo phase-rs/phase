@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.!wasCastFromTheirHand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Counter target spell [that wasn't cast from its owner's hand].",
+        "TargetType": "Spell",
+        "TgtPrompt": "Select target spell that wasn't cast from its owner's hand"
+      }
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",
+        "TgtPrompt": "Select target spell",
+        "NonBasicSpell": "True",
+        "TargetType": "Spell",
+        "CostDesc": "{1}{U}{U}",
+        "PrecostDesc": "Cleave"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

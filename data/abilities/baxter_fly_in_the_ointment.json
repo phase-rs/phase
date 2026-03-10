@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, each creature you control with a counter on it gains flying until end of turn.",
+        "Origin": "Any",
+        "Execute": "TrigPumpAll",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, each creature you control with a counter on it gains flying until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPumpAll"
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "ValidCard": "Card.YouCtrl",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you draw a card, put a +1/+1 counter on NICKNAME.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

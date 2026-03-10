@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Sideboard",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBLoseLife",
+        "ChangeNum": "1",
+        "Hidden": "True",
+        "SpellDescription": "You may put a card you own from outside the game into your hand. You lose half your life, rounded up. Exile CARDNAME.",
+        "ChangeType": "Card.YouOwn",
+        "ChangeTypeDesc": "card they own"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "TriggerDescription": "Whenever a blue creature you control enters, you may have target player draw a card.",
+        "TriggerZones": "Battlefield",
+        "Destination": "Battlefield",
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You",
+        "ValidCard": "Creature.Blue+YouCtrl"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a black creature you control enters, you may have target player discard a card.",
+        "ValidCard": "Creature.Black+YouCtrl",
+        "OptionalDecider": "You",
+        "Execute": "TrigDiscard",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

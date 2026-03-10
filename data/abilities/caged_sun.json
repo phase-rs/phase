@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ManaAdded",
+      "params": {
+        "ValidSA": "SpellAbility.ManaAbility",
+        "Produced": "ChosenColor",
+        "Player": "You",
+        "Execute": "TrigMana",
+        "ValidSource": "Land",
+        "Static": "True",
+        "TriggerDescription": "Whenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ManaAdded",
+      "params": {
+        "Produced": "ChosenColor",
+        "ValidSource": "Land",
+        "ValidSA": "SpellAbility.!ManaAbility",
+        "Execute": "TrigMana",
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
+        "Player": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Affected": "Creature.ChosenColor+YouCtrl",
+        "Description": "Creatures you control of the chosen color get +1/+1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

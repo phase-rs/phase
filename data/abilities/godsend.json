@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by one or more creatures, you may exile one of those creatures.",
+        "ValidCard": "Card.EquippedBy",
+        "ValidBlocked": "Creature",
+        "Execute": "TrigChooseAttackers",
+        "OptionalDecider": "You"
+      }
+    },
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "OptionalDecider": "You",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever equipped creature blocks or becomes blocked by one or more creatures, you may exile one of those creatures.",
+        "ValidCard": "Card.EquippedBy",
+        "ValidBlocker": "Creature",
+        "Execute": "TrigChooseBlockers"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "ValidCard": "Card.IsRemembered+ExiledWithSource",
+        "Destination": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Forget all remembered cards.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Static": "True",
+        "Destination": "Any",
+        "Secondary": "True",
+        "Execute": "DBCleanup"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "3",
+        "Description": "Equipped creature gets +3/+3.",
+        "AddToughness": "3"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "ValidCard": "Card.nonLand+sharesNameWith Remembered.ExiledWithSource",
+        "Description": "Your opponents can't cast spells with the same name as a card exiled with CARDNAME.",
+        "Caster": "Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

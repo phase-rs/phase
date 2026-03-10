@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Landwalk:Island",
+        "Description": "Enchanted creature has islandwalk. (It can't be blocked as long as defending player controls an Island.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

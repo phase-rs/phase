@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SeekAll",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you seek one or more cards, create a 3/3 colorless Phyrexian Golem artifact creature token.",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Golems you control have vigilance.",
+        "AddKeyword": "Vigilance",
+        "Affected": "Golem.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "CheckSVar": "X",
+        "ValidCard": "Card.Self",
+        "SVarCompare": "EQ0",
+        "EffectZone": "All",
+        "Description": "Cast this spell only if you've cast another green spell this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,85 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": 2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Distribute two +1/+1 counters among up to two target creatures. They gain trample until end of turn.",
+        "Planeswalker": "True",
+        "TargetMin": "0",
+        "DividedAsYouChoose": "2",
+        "SubAbility": "DBPumpAll",
+        "TargetMax": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "None",
+        "TgtPrompt": "Select target creature you control",
+        "AILogic": "Fight",
+        "SubAbility": "SoulsDamage",
+        "Planeswalker": "True",
+        "SpellDescription": "Target creature you control deals damage equal to its power to target creature or planeswalker."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Sideboard",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -5
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeTypeDesc": "creature card they own",
+        "Reveal": "True",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "You may reveal a creature card you own from outside the game and put it into your hand.",
+        "Hidden": "True",
+        "ChangeNum": "1",
+        "ChangeType": "Creature.YouOwn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

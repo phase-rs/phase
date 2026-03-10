@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "ExchangeControlSpell",
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an opponent casts a spell, you may exchange control of CARDNAME and that spell. If you do, you may choose new targets for the spell. (If the spell becomes a permanent, you control that permanent.)",
+        "ValidActivatingPlayer": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

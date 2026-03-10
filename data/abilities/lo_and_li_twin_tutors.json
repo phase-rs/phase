@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigChange",
+        "TriggerDescription": "When NICKNAME enter, search your library for a Lesson or Noble card, reveal it, put it into your hand, then shuffle.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Noble+YouCtrl",
+        "Description": "Noble creatures you control and Lesson spells you control have lifelink.",
+        "AddKeyword": "Lifelink"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Stack",
+        "Description": "Noble creatures you control and Lesson spells you control have lifelink.",
+        "AddKeyword": "Lifelink",
+        "Affected": "Lesson.YouCtrl",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

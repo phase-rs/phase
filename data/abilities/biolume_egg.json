@@ -1,0 +1,68 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "Execute": "TrigScry",
+            "TriggerDescription": "When CARDNAME enters, scry 2.",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Sacrificed",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When you sacrifice CARDNAME, return it to the battlefield transformed under its owner's control at the beginning of the next end step.",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigDelay",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "SpellDescription": "CARDNAME can't be blocked this turn.",
+              "StaticAbilities": "Unblockable",
+              "ExileOnMoved": "Battlefield",
+              "RememberObjects": "Self"
+            }
+          },
+          "cost": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "CARDNAME can't be blocked this turn.",
+            "StaticAbilities": "Unblockable",
+            "ExileOnMoved": "Battlefield",
+            "RememberObjects": "Self"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

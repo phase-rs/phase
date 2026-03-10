@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Spirit creatures you control get +1/+1 and have hexproof.",
+        "Affected": "Creature.Spirit+Other+YouCtrl",
+        "AddKeyword": "Hexproof",
+        "AddPower": "1",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

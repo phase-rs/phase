@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "UnlockDoor",
+        "params": {
+          "TgtPrompt": "Choose target Room you control",
+          "SorcerySpeed": "True",
+          "Mode": "LockOrUnlock",
+          "ValidTgts": "Room.YouCtrl",
+          "SpellDescription": "Lock or unlock a door of target Room you control. Activate only as a sorcery."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Choose target Room you control",
+        "SorcerySpeed": "True",
+        "Mode": "LockOrUnlock",
+        "ValidTgts": "Room.YouCtrl",
+        "SpellDescription": "Lock or unlock a door of target Room you control. Activate only as a sorcery."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigDig",
+        "TriggerDescription": "When CARDNAME enters, reveal the top seven cards of your library. Put all enchantment cards from among them into your hand and the rest on the bottom of your library in a random order."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

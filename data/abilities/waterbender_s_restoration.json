@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile X target creatures you control. Return those cards to the battlefield under their owner's control at the beginning of the next end step.",
+        "TgtPrompt": "Select target creature you control",
+        "SubAbility": "DelTrig",
+        "TargetMax": "X",
+        "Announce": "X",
+        "RememberChanged": "True",
+        "TargetMin": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Description": "As an additional cost to cast this spell, waterbend {X}. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
+        "Cost": "Waterbend<X>",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

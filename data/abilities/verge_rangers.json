@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Library",
+        "Description": "You may look at the top card of your library any time.",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "MayLookAt": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "GTY",
+        "AffectedZone": "Library",
+        "Description": "As long as an opponent controls more lands than you, you may play lands from the top of your library. (You can play a land this way only if you have an available land play remaining.)",
+        "Affected": "Land.TopLibrary+YouCtrl",
+        "MayPlay": "True",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

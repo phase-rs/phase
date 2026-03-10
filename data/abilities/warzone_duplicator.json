@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, return target creature an opponent controls with power less than CARDNAME's power to its owner's hand. If that creature wasn't a token, conjure a duplicate of it into your hand. It perpetually gains \"You may spend mana as though it were mana of any color to cast this spell.\"",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

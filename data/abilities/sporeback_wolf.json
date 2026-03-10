@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self",
+        "AddToughness": "2",
+        "Description": "During your turn, CARDNAME gets +0/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

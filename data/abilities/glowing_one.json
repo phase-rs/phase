@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigRadiation",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, they get four rad counters.",
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "ValidTarget": "Player"
+      }
+    },
+    {
+      "mode": "Milled",
+      "params": {
+        "ValidPlayer": "Player",
+        "ValidCard": "Card.nonLand",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever a player mills a nonland card, you gain 1 life."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

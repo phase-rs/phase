@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Seek",
+        "params": {
+          "SubAbility": "Shuffle",
+          "Num": "2",
+          "Type": "Creature",
+          "DefinedCards": "Top_10_OfLibrary",
+          "SpellDescription": "Seek two creature cards from among the top ten cards of your library,"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "Shuffle",
+        "Num": "2",
+        "Type": "Creature",
+        "DefinedCards": "Top_10_OfLibrary",
+        "SpellDescription": "Seek two creature cards from among the top ten cards of your library,"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "FreeCard",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land has \"{T}: Add one mana of any color.\"",
+        "Affected": "Card.EnchantedBy",
+        "AddAbility": "AbundantGrowthTap"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

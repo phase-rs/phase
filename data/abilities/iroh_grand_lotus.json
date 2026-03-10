@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Affected": "Instant.nonLesson+YouOwn,Sorcery.nonLesson+YouOwn",
+        "AddKeyword": "Flashback",
+        "Description": "During your turn, each non-Lesson instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost. (You may cast a card from your graveyard for its flashback cost. Then exile it.)",
+        "AffectedZone": "Graveyard"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AffectedZone": "Graveyard",
+        "AddKeyword": "Flashback:1",
+        "Affected": "Lesson.YouOwn",
+        "Description": "During your turn, each Lesson card in your graveyard has flashback {1}.",
+        "Condition": "PlayerTurn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

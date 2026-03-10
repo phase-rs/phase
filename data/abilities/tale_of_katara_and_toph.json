@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures you control have \"Whenever this creature becomes tapped for the first time during each of your turns, put a +1/+1 counter on it.\"",
+        "Affected": "Creature.YouCtrl",
+        "AddTrigger": "TapTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

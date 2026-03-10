@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ValidCards": "Card.YouOwn",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever one or more cards leave your graveyard, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Any",
+        "Origin": "Graveyard",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigGainLife",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME dies, you gain life equal to its power.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

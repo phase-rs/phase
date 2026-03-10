@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "CheckSVar": "X",
+        "Affected": "Card.Self",
+        "SVarCompare": "GE10",
+        "Description": "CARDNAME gets +3/+0 as long as there are ten or more cards in a single graveyard."
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "CARDNAME can't be blocked as long as you control an Ashiok planeswalker.",
+        "IsPresent": "Planeswalker.Ashiok+YouCtrl",
+        "ValidAttacker": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

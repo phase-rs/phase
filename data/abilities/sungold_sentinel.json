@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseColor",
+        "params": {
+          "SubAbility": "DBPump",
+          "CheckSVar": "X",
+          "SVarCompare": "GE3",
+          "Defined": "You",
+          "PrecostDesc": "Coven —",
+          "AILogic": "MostProminentInHumanDeck",
+          "SpellDescription": "Choose a color. CARDNAME gains hexproof from that color until end of turn and can't be blocked by creatures of that color this turn. Activate only if you control three or more creatures with different powers."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBPump",
+        "CheckSVar": "X",
+        "SVarCompare": "GE3",
+        "Defined": "You",
+        "PrecostDesc": "Coven —",
+        "AILogic": "MostProminentInHumanDeck",
+        "SpellDescription": "Choose a color. CARDNAME gains hexproof from that color until end of turn and can't be blocked by creatures of that color this turn. Activate only if you control three or more creatures with different powers."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile up to one target card from a graveyard.",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

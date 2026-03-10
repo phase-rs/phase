@@ -1,0 +1,16 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Description": "Creatures with power greater than the number of cards in your hand can't attack.",
+        "ValidCard": "Creature.powerGTX"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

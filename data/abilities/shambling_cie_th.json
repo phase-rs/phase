@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigReturn",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "Whenever you cast a noncreature spell, you may pay {B}. If you do, return this card from your graveyard to your hand.",
+        "ValidCard": "Card.nonCreature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Description": "This creature enters tapped."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBExile",
+        "ValidCards": "Creature",
+        "SpellDescription": "Destroy all creatures."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalCost"
+      },
+      "params": {
+        "EffectZone": "All",
+        "ValidCard": "Card.Self",
+        "Cost": "CollectEvidence<6>",
+        "ValidSA": "Spell",
+        "Description": "As an additional cost to cast this spell, you may collect evidence 6. (Exile cards with total mana value 6 or greater from your graveyard.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

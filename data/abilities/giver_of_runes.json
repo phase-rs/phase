@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "ValidTgts": "Creature.Other+YouCtrl",
+          "Gains": "Choice",
+          "Choices": "AnyColor,colorless",
+          "SpellDescription": "Another target creature you control gains protection from colorless or from the color of your choice until end of turn.",
+          "TgtPrompt": "Select target creature you control"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.Other+YouCtrl",
+        "Gains": "Choice",
+        "Choices": "AnyColor,colorless",
+        "SpellDescription": "Another target creature you control gains protection from colorless or from the color of your choice until end of turn.",
+        "TgtPrompt": "Select target creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

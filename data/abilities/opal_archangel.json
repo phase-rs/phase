@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Creature",
+        "TriggerDescription": "When an opponent casts a creature spell, if CARDNAME is an enchantment, CARDNAME becomes a 5/5 Angel creature with flying and vigilance.",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "TrigAnimate",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+Enchantment"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

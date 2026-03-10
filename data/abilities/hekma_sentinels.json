@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Discarded",
+      "params": {
+        "Execute": "TrigPump",
+        "TriggerDescription": "Whenever you cycle or discard a card, CARDNAME gets +1/+1 until end of turn.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.YouOwn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

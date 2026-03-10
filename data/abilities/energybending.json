@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "Energybend",
+          "RememberObjects": "Valid Land.YouCtrl",
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Lands you control gain all basic land types until end of turn. Draw a card."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "Energybend",
+        "RememberObjects": "Valid Land.YouCtrl",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Lands you control gain all basic land types until end of turn. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

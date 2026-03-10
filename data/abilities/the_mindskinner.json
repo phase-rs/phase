@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "CARDNAME can't be blocked."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "AlwaysReplace": "True",
+        "ValidSource": "Card.YouCtrl,Emblem.YouCtrl",
+        "ExecuteMode": "PerSource",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Opponent",
+        "PreventionEffect": "True",
+        "ReplaceWith": "Mill",
+        "Description": "If a source you control would deal damage to an opponent, prevent that damage and each opponent mills that many cards."
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a creature card is put into an opponent's graveyard from anywhere, you may pay life equal to its mana value. If you do, put it onto the battlefield under your control. It's a Warlock in addition to its other types.",
+        "Destination": "Graveyard",
+        "Execute": "TrigReanimate",
+        "Origin": "Any",
+        "ValidCard": "Creature.!token+OppOwn",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Graveyard",
+        "ActiveZones": "Battlefield",
+        "ValidLKI": "Warlock.YouCtrl",
+        "Origin": "Battlefield",
+        "Description": "If a Warlock you control would die, exile it instead.",
+        "ReplaceWith": "Exile"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "UntapAll",
+        "params": {
+          "SpellDescription": "Untap all creatures. Until end of turn, whenever a creature an opponent controls blocks, draw a card. Draw a card.",
+          "ValidCards": "Creature",
+          "SubAbility": "DBEffect"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Untap all creatures. Until end of turn, whenever a creature an opponent controls blocks, draw a card. Draw a card.",
+        "ValidCards": "Creature",
+        "SubAbility": "DBEffect"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

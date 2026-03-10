@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has forestwalk. (It can't be blocked as long as defending player controls a Forest.)",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Landwalk:Forest"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

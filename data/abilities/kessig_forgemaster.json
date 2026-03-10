@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackerBlockedByCreature",
+          "params": {
+            "ValidBlocker": "Card.Self",
+            "Execute": "TrigDamageAttacker",
+            "ValidCard": "Creature",
+            "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME deals 1 damage to that creature."
+          }
+        },
+        {
+          "mode": "AttackerBlockedByCreature",
+          "params": {
+            "Execute": "TrigDamageBlocker",
+            "Secondary": "True",
+            "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME deals 1 damage to that creature.",
+            "ValidCard": "Card.Self",
+            "ValidBlocker": "Creature"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "WerewolfTransformCondition": "True",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackerBlockedByCreature",
+          "params": {
+            "ValidCard": "Creature",
+            "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME deals 2 damage to that creature.",
+            "Execute": "TrigDamageAttacker",
+            "ValidBlocker": "Card.Self"
+          }
+        },
+        {
+          "mode": "AttackerBlockedByCreature",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDamageBlocker",
+            "Secondary": "True",
+            "ValidBlocker": "Creature",
+            "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, CARDNAME deals 2 damage to that creature."
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME.",
+            "Execute": "TrigTransform",
+            "TriggerZones": "Battlefield",
+            "WerewolfUntransformCondition": "True",
+            "Phase": "Upkeep"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

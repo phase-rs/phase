@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card, then discard a card. If you discarded an instant or sorcery card this way, each opponent loses 1 life and you gain 1 life.",
+        "SubAbility": "DBDiscard"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "You may cast target instant or sorcery card from your graveyard this turn. If that spell would be put into your graveyard, exile it instead. Activate only as a sorcery.",
+          "TgtPrompt": "Select target instant or sorcery card in your graveyard",
+          "ValidTgts": "Instant.YouOwn,Sorcery.YouOwn",
+          "StaticAbilities": "MayPlay",
+          "RememberObjects": "Targeted",
+          "TgtZone": "Graveyard",
+          "SorcerySpeed": "True",
+          "ReplacementEffects": "ReplaceGraveyard"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may cast target instant or sorcery card from your graveyard this turn. If that spell would be put into your graveyard, exile it instead. Activate only as a sorcery.",
+        "TgtPrompt": "Select target instant or sorcery card in your graveyard",
+        "ValidTgts": "Instant.YouOwn,Sorcery.YouOwn",
+        "StaticAbilities": "MayPlay",
+        "RememberObjects": "Targeted",
+        "TgtZone": "Graveyard",
+        "SorcerySpeed": "True",
+        "ReplacementEffects": "ReplaceGraveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

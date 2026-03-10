@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card if you had two or more creatures enter the battlefield under your control this turn.",
+        "CheckSVar": "X",
+        "Execute": "TrigDraw",
+        "ValidTarget": "Player",
+        "SVarCompare": "GE2",
+        "CombatDamage": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

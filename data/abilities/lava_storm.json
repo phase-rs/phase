@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "GenericChoice",
+        "params": {
+          "Choices": "DBDmgAttackers,DBDmgBlockers",
+          "Defined": "You",
+          "AILogic": "BestOption",
+          "SpellDescription": "CARDNAME deals 2 damage to each attacking creature or CARDNAME deals 2 damage to each blocking creature.",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "DBDmgAttackers,DBDmgBlockers",
+        "Defined": "You",
+        "AILogic": "BestOption",
+        "SpellDescription": "CARDNAME deals 2 damage to each attacking creature or CARDNAME deals 2 damage to each blocking creature.",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

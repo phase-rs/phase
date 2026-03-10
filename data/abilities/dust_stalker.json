@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each end step, if you control no other colorless creatures, return CARDNAME to its owner's hand.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature.YouCtrl+Colorless+Other",
+        "PresentCompare": "EQ0",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "Destination": "Any",
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the chosen player's life total.",
+        "CharacteristicDefining": "True",
+        "SetToughness": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

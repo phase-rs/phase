@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigConjure",
+        "TriggerDescription": "When NICKNAME enters and whenever you cast a Snake spell, conjure a card named Ambush Viper into the top six cards of your library at random. It perpetually gains \"When this creature enters, draw a card.\""
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "When NICKNAME enters and whenever you cast a Snake spell, conjure a card named Ambush Viper into the top six cards of your library at random. It perpetually gains \"When this creature enters, draw a card.\"",
+        "ValidCard": "Snake",
+        "Secondary": "True",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigConjure",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Mill",
+        "Description": "As long as CARDNAME is paired with another creature, each of those creatures have \"{T}: Target player mills two cards.\"",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

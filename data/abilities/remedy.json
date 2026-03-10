@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "TargetMin": "0",
+          "SpellDescription": "Prevent the next 5 damage that would be dealt this turn to any number of targets, divided as you choose.",
+          "Amount": "5",
+          "DividedAsYouChoose": "5",
+          "TgtPrompt": "Select any target to prevent damage to",
+          "TargetMax": "5",
+          "ValidTgts": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMin": "0",
+        "SpellDescription": "Prevent the next 5 damage that would be dealt this turn to any number of targets, divided as you choose.",
+        "Amount": "5",
+        "DividedAsYouChoose": "5",
+        "TgtPrompt": "Select any target to prevent damage to",
+        "TargetMax": "5",
+        "ValidTgts": "Any"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

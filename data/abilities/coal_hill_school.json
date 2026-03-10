@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever a player casts a historic spell, that player draws a card. (Artifacts, legendaries, and Sagas are historic.)",
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.Historic",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "TrigReturn",
+        "TriggerDescription": "Whenever chaos ensues, return target historic card from your graveyard to your hand.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

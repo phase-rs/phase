@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": -3,
+        "toughness": -3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Optional": "True",
+        "SubAbility": "GPaid",
+        "ConditionManaSpent": "B",
+        "OptionQuestion": "Do you want TARGETS to get -3/-3?",
+        "IsCurse": "True",
+        "SpellDescription": "If {B} was spent to cast CARDNAME, you may have target creature get -3/-3 until end of turn. If G was spent to cast CARDNAME, you may have target creature get +3/+3 until end of turn. (Do both if {B}{G} was spent.)",
+        "TgtPrompt": "Select target creature to get -3/-3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

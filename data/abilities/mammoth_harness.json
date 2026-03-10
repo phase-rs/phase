@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Card.EnchantedBy",
+        "Execute": "TrigPumpAttacker",
+        "ValidCard": "Creature",
+        "TriggerDescription": "Whenever enchanted creature blocks or becomes blocked by a creature, the other creature gains first strike until end of turn."
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Creature",
+        "Execute": "TrigPumpBlocker",
+        "TriggerDescription": "Whenever enchanted creature blocks or becomes blocked by a creature, the other creature gains first strike until end of turn.",
+        "Secondary": "True",
+        "ValidCard": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "RemoveKeyword": "Flying",
+        "Description": "Enchanted creature loses flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

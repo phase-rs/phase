@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainControl",
+        "TriggerDescription": "Whenever CARDNAME attacks, gain control of target Equipment an opponent controls until end of turn. Attach it to CARDNAME. When you lose control of that Equipment, unattach it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

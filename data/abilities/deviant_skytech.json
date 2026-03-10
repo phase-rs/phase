@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When this enchantment enters, create two 1/1 colorless Thopter artifact creature tokens with flying.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddAbility": "ABToken",
+        "Description": "Max speed — Sacrifice this enchantment: Create two 1/1 colorless Thopter artifact creature tokens with flying.",
+        "Condition": "MaxSpeed"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

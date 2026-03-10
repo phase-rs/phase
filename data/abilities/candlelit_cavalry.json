@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "SVarCompare": "GE3",
+        "TriggerDescription": "Coven — At the beginning of combat on your turn, if you control three or more creatures with different powers, CARDNAME gains trample until end of turn.",
+        "Phase": "BeginCombat",
+        "CheckSVar": "X",
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

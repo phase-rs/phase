@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouOwn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile X target creature cards from your graveyard. For each creature card exiled this way, create a 2/2 black Zombie creature token.",
+        "SubAbility": "DBToken",
+        "TargetMin": "X",
+        "TargetMax": "X",
+        "TgtPrompt": "Choose X target creature cards in your graveyard",
+        "StackDescription": "{p:You} exiles {c:Targeted} from their graveyard. For each creature card exiled this way, {p:You} creates a 2/2 black Zombie creature token."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

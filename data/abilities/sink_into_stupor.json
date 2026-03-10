@@ -1,0 +1,69 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield,Stack",
+            "destination": "Hand",
+            "target": {
+              "type": "Filtered",
+              "filter": "Permanent.nonLand+OppCtrl,Card.inZoneStack+OppCtrl"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TgtZone": "Stack,Battlefield",
+            "SpellDescription": "Return target spell or nonland permanent an opponent controls to its owner's hand."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "U",
+            "params": {
+              "SpellDescription": "Add {U}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {U}."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Description": "As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "ReplaceWith": "DBTap",
+            "ReplacementResult": "Updated"
+          }
+        }
+      ]
+    }
+  ]
+}

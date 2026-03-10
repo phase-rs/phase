@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 2
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDiscard",
+        "Planeswalker": "True",
+        "ValidTgts": "Player",
+        "SpellDescription": "Target player draws two cards, then discards two cards."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Gain control of target artifact.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Stackable": "False",
+          "Triggers": "TrigSpellCast",
+          "Duration": "Permanent",
+          "Name": "Emblem — Dack Fayden",
+          "AILogic": "Always",
+          "Planeswalker": "True",
+          "SpellDescription": "You get an emblem with \"Whenever you cast a spell that targets one or more permanents, gain control of those permanents.\"",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Stackable": "False",
+        "Triggers": "TrigSpellCast",
+        "Duration": "Permanent",
+        "Name": "Emblem — Dack Fayden",
+        "AILogic": "Always",
+        "Planeswalker": "True",
+        "SpellDescription": "You get an emblem with \"Whenever you cast a spell that targets one or more permanents, gain control of those permanents.\"",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

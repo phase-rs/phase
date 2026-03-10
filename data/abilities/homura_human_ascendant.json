@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME dies, return it to the battlefield flipped.",
+            "Destination": "Graveyard",
+            "Execute": "TrigReturn",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "CantBlock",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Description": "CARDNAME can't block."
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Creatures you control get +2/+2 and have flying and \"{R}: This creature gets +1/+0 until end of turn.\"",
+            "Affected": "Creature.YouCtrl",
+            "AddToughness": "2",
+            "AddPower": "2",
+            "AddKeyword": "Flying",
+            "AddAbility": "ABPump"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

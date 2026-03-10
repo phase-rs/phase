@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "CounterNum": "1",
+          "ValidCards": "Creature.YouCtrl",
+          "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+          "CounterType": "P1P1"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "W B"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CounterNum": "1",
+        "ValidCards": "Creature.YouCtrl",
+        "SpellDescription": "Put a +1/+1 counter on each creature you control.",
+        "CounterType": "P1P1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

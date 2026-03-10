@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapAll",
+        "params": {
+          "ValidCards": "Creature.OppCtrl",
+          "SubAbility": "DBPumpAll",
+          "AILogic": "AtLeast3",
+          "SpellDescription": "Tap all creatures your opponents control. Creatures you control gain lifelink until end of turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.OppCtrl",
+        "SubAbility": "DBPumpAll",
+        "AILogic": "AtLeast3",
+        "SpellDescription": "Tap all creatures your opponents control. Creatures you control gain lifelink until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

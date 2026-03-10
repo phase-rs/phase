@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "First Strike",
+        "AddPower": "1",
+        "Affected": "Card.Self",
+        "IsPresent": "Planeswalker.Chandra+YouCtrl",
+        "Description": "As long as you control a Chandra planeswalker, CARDNAME gets +1/+0 and has first strike. (It deals combat damage before creatures without first strike.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

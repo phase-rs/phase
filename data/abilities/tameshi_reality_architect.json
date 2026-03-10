@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.cmcLEX+YouOwn,Enchantment.cmcLEX+YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "X W"
+          },
+          {
+            "type": "Mana",
+            "cost": "Return<1/Land/land>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target artifact or enchantment card with mana value X or less from your graveyard to the battlefield. Activate only as a sorcery.",
+        "SorcerySpeed": "True",
+        "TgtPrompt": "Select target artifact or enchantment card with mana value X or less"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Permanent.nonCreature",
+        "ActivationLimit": "1",
+        "TriggerDescription": "Whenever one or more noncreature permanents are returned to hand, draw a card. This ability triggers only once each turn.",
+        "Execute": "TrigDraw",
+        "Origin": "Battlefield",
+        "Destination": "Hand"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

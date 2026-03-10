@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerDescription": "When this creature enters, create a 2/2 black Zombie creature token.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Max speed — Whenever a creature you control dies, each opponent loses 1 life and you gain 1 life.",
+        "Affected": "Card.Self",
+        "Condition": "MaxSpeed",
+        "AddTrigger": "DiesTrig"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

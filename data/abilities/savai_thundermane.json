@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Cycled",
+      "params": {
+        "TriggerDescription": "Whenever you cycle a card, you may pay {2}. When you do, CARDNAME deals 2 damage to target creature and you gain 2 life.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigImmediateTrig",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

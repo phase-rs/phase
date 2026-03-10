@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChoosePlayer",
+        "params": {
+          "Choices": "Player.IsRemembered",
+          "Defined": "You",
+          "SubAbility": "DBChooseSpell",
+          "SpellDescription": "Choose a player who cast one or more sorcery spells this turn. CARDNAME deals damage to that player equal to half the damage dealt by one of those sorcery spells this turn, rounded down."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "Player.IsRemembered",
+        "Defined": "You",
+        "SubAbility": "DBChooseSpell",
+        "SpellDescription": "Choose a player who cast one or more sorcery spells this turn. CARDNAME deals damage to that player equal to half the damage dealt by one of those sorcery spells this turn, rounded down."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Static": "True",
+        "Execute": "DBForget",
+        "Phase": "Untap"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Sorcery.!IsRemembered",
+        "Static": "True",
+        "Execute": "TrigRememberPlayer"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

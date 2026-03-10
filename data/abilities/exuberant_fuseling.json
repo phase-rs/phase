@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigCounter",
+        "TriggerDescription": "When CARDNAME enters and whenever another creature or artifact you control is put into a graveyard from the battlefield, put an oil counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "TrigCounter",
+        "ValidCard": "Creature.Other+YouCtrl,Artifact.Other+YouCtrl",
+        "Secondary": "True",
+        "TriggerDescription": "When CARDNAME enters and whenever another creature or artifact you control is put into a graveyard from the battlefield, put an oil counter on CARDNAME.",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "X",
+        "Description": "CARDNAME gets +1/+0 for each oil counter on it.",
+        "Affected": "Card.Self",
+        "AffectedZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

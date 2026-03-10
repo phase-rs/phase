@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "TriggerDescription": "When CARDNAME is put into a graveyard from the battlefield, return it to its owner's hand.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddType": "Dragon",
+        "RemoveCreatureTypes": "True",
+        "SetToughness": "2",
+        "Description": "Enchanted creature is a black Dragon with base power and toughness 4/2, has flying and deathtouch, and is goaded. (It attacks each combat if able and attacks a player other than you if able.)",
+        "SetPower": "4",
+        "AddKeyword": "Flying & Deathtouch",
+        "SetColor": "Black",
+        "Goad": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

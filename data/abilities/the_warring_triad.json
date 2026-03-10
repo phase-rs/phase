@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "Defined": "Targeted",
+          "SpellDescription": "Target player adds one mana of any color.",
+          "ValidTgts": "Player"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Mill<1>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Targeted",
+        "SpellDescription": "Target player adds one mana of any color.",
+        "ValidTgts": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SVarCompare": "LT8",
+        "RemoveType": "Creature",
+        "CheckSVar": "X",
+        "Description": "As long as there are fewer than eight cards in your graveyard, CARDNAME isn't a creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

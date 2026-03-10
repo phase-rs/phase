@@ -1,0 +1,73 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/DREAM/NICKNAME>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "Defined": "Self",
+          "Amount": "1",
+          "SpellDescription": "Prevent the next 1 damage that would be dealt to NICKNAME this turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<1/DREAM/NICKNAME>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "Amount": "1",
+        "SpellDescription": "Prevent the next 1 damage that would be dealt to NICKNAME this turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, if NICKNAME started the turn untapped, put a dream counter on it.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "IsPresent": "Card.Self+startedTheTurnUntapped"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MaxCounter"
+      },
+      "params": {
+        "CounterType": "DREAM",
+        "ValidCard": "Card.Self",
+        "MaxNum": "7",
+        "Description": "CARDNAME can't have more than seven dream counters on it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

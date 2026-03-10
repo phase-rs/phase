@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "BeginCombat",
+        "OptionalDecider": "You",
+        "Execute": "DBTrigger",
+        "TriggerDescription": "At the beginning of combat on your turn, you may remove an oil counter from CARDNAME. When you do, target creature you control gains your choice of flying, vigilance, deathtouch, or lifelink until end of turn.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Phase": "End of Turn",
+            "TriggerDescription": "At the beginning of each end step, bolster 1. (Choose a creature with the least toughness among creatures you control and put a +1/+1 counter on it.)",
+            "Execute": "TrigBolster"
+          }
+        },
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigReturn",
+            "Destination": "Graveyard",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When NICKNAME dies, return it to the battlefield converted under its owner's control."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackersDeclared",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "AttackingPlayer": "You",
+            "Execute": "TrigBolster",
+            "TriggerDescription": "Whenever you attack, bolster 2. The chosen creature gains trample until end of turn. When that creature deals combat damage to a player this turn, convert NICKNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

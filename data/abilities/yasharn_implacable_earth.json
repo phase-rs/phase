@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.",
+        "Execute": "TrigLands"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantPayLife"
+      },
+      "params": {
+        "Description": "Players can't pay life or sacrifice nonland permanents to cast spells or activate abilities.",
+        "ValidPlayer": "Player",
+        "ValidCause": "Spell,Activated",
+        "ForCost": "True"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantSacrifice"
+      },
+      "params": {
+        "ForCost": "True",
+        "Secondary": "True",
+        "Description": "Players can't pay life or sacrifice nonland permanents to cast spells or activate abilities.",
+        "ValidCard": "Permanent.nonLand",
+        "ValidCause": "Spell,Activated"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTap",
+        "TriggerDescription": "When CARDNAME enters the battlefield, tap enchanted creature.",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "VisitAttraction",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidPlayer": "You",
+        "Execute": "TrigAttach",
+        "TriggerDescription": "Whenever you visit an Attraction, you may attach CARDNAME to target tapped creature.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Attraction.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Creature.AttachedBy",
+        "Description": "Enchanted creature doesn't untap during its controller's untap step.",
+        "ActiveZones": "Battlefield",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

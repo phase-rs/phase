@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever another nontoken creature you control enters, you may draw a card.",
+        "ValidCard": "Creature.!token+Other+YouCtrl",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

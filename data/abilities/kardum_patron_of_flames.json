@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever CARDNAME attacks, put a flame counter on it, then seek a card with mana value equal to the number of flame counters on it and exile that card face down.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCounter"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When NICKNAME dies, put the cards exiled with it into their owner's hand. At the beginning of the end step of your next turn, discard those cards.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigReturn"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Static": "True",
+        "ValidCard": "Card.Self",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "ExcludedDestinations": "Graveyard"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "Static": "True",
+        "ValidCard": "Card.IsRemembered+ExiledWithSource"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

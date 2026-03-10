@@ -1,0 +1,77 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "RestrictValid": "Spell.Creature",
+          "SpellDescription": "Add {G}. Spend this mana only to cast a creature spell."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.Creature",
+        "SpellDescription": "Add {G}. Spend this mana only to cast a creature spell."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "ValidCards": "Frog.ThisTurnEntered+YouCtrl,Rabbit.ThisTurnEntered+YouCtrl,Raccoon.ThisTurnEntered+YouCtrl,Squirrel.ThisTurnEntered+YouCtrl",
+          "CounterType": "P1P1",
+          "CounterNum": "1",
+          "SpellDescription": "Put a +1/+1 counter on each Frog, Rabbit, Raccoon, or Squirrel you control that entered the battlefield this turn."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "G"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Frog.ThisTurnEntered+YouCtrl,Rabbit.ThisTurnEntered+YouCtrl,Raccoon.ThisTurnEntered+YouCtrl,Squirrel.ThisTurnEntered+YouCtrl",
+        "CounterType": "P1P1",
+        "CounterNum": "1",
+        "SpellDescription": "Put a +1/+1 counter on each Frog, Rabbit, Raccoon, or Squirrel you control that entered the battlefield this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

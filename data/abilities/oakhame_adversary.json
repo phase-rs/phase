@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, draw a card.",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Amount": "2",
+        "Description": "CARDNAME costs {2} less to cast if your opponent controls a green permanent.",
+        "EffectZone": "All",
+        "IsPresent": "Permanent.Green+OppCtrl",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

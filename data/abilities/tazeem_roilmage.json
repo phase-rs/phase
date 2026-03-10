@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, return target instant or sorcery card from your graveyard to your hand.",
+        "ValidCard": "Card.Self+kicked",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

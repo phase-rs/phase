@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "MultiplePiles",
+        "params": {
+          "SpellDescription": "Starting with you, each player separates all permanents they control into three piles. Then each player chooses one of their piles at random and sacrifices those permanents. (Piles can be empty.)",
+          "ValidCards": "Permanent",
+          "Piles": "3",
+          "ChosenPile": "DBSacrifice",
+          "RandomChosen": "True",
+          "Zone": "Battlefield",
+          "Defined": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Starting with you, each player separates all permanents they control into three piles. Then each player chooses one of their piles at random and sacrifices those permanents. (Piles can be empty.)",
+        "ValidCards": "Permanent",
+        "Piles": "3",
+        "ChosenPile": "DBSacrifice",
+        "RandomChosen": "True",
+        "Zone": "Battlefield",
+        "Defined": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

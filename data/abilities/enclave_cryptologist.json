@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Loot",
+        "Affected": "Card.Self",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE2_LEVEL",
+        "Description": "LEVEL 1-2 {T}: Draw a card, then discard a card."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "Draw",
+        "Affected": "Card.Self",
+        "IsPresent": "Card.Self+counters_GE3_LEVEL",
+        "Description": "LEVEL 3+ {T}: Draw a card."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

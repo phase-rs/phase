@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "ValidCard": "Creature.!token+Other+YouCtrl",
+        "TriggerDescription": "Whenever another nontoken creature you control dies, you may exile it. If you do, create a token that's a copy of that creature, except it's a 1/1 Food Golem artifact creature in addition to its other types and it has \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\"",
+        "Execute": "TrigExile",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Food+YouCtrl,Creature.Golem+YouCtrl",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Each creature you control that's a Food or a Golem gets +2/+2 and has trample.",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

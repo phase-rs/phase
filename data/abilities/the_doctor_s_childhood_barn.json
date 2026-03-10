@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, for each opponent, choose up to one target nonland permanent that opponent controls. Untap those permanents. They phase out. They can't phase in for as long as CARDNAME remains face up. When a player planeswalks, those permanents phase in."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Creature",
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "Description": "Creatures enter tapped.",
+        "ActiveZones": "Command"
+      }
+    }
+  ],
+  "faces": []
+}

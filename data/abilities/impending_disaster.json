@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE7",
+        "IsPresent": "Land",
+        "Phase": "Upkeep",
+        "ValidPlayer": "You",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of your upkeep, if there are seven or more lands on the battlefield, sacrifice CARDNAME and destroy all lands."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

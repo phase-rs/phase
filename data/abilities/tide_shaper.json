@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+kicked",
+        "Origin": "Any",
+        "Execute": "TrigAnimate",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, target land becomes an Island for as long as CARDNAME remains on the battlefield."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Affected": "Card.Self",
+        "AddPower": "1",
+        "IsPresent": "Island.OppCtrl",
+        "Description": "CARDNAME gets +1/+1 as long as an opponent controls an Island."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

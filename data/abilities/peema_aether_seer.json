@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "Target creature blocks this turn if able.",
+          "StackDescription": "{c:Targeted} blocks this turn if able.",
+          "ValidTgts": "Creature",
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "MustBlock"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayEnergy<3>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "Target creature blocks this turn if able.",
+        "StackDescription": "{c:Targeted} blocks this turn if able.",
+        "ValidTgts": "Creature",
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "MustBlock"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigEnergy",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you get an amount of {E} (energy counters) equal to the greatest power among creatures you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

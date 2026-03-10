@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "c_3_3_a_robot",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "PayEnergy<3>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Create a tapped 3/3 colorless Robot artifact creature token.",
+        "TokenTapped": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "ValidSource": "Creature.Artifact+YouCtrl",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever one or more artifact creatures you control deal combat damage to a player, you get {E} (an energy counter).",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigEnergy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

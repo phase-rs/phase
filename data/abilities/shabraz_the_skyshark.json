@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Human"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "WU"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Flying",
+        "TgtPrompt": "Select target Human",
+        "SpellDescription": "Target Human gains flying until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever you draw a card, put a +1/+1 counter on CARDNAME and you gain 1 life.",
+        "ValidCard": "Card.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

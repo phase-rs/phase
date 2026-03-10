@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Description": "Islands don't untap during their controllers' untap steps.",
+        "ValidCard": "Island",
+        "ValidStepTurnToController": "You",
+        "Layer": "CantHappen",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

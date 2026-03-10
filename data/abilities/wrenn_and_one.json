@@ -1,0 +1,87 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Defined": "Self",
+        "Duration": "UntilYourNextTurn",
+        "SpellDescription": "CARDNAME gains \"{T}: Add {G}\" until your next turn.",
+        "Abilities": "ABMana",
+        "StackDescription": "SpellDescription"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "g_1_1_squirrel",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "StackDescription": "REP Create_{p:You} creates",
+        "SpellDescription": "Create a 1/1 green Squirrel creature token."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "SpellDescription": "You get an emblem with \"At the beginning of your precombat main phase, add {G} for each creature you control.\"",
+          "Name": "Emblem — Wrenn and One",
+          "Duration": "Permanent",
+          "StackDescription": "REP You get_{p:You} gets",
+          "Triggers": "TrigCradle",
+          "Image": "emblem_wrenn_and_one"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "SpellDescription": "You get an emblem with \"At the beginning of your precombat main phase, add {G} for each creature you control.\"",
+        "Name": "Emblem — Wrenn and One",
+        "Duration": "Permanent",
+        "StackDescription": "REP You get_{p:You} gets",
+        "Triggers": "TrigCradle",
+        "Image": "emblem_wrenn_and_one"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.OppCtrl,Emblem.OppCtrl",
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You",
+        "ValidTarget": "You",
+        "IsPresent": "Card.untapped",
+        "PresentDefined": "Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a source an opponent controls deals damage to you, if CARDNAME is untapped, you may draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigTap",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever another white creature you control enters, tap target creature an opponent controls.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.White+YouCtrl+Other"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

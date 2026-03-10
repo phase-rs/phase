@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "ValidCard": "Card.AttachedBy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When enchanted creature becomes tapped or is dealt damage, destroy it.",
+        "Execute": "TrigDestroy1"
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "TriggerDescription": "When enchanted creature becomes tapped or is dealt damage, destroy it.",
+        "ValidTarget": "Creature.EnchantedBy",
+        "Execute": "TrigDestroy2"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature gets -5/-0.",
+        "AddPower": "-5"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

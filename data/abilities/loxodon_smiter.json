@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "event": "Moved",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "If a spell or ability an opponent controls causes you to discard CARDNAME, put it onto the battlefield instead of putting it into your graveyard.",
+        "EffectOnly": "True",
+        "Discard": "True",
+        "ReplaceWith": "SurpriseETB",
+        "ActiveZones": "Hand",
+        "ValidCause": "SpellAbility.OppCtrl"
+      }
+    }
+  ],
+  "faces": []
+}

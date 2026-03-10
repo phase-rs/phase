@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterRemoved",
+      "params": {
+        "TriggerDescription": "When the last time counter is removed from CARDNAME while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.",
+        "TriggerZones": "Exile",
+        "ValidCard": "Card.Self",
+        "CounterType": "TIME",
+        "Execute": "TrigToken",
+        "NewCounterAmount": "0"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

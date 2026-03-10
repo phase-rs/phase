@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "B R G",
+        "params": {
+          "Defined": "Player",
+          "SpellDescription": "Each player adds {B}{R}{G}."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Player",
+        "SpellDescription": "Each player adds {B}{R}{G}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "ManaBurn"
+      },
+      "params": {
+        "Description": "A player losing unspent mana causes that player to lose that much life."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

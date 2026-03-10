@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a nontoken creature you control enters, put a loyalty counter on enchanted planeswalker.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.!token+YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted planeswalker has \"[+1]: Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.\"",
+        "Affected": "Planeswalker.EnchantedBy",
+        "AddAbility": "VivienPlus"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

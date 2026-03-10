@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddPhase",
+        "params": {
+          "SubAbility": "DBEffect",
+          "NumPhases": "2",
+          "ConditionPhases": "Main1,Main2",
+          "ExtraPhase": "Combat",
+          "SpellDescription": "After this main phase, there are two additional combat phases. At the beginning of each combat this turn, untap all creatures that attacked this turn."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBEffect",
+        "NumPhases": "2",
+        "ConditionPhases": "Main1,Main2",
+        "ExtraPhase": "Combat",
+        "SpellDescription": "After this main phase, there are two additional combat phases. At the beginning of each combat this turn, untap all creatures that attacked this turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

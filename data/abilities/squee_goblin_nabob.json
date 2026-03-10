@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Graveyard",
+        "OptionalDecider": "You",
+        "Execute": "TrigChange",
+        "TriggerDescription": "At the beginning of your upkeep, you may return CARDNAME from your graveyard to your hand.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

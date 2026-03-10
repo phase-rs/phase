@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature.Ninja",
+          "AILogic": "Pump",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "SpellDescription": "Target Ninja creature can't be blocked this turn.",
+          "StaticAbilities": "Unblockable",
+          "TgtPrompt": "Select target Ninja creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature.Ninja",
+        "AILogic": "Pump",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "SpellDescription": "Target Ninja creature can't be blocked this turn.",
+        "StaticAbilities": "Unblockable",
+        "TgtPrompt": "Select target Ninja creature"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may search your library for a Ninja card, reveal it, put it into your hand, then shuffle.",
+        "Execute": "TrigSearch",
+        "ValidTarget": "Player",
+        "OptionalDecider": "You",
+        "ValidSource": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "PlaneswalkedTo",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, you may reveal the top card of your library. If it's a permanent card, you may put it onto the battlefield. If you revealed a card but didn't put it onto the battlefield, put it on the bottom of your library.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDig"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDig",
+        "Secondary": "True",
+        "TriggerDescription": "When you planeswalk to CARDNAME or at the beginning of your upkeep, you may reveal the top card of your library. If it's a permanent card, you may put it onto the battlefield. If you revealed a card but didn't put it onto the battlefield, put it on the bottom of your library.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Command",
+        "OptionalDecider": "You",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, return target permanent card from your graveyard to the battlefield.",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

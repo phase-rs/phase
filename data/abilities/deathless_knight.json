@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "LifeGained",
+      "params": {
+        "FirstTime": "True",
+        "ValidPlayer": "You",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "When you gain life for the first time each turn, return CARDNAME from your graveyard to your hand.",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

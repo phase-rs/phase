@@ -1,0 +1,74 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Self",
+          "ExileOnMoved": "Battlefield",
+          "SpellDescription": "CARDNAME can't be blocked this turn.",
+          "StaticAbilities": "Unblockable"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<1/Merfolk.Other>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Self",
+        "ExileOnMoved": "Battlefield",
+        "SpellDescription": "CARDNAME can't be blocked this turn.",
+        "StaticAbilities": "Unblockable"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<3/Merfolk>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card.",
+        "AILogic": "AtOppEOT"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "ValidCards": "Merfolk.YouCtrl",
+          "SpellDescription": "Put a +1/+1 counter on each Merfolk you control.",
+          "CounterNum": "1",
+          "CounterType": "P1P1",
+          "AILogic": "AtOppEOT"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<5/Merfolk>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Merfolk.YouCtrl",
+        "SpellDescription": "Put a +1/+1 counter on each Merfolk you control.",
+        "CounterNum": "1",
+        "CounterType": "P1P1",
+        "AILogic": "AtOppEOT"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

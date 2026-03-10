@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "When CARDNAME enters, draw two cards, then discard a card."
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "OptionalDecider": "You",
+        "Execute": "TrigChoose",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast an instant, sorcery, or Wizard spell, you may have CARDNAME's base power and toughness become 4/1 or 1/4 until end of turn.",
+        "ValidCard": "Instant,Sorcery,Wizard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw1",
+        "TriggerDescription": "When CARDNAME enters, draw two cards.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Draw",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw2",
+        "TriggerDescription": "At the beginning of each other player's draw step, that player draws an additional card.",
+        "ValidPlayer": "Player.Other"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your draw step, draw two additional cards.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigDraw1",
+        "Phase": "Draw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

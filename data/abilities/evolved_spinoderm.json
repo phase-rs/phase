@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigRemoveCtr",
+        "ValidPlayer": "You",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, remove an oil counter from CARDNAME. Then if it has no oil counters on it, sacrifice it."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Self+counters_LE2_OIL",
+        "Description": "CARDNAME has trample as long as it has two or fewer oil counters on it. Otherwise, it has hexproof.",
+        "AddKeyword": "Trample"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Hexproof",
+        "Affected": "Creature.Self+counters_GT2_OIL"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

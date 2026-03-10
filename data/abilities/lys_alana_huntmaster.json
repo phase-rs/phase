@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast an Elf spell, you may create a 1/1 green Elf Warrior creature token.",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken",
+        "ValidCard": "Elf",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

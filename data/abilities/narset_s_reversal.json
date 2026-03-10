@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "TargetType": "Spell",
+          "MayChooseTarget": "True",
+          "SubAbility": "DBReturn",
+          "SpellDescription": "Copy target instant or sorcery spell, then return it to its owner's hand. You may choose new targets for the copy.",
+          "ValidTgts": "Instant,Sorcery"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetType": "Spell",
+        "MayChooseTarget": "True",
+        "SubAbility": "DBReturn",
+        "SpellDescription": "Copy target instant or sorcery spell, then return it to its owner's hand. You may choose new targets for the copy.",
+        "ValidTgts": "Instant,Sorcery"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

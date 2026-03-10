@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttack,CantBlock"
+      },
+      "params": {
+        "Description": "Enchanted creature is a Spirit and can't attack or block. (It loses all other creature types.)",
+        "ValidCard": "Creature.EnchantedBy"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddType": "Spirit",
+        "RemoveCreatureTypes": "True",
+        "Description": "Enchanted creature is a Spirit and can't attack or block. (It loses all other creature types.)",
+        "Affected": "Creature.EnchantedBy",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

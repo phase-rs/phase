@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Library",
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "TargetMin": "2",
+        "DefinedPlayer": "Targeted",
+        "TargetMax": "2",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Choose two target players. Each of them searches their library for a card, then shuffles and puts that card on top.",
+        "LibraryPosition": "0",
+        "ChangeType": "Card"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

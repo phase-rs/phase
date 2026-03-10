@@ -1,0 +1,64 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Other",
+            "api_type": "AddTurn",
+            "params": {
+              "PresentCompare": "GE2",
+              "NumTurns": "1",
+              "IsPresent": "Doctor.YouCtrl",
+              "SubAbility": "DBChange",
+              "SpellDescription": "Cast this spell only if you control two or more Doctors.,,,,,,Take an extra turn after this one."
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "PresentCompare": "GE2",
+            "NumTurns": "1",
+            "IsPresent": "Doctor.YouCtrl",
+            "SubAbility": "DBChange",
+            "SpellDescription": "Cast this spell only if you control two or more Doctors.,,,,,,Take an extra turn after this one."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Library",
+            "destination": "Hand",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ChangeType": "Doctor",
+            "ChangeNum": "1",
+            "SpellDescription": "Search your library for a Doctor card, reveal it, put it into your hand, then shuffle."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

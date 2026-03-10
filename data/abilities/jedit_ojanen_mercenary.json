@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or another legendary creature enters, you may pay {G}. If you do, create a 2/2 green Cat Warrior creature token with forestwalk.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Creature.Other+Legendary+YouCtrl",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

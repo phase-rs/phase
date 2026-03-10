@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to twice the number of instant and sorcery cards in your graveyard.",
+        "SetPower": "X",
+        "CharacteristicDefining": "True",
+        "SetToughness": "X"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidSpell": "Spell.Instant,Spell.Sorcery",
+        "Type": "Spell",
+        "Amount": "3",
+        "Description": "The first instant or sorcery spell you cast each turn costs {3} less to cast.",
+        "OnlyFirstSpell": "True",
+        "Activator": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

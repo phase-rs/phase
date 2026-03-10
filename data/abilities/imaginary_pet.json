@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if you have a card in hand, return CARDNAME to its owner's hand.",
+        "PresentZone": "Hand",
+        "Phase": "Upkeep",
+        "PresentPlayer": "You",
+        "Execute": "TrigBounce",
+        "IsPresent": "Card",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

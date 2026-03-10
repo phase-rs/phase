@@ -1,0 +1,103 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "Main2",
+          "Triggers": "AttackTrigger",
+          "Duration": "UntilYourNextTurn",
+          "SpellDescription": "Until your next turn, whenever a creature attacks you or CARDNAME, put a -1/-1 counter on that creature.",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Main2",
+        "Triggers": "AttackTrigger",
+        "Duration": "UntilYourNextTurn",
+        "SpellDescription": "Until your next turn, whenever a creature attacks you or CARDNAME, put a -1/-1 counter on that creature.",
+        "Planeswalker": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ChangeType": "Creature.TargetedPlayerCtrl",
+        "Mandatory": "True",
+        "IsCurse": "True",
+        "SubAbility": "DBPump",
+        "ChangeNum": "1",
+        "Chooser": "Targeted",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Target opponent puts a creature card of their choice from their graveyard onto the battlefield under your control.",
+        "Hidden": "True",
+        "RememberChanged": "True",
+        "GainControl": "True"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "StackDescription": "SpellDescription",
+          "ValidDescription": "creature",
+          "FoundDestination": "Battlefield",
+          "RevealedDestination": "Graveyard",
+          "Amount": "3",
+          "GainControl": "True",
+          "IsCurse": "True",
+          "ValidTgts": "Opponent",
+          "SpellDescription": "Target opponent reveals cards from the top of their library until they reveal three creature cards. Put those cards onto the battlefield under your control. That player puts the rest into their graveyard.",
+          "Valid": "Creature",
+          "Planeswalker": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "SpellDescription",
+        "ValidDescription": "creature",
+        "FoundDestination": "Battlefield",
+        "RevealedDestination": "Graveyard",
+        "Amount": "3",
+        "GainControl": "True",
+        "IsCurse": "True",
+        "ValidTgts": "Opponent",
+        "SpellDescription": "Target opponent reveals cards from the top of their library until they reveal three creature cards. Put those cards onto the battlefield under your control. That player puts the rest into their graveyard.",
+        "Valid": "Creature",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

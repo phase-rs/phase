@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Blocks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, flip a coin at end of combat. If you lose the flip, an opponent gains control of CARDNAME.",
+        "ValidCard": "Card.Self",
+        "Execute": "DelayTrig",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "DelayTrig",
+        "ValidCard": "Card.Self",
+        "Secondary": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, flip a coin at end of combat. If you lose the flip, an opponent gains control of CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

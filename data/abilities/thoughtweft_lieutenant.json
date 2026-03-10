@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Kithkin.YouCtrl+Other",
+        "TriggerDescription": "Whenever this creature or another Kithkin you control enters, target creature you control gets +1/+1 and gains trample until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

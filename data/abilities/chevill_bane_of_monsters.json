@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "At the beginning of your upkeep, if your opponents control no permanents with bounty counters on them, put a bounty counter on target creature or planeswalker an opponent controls.",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "You",
+        "IsPresent": "Permanent.OppCtrl+counters_GE1_BOUNTY"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a permanent an opponent controls with a bounty counter on it dies, you gain 3 life and draw a card.",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Permanent.OppCtrl+counters_GE1_BOUNTY",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When CARDNAME enters, up to two target creatures each get +2/+0 and gain vigilance and haste until end of turn.",
+            "Execute": "TrigSearch",
+            "Origin": "Any",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "Token",
+            "name": "rw_3_2_warrior_symbiotic_attack",
+            "power": 0,
+            "toughness": 0,
+            "types": [],
+            "colors": [],
+            "keywords": []
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "TokenAmount": "2",
+            "TokenOwner": "You",
+            "SpellDescription": "Create two 3/2 red and white Warrior creature tokens with \"Whenever this creature and at least one other creature token attack, put a +1/+1 counter on this creature.\""
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

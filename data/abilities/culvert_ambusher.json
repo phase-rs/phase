@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters or is turned face up, target creature blocks this turn if able.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigProvoke"
+      }
+    },
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "Execute": "TrigProvoke",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters or is turned face up, target creature blocks this turn if able."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

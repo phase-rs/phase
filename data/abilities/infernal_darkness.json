@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "ProduceMana"
+      },
+      "params": {
+        "ValidCard": "Land",
+        "Description": "If a land is tapped for mana, it produces {B} instead of any other type.",
+        "ReplaceWith": "ProduceB",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

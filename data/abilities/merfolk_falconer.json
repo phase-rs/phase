@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigScry",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.kicked",
+        "ValidActivatingPlayer": "You",
+        "TriggerDescription": "Whenever you cast a kicked spell, scry 2."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

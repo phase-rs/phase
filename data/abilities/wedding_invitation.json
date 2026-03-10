@@ -1,0 +1,63 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "Unblockable",
+          "AITgts": "Vampire",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "SubAbility": "DBPump",
+          "SpellDescription": "Target creature can't be blocked this turn.",
+          "AILogic": "Pump",
+          "RememberObjects": "Targeted",
+          "ValidTgts": "Creature",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "Unblockable",
+        "AITgts": "Vampire",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "SubAbility": "DBPump",
+        "SpellDescription": "Target creature can't be blocked this turn.",
+        "AILogic": "Pump",
+        "RememberObjects": "Targeted",
+        "ValidTgts": "Creature",
+        "ExileOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

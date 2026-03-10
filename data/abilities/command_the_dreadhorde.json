@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TargetMax": "NumCreatPW",
+        "SubAbility": "DBDamage",
+        "TgtZone": "Graveyard",
+        "SpellDescription": "Choose any number of target creature and/or planeswalker cards in graveyards. CARDNAME deals damage to you equal to the total mana value of those cards. Put them onto the battlefield under your control.",
+        "TargetMin": "0"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

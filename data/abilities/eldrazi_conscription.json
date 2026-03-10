@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Trample & Annihilator:2",
+        "Description": "Enchanted creature gets +10/+10 and has trample and annihilator 2. (Whenever it attacks, defending player sacrifices two permanents.)",
+        "AddToughness": "10",
+        "AddPower": "10"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

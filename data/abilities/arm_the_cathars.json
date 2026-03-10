@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 3,
+        "toughness": 3,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "KW": "Vigilance",
+        "SubAbility": "DBPump",
+        "TgtPrompt": "Select target creature (+3/+3)",
+        "StackDescription": "REP target creature_{c:ThisTargetedCard}",
+        "SpellDescription": "Until end of turn, target creature gets +3/+3,"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDrain",
+        "TriggerDescription": "At the beginning of your end step, each opponent loses X life and you gain X life, where X is the number of Auras you control.",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Target": "You,Planeswalker.YouCtrl",
+        "Description": "Each creature that's enchanted by an Aura you control can't attack you or planeswalkers you control.",
+        "ValidCard": "Creature.EnchantedBy Aura.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

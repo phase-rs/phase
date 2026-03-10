@@ -1,0 +1,71 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "Execute": "TrigChangeZone",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, return up to one target Goblin card from your graveyard to your hand.",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Transformed",
+          "params": {
+            "Execute": "TrigChangeZone",
+            "TriggerDescription": "Whenever this creature enters or transforms into CARDNAME, return up to one target Goblin card from your graveyard to your hand.",
+            "Secondary": "True",
+            "ValidCard": "Card.Self"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Main1",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {R}. If you do, transform NICKNAME.",
+            "Execute": "TrigTransform",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "TriggerDescription": "Whenever NICKNAME attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"",
+            "Execute": "TrigCopy",
+            "ValidCard": "Card.Self",
+            "TriggerZones": "Battlefield"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidPlayer": "You",
+            "Execute": "TrigTransform",
+            "TriggerDescription": "At the beginning of your first main phase, you may pay {B}. If you do, transform NICKNAME.",
+            "Phase": "Main1"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

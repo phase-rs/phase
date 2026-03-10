@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Filtered",
+          "filter": "Instant.YouOwn,Sorcery.YouOwn"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target instant or sorcery card in your graveyard",
+        "RememberLKI": "True",
+        "FaceDownToughness": "3",
+        "StackDescription": "REP Note_{p:You} notes & target instant or sorcery card in your graveyard_{c:Targeted} & put_puts",
+        "SubAbility": "RememberSpell",
+        "FaceDown": "True",
+        "RememberChanged": "True",
+        "FaceDownSetType": "Creature",
+        "SpellDescription": "Note the name of target instant or sorcery card in your graveyard and put it onto the battlefield face down. It's a 3/3 creature with \"Whenever this creature deals combat damage to a player, you may create a copy of the card with the noted name. You may cast the copy without paying its mana cost\" and \"If this creature would leave the battlefield, exile it instead of putting it anywhere else.\"",
+        "StaticEffect": "Animate",
+        "FaceDownPower": "3"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

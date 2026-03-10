@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigReveal",
+        "Phase": "BeginCombat",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of each combat, you may reveal the top card of your library. If you reveal a creature card this way, CARDNAME becomes a copy of that card until end of turn, except it has flying."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "Description": "You may look at the top card of your library any time.",
+        "MayLookAt": "You",
+        "AffectedZone": "Library"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

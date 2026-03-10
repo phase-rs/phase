@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Constellation — Whenever an enchantment you control enters, tap target creature an opponent controls.",
+        "Destination": "Battlefield",
+        "Execute": "TrigTap",
+        "ValidCard": "Enchantment.YouCtrl",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G W",
+        "params": {
+          "RestrictValid": "Spell.Creature+NoAbilities",
+          "SpellDescription": "Add {G}{W}. Spend this mana only to cast creature spells with no abilities."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RestrictValid": "Spell.Creature+NoAbilities",
+        "SpellDescription": "Add {G}{W}. Spend this mana only to cast creature spells with no abilities."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidBlocker": "Creature.!NoAbilities",
+        "ValidAttacker": "Creature.NoAbilities+YouCtrl",
+        "Description": "Creatures you control with no abilities can't be blocked by creatures with abilities."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigPump",
+        "TriggerDescription": "When CARDNAME enters, target creature an opponent controls gets -1/-1 until end of turn."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TripPumpOpp",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Opponent",
+        "Delirium": "True",
+        "TriggerDescription": "Delirium — At the beginning of each opponent's upkeep, if there are four or more card types among cards in your graveyard, target creature that player controls gets -1/-1 until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

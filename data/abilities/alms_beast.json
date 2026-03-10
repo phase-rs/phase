@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creatures blocking or blocked by CARDNAME have lifelink.",
+        "Affected": "Creature.blockedBySource,Creature.blockingSource",
+        "AddKeyword": "Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

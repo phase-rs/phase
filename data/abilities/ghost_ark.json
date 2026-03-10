@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesCrewed",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "DBPumpAll",
+        "TriggerDescription": "Repair Barge — Whenever CARDNAME becomes crewed, each artifact creature card in your graveyard gains unearth {3} until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

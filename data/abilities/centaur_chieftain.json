@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TrigETB",
+        "Affected": "Card.Self",
+        "Description": "Threshold — As long as there are seven or more cards in your graveyard, CARDNAME has \"When CARDNAME enters, creatures you control get +1/+1 and gain trample until end of turn.\"",
+        "Condition": "Threshold"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

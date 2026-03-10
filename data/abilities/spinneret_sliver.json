@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Reach",
+        "Description": "All Sliver creatures have reach.",
+        "Affected": "Creature.Sliver"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "RemoveKeywords": "Hexproof & Shroud",
+          "CantHaveKeyword": "Hexproof & Shroud",
+          "SpellDescription": "Until end of turn, creatures your opponents control lose hexproof and shroud and can't have hexproof or shroud.",
+          "ValidCards": "Creature.OppCtrl",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RemoveKeywords": "Hexproof & Shroud",
+        "CantHaveKeyword": "Hexproof & Shroud",
+        "SpellDescription": "Until end of turn, creatures your opponents control lose hexproof and shroud and can't have hexproof or shroud.",
+        "ValidCards": "Creature.OppCtrl",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

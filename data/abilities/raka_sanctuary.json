@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "IsPresent": "Permanent.YouCtrl+White,Permanent.YouCtrl+Blue",
+        "Execute": "TrigDmg",
+        "TriggerDescription": "At the beginning of your upkeep, if you control a white or blue permanent, CARDNAME deals 1 damage to target creature. If you control a white permanent and a blue permanent, CARDNAME deals 3 damage instead.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

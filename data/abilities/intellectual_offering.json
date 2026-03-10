@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChoosePlayer",
+        "params": {
+          "Choices": "Player.Opponent",
+          "SpellDescription": "Choose an opponent. You and that player each draw three cards. Choose an opponent. Untap all nonland permanents you control and all nonland permanents that player controls.",
+          "Defined": "You",
+          "SubAbility": "DBDraw"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Choices": "Player.Opponent",
+        "SpellDescription": "Choose an opponent. You and that player each draw three cards. Choose an opponent. Untap all nonland permanents you control and all nonland permanents that player controls.",
+        "Defined": "You",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

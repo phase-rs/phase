@@ -1,0 +1,24 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigChangeZone",
+        "OptionalDecider": "You",
+        "IsPresent": "Creature.YouCtrl",
+        "PresentPlayer": "You",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, if you have four or more creature cards in your graveyard, you may return target creature card from your graveyard to your hand.",
+        "PresentCompare": "GE4",
+        "PresentZone": "Graveyard",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

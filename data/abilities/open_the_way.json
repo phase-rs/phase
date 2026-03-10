@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "Tapped": "True",
+          "XMaxLimit": "Y",
+          "SpellDescription": "X can't be greater than the number of players in the game. Reveal cards from the top of your library until you reveal X land cards. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order.",
+          "Valid": "Card.Land",
+          "Amount": "X",
+          "FoundDestination": "Battlefield",
+          "ValidDescription": "land",
+          "RevealedDestination": "Library",
+          "RevealedLibraryPosition": "-1",
+          "RevealRandomOrder": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Tapped": "True",
+        "XMaxLimit": "Y",
+        "SpellDescription": "X can't be greater than the number of players in the game. Reveal cards from the top of your library until you reveal X land cards. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order.",
+        "Valid": "Card.Land",
+        "Amount": "X",
+        "FoundDestination": "Battlefield",
+        "ValidDescription": "land",
+        "RevealedDestination": "Library",
+        "RevealedLibraryPosition": "-1",
+        "RevealRandomOrder": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

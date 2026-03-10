@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": -1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME gets +1/-1 until end of turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever another creature becomes the target of an ability of a land you control named Labyrinth of Skophos, you may have CARDNAME fight that creature. (Each deals damage equal to its power to the other.)",
+        "ValidSource": "Ability.Land+namedLabyrinth of Skophos+YouCtrl",
+        "Execute": "TrigFight",
+        "ValidTarget": "Creature.Other",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

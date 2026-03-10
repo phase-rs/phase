@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ActiveZones": "Battlefield",
+        "Description": "Artifacts, creatures, and lands your opponents control enter tapped.",
+        "ReplacementResult": "Updated",
+        "ValidCard": "Artifact.OppCtrl,Creature.OppCtrl,Land.OppCtrl",
+        "ReplaceWith": "ETBTapped"
+      }
+    }
+  ],
+  "faces": []
+}

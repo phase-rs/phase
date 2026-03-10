@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Sacrificed",
+      "params": {
+        "ValidCard": "Elemental.!token",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigCopy",
+        "TriggerDescription": "Whenever you sacrifice a nontoken Elemental, create a token that's a copy of it. The token gains haste until end of turn. At the beginning of your next end step, sacrifice it unless you pay {W}{U}{B}{R}{G}."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Evoke:4",
+        "AffectedZone": "Hand",
+        "Description": "Elemental permanent spells you cast from your hand have evoke {4}. (If you cast a spell for its evoke cost, it's sacrificed when it enters.)",
+        "Affected": "Permanent.Elemental+YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

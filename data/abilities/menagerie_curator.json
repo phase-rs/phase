@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Any",
+        "params": {
+          "SpellDescription": "Add one mana of any color. Spend this mana only to cast creature spells.",
+          "Amount": "1",
+          "RestrictValid": "Spell.Creature"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any color. Spend this mana only to cast creature spells.",
+        "Amount": "1",
+        "RestrictValid": "Spell.Creature"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Creature+!sharesCreatureTypeWith ValidLibrary Creature.YouOwn",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever you cast a creature spell that doesn't share a creature type with a creature type in your library, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

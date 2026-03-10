@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Raid — When CARDNAME enters, if you attacked this turn, you may return target creature to its owner's hand.",
+        "Execute": "TrigChangeZone",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "CheckSVar": "RaidTest",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

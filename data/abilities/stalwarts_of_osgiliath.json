@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, the Ring tempts you.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigTempt"
+      }
+    },
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever you draw your second card each turn, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Card.YouCtrl",
+        "Number": "2",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

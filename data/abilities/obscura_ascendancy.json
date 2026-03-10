@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.cmcEQX",
+        "Execute": "DBPutCounter",
+        "TriggerDescription": "Whenever you cast a spell, if its mana value is equal to 1 plus the number of soul counters on CARDNAME, put a soul counter on CARDNAME, then create a 2/2 white Spirit creature token with flying.",
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "3",
+        "AddToughness": "3",
+        "IsPresent": "Card.Self+counters_GE5_SOUL",
+        "Description": "As long as there are five or more soul counters on CARDNAME, Spirits you control get +3/+3.",
+        "Affected": "Spirit.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigMill",
+            "Origin": "Battlefield",
+            "TriggerDescription": "When CARDNAME dies, mill three cards.",
+            "Destination": "Graveyard"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME enters, you may shuffle up to three target cards from your graveyard into your library.",
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigChangeZone"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ReplaceWith": "Exile",
+            "Destination": "Graveyard"
+          }
+        }
+      ]
+    }
+  ]
+}

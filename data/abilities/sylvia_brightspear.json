@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Dragons your team controls have double strike.",
+        "AddKeyword": "Double Strike",
+        "Affected": "Dragon.YourTeamCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

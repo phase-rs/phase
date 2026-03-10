@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigAmass",
+        "TriggerDescription": "When you cast this spell, amass Orcs 5, mill five cards, then return a creature card from your graveyard to the battlefield."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a commander an opponent controls dies, the Ring tempts you.",
+        "Origin": "Battlefield",
+        "ValidCard": "Card.OppCtrl+IsCommander",
+        "Destination": "Graveyard",
+        "Execute": "TrigTempt"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

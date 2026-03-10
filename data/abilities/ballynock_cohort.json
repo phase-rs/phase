@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "IsPresent": "Creature.White+Other+YouCtrl",
+        "Description": "CARDNAME gets +1/+1 as long as you control another white creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

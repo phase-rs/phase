@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you control another Wizard, CARDNAME has \"When this creature dies, draw a card.\"",
+        "Affected": "Card.Self",
+        "AddTrigger": "DeathTrig",
+        "AddSVar": "TrigDraw",
+        "IsPresent": "Wizard.YouCtrl+Other"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

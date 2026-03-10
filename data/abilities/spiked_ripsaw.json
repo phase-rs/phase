@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature attacks, you may sacrifice a Forest. If you do, that creature gains trample until end of turn."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddSVar": "AE",
+        "Description": "Equipped creature gets +3/+3.",
+        "AddPower": "3",
+        "AddToughness": "3",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

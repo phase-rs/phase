@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigFood",
+        "TriggerDescription": "When CARDNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")"
+      }
+    },
+    {
+      "mode": "TokenCreated",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigCounter",
+        "TriggerZones": "Battlefield",
+        "ValidToken": "Card.token+YouCtrl",
+        "TriggerDescription": "Whenever you create a token, put a +1/+1 counter on target creature you control other than NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

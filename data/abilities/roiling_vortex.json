@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "AILogic": "NoGain",
+          "SpellDescription": "Your opponents can't gain life this turn.",
+          "StaticAbilities": "STCantGain"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "NoGain",
+        "SpellDescription": "Your opponents can't gain life this turn.",
+        "StaticAbilities": "STCantGain"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "Trig1Damage",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Player",
+        "TriggerDescription": "At the beginning of each player's upkeep, CARDNAME deals 1 damage to them."
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever a player casts a spell, if no mana was spent to cast that spell, CARDNAME deals 5 damage to that player.",
+        "ValidActivatingPlayer": "Player",
+        "Execute": "Trig5Damage",
+        "ValidSA": "Spell.ManaSpent EQ0",
+        "ValidCard": "Card",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

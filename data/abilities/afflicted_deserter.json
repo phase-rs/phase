@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerDescription": "At the beginning of each upkeep, if no spells were cast last turn, transform CARDNAME.",
+            "WerewolfTransformCondition": "True",
+            "Phase": "Upkeep",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigTransform"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "Execute": "TrigDestroy",
+            "TriggerDescription": "Whenever this creature transforms into CARDNAME, you may destroy target artifact. If that artifact is put into a graveyard this way, CARDNAME deals 3 damage to that artifact's controller.",
+            "ValidCard": "Card.Self",
+            "OptionalDecider": "You"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "Upkeep",
+            "Execute": "TrigTransform",
+            "WerewolfUntransformCondition": "True",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of each upkeep, if a player cast two or more spells last turn, transform CARDNAME."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

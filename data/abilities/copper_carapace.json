@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2",
+        "Description": "Equipped creature gets +2/+2 and can't block.",
+        "AddToughness": "2"
+      }
+    },
+    {
+      "mode": "CantBlock",
+      "params": {
+        "Description": "Equipped creature gets +2/+2 and can't block.",
+        "ValidCard": "Creature.EquippedBy",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

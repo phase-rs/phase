@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "SetState",
+        "params": {
+          "AILogic": "Never",
+          "Defined": "Self",
+          "Mode": "TurnFaceDown",
+          "SpellDescription": "Turn CARDNAME face down."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Never",
+        "Defined": "Self",
+        "Mode": "TurnFaceDown",
+        "SpellDescription": "Turn CARDNAME face down."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

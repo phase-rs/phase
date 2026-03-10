@@ -1,0 +1,59 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, each player puts their library into their hand.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChangeZone",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigShuffleBack",
+        "Origin": "Battlefield",
+        "TriggerDescription": "When CARDNAME leaves the battlefield, each player shuffles their hand and graveyard into their library."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetMaxHandSize": "Unlimited",
+        "Description": "Players have no maximum hand size and don't lose the game for drawing from an empty library.",
+        "Affected": "Player"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "Each player can't cast more than one spell each turn.",
+        "Caster": "Player",
+        "NumLimitEachTurn": "1",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "GameLoss"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ValidPlayer": "Player",
+        "Description": "Players don't lose the game for drawing from an empty library.",
+        "ActiveZones": "Battlefield",
+        "ValidLoseReason": "Milled",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "faces": []
+}

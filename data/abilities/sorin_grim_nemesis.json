@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Hand"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "Planeswalker": "True",
+        "SubAbility": "DBLoseLife",
+        "RememberChanged": "True",
+        "ChangeNum": "All",
+        "ChangeValid": "Card",
+        "SpellDescription": "Reveal the top card of your library and put that card into your hand. Each opponent loses life equal to its mana value."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Planeswalker"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<X/LOYALTY>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature or planeswalker",
+        "Planeswalker": "True",
+        "SubAbility": "DBGainLife",
+        "SpellDescription": "CARDNAME deals X damage to target creature or planeswalker and you gain X life."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_1_1_vampire_knight_lifelink",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TokenOwner": "You",
+        "SpellDescription": "Create a number of 1/1 black Vampire Knight creature tokens with lifelink equal to the highest life total among all players.",
+        "Ultimate": "True",
+        "TokenAmount": "Z"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "4",
+        "AddKeyword": "Vigilance & Haste",
+        "AddType": "Creature & Spirit",
+        "SetColor": "Green",
+        "Description": "Enchanted land is a 4/5 green Spirit creature with vigilance and haste. It's still a land.",
+        "SetToughness": "5",
+        "Affected": "Land.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Destroy",
+      "params": {
+        "Description": "If enchanted land would be destroyed, instead sacrifice CARDNAME and that land gains indestructible until end of turn.",
+        "ValidCard": "Card.EnchantedBy",
+        "ReplaceWith": "HarmoniousEgress"
+      }
+    }
+  ],
+  "faces": []
+}

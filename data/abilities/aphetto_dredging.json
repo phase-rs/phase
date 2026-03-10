@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl+ChosenType"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "MostProminentInComputerGraveyard",
+        "SpellDescription": "Return up to three target creature cards of the creature type of your choice from your graveyard to your hand.",
+        "AnnounceType": "CreatureType",
+        "TargetMax": "3",
+        "TargetMin": "0",
+        "TgtPrompt": "Choose target creature card with the chosen type in your graveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

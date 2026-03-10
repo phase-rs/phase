@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Draw a card, then scry 2.",
+        "Planeswalker": "True",
+        "SubAbility": "DBScry"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Exile"
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Reveal": "True",
+        "SubAbility": "DBToken",
+        "ChangeNum": "All",
+        "SpellDescription": "Exile the top card of your library.",
+        "RememberChanged": "True",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Scry",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you scry, the next instant or sorcery spell you cast this turn costs {X} less to cast, where X is the number of cards looked at while scrying this way.",
+        "Execute": "TrigEff",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

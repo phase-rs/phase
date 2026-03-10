@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self",
+        "ValidPlayer": "Player",
+        "Execute": "TrigRepeat",
+        "TriggerDescription": "At the beginning of each upkeep, if CARDNAME is on the battlefield, each player creates a 2/2 black Zombie creature token with haste named Tombspawn for each creature card in their graveyard.",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "Execute": "DestroyRemembered",
+        "TriggerDescription": "At the beginning of each end step or when CARDNAME leaves the battlefield, destroy all tokens created with CARDNAME. They can't be regenerated.",
+        "ValidPlayer": "Player"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DestroyRemembered",
+        "Secondary": "True",
+        "TriggerDescription": "At the beginning of each end step or when CARDNAME leaves the battlefield, destroy all tokens created with CARDNAME. They can't be regenerated.",
+        "ValidCard": "Card.Self",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBImmediateTrigger",
+        "StackDescription": "SpellDescription",
+        "PlayerTurn": "True",
+        "Defined": "Self",
+        "SpellDescription": "Target opponent gains control of CARDNAME. When they do, you draw two cards and put a quest counter on NICKNAME. Activate only during your turn."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Wild Card — When NICKNAME leaves the battlefield, its owner creates a tapped 1/1 white Soldier creature token for each quest counter on it.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

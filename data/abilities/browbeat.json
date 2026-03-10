@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Draw",
+        "count": 3
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target player to draw three cards",
+        "SpellDescription": "Any player may have CARDNAME deal 5 damage to them. If no one does, target player draws three cards.",
+        "UnlessCost": "DamageYou<5>",
+        "UnlessPayer": "Player",
+        "ValidTgts": "Player",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

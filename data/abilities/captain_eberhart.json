@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.YouOwn+DrawnThisTurn",
+        "Description": "Spells cast from among cards you drew this turn cost {1} less to cast.",
+        "Amount": "1"
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Amount": "1",
+        "Description": "Spells cast from among cards your opponents drew this turn cost {1} more to cast.",
+        "ValidCard": "Card.OppOwn+DrawnThisTurn",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

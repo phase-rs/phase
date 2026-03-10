@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.CostsPhyrexianMana",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDealDamage",
+        "TriggerDescription": "Whenever you cast a spell with {H} in its mana cost, CARDNAME deals damage equal to that spell's mana value to any target.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

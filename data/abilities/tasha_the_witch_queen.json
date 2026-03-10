@@ -1,0 +1,72 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 1
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Draw a card. For each opponent, exile up to one target instant or sorcery card from that player's graveyard and put a page counter on it.",
+        "SubAbility": "DBExileForEach",
+        "Defined": "You"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Play",
+        "params": {
+          "SpellDescription": "You may cast a spell from among cards in exile with page counters on them without paying its mana cost.",
+          "WithoutManaCost": "True",
+          "Optional": "True",
+          "ValidZone": "Exile",
+          "ValidSA": "Spell",
+          "Valid": "Card.counters_GE1_PAGE",
+          "Amount": "1",
+          "Planeswalker": "True",
+          "Controller": "You"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You may cast a spell from among cards in exile with page counters on them without paying its mana cost.",
+        "WithoutManaCost": "True",
+        "Optional": "True",
+        "ValidZone": "Exile",
+        "ValidSA": "Spell",
+        "Valid": "Card.counters_GE1_PAGE",
+        "Amount": "1",
+        "Planeswalker": "True",
+        "Controller": "You"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a spell you don't own, create a 3/3 black Demon creature token.",
+        "ValidCard": "Card.YouDontOwn",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

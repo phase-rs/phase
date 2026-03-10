@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Activator": "You",
+        "ValidSpell": "Activated.Equip",
+        "ValidCard": "Equipment.Other",
+        "Amount": "1",
+        "Description": "Equip abilities you activate of other Equipment cost {1} less to activate."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has double strike.",
+        "AddKeyword": "Double Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

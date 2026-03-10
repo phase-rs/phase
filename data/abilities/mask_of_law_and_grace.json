@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature has protection from black and from red.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Protection from black & Protection from red"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Variable",
+          "value": "X"
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AITgts": "Creature.White,Creature.Blue",
+        "IsCurse": "True",
+        "SpellDescription": "CARDNAME deals 1 damage to target creature. If that creature is white or blue, CARDNAME deals 4 damage to it instead.",
+        "StackDescription": "REP target creature_{c:Targeted}"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

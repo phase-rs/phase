@@ -1,0 +1,72 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigOppToken",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, target opponent creates two 0/2 green Plant creature tokens with defender.",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "DamageDone",
+          "params": {
+            "Execute": "DBTransform",
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, you may transform CARDNAME.",
+            "ValidSource": "Creature.EquippedBy",
+            "CombatDamage": "True",
+            "ValidTarget": "Player"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "1",
+            "Description": "Equipped creature gets +2/+1.",
+            "Affected": "Creature.EquippedBy",
+            "AddPower": "2"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Any",
+            "params": {
+              "Amount": "3",
+              "SpellDescription": "Add three mana of any one color."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Amount": "3",
+            "SpellDescription": "Add three mana of any one color."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

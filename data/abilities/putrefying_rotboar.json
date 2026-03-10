@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigAnimateAll",
+        "TriggerDescription": "Whenever a Boar you control attacks, each nonland card in defending player's hand perpetually gains \"When you cast this spell, you lose 1 life.\"",
+        "ValidCard": "Boar.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "PresentZone": "Exile",
+          "StaticAbilities": "Unblockable",
+          "ExileOnMoved": "Battlefield",
+          "IsPresent": "Card.YouOwn",
+          "RememberObjects": "Self",
+          "StackDescription": "CARDNAME can't be blocked this turn.",
+          "SpellDescription": "CARDNAME can't be blocked this turn. Activate only if you own a card in exile."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 U U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PresentZone": "Exile",
+        "StaticAbilities": "Unblockable",
+        "ExileOnMoved": "Battlefield",
+        "IsPresent": "Card.YouOwn",
+        "RememberObjects": "Self",
+        "StackDescription": "CARDNAME can't be blocked this turn.",
+        "SpellDescription": "CARDNAME can't be blocked this turn. Activate only if you own a card in exile."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

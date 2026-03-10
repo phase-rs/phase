@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigReturn",
+            "TriggerDescription": "When CARDNAME dies, return it to the battlefield transformed under your control.",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Equipped creature gets +1/+1.",
+            "AddPower": "1",
+            "AddToughness": "1",
+            "Affected": "Creature.EquippedBy"
+          }
+        },
+        {
+          "mode": "Continuous",
+          "params": {
+            "Affected": "Card.EquippedBy+Human",
+            "Description": "As long as equipped creature is a Human, it has menace. (It can't be blocked except by two or more creatures.)",
+            "AddKeyword": "Menace"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 5,
+        "types": [
+          "Artifact",
+          "Creature"
+        ],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Vehicle"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target creature or Vehicle",
+        "StackDescription": "Until end of turn, {c:Targeted} becomes an artifact creature with base power and toughness 4/5.",
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Until end of turn, target creature or Vehicle becomes an artifact creature with base power and toughness 4/5. Draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

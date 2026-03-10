@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Horsemanship",
+        "Affected": "Card.YouCtrl+IsCommander",
+        "Description": "Commanders you control have horsemanship."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

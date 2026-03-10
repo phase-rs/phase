@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "ValidCause": "Artifact,Creature",
+        "Description": "If an artifact or creature entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+        "ValidCard": "Permanent.YouCtrl",
+        "Destination": "Battlefield",
+        "ValidMode": "ChangesZone,ChangesZoneAll"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

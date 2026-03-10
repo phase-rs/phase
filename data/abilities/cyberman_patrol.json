@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Artifact creatures you control have afflict 3. (Whenever a creature with afflict 3 becomes blocked, defending player loses 3 life.)",
+        "Affected": "Creature.Artifact+YouCtrl",
+        "AddKeyword": "Afflict:3"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

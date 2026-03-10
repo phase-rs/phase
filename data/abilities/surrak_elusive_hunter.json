@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Creature.YouCtrl+inZoneBattlefield,Spell.Creature+YouCtrl",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature you control or a creature spell you control becomes the target of a spell or ability an opponent controls, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDestroy",
+        "ConditionPresent": "Creature",
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select target nonland permanent",
+        "ConditionDefined": "Targeted",
+        "ConditionCompare": "EQ1",
+        "ConditionManaNotSpent": "G W",
+        "SpellDescription": "Destroy target nonland permanent if it's a creature or if {G}{W} was spent to cast this spell."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

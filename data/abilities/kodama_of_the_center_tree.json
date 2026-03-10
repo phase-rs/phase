@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "X",
+        "SetPower": "X",
+        "Description": "CARDNAME's power and toughness are each equal to the number of Spirits you control.",
+        "CharacteristicDefining": "True"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "Soulshift:N",
+        "CalcKeywordN": "X",
+        "Description": "CARDNAME has soulshift X, where X is the number of Spirits you control."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

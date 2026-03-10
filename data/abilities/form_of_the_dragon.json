@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "At the beginning of your upkeep, CARDNAME deals 5 damage to any target.",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each end step, your life total becomes 5.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player",
+        "Execute": "TrigLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "Description": "Creatures without flying can't attack you.",
+        "ValidCard": "Creature.withoutFlying",
+        "Target": "You"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

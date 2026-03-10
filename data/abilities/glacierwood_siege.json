@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "• Temur — Whenever you cast an instant or sorcery spell, target player mills four cards.",
+        "AddTrigger": "TemurTrigger",
+        "Affected": "Card.Self+ChosenModeTemur"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "SultaiStatic",
+        "Affected": "Card.Self+ChosenModeSultai",
+        "Description": "• Sultai — You may play lands from your graveyard."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

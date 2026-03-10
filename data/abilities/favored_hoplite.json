@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCounters",
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on CARDNAME and prevent all damage that would be dealt to it this turn.",
+        "ValidActivatingPlayer": "You",
+        "TargetsValid": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

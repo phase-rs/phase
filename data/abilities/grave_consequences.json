@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RepeatEach",
+        "params": {
+          "SubAbility": "DBExile",
+          "RepeatSubAbility": "DBChooseNum",
+          "SpellDescription": "Each player may exile any number of cards from their graveyard. Then each player loses 1 life for each card in their graveyard. Draw a card.",
+          "RepeatPlayers": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBExile",
+        "RepeatSubAbility": "DBChooseNum",
+        "SpellDescription": "Each player may exile any number of cards from their graveyard. Then each player loses 1 life for each card in their graveyard. Draw a card.",
+        "RepeatPlayers": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

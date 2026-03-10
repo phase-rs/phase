@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PutCounterAll",
+        "params": {
+          "IsCurse": "True",
+          "SpellDescription": "Put a -1/-1 counter on each attacking creature.",
+          "CounterNum": "1",
+          "CounterType": "M1M1",
+          "ValidCards": "Creature.attacking"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "IsCurse": "True",
+        "SpellDescription": "Put a -1/-1 counter on each attacking creature.",
+        "CounterNum": "1",
+        "CounterType": "M1M1",
+        "ValidCards": "Creature.attacking"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

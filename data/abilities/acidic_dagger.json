@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature",
+          "ActivationPhases": "Upkeep->Declare Attackers",
+          "Triggers": "TrigDam,TrigLeave",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "Whenever target creature deals combat damage to a non-Wall creature this turn, destroy that non-Wall creature. When the targeted creature leaves the battlefield this turn, sacrifice CARDNAME. Activate only before blockers are declared.",
+          "ActivationFirstCombat": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "4"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature",
+        "ActivationPhases": "Upkeep->Declare Attackers",
+        "Triggers": "TrigDam,TrigLeave",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "Whenever target creature deals combat damage to a non-Wall creature this turn, destroy that non-Wall creature. When the targeted creature leaves the battlefield this turn, sacrifice CARDNAME. Activate only before blockers are declared.",
+        "ActivationFirstCombat": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

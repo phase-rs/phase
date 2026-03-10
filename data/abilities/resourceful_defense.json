@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MoveCounter",
+        "params": {
+          "SpellDescription": "Move any number of counters from target permanent you control to another target permanent you control.",
+          "TargetMax": "2",
+          "ValidTgts": "Permanent.YouCtrl",
+          "TgtPrompt": "Select target permanent to move counters from then target permanent to move counters to",
+          "TargetMin": "2",
+          "CounterNum": "Any",
+          "CounterType": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "4 W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Move any number of counters from target permanent you control to another target permanent you control.",
+        "TargetMax": "2",
+        "ValidTgts": "Permanent.YouCtrl",
+        "TgtPrompt": "Select target permanent to move counters from then target permanent to move counters to",
+        "TargetMin": "2",
+        "CounterNum": "Any",
+        "CounterType": "Any"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Permanent.YouCtrl+HasCounters",
+        "TriggerZones": "Battlefield",
+        "Destination": "Any",
+        "Execute": "TrigPutCounter",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever a permanent you control leaves the battlefield, if it had counters on it, put those counters on target permanent you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

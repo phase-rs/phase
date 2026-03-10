@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TrigDamageDone",
+        "SetPower": "4",
+        "Description": "During your turn, each non-Equipment artifact and non-Aura enchantment you control with mana value 4 or greater is a 4/4 Elemental creature in addition to its other types and has indestructible, haste, and \"Whenever this creature deals combat damage to a player, draw a card.\"",
+        "SetToughness": "4",
+        "AddType": "Creature & Elemental",
+        "Condition": "PlayerTurn",
+        "Affected": "Artifact.nonEquipment+YouCtrl+cmcGE4,Enchantment.nonAura+YouCtrl+cmcGE4",
+        "AddKeyword": "Indestructible & Haste"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

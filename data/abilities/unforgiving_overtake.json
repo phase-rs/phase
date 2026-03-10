@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature,Vehicle"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberLKI": "True",
+        "AlwaysRemember": "True",
+        "SpellDescription": "Destroy target creature or Vehicle. Its controller loses 2 life.",
+        "SubAbility": "DBLoseLife",
+        "TgtPrompt": "Select target creature or Vehicle"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "X",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Description": "If you weren't the starting player, this spell costs {1} less to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

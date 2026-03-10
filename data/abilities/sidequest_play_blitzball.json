@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Phase": "BeginCombat",
+            "Execute": "TrigPump",
+            "ValidPlayer": "You",
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "At the beginning of combat on your turn, target creature you control gets +2/+0 until end of turn."
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "SVarCompare": "GE6",
+            "CheckSVar": "X",
+            "Execute": "TrigTransform",
+            "ValidPlayer": "You",
+            "Phase": "EndCombat",
+            "TriggerDescription": "At the end of combat on your turn, if a player was dealt 6 or more combat damage this turn, transform this enchantment, then attach it to a creature you control.",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "Description": "Double Overdrive — Equipped creature gets +2/+0 and has double strike.",
+            "AddPower": "2",
+            "Affected": "Creature.EquippedBy",
+            "AddKeyword": "Double Strike"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

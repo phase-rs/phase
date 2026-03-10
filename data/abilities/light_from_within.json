@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Chroma — Each creature you control gets +1/+1 for each white mana symbol in its mana cost.",
+        "AffectedZone": "Battlefield",
+        "Affected": "Creature.YouCtrl",
+        "AddPower": "AffectedX",
+        "AddToughness": "AffectedX"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

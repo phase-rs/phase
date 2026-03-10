@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, choose a creature with the least toughness among creatures your opponents control. It perpetually gets -1/-1.",
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "TrigChoose"
+      }
+    },
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0",
+        "TriggerDescription": "When your opponents control no creatures, sacrifice CARDNAME.",
+        "Execute": "TrigSac",
+        "IsPresent": "Creature.OppCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

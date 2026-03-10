@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, you may cast target artifact card from your graveyard this turn.",
+        "TriggerZones": "Battlefield",
+        "Alone": "True",
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl",
+        "Execute": "TrigEffect"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

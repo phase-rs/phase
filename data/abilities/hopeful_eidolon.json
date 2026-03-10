@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Lifelink",
+        "Affected": "Card.EnchantedBy",
+        "AddToughness": "1",
+        "Description": "Enchanted creature gets +1/+1 and has lifelink."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

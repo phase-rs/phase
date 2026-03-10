@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DungeonCompleted",
+      "params": {
+        "Execute": "DBReturn",
+        "TriggerZones": "Graveyard",
+        "ValidPlayer": "You",
+        "TriggerDescription": "Whenever you complete a dungeon, you may return CARDNAME from your graveyard to your hand.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Description": "CARDNAME enters tapped.",
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated"
+      }
+    }
+  ],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, create a 1/1 colorless Thopter artifact creature token with flying.",
+        "ValidCard": "Card.wasCastFromExile",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerDescription": "Whenever you play a land from exile or cast a spell from exile, create a 1/1 colorless Thopter artifact creature token with flying.",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "TrigToken",
+        "Secondary": "True",
+        "Origin": "Exile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Affected": "Thopter.YouCtrl",
+        "Description": "Thopters you control have haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

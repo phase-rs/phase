@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player.Opponent+NonActive",
+        "TriggerDescription": "Whenever an opponent draws their first card each turn, if it's not their turn, you create a 1/1 red Devil creature token with \"When this creature dies, it deals 1 damage to any target.\"",
+        "Number": "1"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Devil.YouCtrl",
+        "AttackedTarget": "Player",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever one or more Devils you control attack one or more players, you and those players each draw a card, then discard a card at random.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

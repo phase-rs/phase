@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "AffectedZone": "Exile",
+        "Affected": "Card.Self",
+        "EffectZone": "Exile",
+        "Description": "You may cast CARDNAME from exile."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

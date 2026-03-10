@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "TriggerDescription": "When CARDNAME enters or attacks, exile a card from a graveyard.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME enters or attacks, exile a card from a graveyard."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "You",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "Description": "You may look at the top card of your library any time.",
+        "AffectedZone": "Library"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlayLimit": "1",
+        "EffectZone": "Battlefield",
+        "MayPlay": "True",
+        "Description": "Once each turn, you may cast a spell from the top of your library if it shares a card type with a card exiled with CARDNAME.",
+        "Affected": "Card.nonLand+TopLibrary+YouCtrl+sharesCardTypeWith Imprinted.ExiledWithSource",
+        "AffectedZone": "Library"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

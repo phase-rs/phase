@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Player",
+        "AddKeyword": "OnlyUntapChosen:Artifact,Creature,Land",
+        "IsPresent": "Card.Self+untapped",
+        "Description": "As long as CARDNAME is untapped, each player chooses artifact, creature, or land during their untap step. That player can untap only permanents of the chosen type this step."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPutCounter1",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, you may sacrifice another creature or artifact. If you do, put two +1/+1 counters on NICKNAME."
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME enters or attacks, you may sacrifice another creature or artifact. If you do, put two +1/+1 counters on NICKNAME.",
+        "Execute": "TrigPutCounter1"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "TrigPutCounter2",
+        "TriggerDescription": "When NICKNAME leaves the battlefield, put its counters on target creature you control.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

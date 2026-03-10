@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "FlipACoin",
+        "params": {
+          "WinSubAbility": "DBAddTurn",
+          "SpellDescription": "Flip a coin. If you win the flip, take an extra turn after this one."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "WinSubAbility": "DBAddTurn",
+        "SpellDescription": "Flip a coin. If you win the flip, take an extra turn after this one."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

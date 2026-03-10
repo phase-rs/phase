@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may search your library and/or graveyard for a Shrine card and put it onto the battlefield. If you search your library this way, shuffle.",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigSearch"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Panharmonicon",
+      "params": {
+        "Description": "If an ability of another Shrine you control triggers while you control six or more Shrines, that ability triggers an additional time.",
+        "IsPresent": "Shrine.YouCtrl",
+        "ValidCard": "Shrine.Other+YouCtrl",
+        "PresentCompare": "GE6"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

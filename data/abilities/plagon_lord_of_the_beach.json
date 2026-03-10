@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ValidTgts": "Creature.YouCtrl",
+          "SpellDescription": "Target creature you control assigns combat damage equal to its toughness rather than its power this turn.",
+          "RememberObjects": "Targeted",
+          "TgtPrompt": "Select target creature you control",
+          "ForgetOnMoved": "Battlefield",
+          "StaticAbilities": "CombatDamageToughness"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "WU"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.YouCtrl",
+        "SpellDescription": "Target creature you control assigns combat damage equal to its toughness rather than its power this turn.",
+        "RememberObjects": "Targeted",
+        "TgtPrompt": "Select target creature you control",
+        "ForgetOnMoved": "Battlefield",
+        "StaticAbilities": "CombatDamageToughness"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card for each creature you control with toughness greater than its power.",
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

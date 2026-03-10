@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonBlack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBGainLife",
+        "TgtPrompt": "Select target nonblack creature",
+        "SpellDescription": "CARDNAME deals 3 damage to target nonblack creature. You gain 3 life."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "AlternativeCost"
+      },
+      "params": {
+        "Description": "You may exile the top three black cards of your graveyard rather than pay this spell's mana cost.",
+        "ValidSA": "Spell.Self",
+        "EffectZone": "All",
+        "Cost": "ExileFromGrave<3/Card.Black+FromTopGrave>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

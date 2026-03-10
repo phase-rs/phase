@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Regenerate",
+        "params": {
+          "SpellDescription": "Regenerate NICKNAME. (The next time he would be destroyed this turn, instead tap him, remove him from combat, and heal all damage on him.)"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Regenerate NICKNAME. (The next time he would be destroyed this turn, instead tap him, remove him from combat, and heal all damage on him.)"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of each end step, if NICKNAME dealt damage to another creature this turn, put a +1/+1 counter on him.",
+        "CheckSVar": "Y",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidTarget": "Permanent,Player",
+        "Description": "Unrivaled Lethality — Double all damage NICKNAME would deal.",
+        "ValidSource": "Card.Self",
+        "ActiveZones": "Battlefield",
+        "ReplaceWith": "DmgTwice"
+      }
+    }
+  ],
+  "faces": []
+}

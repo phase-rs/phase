@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has \"{1}{W}, {T}: You gain 3 life.\"",
+        "AddAbility": "ABGainLife"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

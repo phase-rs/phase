@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigToken",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever enchanted creature deals combat damage to a player, create that many 1/1 green Saproling creature tokens.",
+        "ValidTarget": "Player",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Card.AttachedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying",
+        "Affected": "Creature.EnchantedBy",
+        "Description": "Enchanted creature has flying."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

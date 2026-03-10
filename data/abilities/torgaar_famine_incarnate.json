@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentCreature",
+        "params": {
+          "AdditionalDesc": "This spell costs {2} less to cast for each creature sacrificed this way.",
+          "AILogic": "SacToReduceCost"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "6 B B"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AdditionalDesc": "This spell costs {2} less to cast for each creature sacrificed this way.",
+        "AILogic": "SacToReduceCost"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, up to one target player's life total becomes half their starting life total, rounded down.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigSetLife"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "EffectZone": "All",
+        "Relative": "True",
+        "ValidCard": "Card.Self",
+        "Type": "Spell",
+        "Amount": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

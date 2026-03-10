@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YourTeamCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Two target creatures your team controls",
+        "StackDescription": "{c:ThisTargetedCard}",
+        "TgtPrompt": "Select two target creatures your team controls",
+        "TargetMax": "2",
+        "TargetMin": "2",
+        "SubAbility": "DBEachDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

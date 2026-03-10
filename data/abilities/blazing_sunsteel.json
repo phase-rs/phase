@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever equipped creature is dealt damage, it deals that much damage to any target.",
+        "ValidTarget": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+0 for each opponent you have.",
+        "AddPower": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

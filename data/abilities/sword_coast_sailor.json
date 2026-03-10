@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "AttacksPlayer",
+        "Affected": "Creature.IsCommander+YouOwn",
+        "Description": "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, this creature can't be blocked this turn.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

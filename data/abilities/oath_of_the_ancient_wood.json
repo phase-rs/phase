@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "OptionalDecider": "You",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever CARDNAME or another enchantment you control enters, you may put a +1/+1 counter on target creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

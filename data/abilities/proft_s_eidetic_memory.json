@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDraw",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "CheckSVar": "X",
+        "Execute": "TrigPutCounters",
+        "TriggerDescription": "At the beginning of combat on your turn, if you've drawn more than one card this turn, put X +1/+1 counters on target creature you control, where X is the number of cards you've drawn this turn minus one.",
+        "TriggerZones": "Battlefield",
+        "SVarCompare": "GT1",
+        "Phase": "BeginCombat"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetMaxHandSize": "Unlimited",
+        "Affected": "You",
+        "Description": "You have no maximum hand size."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

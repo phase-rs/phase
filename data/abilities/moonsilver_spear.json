@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigAngelToken",
+        "ValidCard": "Card.AttachedBy",
+        "TriggerDescription": "Whenever equipped creature attacks, create a 4/4 white Angel token with flying."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has first strike.",
+        "AddSVar": "AE",
+        "AddKeyword": "First Strike",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

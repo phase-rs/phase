@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All Slivers have \"{T}: Target player mills a card.\"",
+        "AddAbility": "Mill",
+        "Affected": "Sliver"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

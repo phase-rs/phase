@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChoosePlayer",
+        "params": {
+          "ValidTgts": "Player",
+          "Choices": "ThisTargetedPlayer",
+          "SpellDescription": "Choose target player and another target player. The first player controls the second player during the second player's next turn, and the second player controls the first player during the first player's next turn.",
+          "TargetUnique": "True",
+          "SubAbility": "DBControlPlayer1",
+          "Defined": "You",
+          "StackDescription": "SpellDescription"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "Choices": "ThisTargetedPlayer",
+        "SpellDescription": "Choose target player and another target player. The first player controls the second player during the second player's next turn, and the second player controls the first player during the first player's next turn.",
+        "TargetUnique": "True",
+        "SubAbility": "DBControlPlayer1",
+        "Defined": "You",
+        "StackDescription": "SpellDescription"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

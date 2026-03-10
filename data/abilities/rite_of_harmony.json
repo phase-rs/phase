@@ -1,0 +1,25 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "CreatureEnchantmentETB",
+          "SpellDescription": "Whenever a creature or enchantment you control enters this turn, draw a card."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "CreatureEnchantmentETB",
+        "SpellDescription": "Whenever a creature or enchantment you control enters this turn, draw a card."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

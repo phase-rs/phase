@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature",
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature enters, destroy all other creatures that share a color with it. They can't be regenerated."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Untap": "True",
+        "AddKWs": "Haste",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
+        "LoseControl": "EOT"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "IsPresent": "Creature.YouCtrl+withMenace",
+        "Description": "This spell costs {3} less to cast if you control a creature with menace.",
+        "ValidCard": "Card.Self",
+        "Amount": "3",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

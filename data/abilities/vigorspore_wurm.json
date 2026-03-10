@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "TriggerDescription": "Undergrowth — When CARDNAME enters, target creature gains vigilance and gets +X/+X until end of turn, where X is the number of creature cards in your graveyard.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "MinMaxBlocker"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Max": "1",
+        "Description": "CARDNAME can't be blocked by more than one creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When NICKNAME enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Animal May-Ham — Other Spiders, Boars, Bats, Bears, Birds, Cats, Dogs, Frogs, Jackals, Lizards, Mice, Otters, Rabbits, Raccoons, Rats, Squirrels, Turtles, and Wolves you control get +1/+1.",
+        "Affected": "Spider.Other+YouCtrl,Boar.Other+YouCtrl,Bat.Other+YouCtrl,Bear.Other+YouCtrl,Bird.Other+YouCtrl,Cat.Other+YouCtrl,Dog.Other+YouCtrl,Frog.Other+YouCtrl,Jackal.Other+YouCtrl,Lizard.Other+YouCtrl,Mouse.Other+YouCtrl,Otter.Other+YouCtrl,Rabbit.Other+YouCtrl,Raccoon.Other+YouCtrl,Rat.Other+YouCtrl,Squirrel.Other+YouCtrl,Turtle.Other+YouCtrl,Wolf.Other+YouCtrl",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "G",
+        "params": {
+          "SpellDescription": "Add {G}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {G}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounters",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "At the beginning of your end step, if a face-down creature entered the battlefield under your control this turn, put a +1/+1 counter on CARDNAME.",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You",
+        "CheckSVar": "FaceDown"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

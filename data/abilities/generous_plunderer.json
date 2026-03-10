@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "TrigTreasure",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may create a Treasure token. When you do, target opponent creates a tapped Treasure token.",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDamage",
+        "TriggerDescription": "Whenever CARDNAME attacks, it deals damage to defending player equal to the number of artifacts they control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

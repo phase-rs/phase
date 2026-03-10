@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever an opponent casts a spell, counter it unless that player pays {1}.",
+        "ValidCard": "Card",
+        "ValidActivatingPlayer": "Opponent",
+        "Execute": "CounterSpellOpp",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

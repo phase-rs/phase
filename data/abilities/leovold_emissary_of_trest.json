@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "TriggerDescription": "Whenever you or a permanent you control becomes the target of a spell or ability an opponent controls, you may draw a card.",
+        "ValidTarget": "You,Permanent.YouCtrl+inZoneBattlefield",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "SpellAbility.OppCtrl",
+        "OptionalDecider": "You",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantDraw",
+      "params": {
+        "DrawLimit": "1",
+        "Description": "Each opponent can't draw more than one card each turn.",
+        "ValidPlayer": "Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

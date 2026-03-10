@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ThisDoor": "True",
+            "ValidPlayer": "You",
+            "Execute": "TrigSurveil",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "When you unlock this door, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "ValidPlayer": "You",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDread",
+            "ThisDoor": "True",
+            "TriggerDescription": "When you unlock this door, manifest dread, then put a +1/+1 counter on that creature."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

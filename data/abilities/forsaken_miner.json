@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CommitCrime",
+      "params": {
+        "TriggerZones": "Graveyard",
+        "ValidPlayer": "You",
+        "Execute": "TrigChange",
+        "TriggerDescription": "Whenever you commit a crime, you may pay {B}. If you do, return CARDNAME from your graveyard to the battlefield. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "SpellDescription": "Add {R}. Spend this mana only to cast an Elemental spell or a Chandra planeswalker spell.",
+          "RestrictValid": "Spell.Elemental,Spell.Planeswalker+Chandra"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R}. Spend this mana only to cast an Elemental spell or a Chandra planeswalker spell.",
+        "RestrictValid": "Spell.Elemental,Spell.Planeswalker+Chandra"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

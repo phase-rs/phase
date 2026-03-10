@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Haste",
+        "Description": "Enchanted creature gets +1/+0 and has haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

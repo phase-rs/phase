@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Reach",
+        "Affected": "Creature.YouCtrl",
+        "AddToughness": "1",
+        "Description": "Creatures you control get +0/+1 and have reach. (They can block creatures with flying.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

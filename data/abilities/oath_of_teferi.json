@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile another target permanent you control. Return that card to the battlefield under its owner's control at the beginning of the next end step."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "NumLoyaltyAct"
+      },
+      "params": {
+        "ValidCard": "Planeswalker.YouCtrl",
+        "Twice": "True",
+        "Description": "You may activate the loyalty abilities of planeswalkers you control twice each turn rather than only once."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

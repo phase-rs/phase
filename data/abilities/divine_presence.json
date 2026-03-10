@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "DamageAmount": "GE4",
+        "Description": "If a source would deal 4 or more damage to a permanent or player, that source deals 3 damage to that permanent or player instead.",
+        "ReplaceWith": "Dmg3",
+        "ActiveZones": "Battlefield",
+        "ValidTarget": "Permanent,Player"
+      }
+    }
+  ],
+  "faces": []
+}

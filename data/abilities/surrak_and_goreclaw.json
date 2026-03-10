@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.!token+Other+YouCtrl",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever another nontoken creature you control enters, put a +1/+1 counter on it. It gains haste until end of turn."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "AddKeyword": "Trample",
+        "Description": "Other creatures you control have trample."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

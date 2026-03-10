@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "Origin": "Any",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, each opponent discards a card.",
+        "Execute": "TrigDiscard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

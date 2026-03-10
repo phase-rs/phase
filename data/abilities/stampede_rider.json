@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Creature.YouCtrl+powerGE4",
+        "Phase": "BeginCombat",
+        "TriggerDescription": "At the beginning of each combat, if you control a creature with power 4 or greater, CARDNAME gets +1/+1 until end of turn.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

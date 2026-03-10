@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SubAbility": "DBDraw",
+          "SpellDescription": "Target creature can't be blocked this turn.",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "RememberObjects": "Targeted",
+          "AILogic": "Pump",
+          "StaticAbilities": "Unblockable",
+          "ValidTgts": "Creature",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDraw",
+        "SpellDescription": "Target creature can't be blocked this turn.",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "RememberObjects": "Targeted",
+        "AILogic": "Pump",
+        "StaticAbilities": "Unblockable",
+        "ValidTgts": "Creature",
+        "ExileOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

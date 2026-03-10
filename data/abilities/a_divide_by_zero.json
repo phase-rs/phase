@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield,Stack",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.cmcGE1,Card.inZoneStack+cmcGE1"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtZone": "Stack,Battlefield",
+        "SubAbility": "DBLearn",
+        "SpellDescription": "Return target spell or permanent with mana value 1 or greater to its owner's hand. If its mana value was 4 or less, learn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

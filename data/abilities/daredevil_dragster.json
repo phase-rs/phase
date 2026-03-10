@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Card.Self+attackedThisCombat,Card.Self+blockedThisCombat",
+        "TriggerDescription": "At end of combat, if CARDNAME attacked or blocked this combat, put a velocity counter on it. Then if it has two or more velocity counters on it, sacrifice it and draw two cards.",
+        "Execute": "TrigPutCounter",
+        "ValidPlayer": "Player",
+        "NoResolvingCheck": "True",
+        "Phase": "EndCombat"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

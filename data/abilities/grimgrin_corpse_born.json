@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Untap NICKNAME and put a +1/+1 counter on it.",
+        "SubAbility": "DBPutCounter"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDestroy",
+        "TriggerDescription": "Whenever NICKNAME attacks, destroy target creature defending player controls, then put a +1/+1 counter on NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplaceWith": "ETBTapped",
+        "ValidCard": "Card.Self",
+        "ReplacementResult": "Updated",
+        "Description": "NICKNAME enters tapped."
+      }
+    },
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen",
+        "ValidStepTurnToController": "You",
+        "Description": "NICKNAME doesn't untap during your untap step."
+      }
+    }
+  ],
+  "faces": []
+}

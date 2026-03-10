@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "ValidAttacker": "Creature.Self",
+        "Description": "This creature can't be blocked."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ValidCard": "Card.Self",
+        "ActiveZones": "Battlefield",
+        "SVarCompare": "GE2",
+        "ValidStepTurnToController": "You",
+        "CheckSVar": "X",
+        "Description": "This creature doesn't untap during your untap step if an opponent controls two or more creatures."
+      }
+    }
+  ],
+  "faces": []
+}

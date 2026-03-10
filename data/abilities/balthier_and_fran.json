@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "FirstCombat": "True",
+        "ValidCard": "Vehicle.CrewedBySourceThisTurn",
+        "TriggerDescription": "Whenever a Vehicle crewed by CARDNAME this turn attacks, if it's the first combat phase of the turn, you may pay {1}{R}{G}. If you do, after this phase, there is an additional combat phase.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAddCombat"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Vigilance & Reach",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "Description": "Vehicles you control get +1/+1 and have vigilance and reach.",
+        "Affected": "Vehicle.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

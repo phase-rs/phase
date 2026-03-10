@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, create a 1/1 colorless Thopter artifact creature token with flying.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Artifact+YouCtrl",
+        "AddKeyword": "Haste",
+        "Description": "Artifact creatures you control have haste. (They can attack and {T} as soon as they come under your control.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

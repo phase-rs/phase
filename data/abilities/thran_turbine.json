@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "DBMana",
+        "TriggerDescription": "At the beginning of your upkeep, you may add {C}{C}. You can't spend this mana to cast spells.",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

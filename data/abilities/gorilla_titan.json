@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "PresentCompare": "EQ0",
+        "IsPresent": "Card.YouOwn",
+        "PresentZone": "Graveyard",
+        "Affected": "Card.Self",
+        "AddPower": "4",
+        "Description": "CARDNAME gets +4/+4 as long as there are no cards in your graveyard.",
+        "AddToughness": "4"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

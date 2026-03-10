@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigFight",
+        "TriggerDescription": "When CARDNAME enters, enchanted creature fights up to one target creature you don't control. (Each deals damage equal to its power to the other.)",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.EnchantedBy",
+        "AddToughness": "2",
+        "Description": "Enchanted creature gets +0/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

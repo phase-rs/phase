@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.greatestCMC_Creature",
+        "AddKeyword": "Protection from each color",
+        "Description": "Each creature with the highest mana value has protection from each color."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

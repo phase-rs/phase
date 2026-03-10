@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigChooseCardType",
+            "TriggerDescription": "At the beginning of your end step, choose a card type, then reveal the top three cards of your library. Put all cards of the chosen type revealed this way into your hand and the rest on the bottom of your library in any order.",
+            "ValidPlayer": "You",
+            "Phase": "End of Turn"
+          }
+        }
+      ],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddPower": "Z",
+            "Affected": "Card.Self",
+            "Description": "NICKNAME gets +1/+1 for each card in your hand and each foretold card you own in exile.",
+            "AddToughness": "Z"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, return it to its owner's hand, then scry 2.",
+            "ValidTarget": "Player",
+            "CombatDamage": "True",
+            "Execute": "TrigReturn",
+            "ValidSource": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

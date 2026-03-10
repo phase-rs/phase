@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "FlipOntoBattlefield",
+        "params": {
+          "SpellDescription": "If CARDNAME is on the battlefield, flip CARDNAME onto the battlefield from a height of at least one foot. If CARDNAME turns over completely at least once during the flip, destroy all nontoken permanents it touches. Then destroy CARDNAME.",
+          "SubAbility": "DBDestroyTouched",
+          "StackDescription": "SpellDescription",
+          "ActivationZone": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "If CARDNAME is on the battlefield, flip CARDNAME onto the battlefield from a height of at least one foot. If CARDNAME turns over completely at least once during the flip, destroy all nontoken permanents it touches. Then destroy CARDNAME.",
+        "SubAbility": "DBDestroyTouched",
+        "StackDescription": "SpellDescription",
+        "ActivationZone": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

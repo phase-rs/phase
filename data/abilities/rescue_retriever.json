@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigPutCounterAll",
+        "TriggerDescription": "When CARDNAME enters, put a +1/+1 counter on each other Soldier you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ActiveZones": "Battlefield",
+        "Prevent": "True",
+        "ValidTarget": "Soldier.attacking+YouCtrl+Other",
+        "IsCombat": "True",
+        "Description": "Prevent all damage that would be dealt to other attacking Soldiers you control."
+      }
+    }
+  ],
+  "faces": []
+}

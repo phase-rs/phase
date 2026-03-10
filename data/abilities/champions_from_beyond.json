@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this enchantment enters, create X 1/1 colorless Hero creature tokens.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "ValidAttackers": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Light Party — Whenever you attack with four or more creatures, scry 2, then draw a card.",
+        "Execute": "TrigScry",
+        "ValidAttackersAmount": "GE4"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "ValidAttackers": "Creature",
+        "TriggerZones": "Battlefield",
+        "ValidAttackersAmount": "GE8",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Full Party — Whenever you attack with eight or more creatures, those creatures get +4/+4 until end of turn.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

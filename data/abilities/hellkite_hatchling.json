@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+HasDevoured",
+        "Description": "CARDNAME has flying and trample if it devoured a creature.",
+        "AddKeyword": "Flying & Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

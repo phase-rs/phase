@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "SetToughness": "6",
+        "Description": "LEVEL 1-4 0/6",
+        "SetPower": "0",
+        "IsPresent": "Card.Self+counters_GE1_LEVEL+counters_LE4_LEVEL"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Card.Self+counters_GE5_LEVEL",
+        "Description": "LEVEL 5+ 6/6 Islandwalk",
+        "AddKeyword": "Landwalk:Island",
+        "SetToughness": "6",
+        "SetPower": "6",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

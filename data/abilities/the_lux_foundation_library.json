@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDraw",
+        "OptionalDecider": "You",
+        "ValidTarget": "Player",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, you may draw a card.",
+        "ValidSource": "Creature.YouCtrl",
+        "CombatDamage": "True",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, put a shadow counter on target creature. (A creature with shadow can block or be blocked by only creatures with shadow.)",
+        "Execute": "RolledChaos",
+        "TriggerZones": "Command"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "EffectZone": "Command",
+        "Affected": "Player",
+        "SetMaxHandSize": "Unlimited",
+        "Description": "Players have no maximum hand size."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

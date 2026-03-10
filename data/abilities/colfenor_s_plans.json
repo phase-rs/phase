@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, exile the top seven cards of your library face down. You may look at the cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "AffectedZone": "Exile",
+        "Description": "You may look at the cards exiled with CARDNAME, and you may play lands and cast spells from among those cards.",
+        "Affected": "Card.ExiledWithSource",
+        "MayLookAt": "You"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Caster": "You",
+        "NumLimitEachTurn": "1",
+        "ValidCard": "Card",
+        "Description": "You can't cast more than one spell each turn."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "BeginPhase"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "Description": "Skip your draw step.",
+        "ActiveZones": "Battlefield",
+        "Phase": "Draw",
+        "Skip": "True"
+      }
+    }
+  ],
+  "faces": []
+}

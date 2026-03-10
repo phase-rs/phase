@@ -1,0 +1,66 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigPump",
+            "TriggerDescription": "When CARDNAME enters, target creature an opponent controls gets -13/-13 until end of turn.",
+            "Destination": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Card"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBToken",
+            "SpellDescription": "Exile target card from a graveyard.",
+            "TgtPrompt": "Choose target card in a graveyard"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Origin": "Any",
+            "Destination": "Battlefield",
+            "TriggerDescription": "When CARDNAME enters, create two 2/2 black Zombie creature tokens.",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigToken"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

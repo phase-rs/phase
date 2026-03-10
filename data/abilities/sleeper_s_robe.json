@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidSource": "Card.AttachedBy",
+        "OptionalDecider": "You",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever enchanted creature deals combat damage to an opponent, you may draw a card.",
+        "ValidTarget": "Opponent"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Fear",
+        "Description": "Enchanted creature has fear. (It can't be blocked except by artifact creatures and/or black creatures.)"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

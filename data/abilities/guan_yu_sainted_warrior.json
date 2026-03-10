@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self+YouOwn",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "Execute": "TrigReturn",
+        "TriggerDescription": "When CARDNAME is put into your graveyard from the battlefield, you may shuffle CARDNAME into your library.",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

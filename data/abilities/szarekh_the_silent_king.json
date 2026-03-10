@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigMill",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "My Will Be Done — Whenever CARDNAME attacks, mill three cards. You may put an artifact creature card or Vehicle card from among the cards milled this way into your hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

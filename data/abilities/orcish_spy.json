@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PeekAndReveal",
+        "params": {
+          "PeekAmount": "3",
+          "ValidTgts": "Player",
+          "NoReveal": "True",
+          "SpellDescription": "Look at the top three cards of target player's library."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PeekAmount": "3",
+        "ValidTgts": "Player",
+        "NoReveal": "True",
+        "SpellDescription": "Look at the top three cards of target player's library."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveLandTypes": "True",
+        "AddType": "Plains",
+        "Description": "Lands you control are Plains.",
+        "Affected": "Land.YouCtrl"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.YouOwn+nonLand",
+        "SetColor": "White",
+        "AffectedZone": "Hand,Library,Graveyard,Exile,Command",
+        "Description": "Nonland permanents you control are white. The same is true for spells you control and nonland cards you own that aren't on the battlefield."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.YouCtrl+nonLand",
+        "SetColor": "White",
+        "AffectedZone": "Battlefield,Stack"
+      }
+    },
+    {
+      "mode": {
+        "Other": "ManaConvert"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "Description": "You may spend white mana as though it were mana of any color. You may spend other mana only as though it were colorless mana.",
+        "ManaConversion": "White->AnyColor nonWhite<-C"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

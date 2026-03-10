@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "Origin": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "ValidCards": "Creature.YouOwn",
+        "TriggerDescription": "Whenever one or more creature cards leave your graveyard, put a +1/+1 counter on NICKNAME.",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Amount": "X",
+        "Description": "This spell costs {1} less to cast for each creature card in your graveyard.",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

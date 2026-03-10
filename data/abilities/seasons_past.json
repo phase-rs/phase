@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "X",
+        "Hidden": "True",
+        "DifferentCMC": "True",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Return any number of cards with different mana values from your graveyard to your hand. Put CARDNAME on the bottom of its owner's library.",
+        "SubAbility": "DBChangeZone",
+        "ChangeType": "Card.YouOwn"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

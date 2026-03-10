@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBToken",
+        "TriggerDescription": "When CARDNAME enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this artifact: Add one mana of any color.\")"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplaceWith": "EnterWithP1P1",
+        "ValidCard": "Creature.YouCtrl+Other",
+        "ReplacementResult": "Updated",
+        "Description": "Other creatures you control enter with an additional +1/+1 counter on them for each mana from a Treasure spent to cast them.",
+        "ActiveZones": "Battlefield",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

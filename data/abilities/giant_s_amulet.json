@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, you may pay {3}{U}. If you do, create a 4/4 blue Giant Wizard creature token, then attach CARDNAME to it.",
+        "Execute": "TrigToken",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "Hexproof",
+        "Description": "Equipped creature gets +0/+1 has \"This creature has hexproof as long as it's untapped.\" (It can't be the target of spells or abilities your opponents control.)",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

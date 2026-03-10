@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.PairedWith,Creature.Self+Paired",
+        "AddTrigger": "CastTrigger",
+        "Description": "As long as CARDNAME is paired with another creature, each of those creatures has \"Whenever an opponent casts a spell, put a +1/+1 counter on this creature.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

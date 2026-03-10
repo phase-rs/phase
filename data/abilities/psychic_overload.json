@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigTap",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When this Aura enters, tap enchanted permanent.",
+        "Origin": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted permanent has \"Discard two artifact cards: Untap this permanent.\"",
+        "AddAbility": "Untap",
+        "Affected": "Card.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "Description": "Enchanted permanent doesn't untap during its controller's untap step.",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Card.EnchantedBy",
+        "ValidStepTurnToController": "You"
+      }
+    }
+  ],
+  "faces": []
+}

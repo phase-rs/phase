@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "FlippedCoin",
+      "params": {
+        "ValidPlayer": "You",
+        "ValidResult": "Win",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you win a coin flip, put a luck counter on CARDNAME.",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if CARDNAME has ten or more luck counters on it, you win the game.",
+        "Execute": "TrigWin",
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "IsPresent": "Card.Self+counters_GE10_LUCK"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

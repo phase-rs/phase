@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast an Aura spell that targets a modified permanent you control, draw a card.",
+        "TargetsValid": "Permanent.modified+YouCtrl",
+        "ValidCard": "Aura"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Affinity:Aura",
+        "Affected": "Enchantment.YouCtrl+wasCast",
+        "Description": "Enchantment spells you cast have affinity for Auras.",
+        "AffectedZone": "Stack"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

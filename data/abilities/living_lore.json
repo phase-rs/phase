@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage, you may sacrifice it. If you do, you may cast the exiled card without paying its mana cost.",
+        "Execute": "TrigSacLore",
+        "CombatDamage": "True",
+        "ValidSource": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Execute": "DBCleanup",
+        "Destination": "Any",
+        "Static": "True",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "ValidCard": "Card.IsRemembered",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Origin": "Exile"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME's power and toughness are each equal to the exiled card's mana value.",
+        "SetToughness": "X",
+        "CharacteristicDefining": "True",
+        "SetPower": "X"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

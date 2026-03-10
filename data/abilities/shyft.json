@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "Execute": "TrigColor",
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may have CARDNAME become the color or colors of your choice. (This effect lasts indefinitely.)",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.Other+YouCtrl",
+        "Destination": "Graveyard",
+        "TriggerDescription": "Whenever another creature you control dies, put a +1/+1 counter on NICKNAME."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "PresentZone": "Graveyard",
+        "AddKeyword": "Vigilance",
+        "Description": "NICKNAME has vigilance as long as there's a Lesson card in your graveyard.",
+        "IsPresent": "Lesson.YouOwn",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

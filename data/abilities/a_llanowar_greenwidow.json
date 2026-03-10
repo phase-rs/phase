@@ -1,0 +1,34 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "5 G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "WithCountersType": "FINALITY",
+        "Tapped": "True",
+        "WithCountersAmount": "1",
+        "PrecostDesc": "Domain —",
+        "SpellDescription": "Return CARDNAME from your graveyard to the battlefield tapped with a finality counter on it. This ability costs {1} less to activate for each basic land type among lands you control.",
+        "ActivationZone": "Graveyard",
+        "ReduceCost": "X"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

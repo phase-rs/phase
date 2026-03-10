@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Land.YouCtrl",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you may switch CARDNAME power and toughness until end of turn.",
+        "Execute": "TrigPump"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

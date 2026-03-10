@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "DelayedTrigger",
+        "params": {
+          "ValidActivatingPlayer": "You",
+          "SpellDescription": "When you next cast an instant or sorcery spell this turn, copy it and you may choose new targets for the copy.",
+          "ThisTurn": "True",
+          "AILogic": "SpellCopy",
+          "Mode": "SpellCast",
+          "Execute": "EffTrigCopy",
+          "ValidCard": "Instant,Sorcery"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<3/CHARGE>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidActivatingPlayer": "You",
+        "SpellDescription": "When you next cast an instant or sorcery spell this turn, copy it and you may choose new targets for the copy.",
+        "ThisTurn": "True",
+        "AILogic": "SpellCopy",
+        "Mode": "SpellCast",
+        "Execute": "EffTrigCopy",
+        "ValidCard": "Instant,Sorcery"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "IsPresent": "Card.Self+counters_LT3_CHARGE",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, if this artifact has fewer than three charge counters on it, put a charge counter on it.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

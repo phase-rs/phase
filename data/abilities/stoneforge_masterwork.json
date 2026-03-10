@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "AffectedX",
+        "AddToughness": "AffectedX",
+        "EffectZone": "Battlefield",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1 for each other creature you control that shares a creature type with it."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

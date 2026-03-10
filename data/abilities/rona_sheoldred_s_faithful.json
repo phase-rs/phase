@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell, each opponent loses 1 life.",
+        "Execute": "TrigDrain"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RaiseCost": "Discard<2/Card>",
+        "Description": "You may cast CARDNAME from your graveyard by discarding two cards in addition to paying its other costs.",
+        "EffectZone": "Graveyard",
+        "MayPlay": "True",
+        "AffectedZone": "Graveyard",
+        "ActivationZone": "Graveyard",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

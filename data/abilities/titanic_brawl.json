@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBFight",
+        "SpellDescription": "Target creature you control fights target creature you don't control. (Each deals damage equal to its power to the other.)",
+        "TgtPrompt": "Choose target creature you control"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {1} less to cast if it targets a creature you control with a +1/+1 counter on it.",
+        "ValidCard": "Card.Self",
+        "Amount": "1",
+        "Type": "Spell",
+        "ValidTarget": "Creature.YouCtrl+counters_GE1_P1P1",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

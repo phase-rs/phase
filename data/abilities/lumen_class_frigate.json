@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddStaticAbility": "AnthemStatic",
+        "Description": "STATION 2+ Other creatures you control get +1/+1.",
+        "Affected": "Card.Self+counters_GE2_CHARGE"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Flying & Lifelink",
+        "Affected": "Card.Self+counters_GE12_CHARGE",
+        "AddType": "Creature",
+        "Description": "STATION 12+ Flying, lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

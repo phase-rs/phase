@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<3/P1P1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return it to its owner's hand."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Graveyard",
+        "ValidCard": "Land.!token+YouOwn",
+        "TriggerZones": "Battlefield",
+        "Execute": "DBPutCounter",
+        "TriggerDescription": "Whenever a land card is put into your graveyard from anywhere, put a +1/+1 counter on CARDNAME."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When NICKNAME leaves the battlefield, return up to three target land cards from your graveyard to your hand.",
+        "Execute": "DBChangeZone",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "AffectedX",
+        "AddPower": "AffectedX",
+        "Description": "Each other multicolored creature you control gets +1/+1 for each of its colors.",
+        "Affected": "Creature.MultiColor+Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

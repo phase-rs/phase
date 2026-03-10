@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "NewGame",
+      "params": {
+        "TriggerDescription": "As long as every card in your card pool started the game in your library or in the command zone, lands you control have \"{T}: Add one mana of any color.\"",
+        "TriggerZones": "Command",
+        "Execute": "TrigWorldknit",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "AddAbility": "AnyMana",
+        "Description": "Lands you control have \"{T}: Add one mana of any one color.\"",
+        "Affected": "Land.YouCtrl",
+        "EffectZone": "Command"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

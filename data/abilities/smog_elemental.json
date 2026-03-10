@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "-1",
+        "Affected": "Creature.withFlying+OppCtrl",
+        "AddToughness": "-1",
+        "Description": "Creatures with flying your opponents control get -1/-1."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

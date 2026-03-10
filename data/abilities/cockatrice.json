@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "DelTrigBlocked",
+        "ValidBlocker": "Card.Self",
+        "ValidCard": "Creature.nonWall",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a non-Wall creature, destroy that creature at end of combat."
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Secondary": "True",
+        "ValidBlocker": "Creature.nonWall",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a non-Wall creature, destroy that creature at end of combat.",
+        "ValidCard": "Card.Self",
+        "Execute": "DelTrigBlocker"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

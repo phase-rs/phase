@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Land.YouCtrl",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, you gain 1 life.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "Description": "Play with the top card of your library revealed.",
+        "AffectedZone": "Library",
+        "MayLookAt": "Player"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "MayPlay": "True",
+        "Description": "You may play lands from the top of your library."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

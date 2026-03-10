@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "ValidCards": "Permanent.OppCtrl",
+          "RemoveKeywords": "Hexproof & Indestructible",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Permanent.OppCtrl",
+        "RemoveKeywords": "Hexproof & Indestructible",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Permanents your opponents control lose hexproof and indestructible until end of turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddKeyword": "Trample & Lifelink",
+        "Description": "Equipped creature gets +1/+1 and has trample and lifelink.",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

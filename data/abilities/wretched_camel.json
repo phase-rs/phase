@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigDiscard",
+        "TriggerDescription": "When CARDNAME dies, if you control a Desert or there is a Desert card in your graveyard, target player discards a card.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Desert": "True",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

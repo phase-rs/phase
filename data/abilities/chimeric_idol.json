@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "TapAll",
+        "params": {
+          "ValidCards": "Land.YouCtrl",
+          "SpellDescription": "Tap all lands you control. CARDNAME becomes a 3/3 Turtle artifact creature until end of turn.",
+          "SubAbility": "DBAnimate"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Land.YouCtrl",
+        "SpellDescription": "Tap all lands you control. CARDNAME becomes a 3/3 Turtle artifact creature until end of turn.",
+        "SubAbility": "DBAnimate"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "TrigDraw",
+        "ValidCard": "Card.AttachedBy",
+        "ValidBlocker": "Creature",
+        "TriggerDescription": "Whenever equipped creature becomes blocked by a creature, you may draw two cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

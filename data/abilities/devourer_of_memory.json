@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Mill a card."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever one or more cards are put into your graveyard from your library, CARDNAME gets +1/+1 until end of turn and can't be blocked this turn.",
+        "ValidCards": "Card.YouOwn",
+        "Execute": "TrigPump",
+        "Origin": "Library"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

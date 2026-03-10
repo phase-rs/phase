@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Zombie.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigTap",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever another Zombie you control enters, you may tap target artifact or creature."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

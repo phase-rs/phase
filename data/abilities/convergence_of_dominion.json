@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 3,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "PrecostDesc": "Translocation Protocols —",
+        "SpellDescription": "Mill three cards."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "Dynastic Command Node — As long as you control your commander, activated abilities of cards in your graveyard cost {2} less to activate. This effect can't reduce the mana in that ability's activation cost to less than one mana.",
+        "Type": "Ability",
+        "AffectedZone": "Graveyard",
+        "ValidCard": "Card.YouOwn",
+        "Amount": "2",
+        "MinMana": "1",
+        "IsPresent": "Card.IsCommander+YouOwn+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

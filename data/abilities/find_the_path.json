@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, venture into the dungeon. (Enter the first room or advance to the next room.)",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "DBVenture"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land has \"{T}: Add {G}{G}.\"",
+        "AddAbility": "ABMana",
+        "Affected": "Land.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

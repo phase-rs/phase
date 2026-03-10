@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.IsCommander+YouOwn",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever your commander attacks, create a 1/1 red Mercenary creature token with \"{T}: Target creature you control gets +1/+0 until end of turn. Activate only as a sorcery.\""
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Legendary creature spells you cast have convoke. (Your creatures can help cast those spells. Each creature you tap while casting a legendary creature spell pays for {1} or one mana of that creature's color.)",
+        "Affected": "Card.Creature+Legendary+YouCtrl+wasCast",
+        "AddKeyword": "Convoke",
+        "AffectedZone": "Stack"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

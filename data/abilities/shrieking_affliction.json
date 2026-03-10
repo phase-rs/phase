@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "SVarCompare": "LE1",
+        "ValidPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigLoseLife",
+        "TriggerDescription": "At the beginning of each opponent's upkeep, if that player has one or fewer cards in hand, they lose 3 life.",
+        "CheckSVar": "CardsInHand",
+        "Phase": "Upkeep"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

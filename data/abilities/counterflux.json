@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.YouDontCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target spell you don't control.",
+        "TargetType": "Spell",
+        "SpellDescription": "Counter target spell you don't control."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Self",
+        "Description": "This spell can't be countered.",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

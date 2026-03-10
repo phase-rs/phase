@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, venture into the dungeon.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "DBVenture"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted land has \"{T}: Add two mana of any one color.\"",
+        "AddAbility": "ABMana",
+        "Affected": "Land.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

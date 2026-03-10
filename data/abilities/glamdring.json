@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidSource": "Creature.EquippedBy",
+        "TriggerDescription": "Whenever equipped creature deals combat damage to a player, you may cast an instant or sorcery spell from your hand with mana value less than or equal to that damage without paying its mana cost.",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigCastFromYard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has first strike and gets +1/+0 for each instant and sorcery card in your graveyard.",
+        "AddPower": "X",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "First Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

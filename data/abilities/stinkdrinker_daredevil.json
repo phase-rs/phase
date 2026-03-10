@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Giant",
+        "Activator": "You",
+        "Amount": "2",
+        "Type": "Spell",
+        "Description": "Giant spells you cast cost {2} less to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

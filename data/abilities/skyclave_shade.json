@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "PlayerTurn": "True",
+        "ValidCard": "Land.YouCtrl",
+        "PresentZone": "Graveyard",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, if CARDNAME is in your graveyard and it's your turn, you may cast it from your graveyard this turn.",
+        "TriggerZones": "Graveyard",
+        "Origin": "Any",
+        "IsPresent": "Card.StrictlySelf",
+        "Execute": "TrigEffect"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBlock",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME can't block."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

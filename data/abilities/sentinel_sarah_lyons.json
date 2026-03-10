@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "NoResolvingCheck": "True",
+        "ValidCard": "Card.Self",
+        "PresentCompare": "GE2",
+        "IsPresent": "Creature.attacking+Other",
+        "Execute": "TrigDamage",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Battalion — Whenever CARDNAME and at least two other creatures attack, CARDNAME deals damage equal to the number of artifacts you control to target player."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "AddToughness": "2",
+        "AddPower": "2",
+        "Description": "As long as an artifact entered the battlefield under your control this turn, creatures you control get +2/+2.",
+        "Affected": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

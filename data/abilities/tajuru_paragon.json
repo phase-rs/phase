@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if it was kicked, reveal the top six cards of your library. You may put a card that shares a creature type with it from among them into your hand. Put the rest on the bottom of your library in a random order.",
+        "Execute": "TrigDig",
+        "ValidCard": "Card.Self+kicked",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "Description": "CARDNAME is also a Cleric, Rogue, Warrior, and Wizard.",
+        "CharacteristicDefining": "True",
+        "AddType": "Cleric & Rogue & Warrior & Wizard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

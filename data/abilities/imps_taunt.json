@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "MustAttack",
+          "ValidTgts": "Creature",
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "Target creature attacks this turn if able."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "MustAttack",
+        "ValidTgts": "Creature",
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "Target creature attacks this turn if able."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

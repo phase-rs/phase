@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self,Ally.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigPumpAll",
+        "TriggerDescription": "Rally — Whenever CARDNAME or another Ally you control enters, creatures you control gain trample until end of turn.",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

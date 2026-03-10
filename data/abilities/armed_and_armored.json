@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AnimateAll",
+        "params": {
+          "StackDescription": "Vehicles {p:You} controls become artifact creatures until end of turn.",
+          "SpellDescription": "Vehicles you control become artifact creatures until end of turn. Choose a Dwarf you control. Attach any number of Equipment you control to it.",
+          "ValidCards": "Vehicle.YouCtrl",
+          "Types": "Creature,Artifact",
+          "SubAbility": "ArmDwarf"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "Vehicles {p:You} controls become artifact creatures until end of turn.",
+        "SpellDescription": "Vehicles you control become artifact creatures until end of turn. Choose a Dwarf you control. Attach any number of Equipment you control to it.",
+        "ValidCards": "Vehicle.YouCtrl",
+        "Types": "Creature,Artifact",
+        "SubAbility": "ArmDwarf"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

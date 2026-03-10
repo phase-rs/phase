@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "Execute": "TrigPump",
+        "Alone": "True",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a Samurai or Warrior you control attacks alone, it gets +1/+1 until end of turn.",
+        "ValidCard": "Samurai.YouCtrl,Warrior.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

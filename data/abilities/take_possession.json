@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainControl": "You",
+        "Affected": "Permanent.EnchantedBy",
+        "Description": "You control enchanted permanent."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "Execute": "TrigSac",
+        "ValidPlayer": "You",
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME if there are no echo counters on it. Otherwise, target opponent may choose that for each 1 damage that would be dealt to you until your next upkeep, you remove an echo counter from CARDNAME instead.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "GameLoss"
+      },
+      "params": {
+        "Layer": "CantHappen",
+        "ValidLoseReason": "LifeReachedZero",
+        "ActiveZones": "Battlefield",
+        "Description": "You don't lose the game for having 0 or less life.",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "faces": []
+}

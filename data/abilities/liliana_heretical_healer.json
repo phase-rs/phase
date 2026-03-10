@@ -1,0 +1,110 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigTransform",
+            "ValidCard": "Creature.!token+Other+YouCtrl",
+            "TriggerZones": "Battlefield",
+            "Origin": "Battlefield",
+            "Destination": "Graveyard",
+            "TriggerDescription": "Whenever another nontoken creature you control dies, exile CARDNAME, then return her to the battlefield transformed under her owner's control. If you do, create a 2/2 black Zombie creature token."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Discard",
+            "count": 1,
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": 2
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "SpellDescription": "Each player discards a card.",
+            "Mode": "TgtChoose",
+            "Defined": "Player"
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature.YouOwn+nonLegendary+cmcEQX"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "SubCounter<X/LOYALTY>"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Planeswalker": "True",
+            "TgtPrompt": "Choose target nonlegendary creature with mana value X in your graveyard",
+            "SpellDescription": "Return target nonlegendary creature card with mana value X from your graveyard to the battlefield."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "params": {
+              "Image": "emblem_liliana_defiant_necromancer",
+              "AILogic": "Always",
+              "SpellDescription": "You get an emblem with \"Whenever a creature dies, return it to the battlefield under your control at the beginning of the next end step.\"",
+              "Planeswalker": "True",
+              "Stackable": "False",
+              "Ultimate": "True",
+              "Duration": "Permanent",
+              "Name": "Emblem — Liliana, Defiant Necromancer",
+              "Triggers": "TrigChangesZone"
+            }
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -8
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "Image": "emblem_liliana_defiant_necromancer",
+            "AILogic": "Always",
+            "SpellDescription": "You get an emblem with \"Whenever a creature dies, return it to the battlefield under your control at the beginning of the next end step.\"",
+            "Planeswalker": "True",
+            "Stackable": "False",
+            "Ultimate": "True",
+            "Duration": "Permanent",
+            "Name": "Emblem — Liliana, Defiant Necromancer",
+            "Triggers": "TrigChangesZone"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature has lifelink.",
+        "AddKeyword": "Lifelink"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "SVarCompare": "GE30",
+        "Description": "As long as you have 30 or more life, equipped creature gets +5/+5 and has indestructible and \"Prevent all damage that would be dealt to this creature.\"",
+        "CheckSVar": "X",
+        "AddKeyword": "Indestructible & Prevent all damage that would be dealt to CARDNAME.",
+        "AddToughness": "5",
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "5"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "Origin": "Any",
+        "ValidCard": "Card.Self+untapped",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters untapped, put a +1/+1 counter on target creature you control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "LandTapped",
+        "ValidCard": "Card.Self",
+        "Description": "CARDNAME enters tapped unless you control three or more other Plains.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

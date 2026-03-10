@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, you may exile a creature card from your hand. If you do, search your hand and library for any number of cards with the same name, exile them, then shuffle. Choose a creature card you own from outside the game. Conjure a duplicate of that card into your hand for each card exiled from your hand this way.",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

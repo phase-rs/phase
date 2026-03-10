@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "Nonartifact creatures can't block this turn.",
+          "StaticAbilities": "KWPump",
+          "AILogic": "Evasion"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Nonartifact creatures can't block this turn.",
+        "StaticAbilities": "KWPump",
+        "AILogic": "Evasion"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

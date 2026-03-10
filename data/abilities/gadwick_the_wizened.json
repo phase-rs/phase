@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw X cards.",
+        "Execute": "TrigDraw",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidCard": "Card.Blue",
+        "ValidActivatingPlayer": "You",
+        "Execute": "TrigTap",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a blue spell, tap target nonland permanent an opponent controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

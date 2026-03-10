@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Card.Self",
+        "Execute": "TrigAnimateAttacker",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature becomes green. (This effect lasts indefinitely.)",
+        "ValidCard": "Creature"
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidCard": "Card.Self",
+        "ValidBlocker": "Creature",
+        "Execute": "TrigAnimateBlocker",
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature becomes green. (This effect lasts indefinitely.)"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

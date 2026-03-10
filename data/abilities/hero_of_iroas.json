@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TargetsValid": "Card.Self",
+        "Execute": "TrigCounters",
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on CARDNAME.",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Aura",
+        "Activator": "You",
+        "Description": "Aura spells you cast cost {1} less to cast.",
+        "Amount": "1",
+        "Type": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

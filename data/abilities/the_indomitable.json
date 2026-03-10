@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "ValidTarget": "Player",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature you control deals combat damage to a player, draw a card.",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You may cast CARDNAME from your graveyard as long as you control three or more tapped Pirates and/or Vehicles.",
+        "EffectZone": "Graveyard",
+        "Affected": "Card.Self",
+        "PresentCompare": "GE3",
+        "AffectedZone": "Graveyard",
+        "IsPresent": "Pirate.YouCtrl+tapped,Vehicle.YouCtrl+tapped",
+        "MayPlay": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

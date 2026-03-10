@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Opponent",
+        "Description": "Each opponent's maximum hand size is reduced by one.",
+        "RaiseMaxHandSize": "-1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

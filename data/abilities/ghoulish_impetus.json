@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When enchanted creature dies, return CARDNAME to the battlefield at the beginning of the next end step.",
+        "Origin": "Battlefield",
+        "Execute": "TrigDelayedTrigger",
+        "ValidCard": "Card.EnchantedBy",
+        "Destination": "Graveyard"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Enchanted creature gets +1/+1, has deathtouch, and is goaded.",
+        "AddToughness": "1",
+        "Goad": "True",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Deathtouch"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

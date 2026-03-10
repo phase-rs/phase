@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "Activator": "You",
+        "Amount": "2",
+        "Type": "Spell",
+        "Description": "Spells you cast that target CARDNAME cost {2} less to cast."
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Description": "Spells your opponents cast that target CARDNAME cost {2} more to cast.",
+        "ValidTarget": "Card.Self",
+        "Activator": "Player.Opponent",
+        "Type": "Spell",
+        "Amount": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

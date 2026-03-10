@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact to destroy",
+        "TargetMax": "1",
+        "TargetMin": "0",
+        "AILogic": "Destroy",
+        "IsCurse": "True",
+        "SubAbility": "DBPump1",
+        "SpellDescription": "Destroy up to one target artifact, up to one target creature, and up to one target enchantment. Delirium — Then if there are four or more card types among cards in your graveyard, create an X/X green Ooze token, where X is the total mana value of permanents destroyed this way."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

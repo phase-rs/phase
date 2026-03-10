@@ -1,0 +1,35 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Permanent",
+        "Description": "All permanents are artifact in addition to their other types.",
+        "AddType": "Artifact"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card",
+        "AffectedZone": "All",
+        "Description": "All cards that aren't on the battlefield, spells, and permanents are colorless.",
+        "SetColor": "Colorless"
+      }
+    },
+    {
+      "mode": {
+        "Other": "ManaConvert"
+      },
+      "params": {
+        "Description": "Players may spend mana as though it were mana of any color.",
+        "ManaConversion": "AnyType->AnyColor"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

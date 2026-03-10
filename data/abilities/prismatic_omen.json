@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.YouCtrl",
+        "AddType": "AllBasicLandType",
+        "Description": "Lands you control are every basic land type in addition to their other types."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

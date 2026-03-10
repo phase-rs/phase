@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Attacking creatures get -1/-0.",
+        "AddPower": "-1",
+        "Affected": "Creature.attacking"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

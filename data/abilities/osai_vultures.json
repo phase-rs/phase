@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 1,
+        "toughness": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<2/CARRION>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CostDesc": "Remove two carrion counters from CARDNAME:",
+        "SpellDescription": "CARDNAME gets +1/+1 until end of turn.",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "At the beginning of each end step, if a creature died this turn, put a carrion counter on CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "Phase": "End of Turn"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

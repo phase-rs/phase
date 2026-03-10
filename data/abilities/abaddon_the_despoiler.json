@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "PlayerTurn",
+        "Affected": "Card.YouCtrl+YouOwn+wasCastFromHand+cmcLEX",
+        "AffectedZone": "Stack",
+        "Description": "Mark of Chaos Ascendant — During your turn, spells you cast from your hand with mana value X or less have cascade, where X is the total amount of life your opponents have lost this turn.",
+        "AddKeyword": "Cascade"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

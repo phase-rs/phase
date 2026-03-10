@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidTarget": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Valiant": "True",
+        "ValidSource": "SpellAbility.YouCtrl",
+        "Execute": "TrigTap",
+        "TriggerDescription": "Valiant — Whenever CARDNAME becomes the target of a spell or ability you control for the first time each turn, tap target creature an opponent controls."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

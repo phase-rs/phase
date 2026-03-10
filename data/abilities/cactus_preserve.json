@@ -1,0 +1,70 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "ManaReflected",
+        "params": {
+          "SpellDescription": "Add one mana of any type that a land you control could produce.",
+          "ColorOrType": "Type",
+          "Valid": "Land.YouCtrl",
+          "ReflectProperty": "Produce"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add one mana of any type that a land you control could produce.",
+        "ColorOrType": "Type",
+        "Valid": "Land.YouCtrl",
+        "ReflectProperty": "Produce"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [
+          "Creature",
+          "Plant"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Keywords": "Reach",
+        "Defined": "Self",
+        "Colors": "Green",
+        "OverwriteColors": "True",
+        "SpellDescription": "Until end of turn, CARDNAME becomes an X/X green Plant creature with reach, where X is the greatest mana value among your commanders. It's still a land."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "ReplacementResult": "Updated",
+        "Description": "CARDNAME enters tapped.",
+        "ValidCard": "Card.Self",
+        "ReplaceWith": "ETBTapped",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

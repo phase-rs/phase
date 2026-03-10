@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self,Creature.Other+Legendary+YouCtrl",
+        "TriggerDescription": "Whenever CARDNAME or another legendary creature you control enters, the Ring tempts you.",
+        "Execute": "TrigTempt"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as NICKNAME is your Ring-bearer, it must be blocked if able.",
+        "Affected": "Card.Self+IsRingbearer",
+        "AddHiddenKeyword": "CARDNAME must be blocked if able."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

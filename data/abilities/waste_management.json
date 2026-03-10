@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Exile up to two target cards from a single graveyard.",
+        "SubAbility": "ExileGrave",
+        "RememberChanged": "True",
+        "AITgts": "Creature",
+        "TargetsWithSameController": "True",
+        "TargetMin": "0",
+        "TargetMax": "X",
+        "TgtPrompt": "Choose up to two target cards in a single graveyard"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

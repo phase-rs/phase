@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When this enchantment enters, earthbend 3. (Target land you control becomes a 0/0 creature with haste that's still a land. Put three +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "Execute": "TrigEarthbend"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "Description": "If one or more +1/+1 counters would be put on a permanent you control, that many plus one +1/+1 counters are put on it instead.",
+        "ValidCard": "Permanent.YouCtrl+inZoneBattlefield",
+        "ReplaceWith": "AddOneMoreCounters",
+        "ActiveZones": "Battlefield",
+        "ValidCounterType": "P1P1"
+      }
+    }
+  ],
+  "faces": []
+}

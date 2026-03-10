@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "EQ0",
+        "Execute": "TrigSac",
+        "TriggerDescription": "At the beginning of the end step, if you control no Goblins, sacrifice CARDNAME.",
+        "IsPresent": "Goblin.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

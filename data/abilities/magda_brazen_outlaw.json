@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "{p:You} searches their library for an Artifact or Dragon card, puts that card onto the battlefield, then shuffles their library.",
+        "ChangeNum": "1",
+        "ChangeType": "Card.Artifact,Card.Dragon",
+        "SpellDescription": "Search your library for an artifact or Dragon card, put that card onto the battlefield, then shuffle."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "TriggerDescription": "Whenever a Dwarf you control becomes tapped, create a Treasure token.",
+        "ValidCard": "Dwarf.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Affected": "Dwarf.Other+YouCtrl",
+        "Description": "Other Dwarves you control get +1/+0."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

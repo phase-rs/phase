@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "ValidCard": "Goblin",
+        "Amount": "1",
+        "Type": "Spell",
+        "Description": "Goblin spells you cast cost {1} less to cast.",
+        "Activator": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Haste",
+        "Description": "Goblins you control have haste.",
+        "Affected": "Goblin.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ReplacementResult": "Updated",
+        "ReplaceWith": "AddExtraCounter",
+        "Description": "Sensational Save — If NICKNAME was cast using web-slinging, he enters with X +1/+1 counters on him, where X is the mana value of the returned creature.",
+        "ValidCard": "Card.Self+webSlinged+wasCast"
+      }
+    }
+  ],
+  "faces": []
+}

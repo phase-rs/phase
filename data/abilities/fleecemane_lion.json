@@ -1,0 +1,37 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "",
+        "count": 1,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 G W"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Monstrosity": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self+IsMonstrous",
+        "Description": "As long as CARDNAME is monstrous, it has hexproof and indestructible.",
+        "AddKeyword": "Hexproof & Indestructible"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "Flying & Prevent all combat damage that would be dealt to and dealt by CARDNAME.",
+        "Description": "Enchanted creature has flying. Prevent all combat damage that would be dealt to and dealt by enchanted creature."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

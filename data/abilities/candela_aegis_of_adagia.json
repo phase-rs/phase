@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When NICKNAME enters, return up to one target creature you control to its owner's hand. It perpetually gets +1/+1.",
+        "Origin": "Any",
+        "Execute": "TrigReturn"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "STATION 8+ Flying,,,,,,Whenever NICKNAME deals combat damage to a player, you may put a creature card with mana value 3 or less from your hand onto the battlefield.",
+        "Affected": "Card.Self+counters_GE8_CHARGE",
+        "AddType": "Creature",
+        "AddTrigger": "DamageTrig",
+        "AddKeyword": "Flying"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

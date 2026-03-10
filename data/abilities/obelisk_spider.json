@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Creature",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a creature, put a -1/-1 counter on that creature."
+      }
+    },
+    {
+      "mode": "CounterAddedOnce",
+      "params": {
+        "TriggerDescription": "Whenever you put one or more -1/-1 counters on a creature, each opponent loses 1 life and you gain 1 life.",
+        "Execute": "TrigDrain",
+        "TriggerZones": "Battlefield",
+        "ValidSource": "You",
+        "ValidCard": "Creature",
+        "CounterType": "M1M1"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainControl",
+        "target": {
+          "type": "Filtered",
+          "filter": "Opponent"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AllValid": "Creature.TargetedPlayerCtrl",
+        "NewController": "You",
+        "SubAbility": "DBGainCtrlOpp",
+        "SpellDescription": "You and target opponent each gain control of all creatures the other controls until end of turn. Untap those creatures. Those creatures gain haste until end of turn.",
+        "LoseControl": "EOT",
+        "StackDescription": "REP You_{p:You} & target opponent_{p:Targeted}",
+        "RememberControlled": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

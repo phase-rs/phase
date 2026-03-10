@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RollDice",
+        "params": {
+          "Modifier": "X",
+          "Sides": "20",
+          "SpellDescription": "Roll a d20 and add the number of creature cards in your graveyard that were put there from the battlefield this turn.",
+          "ResultSubAbilities": "1-14:DBToHand,Else:DBToField"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Modifier": "X",
+        "Sides": "20",
+        "SpellDescription": "Roll a d20 and add the number of creature cards in your graveyard that were put there from the battlefield this turn.",
+        "ResultSubAbilities": "1-14:DBToHand,Else:DBToField"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

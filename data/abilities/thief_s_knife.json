@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddType": "Rogue",
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +1/+1, has \"Whenever this creature deals combat damage to a player, draw a card,\" and is a Rogue in addition to its other types.",
+        "AddTrigger": "TrigDmg"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

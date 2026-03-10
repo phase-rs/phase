@@ -1,0 +1,92 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Token",
+        "name": "b_2_2_zombie",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Create a 2/2 black Zombie creature token."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -4
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Defined": "Player",
+        "SpellDescription": "Each player sacrifices two creatures.",
+        "SacValid": "Creature",
+        "Amount": "2"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChooseCard",
+        "choices": [
+          "Permanent"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -9
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Opponent",
+        "Mandatory": "True",
+        "SubAbility": "SacAllOthers",
+        "SpellDescription": "Each opponent chooses a permanent they control of each permanent type and sacrifices the rest.",
+        "StackDescription": "SpellDescription",
+        "ControlledByPlayer": "Chooser",
+        "Planeswalker": "True",
+        "Reveal": "True",
+        "Ultimate": "True",
+        "ChooseEach": "Artifact & Battle & Creature & Enchantment & Land & Planeswalker"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a creature you control dies, draw a card."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

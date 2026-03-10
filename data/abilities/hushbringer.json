@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "DisableTriggers"
+      },
+      "params": {
+        "ValidMode": "ChangesZone,ChangesZoneAll",
+        "ValidCause": "Creature",
+        "Destination": "Battlefield",
+        "Description": "Creatures entering or dying don't cause abilities to trigger."
+      }
+    },
+    {
+      "mode": {
+        "Other": "DisableTriggers"
+      },
+      "params": {
+        "ValidCause": "Creature",
+        "Destination": "Graveyard",
+        "Secondary": "True",
+        "Description": "Creatures entering or dying don't cause abilities to trigger.",
+        "ValidMode": "ChangesZone,ChangesZoneAll",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

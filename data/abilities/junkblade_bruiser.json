@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ManaExpend",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you expend 4, CARDNAME gets +2/+1 until end of turn. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
+        "Amount": "4",
+        "Execute": "TrigPump",
+        "Player": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

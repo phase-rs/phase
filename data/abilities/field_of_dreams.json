@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayLookAt": "Player",
+        "Affected": "Card.TopLibrary",
+        "AffectedZone": "Library",
+        "Description": "Players play with the top card of their libraries revealed."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

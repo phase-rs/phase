@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "r_4_4_devil_haste_treasure",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TokenAmount": "4",
+        "AtEOT": "Sacrifice",
+        "TokenOwner": "You",
+        "SpellDescription": "Create four 4/4 red Devil creature tokens with haste and \"When this creature dies, create a colorless Treasure artifact token with '{T}, Sacrifice this artifact: Add one mana of any color.'\" Sacrifice the Devil tokens at the beginning of the next end step."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

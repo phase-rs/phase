@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AITgts": "Card.YouOwn",
+        "SubAbility": "DBToken",
+        "SpellDescription": "Exile target creature card from a graveyard. Its owner creates a 1/1 black and green Snake enchantment creature token with deathtouch.",
+        "AILogic": "AtOppEOT",
+        "AITgtOwnCards": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveType": "Creature",
+        "Description": "As long as your devotion to black and green is less than seven, NICKNAME isn't a creature.",
+        "CheckSVar": "X",
+        "SVarCompare": "LT7",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

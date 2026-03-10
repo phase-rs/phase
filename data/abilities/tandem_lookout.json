@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as CARDNAME is paired with another creature, each of those creatures have \"Whenever this creature deals damage to an opponent, draw a card.\"",
+        "AddSVar": "TandemLookoutTrigDraw",
+        "Affected": "Creature.PairedWith,Creature.Self+Paired",
+        "AddTrigger": "DamageTrigger"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, draw a card.",
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "Execute": "TrigDraw"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigReturn",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you cast a creature spell, you may pay {G}{G}. If you do, return CARDNAME from your graveyard to your hand.",
+        "ValidCard": "Creature",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Graveyard"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you get {E}{E}{E} (three energy counters).",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigEnergy",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "AttackingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigImmediateTrig",
+        "TriggerDescription": "Whenever you attack, you may pay {E}{E}. When you do, target creature you control gains lifelink until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "AddToughness": "1",
+        "IsPresent": "Permanent.Red+!token+OppCtrl",
+        "Affected": "Creature.namedIvory Guardians",
+        "Description": "Creatures named Ivory Guardians get +1/+1 as long as an opponent controls a nontoken red permanent."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

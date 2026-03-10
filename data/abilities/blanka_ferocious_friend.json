@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "BecomesTarget",
+      "params": {
+        "ValidSource": "Spell",
+        "ValidTarget": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Electric Thunder — Whenever NICKNAME becomes the target of a spell, he gets +2/+2 until end of turn and deals 2 damage to each opponent."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "CheckSVar": "X",
+        "SVarCompare": "GE3",
+        "Description": "Rolling Attack — CARDNAME has trample as long as you've cast three or more spells this turn.",
+        "Affected": "Card.Self",
+        "AddKeyword": "Trample"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

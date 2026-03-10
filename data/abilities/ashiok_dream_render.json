@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mill",
+        "count": 4,
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBExileGrave",
+        "SpellDescription": "Target player mills four cards. Then exile each opponent's graveyard.",
+        "Planeswalker": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Spells and abilities you control can't cause you to search your library.",
+        "Affected": "Opponent",
+        "Description": "Spells and abilities your opponents control can't cause their controller to search their library."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Enrage — Whenever CARDNAME is dealt damage, it deals 3 damage to target opponent or planeswalker.",
+        "ValidTarget": "Card.Self",
+        "Execute": "DealDamage",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigSearch",
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may search your library, hand and/or graveyard for a Rune card and put it onto the battlefield attached to CARDNAME. If you search your library this way, shuffle.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddToughness": "1",
+        "Description": "Equipped creature gets +1/+1.",
+        "AddPower": "1",
+        "Affected": "Creature.EquippedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

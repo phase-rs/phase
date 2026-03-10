@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Goad",
+        "params": {
+          "PrecostDesc": "Crown of Madness —",
+          "ValidTgts": "Creature",
+          "SpellDescription": "Goad target creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 R"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Crown of Madness —",
+        "ValidTgts": "Creature",
+        "SpellDescription": "Goad target creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you take the initiative.",
+        "Execute": "TrigInitiative",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

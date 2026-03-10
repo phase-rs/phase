@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Amount": "X",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Type": "Spell",
+        "Description": "This spell costs {G} less to cast for each green creature you control.",
+        "Color": "G"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

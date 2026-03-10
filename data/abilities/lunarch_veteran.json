@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Creature.Other+YouCtrl",
+            "TriggerZones": "Battlefield",
+            "Execute": "TrigGainLife",
+            "TriggerDescription": "Whenever another creature you control enters, you gain 1 life."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "TriggerDescription": "Whenever another creature you control leaves the battlefield, you gain 1 life.",
+            "Destination": "Any",
+            "ValidCard": "Creature.Other+YouCtrl",
+            "Execute": "TrigGainLife",
+            "Origin": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "ReplaceWith": "Exile",
+            "Destination": "Graveyard",
+            "Description": "If CARDNAME would be put into a graveyard from anywhere, exile it instead.",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ]
+    }
+  ]
+}

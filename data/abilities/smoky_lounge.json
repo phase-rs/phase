@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "TrigMana",
+            "TriggerZones": "Battlefield",
+            "Phase": "Main1",
+            "ValidPlayer": "You",
+            "TriggerDescription": "At the beginning of your first main phase, add {R}{R}. Spend this mana only to cast Room spells and unlock doors."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "UnlockDoor",
+          "params": {
+            "TriggerDescription": "When you unlock this door, create an X/X blue Spirit creature token with flying, where X is the number of unlocked doors among Rooms you control.",
+            "Execute": "TrigToken",
+            "ValidPlayer": "You",
+            "ThisDoor": "True",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Artifact",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever an artifact enters, you may gain 1 life.",
+        "OptionalDecider": "You",
+        "Origin": "Any",
+        "Execute": "TrigGainLife"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "TriggerDescription": "Whenever one or more creatures you control deal combat damage to a player, put a +1/+1 counter on NICKNAME.",
+        "Execute": "TrigPutCounter",
+        "ValidSource": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "CombatDamage": "True",
+        "ValidTarget": "Player"
+      }
+    },
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "Execute": "TrigDmg",
+        "ValidTarget": "Opponent",
+        "TriggerDescription": "Chaos — Whenever NICKNAME deals combat damage to an opponent, it deals that much damage to each other opponent if NICKNAME's power is 7 or greater."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

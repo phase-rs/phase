@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Reveal",
+        "params": {
+          "SubAbility": "DBChangeZone",
+          "SpellDescription": "Reveal a card in your hand, then put that card onto the battlefield if it has the same name as a permanent.",
+          "RememberRevealed": "True"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBChangeZone",
+        "SpellDescription": "Reveal a card in your hand, then put that card onto the battlefield if it has the same name as a permanent.",
+        "RememberRevealed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

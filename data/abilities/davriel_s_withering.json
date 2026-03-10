@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": -1,
+        "toughness": -2,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "{c:Targeted} perpetually gets -1/-2.",
+        "SpellDescription": "Target creature an opponent controls perpetually gets -1/-2.",
+        "Duration": "Perpetual",
+        "TgtPrompt": "Select target creature an opponent controls",
+        "IsCurse": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TurnFaceUp",
+      "params": {
+        "GameActivationLimit": "1",
+        "Execute": "TrigSeek",
+        "ValidCard": "Card.Self,Creature.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control is turned face up, seek a non-Elephant creature card with mana value 3 or less and cloak it. This ability triggers only once."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

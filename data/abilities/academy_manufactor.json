@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "ActiveZones": "Battlefield",
+        "ValidToken": "Clue,Food,Treasure",
+        "Description": "If you would create a Clue, Food, or Treasure token, instead create one of each.",
+        "ValidPlayer": "You",
+        "ReplaceWith": "TokenReplace"
+      }
+    }
+  ],
+  "faces": []
+}

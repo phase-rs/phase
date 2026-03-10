@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever equipped creature deals combat damage, you may put an Aura card from your hand onto the battlefield attached to it.",
+        "CombatDamage": "True",
+        "ValidSource": "Creature.EquippedBy",
+        "Execute": "TrigChangeZone",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature has double strike.",
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Double Strike"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

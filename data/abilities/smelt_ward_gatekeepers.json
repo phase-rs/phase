@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, if you control two or more Gates, gain control of target creature an opponent controls until end of turn. Untap that creature. That creature gains haste until end of turn.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainControl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "IsPresent": "Gate.YouCtrl",
+        "PresentCompare": "GE2"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclaredOneTarget",
+      "params": {
+        "TriggerDescription": "Whenever one or more creatures attack one of your opponents, if any of those creatures have power or toughness equal to the chosen number, NICKNAME deals damage equal to its power to defending player.",
+        "AttackedTarget": "Opponent",
+        "TriggerZones": "Battlefield",
+        "ValidAttackers": "Creature.powerEQChosen,Creature.toughnessEQChosen",
+        "Execute": "TrigDealDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

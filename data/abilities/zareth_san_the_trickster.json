@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U B"
+          },
+          {
+            "type": "Mana",
+            "cost": "Return<1/Rogue.unblocked+attacking+YouCtrl/unblocked attacking Rogue you control>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "Self",
+        "ActivationZone": "Hand",
+        "Attacking": "True",
+        "Tapped": "True",
+        "SpellDescription": "Put CARDNAME from your hand onto the battlefield tapped and attacking."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self",
+        "CombatDamage": "True",
+        "Execute": "TrigGainControl",
+        "ValidTarget": "Player",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player, you may put target permanent card from that player's graveyard onto the battlefield under your control."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

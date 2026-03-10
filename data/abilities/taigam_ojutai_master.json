@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "IsPresent": "Card.Self+attackedThisTurn",
+        "ValidActivatingPlayer": "You",
+        "NoResolvingCheck": "True",
+        "Execute": "TrigRebound",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell from your hand, if CARDNAME attacked this turn, that spell gains rebound.",
+        "ValidCard": "Instant.wasCastFromYourHand,Sorcery.wasCastFromYourHand",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "ValidSA": "Spell",
+        "Description": "Instant, sorcery, and Dragon spells you control can't be countered.",
+        "ActiveZones": "Battlefield",
+        "ValidCard": "Instant.YouCtrl,Sorcery.YouCtrl,Dragon.YouCtrl",
+        "Layer": "CantHappen"
+      }
+    }
+  ],
+  "faces": []
+}

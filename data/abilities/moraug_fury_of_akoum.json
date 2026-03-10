@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Phase": "Main1,Main2",
+        "TriggerDescription": "Landfall — Whenever a land you control enters, if it's your main phase, there's an additional combat phase after this phase. At the beginning of that combat, untap all creatures you control.",
+        "PlayerTurn": "True",
+        "AILogic": "SafeToHold",
+        "ValidCard": "Land.YouCtrl",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigAddPhase"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.YouCtrl",
+        "AddPower": "AffectedX",
+        "Description": "Each creature you control gets +1/+0 for each time it has attacked this turn."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

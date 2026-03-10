@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "ChooseColor",
+        "params": {
+          "SubAbility": "DBDmgEach",
+          "Defined": "You",
+          "AILogic": "MostProminentHumanCreatures",
+          "SpellDescription": "Choose a color. CARDNAME deals damage to each player equal to the number of creatures of that color that player controls."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDmgEach",
+        "Defined": "You",
+        "AILogic": "MostProminentHumanCreatures",
+        "SpellDescription": "Choose a color. CARDNAME deals damage to each player equal to the number of creatures of that color that player controls."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

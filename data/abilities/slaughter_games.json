@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "ValidDescription": "nonland",
+          "SubAbility": "ExileYard",
+          "ValidCards": "Card.nonLand",
+          "Defined": "You",
+          "SpellDescription": "Choose a nonland card name. Search target opponent's graveyard, hand, and library for any number of cards with that name and exile them. Then that player shuffles."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidDescription": "nonland",
+        "SubAbility": "ExileYard",
+        "ValidCards": "Card.nonLand",
+        "Defined": "You",
+        "SpellDescription": "Choose a nonland card name. Search target opponent's graveyard, hand, and library for any number of cards with that name and exile them. Then that player shuffles."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Counter",
+      "params": {
+        "Layer": "CantHappen",
+        "ValidSA": "Spell",
+        "ValidCard": "Card.Self",
+        "Description": "This spell can't be countered."
+      }
+    }
+  ],
+  "faces": []
+}

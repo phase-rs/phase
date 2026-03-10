@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Imprint — When CARDNAME enters, you may exile target nontoken creature.",
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBCleanup",
+        "Destination": "Any",
+        "ValidCard": "Card.IsImprinted",
+        "Static": "True",
+        "Origin": "Exile"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "DBCleanup"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetToughness": "Y",
+        "Affected": "Card.Self",
+        "Description": "As long as a card exiled with CARDNAME is a creature card, CARDNAME has the power, toughness, and creature types of the last creature card exiled with CARDNAME. It's still a Shapeshifter.",
+        "AddType": "ImprintedCreatureType",
+        "SetPower": "X",
+        "CheckSVar": "Z",
+        "SVarCompare": "EQ1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

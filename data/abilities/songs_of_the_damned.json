@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Mana",
+        "produced": "B",
+        "params": {
+          "AILogic": "ManaRitual",
+          "AINoRecursiveCheck": "True",
+          "Amount": "X",
+          "SpellDescription": "Add {B} for each creature card in your graveyard."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "ManaRitual",
+        "AINoRecursiveCheck": "True",
+        "Amount": "X",
+        "SpellDescription": "Add {B} for each creature card in your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

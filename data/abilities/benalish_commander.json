@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterRemoved",
+      "params": {
+        "TriggerZones": "Exile",
+        "CounterType": "TIME",
+        "TriggerDescription": "Whenever a time counter is removed from CARDNAME while it's exiled, create a 1/1 white Soldier creature token.",
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "SetPower": "Y",
+        "CharacteristicDefining": "True",
+        "Description": "CARDNAME's power and toughness are each equal to the number of Soldiers you control.",
+        "SetToughness": "Y"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

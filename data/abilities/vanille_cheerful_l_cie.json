@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "ValidCard": "Card.Self",
+            "Execute": "TrigMill",
+            "TriggerDescription": "When NICKNAME enters, mill two cards, then return a permanent card from your graveyard to your hand.",
+            "Destination": "Battlefield",
+            "Origin": "Any"
+          }
+        },
+        {
+          "mode": "Phase",
+          "params": {
+            "Execute": "Meld",
+            "TriggerDescription": "At the beginning of your first main phase, if you both own and control NICKNAME and a creature named Fang, Fearless l'Cie, you may pay {3}{B}{G}. If you do, exile them, then meld them into Ragnarok, Divine Deliverance.",
+            "ValidPlayer": "You",
+            "IsPresent": "Card.Self+YouCtrl+YouOwn",
+            "IsPresent2": "Creature.YouCtrl+YouOwn+namedFang; Fearless l'Cie",
+            "Phase": "Main1",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Destination": "Graveyard",
+            "Origin": "Battlefield",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigDestroy",
+            "TriggerDescription": "When NICKNAME dies, destroy target permanent and return target nonlegendary permanent card from your graveyard to the battlefield."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

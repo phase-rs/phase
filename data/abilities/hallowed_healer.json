@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "ValidTgts": "Any",
+          "Amount": "2",
+          "SpellDescription": "Prevent the next 2 damage that would be dealt to any target this turn."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Any",
+        "Amount": "2",
+        "SpellDescription": "Prevent the next 2 damage that would be dealt to any target this turn."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "PreventDamage",
+        "params": {
+          "Amount": "4",
+          "PrecostDesc": "Threshold —",
+          "ValidTgts": "Any",
+          "Activation": "Threshold",
+          "SpellDescription": "Prevent the next 4 damage that would be dealt to any target this turn. Activate only if there are seven or more cards in your graveyard."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "4",
+        "PrecostDesc": "Threshold —",
+        "ValidTgts": "Any",
+        "Activation": "Threshold",
+        "SpellDescription": "Prevent the next 4 damage that would be dealt to any target this turn. Activate only if there are seven or more cards in your graveyard."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield,Stack",
+        "destination": "Library",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand,Card.inZoneStack"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target spell or nonland permanent",
+        "SpellDescription": "The owner of target spell or nonland permanent puts it on the top or bottom of their library.",
+        "LibraryPositionAlternative": "-1",
+        "AlternativeDecider": "TargetedOwner",
+        "StackDescription": "{p:TargetedOwner} puts {c:Targeted} on the top or bottom of their library.",
+        "DestinationAlternative": "Library"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

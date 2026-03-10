@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "ValidTgts": "Instant,Sorcery",
+          "MayChooseTarget": "True",
+          "SpellDescription": "The controller of target instant or sorcery spell copies it. That player may choose new targets for the copy.",
+          "AITgts": "OwnedOnly",
+          "TargetType": "Spell",
+          "Controller": "TargetedController",
+          "AILogic": "Once"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2 U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Instant,Sorcery",
+        "MayChooseTarget": "True",
+        "SpellDescription": "The controller of target instant or sorcery spell copies it. That player may choose new targets for the copy.",
+        "AITgts": "OwnedOnly",
+        "TargetType": "Spell",
+        "Controller": "TargetedController",
+        "AILogic": "Once"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

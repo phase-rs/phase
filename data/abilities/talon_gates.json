@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Hand",
+        "destination": "Exile",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "0"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Command",
+        "SubAbility": "TimeInGates",
+        "ChangeType": "Card.nonLand+YouCtrl",
+        "StackDescription": "REP Any time you could cast a sorcery, you may exile_{p:You} exiles & your hand_their hand & , where X is its mana value._. & If the_The & doesn't have suspend, it gains suspend._gains suspend if it doesn't have suspend.",
+        "SpellDescription": "Any time you could cast a sorcery, you may exile a nonland card from your hand with X time counters on it, where X is its mana value. If the exiled card doesn't have suspend, it gains suspend.",
+        "RememberChanged": "True",
+        "DefinedPlayer": "You",
+        "SorcerySpeed": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerZones": "Command",
+        "Execute": "RolledChaos",
+        "TriggerDescription": "Whenever chaos ensues, remove two time counters from each suspended card you own."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

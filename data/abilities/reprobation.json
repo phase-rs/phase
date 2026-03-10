@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "RemoveCreatureTypes": "True",
+        "Affected": "Card.EnchantedBy",
+        "RemoveAllAbilities": "True",
+        "RemoveCardTypes": "True",
+        "Description": "Enchanted creature loses all abilities and is a Coward creature with base power and toughness 0/1.",
+        "AddType": "Creature & Coward",
+        "SetToughness": "1",
+        "SetPower": "0"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

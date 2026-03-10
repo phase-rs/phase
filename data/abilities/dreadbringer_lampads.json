@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Execute": "TrigPump",
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, target creature gains intimidate until end of turn."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

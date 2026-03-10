@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddToughness": "1",
+        "Description": "CARDNAME gets +0/+1 as long as an opponent controls an Island.",
+        "IsPresent": "Island.OppCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

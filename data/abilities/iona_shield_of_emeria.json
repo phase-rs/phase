@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "Your opponents can't cast spells of the chosen color.",
+        "ValidCard": "Card.ChosenColor",
+        "Caster": "Opponent"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

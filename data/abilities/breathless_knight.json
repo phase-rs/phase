@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+Other,Card.Self",
+        "TriggerDescription": "Whenever CARDNAME or another creature you control enters, if that creature entered from a graveyard or you cast it from a graveyard, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigPutCounter",
+        "Destination": "Battlefield",
+        "Origin": "Graveyard"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME or another creature you control enters, if that creature entered from a graveyard or you cast it from a graveyard, put a +1/+1 counter on CARDNAME.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.YouCtrl+Other+wasCastFromGraveyardByYou,Card.Self+wasCastFromGraveyardByYou",
+        "Execute": "TrigPutCounter",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

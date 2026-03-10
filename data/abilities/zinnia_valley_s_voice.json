@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME gets +X/+0, where X is the number of other creatures you control with base power 1.",
+        "Affected": "Card.Self",
+        "AddPower": "X"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Creature spells you cast have offspring {2}. (You may pay an additional {2} as you cast a creature spell. If you do, when that creature enters, create a 1/1 token copy of it.)",
+        "AffectedZone": "Stack",
+        "Affected": "Creature.wasCastByYou",
+        "AddKeyword": "Offspring:2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

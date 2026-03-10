@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Condition": "Ferocious",
+        "Description": "Ferocious — If you control a creature with power 4 or greater, you may cast CARDNAME as though it had flash.",
+        "ValidCard": "Card.Self",
+        "ValidSA": "Spell",
+        "Caster": "You",
+        "EffectZone": "All"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted creature gets +2/+0 and has first strike.",
+        "Affected": "Creature.EnchantedBy",
+        "AddKeyword": "First Strike",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

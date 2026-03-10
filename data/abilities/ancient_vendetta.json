@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "NameCard",
+        "params": {
+          "StackDescription": "REP Choose a_{p:You} chooses a & Search target opponent's_{p:You} searches {p:Targeted}'s & and exile_and exiles & That player_{p:Targeted}",
+          "Defined": "You",
+          "SpellDescription": "Choose a card name. Search target opponent's graveyard, hand, and library for up to four cards with that name and exile them. That player shuffles.",
+          "SubAbility": "DBExile"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "REP Choose a_{p:You} chooses a & Search target opponent's_{p:You} searches {p:Targeted}'s & and exile_and exiles & That player_{p:Targeted}",
+        "Defined": "You",
+        "SpellDescription": "Choose a card name. Search target opponent's graveyard, hand, and library for up to four cards with that name and exile them. That player shuffles.",
+        "SubAbility": "DBExile"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

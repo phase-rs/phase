@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Angels you control get +1/+1 and have lifelink.",
+        "Affected": "Angel.Other+YouCtrl",
+        "AddPower": "1",
+        "AddToughness": "1",
+        "AddKeyword": "Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

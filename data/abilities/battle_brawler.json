@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Permanent.White+YouCtrl,Permanent.Red+YouCtrl",
+        "Affected": "Card.Self",
+        "AddKeyword": "First Strike",
+        "Description": "As long as you control a red or white permanent, CARDNAME gets +1/+0 and has first strike.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

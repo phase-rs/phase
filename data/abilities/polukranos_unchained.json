@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Fight",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.Other"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 B G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select another target creature",
+        "SpellDescription": "NICKNAME fights another target creature.",
+        "Defined": "Self"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "AlwaysReplace": "True",
+        "ReplaceWith": "Counters",
+        "ValidTarget": "Card.Self+counters_GE1_P1P1",
+        "PreventionEffect": "True",
+        "ActiveZones": "Battlefield",
+        "Description": "If damage would be dealt to NICKNAME while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it."
+      }
+    }
+  ],
+  "faces": []
+}

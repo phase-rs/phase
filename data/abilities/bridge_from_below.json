@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "PermanentNoncreature",
+        "params": {
+          "AILogic": "Never"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "B B B"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "AILogic": "Never"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "PresentZone": "Graveyard",
+        "TriggerDescription": "Whenever a nontoken creature is put into your graveyard from the battlefield, if CARDNAME is in your graveyard, create a 2/2 black Zombie creature token.",
+        "Execute": "TrigToken",
+        "TriggerZones": "Graveyard",
+        "ValidCard": "Creature.!token+YouOwn",
+        "Origin": "Battlefield",
+        "IsPresent": "Card.StrictlySelf"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Graveyard",
+        "ValidCard": "Creature.OppOwn",
+        "IsPresent": "Card.StrictlySelf",
+        "TriggerZones": "Graveyard",
+        "TriggerDescription": "When a creature is put into an opponent's graveyard from the battlefield, if CARDNAME is in your graveyard, exile CARDNAME.",
+        "PresentZone": "Graveyard",
+        "Origin": "Battlefield",
+        "Execute": "TrigChange"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature deals damage to enchanted planeswalker, destroy that creature.",
+        "ValidSource": "Creature.inZoneBattlefield",
+        "ValidTarget": "Planeswalker.EnchantedBy"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Enchanted planeswalker has \"[-8]: Put all creature cards from all graveyards onto the battlefield under your control.\"",
+        "AddAbility": "LilianaUlt",
+        "Affected": "Planeswalker.EnchantedBy"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

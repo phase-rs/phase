@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has haste as long as you control a red permanent.",
+        "IsPresent": "Permanent.Red+YouCtrl",
+        "Affected": "Card.Self",
+        "AddKeyword": "Haste"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "CARDNAME has lifelink as long as you control a white permanent.",
+        "Affected": "Card.Self",
+        "IsPresent": "Permanent.White+YouCtrl",
+        "AddKeyword": "Lifelink"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

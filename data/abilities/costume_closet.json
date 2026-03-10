@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MoveCounter",
+        "params": {
+          "SorcerySpeed": "True",
+          "TgtPrompt": "Select target creature you control",
+          "Source": "Self",
+          "SpellDescription": "Move a +1/+1 counter from this artifact onto target creature you control. Activate only as a sorcery.",
+          "ValidTgts": "Creature.YouCtrl",
+          "CounterNum": "1",
+          "CounterType": "P1P1"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SorcerySpeed": "True",
+        "TgtPrompt": "Select target creature you control",
+        "Source": "Self",
+        "SpellDescription": "Move a +1/+1 counter from this artifact onto target creature you control. Activate only as a sorcery.",
+        "ValidTgts": "Creature.YouCtrl",
+        "CounterNum": "1",
+        "CounterType": "P1P1"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigCounter",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Creature.modified+YouCtrl",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever a modified creature you control leaves the battlefield, put a +1/+1 counter on this artifact. (Equipment, Auras you control, and counters are modifications.)",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

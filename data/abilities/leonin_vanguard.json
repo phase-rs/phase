@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, if you control three or more creatures, CARDNAME gets +1/+1 until end of turn and you gain 1 life.",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE3",
+        "Phase": "BeginCombat",
+        "ValidPlayer": "You",
+        "Execute": "TrigPump",
+        "IsPresent": "Creature.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

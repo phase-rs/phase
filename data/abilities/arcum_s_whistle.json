@@ -1,0 +1,47 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.nonWall+ActivePlayerCtrl+!firstTurnControlled"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "3"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "UnlessResolveSubs": "WhenNotPaid",
+        "IsCurse": "True",
+        "SubAbility": "DestroyPacifist",
+        "ActivationPhases": "Upkeep->BeginCombat",
+        "SpellDescription": "Choose target non-Wall creature the active player has controlled continuously since the beginning of the turn. That player may pay {X}, where X is that creature's mana value. If they don't pay, the creature attacks this turn if able, and at the beginning of the next end step, destroy it if it didn't attack this turn. Activate only before attackers are declared.",
+        "ActivationFirstCombat": "True",
+        "TgtPrompt": "Select target non-Wall creature the active player has controlled continuously since the beginning of the turn",
+        "UnlessCost": "X",
+        "staticAbilities": "MustAttack",
+        "UnlessPayer": "TargetedController"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.YouCtrl+Other"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TargetMax": "1",
+        "KWChoice": "Vigilance,Lifelink,Indestructible",
+        "ConditionDefined": "Targeted",
+        "ConditionCompare": "GE1",
+        "TgtPrompt": "Select up to one target creature you control",
+        "AILogic": "GideonBlackblade",
+        "TargetMin": "0",
+        "SpellDescription": "Up to one other target creature you control gains your choice of vigilance, lifelink, or indestructible until end of turn.",
+        "StackDescription": "SpellDescription",
+        "ConditionPresent": "Card"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.nonLand"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Exile target nonland permanent.",
+        "TgtPrompt": "Select target nonland permanent",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "During your turn, CARDNAME is a 4/4 Human Soldier creature with indestructible that's still a planeswalker.",
+        "EffectZone": "Battlefield",
+        "AddType": "Creature & Human & Soldier",
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self",
+        "SetToughness": "4",
+        "AddKeyword": "Indestructible",
+        "SetPower": "4"
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "Description": "Prevent all damage that would be dealt to CARDNAME during your turn.",
+        "ValidTarget": "Card.Self",
+        "Prevent": "True",
+        "PlayerTurn": "True"
+      }
+    }
+  ],
+  "faces": []
+}

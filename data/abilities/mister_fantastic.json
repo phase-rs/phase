@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopySpellAbility",
+        "params": {
+          "SpellDescription": "Copy target triggered ability you control twice. You may choose new targets for the copies.",
+          "ValidTgts": "Card,Emblem",
+          "TargetType": "Triggered.YouCtrl",
+          "Amount": "2",
+          "TgtPrompt": "Choose target triggered ability you control",
+          "MayChooseTarget": "True"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R G W U"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Copy target triggered ability you control twice. You may choose new targets for the copies.",
+        "ValidTgts": "Card,Emblem",
+        "TargetType": "Triggered.YouCtrl",
+        "Amount": "2",
+        "TgtPrompt": "Choose target triggered ability you control",
+        "MayChooseTarget": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of combat on your turn, if you've cast a noncreature spell this turn, draw a card.",
+        "TriggerZones": "Battlefield",
+        "CheckSVar": "X",
+        "ValidPlayer": "You",
+        "Phase": "BeginCombat",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

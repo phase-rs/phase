@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Taps",
+      "params": {
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever NICKNAME becomes tapped, draw a card.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Untaps",
+      "params": {
+        "Execute": "TrigCounters",
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever NICKNAME become untapped, put a +1/+1 counter on them."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

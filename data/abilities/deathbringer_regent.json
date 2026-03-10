@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.wasCastFromYourHandByYou+Self",
+        "PresentCompare": "GE5",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When CARDNAME enters, if you cast it from your hand and there are five or more other creatures on the battlefield, destroy all other creatures.",
+        "IsPresent": "Creature.Other",
+        "Execute": "TrigDestroy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

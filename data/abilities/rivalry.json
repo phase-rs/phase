@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "CheckSVar": "ActiveLands",
+        "TriggerDescription": "At the beginning of each player's upkeep, if that player controls more lands than each other player, CARDNAME deals 2 damage to them.",
+        "ValidPlayer": "Player",
+        "Execute": "RivalDamage",
+        "SVarCompare": "GTRivalLands",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

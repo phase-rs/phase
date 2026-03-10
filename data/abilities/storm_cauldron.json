@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "TapsForMana",
+      "params": {
+        "TriggerDescription": "Whenever a land is tapped for mana, return it to its owner's hand.",
+        "ValidCard": "Land",
+        "Execute": "TrigBounce",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AdjustLandPlays": "1",
+        "Affected": "Player",
+        "Description": "Each player may play an additional land during each of their turns."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

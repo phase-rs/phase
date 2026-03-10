@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "StaticAbilities": "Unblockable",
+          "StackDescription": "{c:Targeted} can't be blocked this turn.",
+          "SpellDescription": "Target creature can't be blocked this turn.",
+          "ValidTgts": "Creature",
+          "ExileOnMoved": "Battlefield",
+          "AILogic": "Pump",
+          "RememberObjects": "Targeted"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<2/Artifact>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "StaticAbilities": "Unblockable",
+        "StackDescription": "{c:Targeted} can't be blocked this turn.",
+        "SpellDescription": "Target creature can't be blocked this turn.",
+        "ValidTgts": "Creature",
+        "ExileOnMoved": "Battlefield",
+        "AILogic": "Pump",
+        "RememberObjects": "Targeted"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 colorless Thopter artifact creature tokens with flying.",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigBounce",
+        "TriggerDescription": "Whenever a player puts a nontoken creature onto the battlefield, that player returns a land they control to its owner's hand.",
+        "Origin": "Any",
+        "ValidCard": "Creature.!token",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

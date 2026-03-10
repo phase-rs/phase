@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature.OppCtrl,Vehicle.OppCtrl"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target creature or Vehicle an opponent controls to its owner's hand. Draw a card.",
+        "TgtPrompt": "Select target creature or Vehicle an opponent controls",
+        "SubAbility": "DBDraw"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Description": "This spell costs {2} less to cast if it targets a permanent with mana value 1.",
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Amount": "2",
+        "ValidTarget": "Permanent.cmcEQ1",
+        "EffectZone": "All"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

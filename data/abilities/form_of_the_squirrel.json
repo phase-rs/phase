@@ -1,0 +1,56 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield",
+        "TriggerDescription": "As CARDNAME enters, create a 1/1 green Squirrel creature token. You lose the game when that creature leaves the battlefield."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Secondary": "True",
+        "TriggerController": "TriggeredCardController",
+        "Execute": "TrigLose",
+        "Origin": "Battlefield",
+        "TriggerDescription": "You lose the game when that creature leaves the battlefield.",
+        "ValidCard": "Card.IsRemembered",
+        "Destination": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Creature",
+        "Description": "Creatures can't attack you.",
+        "Target": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "You have shroud.",
+        "Affected": "You",
+        "AddKeyword": "Shroud"
+      }
+    },
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "Description": "You can't cast spells.",
+        "Caster": "You",
+        "EffectZone": "Battlefield",
+        "ValidCard": "Card"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

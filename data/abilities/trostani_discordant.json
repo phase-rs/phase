@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create two 1/1 white Soldier creature tokens with lifelink.",
+        "Destination": "Battlefield",
+        "Execute": "TrigToken"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, each player gains control of all creatures they own.",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Phase": "End of Turn",
+        "Execute": "TrigGainControl"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.Other+YouCtrl",
+        "AddToughness": "1",
+        "Description": "Other creatures you control get +1/+1.",
+        "AddPower": "1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

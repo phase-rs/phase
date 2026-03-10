@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "ValidCard": "Card.Green",
+        "TriggerDescription": "Whenever you cast a green spell or a Forest you control enters, you gain 1 life."
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Forest.YouCtrl",
+        "Origin": "Any",
+        "TriggerDescription": "Whenever you cast a green spell or a Forest you control enters, you gain 1 life.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

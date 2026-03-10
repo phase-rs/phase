@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Number": "2",
+        "ValidPlayer": "Opponent",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an opponent draws their second card each turn, draw two cards."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

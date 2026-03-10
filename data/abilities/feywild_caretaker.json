@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, you take the initiative.",
+        "Origin": "Any",
+        "Execute": "TrigInitiative",
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, if you have the initiative, create a 1/1 blue Faerie Dragon creature token with flying.",
+        "CheckDefinedPlayer": "You.hasInitiative",
+        "Phase": "End of Turn",
+        "Execute": "TrigToken",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

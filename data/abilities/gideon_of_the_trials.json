@@ -1,0 +1,95 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "SpellDescription": "Until your next turn, prevent all damage target permanent would deal.",
+          "Duration": "UntilYourNextTurn",
+          "RememberObjects": "Targeted",
+          "ReplacementEffects": "RPrevent",
+          "ValidTgts": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "SpellDescription": "Until your next turn, prevent all damage target permanent would deal.",
+        "Duration": "UntilYourNextTurn",
+        "RememberObjects": "Targeted",
+        "ReplacementEffects": "RPrevent",
+        "ValidTgts": "Permanent"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": 4,
+        "toughness": 4,
+        "types": [
+          "Creature",
+          "Human",
+          "Soldier"
+        ],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Until end of turn, CARDNAME becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
+        "Defined": "Self",
+        "Planeswalker": "True",
+        "SubAbility": "GideonPrevent",
+        "Keywords": "Indestructible"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Planeswalker": "True",
+          "Ultimate": "True",
+          "Stackable": "False",
+          "SpellDescription": "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+          "ReplacementEffects": "DBYouCantLose,DBOppCantWin",
+          "Duration": "Permanent",
+          "Name": "Emblem — Gideon of the Trials",
+          "AILogic": "Always"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "Ultimate": "True",
+        "Stackable": "False",
+        "SpellDescription": "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+        "ReplacementEffects": "DBYouCantLose,DBOppCantWin",
+        "Duration": "Permanent",
+        "Name": "Emblem — Gideon of the Trials",
+        "AILogic": "Always"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

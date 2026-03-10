@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "OptionalAttackCost"
+      },
+      "params": {
+        "Description": "You may exert CARDNAME as it attacks. When you do, it gets +2/+2 until end of turn. (An exerted creature won't untap during your next untap step.)",
+        "ValidCard": "Card.Self",
+        "Trigger": "TrigPump",
+        "Cost": "Exert<1/CARDNAME>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

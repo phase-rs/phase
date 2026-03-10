@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "Protection",
+        "params": {
+          "SpellDescription": "Target permanent you control gains protection from the color of your choice until end of turn.",
+          "TgtPrompt": "Select target permanent you control",
+          "SubAbility": "DBProtection",
+          "Gains": "Choice",
+          "Choices": "AnyColor",
+          "ValidTgts": "Permanent.YouCtrl",
+          "ConditionSVarCompare": "GT5",
+          "ConditionCheckSVar": "FatefulHour"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target permanent you control gains protection from the color of your choice until end of turn.",
+        "TgtPrompt": "Select target permanent you control",
+        "SubAbility": "DBProtection",
+        "Gains": "Choice",
+        "Choices": "AnyColor",
+        "ValidTgts": "Permanent.YouCtrl",
+        "ConditionSVarCompare": "GT5",
+        "ConditionCheckSVar": "FatefulHour"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

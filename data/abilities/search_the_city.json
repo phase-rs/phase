@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile the top five cards of your library.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "SetupSearch",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "OptionalDecider": "You",
+        "Execute": "TrigFind",
+        "TriggerDescription": "Whenever you play a card with the same name as one of the exiled cards, you may put one of those cards with that name into its owner's hand. Then if there are no cards exiled with CARDNAME, sacrifice it. If you do, take an extra turn after this one.",
+        "ValidCard": "Card.sharesNameWith Remembered",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "LandPlayed",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigFind",
+        "OptionalDecider": "You",
+        "TriggerDescription": "Whenever you play a card with the same name as one of the exiled cards, you may put one of those cards with that name into its owner's hand. Then if there are no cards exiled with CARDNAME, sacrifice it. If you do, take an extra turn after this one.",
+        "ValidCard": "Land.YouCtrl+sharesNameWith Remembered",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

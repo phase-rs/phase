@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Scry",
+        "count": 1
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ConditionCheckSVar": "X",
+        "SubAbility": "DBDraw",
+        "OrOtherConditionSVarCompare": "GE4",
+        "AILogic": "MultipleChoice",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "If X is 1, scry 1,",
+        "ConditionSVarCompare": "EQ1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackersDeclared",
+      "params": {
+        "Execute": "DBRepeat",
+        "AttackingPlayer": "You",
+        "TriggerDescription": "Whenever you attack, for each opponent, create a 1/1 black Ninja creature token that's tapped and attacking that player.",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

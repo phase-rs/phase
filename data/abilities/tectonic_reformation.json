@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Cycling:R",
+        "Description": "Each land card in your hand has cycling {R}.",
+        "Affected": "Land.YouOwn",
+        "AffectedZone": "Hand"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

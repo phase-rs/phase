@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "Player.EnchantedController",
+        "TriggerDescription": "At the beginning of the draw step of enchanted creature's controller, that player draws an additional card.",
+        "Execute": "TrigDraw",
+        "Phase": "Draw",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "X",
+        "AddToughness": "X",
+        "Description": "Enchanted creature gets +1/+1 for each card in its controller's hand."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

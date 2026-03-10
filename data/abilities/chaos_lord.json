@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "Upkeep",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You",
+        "Execute": "ChangeControl",
+        "TriggerDescription": "At the beginning of your upkeep, target opponent gains control of CARDNAME if the number of permanents is even."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CanAttackIfHaste"
+      },
+      "params": {
+        "Description": "CARDNAME can attack as though it had haste unless it entered this turn.",
+        "ValidCard": "Card.Self+!ThisTurnEntered"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

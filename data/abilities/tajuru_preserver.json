@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantSacrifice"
+      },
+      "params": {
+        "ForCost": "False",
+        "Description": "Spells and abilities your opponents control can't cause you to sacrifice permanents.",
+        "ValidCause": "SpellAbility.OppCtrl",
+        "ValidCard": "Card.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

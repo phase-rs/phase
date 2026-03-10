@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever equipped creature dies, you may put a creature card from your hand onto the battlefield and attach CARDNAME to it.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard",
+        "ValidCard": "Card.AttachedBy",
+        "Execute": "CleanTheBlade",
+        "OptionalDecider": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "Equipped creature gets +2/+2."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

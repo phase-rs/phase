@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Caster": "You",
+        "Description": "As long as you control a green or blue permanent, you may cast CARDNAME as though it had flash.",
+        "IsPresent": "Permanent.Green+YouCtrl,Permanent.Blue+YouCtrl",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "ValidSA": "Spell"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

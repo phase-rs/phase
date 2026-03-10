@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "When CARDNAME attacks or blocks, sacrifice it at end of combat.",
+        "Execute": "DelTrig",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Secondary": "True",
+        "TriggerDescription": "Whenever CARDNAME attacks or blocks, sacrifice it at end of combat.",
+        "ValidCard": "Card.Self",
+        "Execute": "DelTrig"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

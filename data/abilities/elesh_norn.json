@@ -1,0 +1,67 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "2 W"
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "None"
+                }
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SorcerySpeed": "True",
+            "RememberChanged": "True",
+            "SubAbility": "DBReturn",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Exile CARDNAME,"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "DamageDone",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidTarget": "You,Permanent.YouCtrl",
+            "Execute": "TrigDealDamage",
+            "TriggerDescription": "Whenever a source an opponent controls deals damage to you or a permanent you control, that source's controller loses 2 life unless they pay {1}.",
+            "ValidSource": "Card.OppCtrl,Emblem.OppCtrl"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

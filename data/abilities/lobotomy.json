@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "RevealHand",
+        "params": {
+          "ValidTgts": "Player",
+          "SubAbility": "ChooseCard",
+          "StackDescription": "SpellDescription",
+          "SpellDescription": "Target player reveals their hand,"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Player",
+        "SubAbility": "ChooseCard",
+        "StackDescription": "SpellDescription",
+        "SpellDescription": "Target player reveals their hand,"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

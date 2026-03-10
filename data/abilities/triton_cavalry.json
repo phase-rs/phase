@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, you may return target enchantment to its owner's hand.",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "TargetsValid": "Card.Self",
+        "OptionalDecider": "You",
+        "Execute": "TrigBounce"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "R",
+        "params": {
+          "Amount": "3",
+          "SpellDescription": "Add {R}{R}{R}."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<3/P1P1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "3",
+        "SpellDescription": "Add {R}{R}{R}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "IsPresent": "Card.Self+counters_LE2_P1P1",
+        "ValidCard": "Card.Red",
+        "TriggerDescription": "Whenever you cast a red spell, if CARDNAME has fewer than three +1/+1 counters on it, put a +1/+1 counter on CARDNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

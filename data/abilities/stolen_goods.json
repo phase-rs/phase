@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "DigUntil",
+        "params": {
+          "FoundDestination": "Exile",
+          "IsCurse": "True",
+          "SubAbility": "DBEffect",
+          "SpellDescription": "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.",
+          "RememberFound": "True",
+          "ValidTgts": "Opponent",
+          "RevealedDestination": "Exile",
+          "ValidDescription": "nonland",
+          "Valid": "Card.nonLand"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "FoundDestination": "Exile",
+        "IsCurse": "True",
+        "SubAbility": "DBEffect",
+        "SpellDescription": "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.",
+        "RememberFound": "True",
+        "ValidTgts": "Opponent",
+        "RevealedDestination": "Exile",
+        "ValidDescription": "nonland",
+        "Valid": "Card.nonLand"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

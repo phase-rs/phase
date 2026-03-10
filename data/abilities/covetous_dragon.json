@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "PresentCompare": "EQ0",
+        "Execute": "TrigSac",
+        "TriggerDescription": "When you control no artifacts, sacrifice CARDNAME.",
+        "TriggerZones": "Battlefield",
+        "IsPresent": "Artifact.YouCtrl"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

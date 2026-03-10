@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlay": "True",
+        "Description": "You may look at the top card of your library any time. You may play lands and cast spells from the top of your library.",
+        "Affected": "Card.TopLibrary+YouCtrl",
+        "AffectedZone": "Library",
+        "MayLookAt": "You"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "MayPlayLimit": "1",
+        "Affected": "Card.nonLand+TopLibrary+YouCtrl,Card.nonLand+YouOwn",
+        "AffectedZone": "Library,Hand",
+        "Condition": "PlayerTurn",
+        "MayPlayWithoutManaCost": "True",
+        "MayPlay": "True",
+        "Description": "Once during each of your turns, you may cast a spell from your hand or the top of your library without paying its mana cost.",
+        "MayPlayDontGrantZonePermissions": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "CloneTarget": "Enchanted",
+          "Duration": "UntilEndOfTurn",
+          "Defined": "ExiledWith",
+          "PumpKeywords": "Haste",
+          "SpellDescription": "Enchanted land becomes a copy of the exiled card until end of turn and gains haste. It's still a land.",
+          "AddTypes": "Land"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "CloneTarget": "Enchanted",
+        "Duration": "UntilEndOfTurn",
+        "Defined": "ExiledWith",
+        "PumpKeywords": "Haste",
+        "SpellDescription": "Enchanted land becomes a copy of the exiled card until end of turn and gains haste. It's still a land.",
+        "AddTypes": "Land"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "Execute": "FreeCard",
+        "TriggerDescription": "When CARDNAME enters, draw a card, then draft a card from CARDNAME's spellbook and exile it."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

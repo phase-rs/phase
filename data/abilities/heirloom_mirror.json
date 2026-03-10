@@ -1,0 +1,80 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Draw",
+            "count": 1
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "1"
+              },
+              {
+                "type": "Tap"
+              },
+              {
+                "type": "Mana",
+                "cost": "PayLife<1>"
+              },
+              {
+                "type": "Mana",
+                "cost": "Discard<1/Card/card>"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBMill",
+            "SorcerySpeed": "True",
+            "StackDescription": "SpellDescription",
+            "SpellDescription": "Draw a card, mill a card, then put a ritual counter on CARDNAME. Then if it has three or more ritual counters on it, remove them and transform it. Activate only as a sorcery."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Exile",
+            "target": {
+              "type": "Filtered",
+              "filter": "Creature"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "2 B"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBPutCounter",
+            "StackDescription": "Exile {c:Targeted} from the graveyard.",
+            "TgtPrompt": "Select target creature card from a graveyard",
+            "SpellDescription": "Exile target creature card from a graveyard."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

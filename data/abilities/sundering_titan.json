@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, choose a land of each basic land type, then destroy those lands.",
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigChoose",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigChoose",
+        "TriggerDescription": "When CARDNAME enters or leaves the battlefield, choose a land of each basic land type, then destroy those lands.",
+        "Destination": "Any",
+        "Secondary": "True",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

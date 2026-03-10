@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, sacrifice CARDNAME unless you pay {W}{W}.",
+        "Phase": "Upkeep",
+        "Execute": "TrigUpkeep",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "DamageDealtOnce",
+      "params": {
+        "TriggerDescription": "Whenever a red creature or spell deals damage, CARDNAME deals that much damage to that creature's or spell's controller.",
+        "ValidSource": "Instant.Red,Sorcery.Red,Creature.Red+inZoneBattlefield",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

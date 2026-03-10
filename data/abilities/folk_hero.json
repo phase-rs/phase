@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "SacTypeDraw",
+        "Description": "Commander creatures you own have \"Whenever you cast a spell that shares a creature type with this creature, draw a card. This ability triggers only once each turn.\"",
+        "Affected": "Creature.IsCommander+YouOwn"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

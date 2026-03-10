@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "ActivationZone": "Hand",
+          "Triggers": "Cast",
+          "ImprintCards": "Self",
+          "ForgetOnMoved": "Exile",
+          "Duration": "Permanent",
+          "SpellDescription": "Target land gains \"{T}: Add {U}, {B}, or {R}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+          "ValidTgts": "Land",
+          "StaticAbilities": "Land,MayPlay",
+          "RememberObjects": "Targeted & Self"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Mana",
+            "cost": "ExileFromHand<1/CARDNAME>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ActivationZone": "Hand",
+        "Triggers": "Cast",
+        "ImprintCards": "Self",
+        "ForgetOnMoved": "Exile",
+        "Duration": "Permanent",
+        "SpellDescription": "Target land gains \"{T}: Add {U}, {B}, or {R}\" until CARDNAME is cast from exile. You may cast CARDNAME for as long as it remains exiled.",
+        "ValidTgts": "Land",
+        "StaticAbilities": "Land,MayPlay",
+        "RememberObjects": "Targeted & Self"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigDealDamage",
+        "Origin": "Any",
+        "TriggerDescription": "When CARDNAME enters, it deals 2 damage to each opponent and you gain 2 life. Scry 2."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

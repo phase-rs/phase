@@ -1,0 +1,52 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Battlefield",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact.cmcLEX,Creature.cmcLEX,Enchantment.cmcLEX"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select target artifact, creature, or enchantment with mana value X or less",
+        "SpellDescription": "Exile target artifact, creature, or enchantment with mana value X or less.",
+        "AnnounceTitle": "how many white cards to exile",
+        "Announce": "Exiled"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Cost": "ExileFromHand<Y/Card.White/white cards>",
+        "Description": "As an additional cost to cast this spell, you may exile any number of white cards from your hand. This spell costs {2} less to cast for each card exiled this way.",
+        "EffectZone": "All",
+        "Type": "Spell"
+      }
+    },
+    {
+      "mode": "ReduceCost",
+      "params": {
+        "Type": "Spell",
+        "ValidCard": "Card.Self",
+        "Amount": "Z",
+        "Description": "This spell costs {2} less to cast for each card exiled this way.",
+        "EffectZone": "All",
+        "Secondary": "True",
+        "Relative": "True"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

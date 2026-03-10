@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddPower": "1",
+        "Description": "Creatures you control that are enchanted get +1/+1 and can't be blocked except by creatures with defender.",
+        "Affected": "Creature.enchanted+YouCtrl",
+        "AddToughness": "1"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockBy"
+      },
+      "params": {
+        "Description": "Creatures you control can't be blocked except by creatures with defender.",
+        "Secondary": "True",
+        "ValidAttacker": "Creature.enchanted+YouCtrl",
+        "ValidBlocker": "Creature.withoutDefender"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

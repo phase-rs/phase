@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When CARDNAME enters the battlefield, create a legendary artifact equipment token named Yellow Hat with equip {2} and \"Equipped creature gets +4/+4 and gains lifelink.\"",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantBeCast",
+      "params": {
+        "CheckSVar": "Count$YourTurns",
+        "Caster": "Player.Active",
+        "EffectZone": "All",
+        "SVarCompare": "LE7",
+        "Description": "You can't cast CARDNAME during your first seven turns of the game. (Keep track if you're playing with this!)",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

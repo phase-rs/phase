@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidCard": "Creature.inZoneBattlefield,Land.inZoneBattlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever an opponent activates an ability of a creature or land that isn't a mana ability, you may draw a card.",
+        "ValidSA": "SpellAbility.!ManaAbility"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

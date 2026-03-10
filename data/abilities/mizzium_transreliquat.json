@@ -1,0 +1,57 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "SpellDescription": "CARDNAME becomes a copy of target artifact until end of turn.",
+          "TgtPrompt": "Select target artifact to copy until end of turn.",
+          "ValidTgts": "Artifact",
+          "Duration": "UntilEndOfTurn"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME becomes a copy of target artifact until end of turn.",
+        "TgtPrompt": "Select target artifact to copy until end of turn.",
+        "ValidTgts": "Artifact",
+        "Duration": "UntilEndOfTurn"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "Clone",
+        "params": {
+          "SpellDescription": "CARDNAME becomes a copy of target artifact, except it has this ability.",
+          "ValidTgts": "Artifact",
+          "GainThisAbility": "True",
+          "TgtPrompt": "Select target artifact to copy."
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "1 U R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME becomes a copy of target artifact, except it has this ability.",
+        "ValidTgts": "Artifact",
+        "GainThisAbility": "True",
+        "TgtPrompt": "Select target artifact to copy."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

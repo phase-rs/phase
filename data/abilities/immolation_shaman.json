@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": 3,
+        "toughness": 3,
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3 R R"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "CARDNAME gets +3/+3 and gains menace until end of turn.",
+        "Defined": "Self",
+        "KW": "Menace"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AbilityCast",
+      "params": {
+        "ValidCard": "Artifact.inZoneBattlefield,Creature.inZoneBattlefield,Land.inZoneBattlefield",
+        "ValidActivatingPlayer": "Opponent",
+        "TriggerDescription": "Whenever an opponent activates an ability of an artifact, creature, or land that isn't a mana ability, CARDNAME deals 1 damage to that player.",
+        "ValidSA": "SpellAbility.!ManaAbility",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDmg"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidBlocker": "Creature",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever a creature blocks a black or red creature, the blocking creature gets +1/+1 until end of turn.",
+        "Execute": "TrigPump",
+        "ValidCard": "Creature.Black,Creature.Red"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

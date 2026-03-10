@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Card.YouOwn"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AIManaPref": "G",
+        "StackDescription": "SpellDescription",
+        "TgtPrompt": "Select target card in your graveyard to return to your hand",
+        "SpellDescription": "Return target card from your graveyard to your hand. Put up to one other target card from your graveyard on top of your library. Exile CARDNAME. Adamant — If at least three green mana was spent to cast this spell, instead return those cards to your hand and exile CARDNAME.",
+        "SubAbility": "DBPump"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

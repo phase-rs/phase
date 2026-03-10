@@ -1,0 +1,46 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Duration": "Permanent",
+          "SpellDescription": "Target creature becomes an enchantment and loses all abilities until a player casts a creature spell.",
+          "ExileOnMoved": "Battlefield",
+          "RememberObjects": "Targeted",
+          "StaticAbilities": "Enchant",
+          "ValidTgts": "Creature",
+          "Triggers": "TrigCastSpell"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1 W"
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Duration": "Permanent",
+        "SpellDescription": "Target creature becomes an enchantment and loses all abilities until a player casts a creature spell.",
+        "ExileOnMoved": "Battlefield",
+        "RememberObjects": "Targeted",
+        "StaticAbilities": "Enchant",
+        "ValidTgts": "Creature",
+        "Triggers": "TrigCastSpell"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

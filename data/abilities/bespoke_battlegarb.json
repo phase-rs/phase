@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "BeginCombat",
+        "Execute": "TrigAttach",
+        "CheckSVar": "Celebration",
+        "TriggerDescription": "Celebration — At the beginning of combat on your turn, if two or more nonland permanents entered the battlefield under your control this turn, attach CARDNAME to up to one target creature you control.",
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "SVarCompare": "GE2"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "Description": "Equipped creature gets +2/+0.",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

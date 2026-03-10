@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Constellation — Whenever CARDNAME or another enchantment you control enters, creatures your opponents control get -1/-1 until end of turn.",
+        "Execute": "TrigMassacre",
+        "ValidCard": "Card.Self,Enchantment.Other+YouCtrl",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

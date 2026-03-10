@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Exile",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact"
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "PrecostDesc": "Imprint —",
+        "SpellDescription": "Exile target artifact card from a graveyard.",
+        "Imprint": "True"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "DBForget",
+        "Destination": "Any",
+        "Origin": "Exile",
+        "Static": "True",
+        "ValidCard": "Card.IsImprinted+ExiledWithSource"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Static": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "GainsAbilitiesOfZones": "Exile",
+        "GainsAbilitiesOf": "Card.IsImprinted+ExiledWithSource",
+        "Description": "CARDNAME has all activated abilities of all cards exiled with it.",
+        "Affected": "Card.Self",
+        "EffectZone": "Battlefield"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

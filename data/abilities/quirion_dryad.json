@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a spell that's white, blue, black, or red, put a +1/+1 counter on CARDNAME.",
+        "ValidCard": "Card.White,Card.Blue,Card.Black,Card.Red",
+        "Execute": "TrigPutCounter",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "PresentZone": "Hand",
+        "IsPresent": "Card.ActivePlayerCtrl",
+        "TriggerDescription": "At the beginning of each opponent's upkeep, if that player has five or more cards in hand, CARDNAME deals 2 damage to that player.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Opponent",
+        "TriggerZones": "Battlefield",
+        "PresentCompare": "GE5",
+        "Execute": "TrigDamageOpp"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

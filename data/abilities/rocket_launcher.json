@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDelayTrig",
+        "IsPresent": "Card.Self+!firstTurnControlled",
+        "SpellDescription": "CARDNAME deals 1 damage to any target. Destroy CARDNAME at the beginning of the next end step. Activate only if you've controlled CARDNAME continuously since the beginning of your most recent turn."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

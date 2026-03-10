@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "As long as you control a Human, CARDNAME has hexproof and indestructible.",
+        "Affected": "Card.Self",
+        "AddKeyword": "Hexproof & Indestructible",
+        "IsPresent": "Human.YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ActivatorThisTurnCast": "EQ1",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "Whenever a player casts their first multicolored spell each turn, each other player draws a card.",
+        "ValidActivatingPlayer": "Player",
+        "ValidCard": "Card.MultiColor"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CastWithFlash",
+      "params": {
+        "Caster": "You",
+        "Description": "You may activate equip abilities any time you could cast an instant.",
+        "ValidSA": "Activated.Equip"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

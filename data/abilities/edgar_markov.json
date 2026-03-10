@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Eminence — Whenever you cast another Vampire spell, if CARDNAME is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
+        "IsPresent": "Card.StrictlySelf",
+        "ValidCard": "Card.Vampire+Other",
+        "Execute": "TrigToken",
+        "PresentZone": "Command",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Command"
+      }
+    },
+    {
+      "mode": "SpellCast",
+      "params": {
+        "IsPresent": "Card.StrictlySelf",
+        "ValidCard": "Card.Vampire+Other",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigToken",
+        "TriggerDescription": "Eminence — Whenever you cast another Vampire spell, if CARDNAME is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
+        "PresentZone": "Battlefield",
+        "Secondary": "True"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on each Vampire you control.",
+        "Execute": "TrigPutCounterAll",
+        "ValidCard": "Creature.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

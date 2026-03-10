@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "IsPresent": "Wolf.Other+YouCtrl,Werewolf.Other+YouCtrl",
+        "Description": "As long as you control another Wolf or Werewolf, CARDNAME gets +1/+0 and has trample.",
+        "AddPower": "1",
+        "Affected": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

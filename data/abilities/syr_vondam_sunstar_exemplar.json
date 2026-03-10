@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Creature.Other+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever another creature you control dies or is put into exile, put a +1/+1 counter on NICKNAME and you gain 1 life.",
+        "Origin": "Battlefield",
+        "Destination": "Graveyard,Exile"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self+powerGE4",
+        "Destination": "Graveyard,Exile",
+        "Execute": "TrigDestroy",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "When NICKNAME dies or is put into exile while its power is 4 or greater, destroy up to one target nonland permanent."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

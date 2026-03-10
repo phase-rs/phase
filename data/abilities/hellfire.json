@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidCards": "Creature.nonBlack",
+        "SubAbility": "DBDealDamage",
+        "SpellDescription": "Destroy all nonblack creatures. CARDNAME deals X plus 3 damage to you, where X is the number of creatures that died this way.",
+        "RememberDestroyed": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

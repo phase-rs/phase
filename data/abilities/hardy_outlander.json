@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, another target creature you control gets +X/+X until end of turn, where X is this creature's power.\"",
+        "Affected": "Creature.IsCommander+YouOwn",
+        "AddTrigger": "AttacksPlayer"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

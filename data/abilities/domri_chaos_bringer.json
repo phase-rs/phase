@@ -1,0 +1,86 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "Combo R G",
+        "params": {
+          "SpellDescription": "Add {R} or {G}. If that mana is spent on a creature spell, it gains riot. (It enters with your choice of a +1/+1 counter or haste.)",
+          "Planeswalker": "True",
+          "Amount": "1",
+          "AddsKeywordsValid": "Spell.Creature",
+          "AddsKeywords": "Riot"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {R} or {G}. If that mana is spent on a creature spell, it gains riot. (It enters with your choice of a +1/+1 counter or haste.)",
+        "Planeswalker": "True",
+        "Amount": "1",
+        "AddsKeywordsValid": "Spell.Creature",
+        "AddsKeywords": "Riot"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "ForceRevealToController": "True",
+        "Optional": "True",
+        "RestRandomOrder": "True",
+        "ChangeValid": "Creature",
+        "ChangeNum": "2",
+        "SpellDescription": "Look at the top four cards of your library. You may reveal up to two creature cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Emblem — Domri, Chaos Bringer",
+          "Triggers": "EffPhase",
+          "Ultimate": "True",
+          "Planeswalker": "True",
+          "SpellDescription": "You get an emblem with \"At the beginning of each end step, create a 4/4 red and green Beast creature token with trample.\"",
+          "Image": "emblem_domri_chaos_bringer",
+          "Duration": "Permanent"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Emblem — Domri, Chaos Bringer",
+        "Triggers": "EffPhase",
+        "Ultimate": "True",
+        "Planeswalker": "True",
+        "SpellDescription": "You get an emblem with \"At the beginning of each end step, create a 4/4 red and green Beast creature token with trample.\"",
+        "Image": "emblem_domri_chaos_bringer",
+        "Duration": "Permanent"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

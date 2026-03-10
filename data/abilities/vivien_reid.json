@@ -1,0 +1,81 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 4,
+        "destination": ""
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "1",
+        "Planeswalker": "True",
+        "Optional": "True",
+        "ChangeValid": "Creature,Land",
+        "ForceRevealToController": "True",
+        "SpellDescription": "Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. Put the rest on the bottom of your library in any order."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact,Enchantment,Creature.withFlying"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target artifact, enchantment or creature with flying",
+        "SpellDescription": "Destroy target artifact, enchantment or creature with flying."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Name": "Emblem — Vivien Reid",
+          "AILogic": "Always",
+          "Image": "emblem_vivien_reid",
+          "Duration": "Permanent",
+          "SpellDescription": "You get an emblem with \"Creatures you control get +2/+2 and have vigilance, trample, and indestructible.\"",
+          "StaticAbilities": "STVivien",
+          "Planeswalker": "True",
+          "Ultimate": "True"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -8
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Emblem — Vivien Reid",
+        "AILogic": "Always",
+        "Image": "emblem_vivien_reid",
+        "Duration": "Permanent",
+        "SpellDescription": "You get an emblem with \"Creatures you control get +2/+2 and have vigilance, trample, and indestructible.\"",
+        "StaticAbilities": "STVivien",
+        "Planeswalker": "True",
+        "Ultimate": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

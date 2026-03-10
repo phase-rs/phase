@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "TriggerDescription": "When this enchantment enters, search your library for up to two basic land cards, put them onto the battlefield tapped, then shuffle.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigSearch"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn",
+        "ValidCard": "Dragon.YouCtrl",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "TriggerDescription": "When a Dragon you control enters, return this enchantment to its owner's hand."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

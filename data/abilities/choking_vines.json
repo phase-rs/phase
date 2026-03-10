@@ -1,0 +1,38 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "BecomesBlocked",
+        "params": {
+          "ValidTgts": "Creature.attacking",
+          "TargetMax": "MaxTgt",
+          "TargetMin": "0",
+          "SpellDescription": "X target attacking creatures become blocked. CARDNAME deals 1 damage to each of those creatures. (This spell works on creatures that can't be blocked.)",
+          "TgtPrompt": "Select target attacking creature",
+          "RememberTargets": "True",
+          "ActivationPhases": "Declare Blockers",
+          "SubAbility": "DBDamage"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ValidTgts": "Creature.attacking",
+        "TargetMax": "MaxTgt",
+        "TargetMin": "0",
+        "SpellDescription": "X target attacking creatures become blocked. CARDNAME deals 1 damage to each of those creatures. (This spell works on creatures that can't be blocked.)",
+        "TgtPrompt": "Select target attacking creature",
+        "RememberTargets": "True",
+        "ActivationPhases": "Declare Blockers",
+        "SubAbility": "DBDamage"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Red creatures you control have first strike.",
+        "AddKeyword": "First Strike",
+        "Affected": "Creature.Red+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

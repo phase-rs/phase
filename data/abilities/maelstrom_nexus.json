@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.YouCtrl",
+        "CheckSVar": "Y",
+        "AddKeyword": "Cascade",
+        "Description": "The first spell you cast each turn has cascade. (When you cast your first spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        "SVarCompare": "EQ0",
+        "AffectedZone": "Stack"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Filtered",
+          "filter": "Artifact"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Announce": "AdditionalCostPayTimesR,AdditionalCostPayTimesG",
+        "SpellDescription": "Destroy target artifact. For each additional {1}{R} you paid, destroy another target artifact. For each additional {1}{G} you paid, destroy another target artifact, and you gain 1 life.",
+        "AnnounceTitle": "how many times to pay the additional cost",
+        "SubAbility": "DBDestroy2"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Description": "As an additional cost to cast this spell, you may pay {1}{R} and/or {1}{G} any number of times.",
+        "ValidCard": "Card.Self",
+        "Amount": "AdditionalCostPayTimesR",
+        "Type": "Spell",
+        "EffectZone": "All",
+        "Cost": "1 R"
+      }
+    },
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "Amount": "AdditionalCostPayTimesG",
+        "ValidCard": "Card.Self",
+        "EffectZone": "All",
+        "Cost": "1 G"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

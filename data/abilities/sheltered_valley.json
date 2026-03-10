@@ -1,0 +1,49 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your upkeep, if you control three or fewer lands, you gain 1 life.",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "IsPresent": "Land.YouCtrl",
+        "PresentCompare": "LE3",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "params": {
+        "Destination": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Description": "If CARDNAME would enter, instead sacrifice each other permanent named Sheltered Valley you control, then put CARDNAME onto the battlefield.",
+        "ReplaceWith": "SacBeforeETB"
+      }
+    }
+  ],
+  "faces": []
+}

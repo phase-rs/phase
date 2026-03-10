@@ -1,0 +1,45 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "IsPresent2": "Creature.YouCtrl+YouOwn+namedMidnight Scavengers",
+            "Execute": "Meld",
+            "TriggerDescription": "At the beginning of combat on your turn, if you both own and control CARDNAME and a creature named Midnight Scavengers, exile them, then meld them into Chittering Host.",
+            "TriggerZones": "Battlefield",
+            "Phase": "BeginCombat",
+            "ValidPlayer": "You",
+            "IsPresent": "Card.Self+YouCtrl+YouOwn"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "Execute": "TrigPumpAll",
+            "ValidCard": "Card.Self",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "TriggerDescription": "When CARDNAME enters, other creatures you control get +1/+0 and menace until end of turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

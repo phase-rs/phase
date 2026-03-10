@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZoneAll",
+      "params": {
+        "ActivationLimit": "1",
+        "Execute": "DBMakeCard",
+        "ValidCards": "Human.YouCtrl,Warrior.YouCtrl",
+        "TriggerDescription": "Whenever one or more Humans and/or Warriors you control enter, conjure a card named Utility Knife onto the battlefield. This ability triggers only once each turn.",
+        "Destination": "Battlefield",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

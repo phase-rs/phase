@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "Whenever a token you control leaves the battlefield, put a +1/+1 counter on CARDNAME.",
+        "Execute": "TrigCounter",
+        "ValidCard": "Card.token+YouCtrl",
+        "Destination": "Any",
+        "TriggerZones": "Battlefield",
+        "Origin": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Any",
+        "Execute": "TrigToken",
+        "TriggerDescription": "When NICKNAME leaves the battlefield, create a number of 1/1 green Elf Warrior creature tokens equal to its power.",
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Activator": "Player",
+          "RememberObjects": "Self",
+          "EffectOwner": "You",
+          "AILogic": "Bribe",
+          "SpellDescription": "The next time CARDNAME would deal damage to you this turn, prevent that damage. Any player may activate this ability.",
+          "ReplacementEffects": "Bribe"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "3"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Activator": "Player",
+        "RememberObjects": "Self",
+        "EffectOwner": "You",
+        "AILogic": "Bribe",
+        "SpellDescription": "The next time CARDNAME would deal damage to you this turn, prevent that damage. Any player may activate this ability.",
+        "ReplacementEffects": "Bribe"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

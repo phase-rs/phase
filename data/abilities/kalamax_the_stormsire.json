@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TriggerDescription": "Whenever you cast your first instant spell each turn, if CARDNAME is tapped, copy that spell. You may choose new targets for the copy.",
+        "ValidCard": "Instant",
+        "PresentDefined": "Self",
+        "ValidActivatingPlayer": "You",
+        "IsPresent": "Card.tapped",
+        "ActivatorThisTurnCast": "EQ1",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopy"
+      }
+    },
+    {
+      "mode": "SpellCopy",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever you copy an instant spell, put a +1/+1 counter on NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

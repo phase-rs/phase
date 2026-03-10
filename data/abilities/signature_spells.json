@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, seek two instant and/or sorcery cards with mana value 3, then exile them.",
+        "Execute": "TrigSeekTwo",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "DBCopy",
+        "Phase": "Upkeep",
+        "TriggerDescription": "At the beginning of your upkeep, you may copy a card exiled with CARDNAME. You may cast the copy without paying its mana cost.",
+        "ValidPlayer": "You",
+        "OptionalDecider": "You",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Static": "True",
+        "ValidCard": "Card.IsImprinted+ExiledWithSource",
+        "Execute": "DBForget",
+        "Origin": "Exile",
+        "Destination": "Any"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Battlefield",
+        "Destination": "Any",
+        "Execute": "DBCleanup",
+        "Static": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

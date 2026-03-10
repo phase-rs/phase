@@ -1,0 +1,41 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "At the beginning of your end step, put a coin counter on another target creature.",
+        "Phase": "End of Turn",
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigReturn",
+        "Destination": "Graveyard,Exile",
+        "Origin": "Battlefield",
+        "ValidCard": "Creature.counters_GE1_COIN",
+        "TriggerDescription": "Whenever a creature with a coin counter on it dies or is put into exile, return that card to the battlefield under your control."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "CheckSVar": "X",
+        "Description": "As long as your devotion to white and black is less than seven, NICKNAME isn't a creature.",
+        "SVarCompare": "LT7",
+        "RemoveType": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

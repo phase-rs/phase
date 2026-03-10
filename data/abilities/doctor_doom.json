@@ -1,0 +1,39 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigToken",
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "When CARDNAME enters, create two 3/3 colorless Robot Villain artifact creature tokens named Doombot.",
+        "Destination": "Battlefield",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigDraw",
+        "TriggerDescription": "At the beginning of your end step, you draw a card and lose 1 life.",
+        "Phase": "End of Turn",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "IsPresent": "Creature.Artifact+YouCtrl,Plan.YouCtrl",
+        "Description": "As long as you control an artifact creature or a Plan, CARDNAME has indestructible.",
+        "Affected": "Card.Self",
+        "AddKeyword": "Indestructible"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

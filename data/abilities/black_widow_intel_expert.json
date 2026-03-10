@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "CombatDamage": "True",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to an opponent, you and that player each draw two cards.",
+        "Execute": "TrigDraw",
+        "ValidSource": "Card.Self",
+        "ValidTarget": "Opponent"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

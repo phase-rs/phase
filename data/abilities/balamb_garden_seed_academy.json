@@ -1,0 +1,93 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Combo G U",
+            "params": {
+              "SpellDescription": "Add {G} or {U}."
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {G} or {U}."
+          }
+        },
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Other",
+            "api_type": "SetState",
+            "params": {
+              "ReduceCost": "X",
+              "Defined": "Self",
+              "SpellDescription": "Transform this land. This ability costs {1} less to activate for each other Town you control.",
+              "Mode": "Transform",
+              "AILogic": "Always"
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": "5 G U"
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "ReduceCost": "X",
+            "Defined": "Self",
+            "SpellDescription": "Transform this land. This ability costs {1} less to activate for each other Town you control.",
+            "Mode": "Transform",
+            "AILogic": "Always"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": [
+        {
+          "event": "Moved",
+          "params": {
+            "Destination": "Battlefield",
+            "ReplaceWith": "ETBTapped",
+            "Description": "CARDNAME enters tapped.",
+            "ValidCard": "Card.Self",
+            "ReplacementResult": "Updated"
+          }
+        }
+      ]
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigDraw",
+            "ValidCard": "Card.Self",
+            "TriggerDescription": "Whenever NICKNAME attacks, draw a card."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

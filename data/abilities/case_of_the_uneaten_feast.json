@@ -1,0 +1,60 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Animate",
+        "power": null,
+        "toughness": null,
+        "types": [],
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Sacrifice",
+        "target": {
+          "type": "None"
+        }
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "staticAbilities": "Play",
+        "Activation": "Solved",
+        "SpellDescription": "Creature cards in your graveyard gain \"You may cast this card from your graveyard\" until end of turn.",
+        "PrecostDesc": "Solved —",
+        "Defined": "ValidGraveyard Creature.YouOwn"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "Origin": "Any",
+        "ValidCard": "Creature.YouCtrl",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigGainLife",
+        "TriggerDescription": "Whenever a creature you control enters, you gain 1 life."
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Phase": "End of Turn",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSolve",
+        "TriggerDescription": "To solve — You've gained 5 or more life this turn. (If unsolved, solve at the beginning of your end step.)",
+        "IsPresent": "Card.Self+!IsSolved",
+        "CheckSVar": "X",
+        "ValidPlayer": "You",
+        "SVarCompare": "GE5"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

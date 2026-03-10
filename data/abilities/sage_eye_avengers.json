@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "OptionalDecider": "You",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigBounce",
+        "TriggerDescription": "Whenever CARDNAME attacks, you may return target creature to its owner's hand if its power is less than CARDNAME's power."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

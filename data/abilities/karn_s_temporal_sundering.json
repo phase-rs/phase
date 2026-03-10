@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "NumTurns": "1",
+          "SubAbility": "DBReturn",
+          "TgtPrompt": "Select target player to take an extra turn",
+          "ValidTgts": "Player",
+          "SpellDescription": "Target player takes an extra turn after this one. Return up to one target nonland permanent to its owner's hand. Exile CARDNAME."
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "NumTurns": "1",
+        "SubAbility": "DBReturn",
+        "TgtPrompt": "Select target player to take an extra turn",
+        "ValidTgts": "Player",
+        "SpellDescription": "Target player takes an extra turn after this one. Return up to one target nonland permanent to its owner's hand. Exile CARDNAME."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

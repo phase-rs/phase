@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Token",
+        "name": "r_6_6_dragon_flying",
+        "power": 0,
+        "toughness": 0,
+        "types": [],
+        "colors": [],
+        "keywords": []
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBDamage",
+        "SpellDescription": "If this spell was kicked, create a 6/6 red Dragon creature token with flying. For each opponent, choose up to one target creature that player controls. CARDNAME deals damage equal to the greatest power among creatures you control to each of the chosen creatures.",
+        "Condition": "Kicked"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

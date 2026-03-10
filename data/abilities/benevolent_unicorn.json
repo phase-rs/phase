@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "DamageDone",
+      "params": {
+        "ValidSource": "Spell",
+        "ValidTarget": "Permanent,Player",
+        "ReplaceWith": "DmgMinus1",
+        "ActiveZones": "Battlefield",
+        "Description": "If a spell would deal damage to a permanent or player, it deals that much damage minus 1 to that permanent or player instead."
+      }
+    }
+  ],
+  "faces": []
+}

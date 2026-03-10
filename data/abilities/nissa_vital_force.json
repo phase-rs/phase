@@ -1,0 +1,83 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Untap",
+        "target": {
+          "type": "Filtered",
+          "filter": "Land.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 1
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SubAbility": "DBAnimate",
+        "Planeswalker": "True",
+        "TgtPrompt": "Select target land you control",
+        "SpellDescription": "Untap target land you control. Until your next turn, it becomes a 5/5 Elemental creature with haste. It's still a land."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Hand",
+        "target": {
+          "type": "Filtered",
+          "filter": "Permanent.YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -3
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Return target permanent card from your graveyard to your hand.",
+        "Planeswalker": "True",
+        "TgtPrompt": "Choose target permanent card in your graveyard"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "SpellDescription": "You get an emblem with \"Whenever a land you control enters, you may draw a card.\"",
+          "Planeswalker": "True",
+          "Duration": "Permanent",
+          "AILogic": "Always",
+          "Ultimate": "True",
+          "Name": "Emblem — Nissa, Vital Force",
+          "Triggers": "TrigDraw",
+          "Image": "emblem_nissa_vital_force"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -6
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "You get an emblem with \"Whenever a land you control enters, you may draw a card.\"",
+        "Planeswalker": "True",
+        "Duration": "Permanent",
+        "AILogic": "Always",
+        "Ultimate": "True",
+        "Name": "Emblem — Nissa, Vital Force",
+        "Triggers": "TrigDraw",
+        "Image": "emblem_nissa_vital_force"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

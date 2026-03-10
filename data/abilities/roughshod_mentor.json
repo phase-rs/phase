@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddKeyword": "Trample",
+        "Description": "Green creatures you control have trample.",
+        "Affected": "Creature.Green+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

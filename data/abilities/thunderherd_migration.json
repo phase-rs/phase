@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Library",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeType": "Land.Basic",
+        "Tapped": "True",
+        "ChangeTypeDesc": "basic land",
+        "SpellDescription": "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        "StackDescription": "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        "ChangeNum": "1"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

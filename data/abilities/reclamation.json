@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttackUnless"
+      },
+      "params": {
+        "Description": "Black creatures can't attack unless their controller sacrifices a land for each black creature they control that's attacking. (This cost is paid as attackers are declared.)",
+        "ValidCard": "Creature.Black",
+        "Cost": "Sac<1/Land>"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

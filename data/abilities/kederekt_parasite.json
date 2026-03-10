@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Drawn",
+      "params": {
+        "TriggerDescription": "Whenever an opponent draws a card, if you control a red permanent, you may have CARDNAME deal 1 damage to that player.",
+        "ValidCard": "Card.OppOwn",
+        "IsPresent": "Permanent.Red+YouCtrl",
+        "TriggerZones": "Battlefield",
+        "OptionalDecider": "You",
+        "Execute": "TrigDamage"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "RaiseCost",
+      "params": {
+        "Type": "Spell",
+        "Cost": "W",
+        "Activator": "You",
+        "ValidCard": "Card.White",
+        "Description": "White spells you cast cost {W} more to cast."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

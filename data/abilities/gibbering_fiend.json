@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Origin": "Any",
+        "Execute": "TrigDmg1",
+        "TriggerDescription": "When CARDNAME enters, it deals 1 damage to each opponent.",
+        "Destination": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigDmg2",
+        "Delirium": "True",
+        "TriggerDescription": "Delirium — At the beginning of each opponent's upkeep, if there are four or more card types among cards in your graveyard, CARDNAME deals 1 damage to that player.",
+        "Phase": "Upkeep",
+        "ValidPlayer": "Opponent",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigRoll",
+        "Destination": "Graveyard",
+        "TriggerDescription": "When CARDNAME dies, roll a six-sided die. If the result is 4 or less, CARDNAME deals that much damage to you."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

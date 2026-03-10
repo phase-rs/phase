@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME blocks a creature, you may return CARDNAME to its owner's hand. If you do, you may put a creature card from your hand onto the battlefield blocking that creature.",
+        "ValidCard": "Creature",
+        "Execute": "TrigBounce",
+        "ValidBlocker": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

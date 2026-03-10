@@ -1,0 +1,44 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Mana",
+        "produced": "B",
+        "params": {
+          "Amount": "4",
+          "AINoRecursiveCheck": "True",
+          "AILogic": "ManaRitual",
+          "SpellDescription": "Add {B}{B}{B}{B}."
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "B"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Amount": "4",
+        "AINoRecursiveCheck": "True",
+        "AILogic": "ManaRitual",
+        "SpellDescription": "Add {B}{B}{B}{B}."
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

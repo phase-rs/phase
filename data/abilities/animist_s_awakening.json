@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": "Battlefield"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "ChangeNum": "All",
+        "SpellDescription": "Reveal the top X cards of your library. Put all land cards from among them onto the battlefield tapped and the rest on the bottom of your library in a random order. Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, untap those lands.",
+        "ChangeValid": "Land",
+        "Tapped": "True",
+        "Reveal": "True",
+        "SubAbility": "DBUntap",
+        "RestRandomOrder": "True",
+        "RememberChanged": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

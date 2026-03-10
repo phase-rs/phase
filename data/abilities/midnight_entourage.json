@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another Aetherborn you control dies, you draw a card and you lose 1 life.",
+        "ValidCard": "Card.Self,Aetherborn.Other+YouCtrl",
+        "Destination": "Graveyard",
+        "Execute": "TrigDraw"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Aetherborn you control get +1/+1.",
+        "AddToughness": "1",
+        "AddPower": "1",
+        "Affected": "Aetherborn.Other+YouCtrl"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

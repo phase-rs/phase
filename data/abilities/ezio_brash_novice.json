@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever CARDNAME attacks, put a +1/+1 counter on it.",
+        "Execute": "TrigPutCounter",
+        "ValidCard": "Creature.Self"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Card.Self",
+        "AddKeyword": "First Strike",
+        "Description": "As long as NICKNAME has two or more counters on it, it has first strike and is an Assassin in addition to its other types.",
+        "AddType": "Assassin",
+        "CheckSVar": "X",
+        "SVarCompare": "GT1"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

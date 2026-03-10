@@ -1,0 +1,27 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Command",
+        "TriggerDescription": "Byzantium Radiation — At the beginning of your upkeep, put an exposure counter on CARDNAME. Then you lose life equal to the number of exposure counters on it.",
+        "Phase": "Upkeep",
+        "Execute": "TrigPutCounter"
+      }
+    },
+    {
+      "mode": "ChaosEnsues",
+      "params": {
+        "TriggerDescription": "Whenever chaos ensues, create two 2/2 black Alien Angel artifact creature tokens with first strike, vigilance, and \"Whenever an opponent casts a creature spell, this permanent isn't a creature until end of turn.\"",
+        "TriggerZones": "Command",
+        "Execute": "TrigToken"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

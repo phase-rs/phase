@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Command",
+        "TriggerDescription": "Whenever a creature you control enters, it gains two abilities chosen at random from flying, first strike, trample, haste, protection from black, protection from red, and vigilance.",
+        "Destination": "Battlefield",
+        "ValidCard": "Creature.YouCtrl",
+        "Execute": "PumpRandom",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

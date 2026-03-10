@@ -1,0 +1,17 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "All Slivers have \"Sacrifice this permanent: You gain 3 life.\"",
+        "Affected": "Sliver",
+        "AddAbility": "GainLife"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

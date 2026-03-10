@@ -1,0 +1,30 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, exile up to one target creature that player controls until CARDNAME leaves the battlefield.",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigExile",
+        "Origin": "Any",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Other Knights you control get +2/+2 and have protection from Assassins.",
+        "AddKeyword": "Protection:Assassin",
+        "AddToughness": "2",
+        "Affected": "Knight.YouCtrl+Other",
+        "AddPower": "2"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

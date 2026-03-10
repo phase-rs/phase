@@ -1,0 +1,51 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Always",
+      "params": {
+        "TriggerDescription": "When you control no Islands, sacrifice this creature.",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigSac",
+        "IsPresent": "Island.YouCtrl",
+        "PresentCompare": "EQ0"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "ValidPlayer": "You",
+        "TriggerZones": "Battlefield",
+        "Phase": "Upkeep",
+        "Execute": "TrigUntap",
+        "OptionalDecider": "You",
+        "TriggerDescription": "At the beginning of your upkeep, you may pay {U}{U}{U}. If you do, untap this creature."
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "params": {
+        "ValidCard": "Card.Self",
+        "UnlessDefender": "controlsIsland",
+        "Description": "This creature can't attack unless defending player controls an Island."
+      }
+    }
+  ],
+  "replacements": [
+    {
+      "event": {
+        "Other": "Untap"
+      },
+      "params": {
+        "ValidStepTurnToController": "You",
+        "ValidCard": "Card.Self",
+        "Layer": "CantHappen",
+        "Description": "This creature doesn't untap during your untap step."
+      }
+    }
+  ],
+  "faces": []
+}

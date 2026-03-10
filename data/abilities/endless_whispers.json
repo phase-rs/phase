@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddTrigger": "TrigEndlessDies",
+        "AddSVar": "EndlessReturn",
+        "Description": "Each creature has \"When this creature dies, choose target opponent. That player puts this card from its owner's graveyard onto the battlefield under their control at the beginning of the next end step.\"",
+        "Affected": "Creature"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

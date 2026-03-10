@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "ChangesZone",
+          "params": {
+            "TriggerDescription": "When CARDNAME enters, search your library and/or graveyard for a non-Human creature card with mana value X or less and put it onto the battlefield. If you search your library this way, shuffle.",
+            "Destination": "Battlefield",
+            "Origin": "Any",
+            "ValidCard": "Card.Self",
+            "Execute": "TrigSearch"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": {
+            "Other": "AssignCombatDamageAsUnblocked"
+          },
+          "params": {
+            "Description": "For each non-Human creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
+            "Optional": "True",
+            "ValidCard": "Creature.YouCtrl+nonHuman"
+          }
+        }
+      ],
+      "replacements": []
+    }
+  ]
+}

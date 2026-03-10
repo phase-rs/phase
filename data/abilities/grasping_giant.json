@@ -1,0 +1,18 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "Execute": "TrigExile",
+        "TriggerDescription": "Whenever CARDNAME becomes blocked by a creature, exile that creature until CARDNAME leaves the battlefield.",
+        "ValidCard": "Card.Self",
+        "ValidBlocker": "Creature"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

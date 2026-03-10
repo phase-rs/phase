@@ -1,0 +1,53 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "CopyPermanent",
+        "params": {
+          "TgtPrompt": "Select another target creature you control",
+          "SorcerySpeed": "True",
+          "PumpKeywords": "Haste",
+          "AtEOT": "Sacrifice",
+          "SubAbility": "DBAnimate",
+          "RememberTokens": "True",
+          "SpellDescription": "Create a token that's a copy of another target creature you control. It gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step. Activate only as a sorcery.",
+          "ValidTgts": "Creature.Other+YouCtrl"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "R"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "TgtPrompt": "Select another target creature you control",
+        "SorcerySpeed": "True",
+        "PumpKeywords": "Haste",
+        "AtEOT": "Sacrifice",
+        "SubAbility": "DBAnimate",
+        "RememberTokens": "True",
+        "SpellDescription": "Create a token that's a copy of another target creature you control. It gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step. Activate only as a sorcery.",
+        "ValidTgts": "Creature.Other+YouCtrl"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Targeted",
+          "SpellDescription": "Creatures target player controls can't block this turn. CARDNAME deals 1 damage to each white and/or blue creature that player controls.",
+          "StaticAbilities": "OppCantBlock",
+          "SubAbility": "DBDamage",
+          "AILogic": "Evasion",
+          "ValidTgts": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Targeted",
+        "SpellDescription": "Creatures target player controls can't block this turn. CARDNAME deals 1 damage to each white and/or blue creature that player controls.",
+        "StaticAbilities": "OppCantBlock",
+        "SubAbility": "DBDamage",
+        "AILogic": "Evasion",
+        "ValidTgts": "Player"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

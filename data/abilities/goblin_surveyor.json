@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "AddAbility": "ABDraw",
+        "AffectedZone": "Graveyard",
+        "Description": "Max speed — {3}, Exile this card from your graveyard: Draw a card.",
+        "Affected": "Card.Self",
+        "EffectZone": "Graveyard",
+        "Condition": "MaxSpeed"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

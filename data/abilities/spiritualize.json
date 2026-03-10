@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "Triggers": "TrigDamage",
+          "RememberObjects": "Targeted",
+          "SpellDescription": "Until end of turn, whenever target creature deals damage, you gain that much life. Draw a card.",
+          "SubAbility": "DBDraw",
+          "ValidTgts": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "Triggers": "TrigDamage",
+        "RememberObjects": "Targeted",
+        "SpellDescription": "Until end of turn, whenever target creature deals damage, you gain that much life. Draw a card.",
+        "SubAbility": "DBDraw",
+        "ValidTgts": "Creature"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

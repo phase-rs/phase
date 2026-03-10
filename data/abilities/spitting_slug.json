@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlocked",
+      "params": {
+        "ValidCard": "Card.Self",
+        "Execute": "PumpSelf",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, you may pay {1}{G}. If you do, CARDNAME gains first strike until end of turn. Otherwise, each creature blocking or blocked by CARDNAME gains first strike until end of turn."
+      }
+    },
+    {
+      "mode": "Blocks",
+      "params": {
+        "Execute": "PumpSelf",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked, you may pay {1}{G}. If you do, CARDNAME gains first strike until end of turn. Otherwise, each creature blocking or blocked by CARDNAME gains first strike until end of turn.",
+        "Secondary": "True",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

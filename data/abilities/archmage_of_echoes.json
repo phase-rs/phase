@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "Execute": "TrigCopySpell",
+        "ValidCard": "Permanent.Faerie,Permanent.Wizard",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever you cast a Faerie or Wizard permanent spell, copy it. (The copy becomes a token.)",
+        "ValidActivatingPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "AddTurn",
+        "params": {
+          "Defined": "You",
+          "SpellDescription": "For each five counters removed this way, take an extra turn after this one.",
+          "NumTurns": "X"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "SubCounter<All/P1P1>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Defined": "You",
+        "SpellDescription": "For each five counters removed this way, take an extra turn after this one.",
+        "NumTurns": "X"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "TargetsValid": "Card.Self",
+        "TriggerDescription": "Heroic — Whenever you cast a spell that targets CARDNAME, put a +1/+1 counter on it.",
+        "Execute": "TrigPutCounter",
+        "ValidActivatingPlayer": "You",
+        "TriggerZones": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

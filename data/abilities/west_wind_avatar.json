@@ -1,0 +1,40 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Card.Self",
+        "TriggerDescription": "Whenever this creature enters or attacks, you may sacrifice a token or a land. If you do, you gain 3 life.",
+        "Destination": "Battlefield",
+        "Execute": "TrigGainLife",
+        "Origin": "Any"
+      }
+    },
+    {
+      "mode": "Attacks",
+      "params": {
+        "TriggerDescription": "Whenever this creature enters or attacks, you may sacrifice a token or a land. If you do, you gain 3 life.",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigGainLife",
+        "TriggerZones": "Battlefield"
+      }
+    },
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerDescription": "Disappear — At the beginning of your end step, if a permanent left the battlefield under your control this turn, draw a card.",
+        "Revolt": "True",
+        "Phase": "End of Turn",
+        "Execute": "TrigDraw",
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "You"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

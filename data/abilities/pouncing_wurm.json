@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Origin": "Any",
+        "Execute": "TrigPut",
+        "Static": "True",
+        "ValidCard": "Card.Self+kicked",
+        "TriggerDescription": "If CARDNAME was kicked, it enters with three +1/+1 counters on it and with haste.",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, attach it to target creature you control. That creature gains indestructible until end of turn.",
+        "Destination": "Battlefield",
+        "Execute": "TrigAttach",
+        "ValidCard": "Card.Self",
+        "Origin": "Any"
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EquippedBy",
+        "AddKeyword": "Haste",
+        "AddPower": "1",
+        "Description": "Equipped creature gets +1/+0 and has haste."
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

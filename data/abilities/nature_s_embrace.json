@@ -1,0 +1,26 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddPower": "2",
+        "AddToughness": "2",
+        "Description": "As long as enchanted permanent is a creature, it gets +2/+2."
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Land.EnchantedBy",
+        "AddAbility": "DBMana",
+        "Description": "As long as enchanted permanent is a land, it has \"{T}: Add two mana of any one color.\""
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

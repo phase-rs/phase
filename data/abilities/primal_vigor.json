@@ -1,0 +1,31 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "CreateToken"
+      },
+      "params": {
+        "Description": "If one or more tokens would be created, twice that many of those tokens are created instead.",
+        "ReplaceWith": "DoubleToken",
+        "ActiveZones": "Battlefield"
+      }
+    },
+    {
+      "event": {
+        "Other": "AddCounter"
+      },
+      "params": {
+        "ReplaceWith": "DoubleCounters",
+        "ValidCounterType": "P1P1",
+        "ValidCard": "Creature.inZoneBattlefield",
+        "ActiveZones": "Battlefield",
+        "Description": "If one or more +1/+1 counters would be put on a creature, twice that many +1/+1 counters are put on that creature instead."
+      }
+    }
+  ],
+  "faces": []
+}

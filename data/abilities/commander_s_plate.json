@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "Equipped creature gets +3/+3 and has protection from each color that's not in your commander's color identity.",
+        "AddPower": "3",
+        "Affected": "Creature.EquippedBy",
+        "AddToughness": "3",
+        "AddKeyword": "Protection from NotCommanderColorID"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

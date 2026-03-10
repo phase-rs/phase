@@ -1,0 +1,98 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": "C",
+        "params": {
+          "SpellDescription": "Add {C}."
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Add {C}."
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Name": "Phyrexian Scrapyard",
+          "SpellDescription": "Conjure a card named Phyrexian Scrapyard into your hand.",
+          "Zone": "Hand"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "1"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Mana",
+            "cost": "Discard<1/Card>"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Phyrexian Scrapyard",
+        "SpellDescription": "Conjure a card named Phyrexian Scrapyard into your hand.",
+        "Zone": "Hand"
+      }
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Other",
+        "api_type": "MakeCard",
+        "params": {
+          "Name": "Soul of New Phyrexia",
+          "SorcerySpeed": "True",
+          "SpellDescription": "Conjure a card named Soul of New Phyrexia onto the battlefield. Activate only as a sorcery.",
+          "Zone": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": "2"
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "None"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "Name": "Soul of New Phyrexia",
+        "SorcerySpeed": "True",
+        "SpellDescription": "Conjure a card named Soul of New Phyrexia onto the battlefield. Activate only as a sorcery.",
+        "Zone": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

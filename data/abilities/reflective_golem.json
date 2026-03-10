@@ -1,0 +1,21 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "params": {
+        "IsSingleTarget": "True",
+        "ValidActivatingPlayer": "You",
+        "ValidCard": "Instant,Sorcery",
+        "TriggerDescription": "Whenever you cast an instant or sorcery spell that targets only CARDNAME, you may pay {2}. If you do, copy that spell. You may choose new targets for the copy.",
+        "TargetsValid": "Card.Self",
+        "TriggerZones": "Battlefield",
+        "Execute": "TrigCopy"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

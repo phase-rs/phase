@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidTarget": "Player.wasDealtCombatDamageThisTurnBySourceTimes EQ1",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever NICKNAME deals combat damage to a player for the first time each turn, untap all attacking creatures. After this combat phase, there is an additional combat phase.",
+        "ValidSource": "Card.Self",
+        "Execute": "TrigUntap"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

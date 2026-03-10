@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": {
+        "Other": "CantAttackUnless"
+      },
+      "params": {
+        "Cost": "2",
+        "Description": "CARDNAME can't attack or block unless you pay {2}.",
+        "ValidCard": "Card.Self"
+      }
+    },
+    {
+      "mode": {
+        "Other": "CantBlockUnless"
+      },
+      "params": {
+        "Cost": "2",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Other",
+        "api_type": "BidLife",
+        "params": {
+          "AIBidMax": "10",
+          "BidSubAbility": "DBLoseLife",
+          "SpellDescription": "Each player may bid life. You start the bidding with a bid of any number. In turn order, each player may top the high bid. The bidding ends if the high bid stands. The high bidder loses life equal to the high bid and draws four cards.",
+          "StartBidding": "Any",
+          "AILogic": "Min"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "AIBidMax": "10",
+        "BidSubAbility": "DBLoseLife",
+        "SpellDescription": "Each player may bid life. You start the bidding with a bid of any number. In turn order, each player may top the high bid. The bidding ends if the high bid stands. The high bidder loses life equal to the high bid and draws four cards.",
+        "StartBidding": "Any",
+        "AILogic": "Min"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

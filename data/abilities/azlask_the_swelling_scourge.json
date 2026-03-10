@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PumpAll",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "All",
+          "filter": ""
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "W U B R G"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Creatures you control get +X/+X until end of turn, where X is the number of experience counters you have.",
+        "ValidCards": "Creature.YouCtrl",
+        "SubAbility": "DBPumpAll"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidCard": "Card.Self,Creature.Colorless+YouCtrl",
+        "Destination": "Graveyard",
+        "Execute": "TrigExperience",
+        "Origin": "Battlefield",
+        "TriggerDescription": "Whenever CARDNAME or another colorless creature you control dies, you get an experience counter."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

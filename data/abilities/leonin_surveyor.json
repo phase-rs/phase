@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Description": "During your turn, this creature has first strike.",
+        "AddKeyword": "First Strike",
+        "Condition": "PlayerTurn",
+        "Affected": "Card.Self"
+      }
+    },
+    {
+      "mode": "Continuous",
+      "params": {
+        "Condition": "MaxSpeed",
+        "AddAbility": "ABDraw",
+        "Description": "Max speed — {3}, Exile this card from your graveyard: Draw a card.",
+        "EffectZone": "Graveyard",
+        "Affected": "Card.Self",
+        "AffectedZone": "Graveyard"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

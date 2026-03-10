@@ -1,0 +1,22 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "Execute": "TrigPutCounter",
+        "TriggerZones": "Battlefield",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of your end step, if you haven't cast a spell from your hand this turn and CARDNAME doesn't have a flying counter on it, put a flying counter on it.",
+        "SVarCompare": "EQ0",
+        "IsPresent": "Card.Self+counters_EQ0_Flying",
+        "ValidPlayer": "You",
+        "CheckSVar": "X"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

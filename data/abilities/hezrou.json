@@ -1,0 +1,50 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "AttackerBlockedOnce",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "ValidCard": "Creature.YouCtrl",
+            "Execute": "TrigPump",
+            "TriggerDescription": "Whenever one or more creatures you control become blocked, each blocking creature gets -1/-1 until end of turn."
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [
+        {
+          "kind": "Spell",
+          "effect": {
+            "type": "PumpAll",
+            "power": -1,
+            "toughness": -1,
+            "target": {
+              "type": "All",
+              "filter": ""
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "remaining_params": {
+            "ValidCards": "Creature.blockedThisTurn",
+            "SpellDescription": "Each creature that blocked this turn gets -1/-1 until end of turn."
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

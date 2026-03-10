@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [
+    {
+      "event": {
+        "Other": "GameLoss"
+      },
+      "params": {
+        "ValidPlayer": "You",
+        "Description": "If you would lose the game, instead shuffle your hand, your graveyard, and all permanents you own into your library, then draw seven cards and your life total becomes 20.",
+        "ReplaceWith": "ShuffleDrawSetLife",
+        "ActiveZones": "Battlefield"
+      }
+    }
+  ],
+  "faces": []
+}

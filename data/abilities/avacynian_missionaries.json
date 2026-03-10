@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Phase",
+          "params": {
+            "TriggerZones": "Battlefield",
+            "Phase": "End of Turn",
+            "Execute": "TrigTransform",
+            "IsPresent": "Card.Self+equipped",
+            "TriggerDescription": "At the beginning of your end step, if CARDNAME is equipped, transform it.",
+            "ValidPlayer": "You"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Transformed",
+          "params": {
+            "TriggerDescription": "When this creature transforms into CARDNAME, you may exile another target creature until CARDNAME leaves the battlefield.",
+            "Execute": "TrigExile",
+            "OptionalDecider": "You",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

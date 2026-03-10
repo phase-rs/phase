@@ -1,0 +1,43 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "GenericEffect",
+        "params": {
+          "RememberObjects": "Self",
+          "StaticAbilities": "Unblockable",
+          "SpellDescription": "CARDNAME can't be blocked this turn.",
+          "ExileOnMoved": "Battlefield"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "2 U"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "RememberObjects": "Self",
+        "StaticAbilities": "Unblockable",
+        "SpellDescription": "CARDNAME can't be blocked this turn.",
+        "ExileOnMoved": "Battlefield"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "TriggerDescription": "When CARDNAME enters, target player mills three cards. (They put the top three cards of their library into their graveyard.)",
+        "Origin": "Any",
+        "Execute": "TrigMill",
+        "ValidCard": "Card.Self",
+        "Destination": "Battlefield"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "LoseLife",
+        "amount": 7
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": "tapXType<5/Wizard>"
+      },
+      "sub_ability": null,
+      "remaining_params": {
+        "SpellDescription": "Target player loses 7 life.",
+        "ValidTgts": "Player",
+        "TgtPrompt": "Select a player to lose 7 life"
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Execute": "TrigCopyPermanent",
+        "TriggerZones": "Command",
+        "Destination": "Battlefield",
+        "TriggerDescription": "Eminence — Whenever another nontoken Wizard you control enters, if CARDNAME is in the command zone or on the battlefield, you may pay {1}. If you do, create a token that's a copy of that Wizard. The token gains haste. Exile it at the beginning of the next end step.",
+        "Origin": "Any",
+        "ValidCard": "Wizard.YouCtrl+!token+Other",
+        "PresentZone": "Command",
+        "IsPresent": "Card.StrictlySelf"
+      }
+    },
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "ValidCard": "Wizard.YouCtrl+!token+Other",
+        "IsPresent": "Card.StrictlySelf",
+        "Execute": "TrigCopyPermanent",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Eminence — Whenever another nontoken Wizard you control enters, if CARDNAME is in the command zone or on the battlefield, you may pay {1}. If you do, create a token that's a copy of that Wizard. The token gains haste. Exile it at the beginning of the next end step.",
+        "Origin": "Any",
+        "Destination": "Battlefield",
+        "PresentZone": "Battlefield",
+        "Secondary": "True"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

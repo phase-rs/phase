@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "params": {
+        "TriggerZones": "Battlefield",
+        "ValidPlayer": "Player",
+        "Phase": "End of Turn",
+        "TriggerDescription": "At the beginning of each player's end step, that player may draw a card if a player other than you lost life this turn.",
+        "Execute": "DrawDamageOther"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "params": {
+        "Destination": "Battlefield",
+        "OptionalDecider": "You",
+        "TriggerDescription": "When CARDNAME enters, you may exile target creature with toughness 3 or greater until CARDNAME leaves the battlefield.",
+        "Origin": "Any",
+        "Execute": "TrigExile",
+        "ValidCard": "Card.Self"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "schema.json",
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": 0,
+        "toughness": 0,
+        "target": {
+          "type": "Filtered",
+          "filter": "Creature"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "remaining_params": {
+        "StackDescription": "Exile {c:Targeted} and all Auras attached to them.",
+        "SubAbility": "DBExile",
+        "RememberTargets": "True",
+        "TargetMin": "0",
+        "TargetMax": "MaxTgts",
+        "SpellDescription": "Exile any number of target creatures and all Auras attached to them.",
+        "IsCurse": "True"
+      }
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

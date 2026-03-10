@@ -1,0 +1,19 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "params": {
+        "Affected": "Creature.EnchantedBy",
+        "AddToughness": "7",
+        "AddKeyword": "Trample",
+        "Description": "Enchanted creature gets +7/+7 and has trample.",
+        "AddPower": "7"
+      }
+    }
+  ],
+  "replacements": [],
+  "faces": []
+}

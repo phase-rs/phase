@@ -1,0 +1,28 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidCard": "Creature",
+        "ValidBlocker": "Card.Self",
+        "Execute": "TrigBlocks",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature can't be regenerated this turn."
+      }
+    },
+    {
+      "mode": "AttackerBlockedByCreature",
+      "params": {
+        "ValidBlocker": "Creature",
+        "TriggerDescription": "Whenever CARDNAME blocks or becomes blocked by a creature, that creature can't be regenerated this turn.",
+        "Secondary": "True",
+        "ValidCard": "Card.Self",
+        "Execute": "TrigBlocked"
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

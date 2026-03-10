@@ -1,0 +1,29 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "params": {
+        "ValidSource": "Card.Self+counters_EQ0_Indestructible",
+        "ValidTarget": "Player",
+        "CombatDamage": "True",
+        "Execute": "TrigPutCounter",
+        "TriggerDescription": "Whenever CARDNAME deals combat damage to a player, if it doesn't have an indestructible counter on it, put an indestructible counter on it."
+      }
+    },
+    {
+      "mode": "DamageDoneOnce",
+      "params": {
+        "Execute": "TrigRemCounter",
+        "CombatDamage": "True",
+        "ValidTarget": "You",
+        "TriggerZones": "Battlefield",
+        "TriggerDescription": "Whenever combat damage is dealt to you, remove an indestructible counter from NICKNAME."
+      }
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "faces": []
+}

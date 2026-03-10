@@ -1,0 +1,62 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": "Combo U R",
+            "params": {
+              "SpellDescription": "Add {U} or {R}. Spend this mana only to cast a noncreature spell.",
+              "RestrictValid": "Spell.nonCreature"
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SpellDescription": "Add {U} or {R}. Spend this mana only to cast a noncreature spell.",
+            "RestrictValid": "Spell.nonCreature"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "mode": "SpellCast",
+          "params": {
+            "ValidActivatingPlayer": "You",
+            "Execute": "TrigPutCounter",
+            "TriggerDescription": "Whenever you cast a noncreature spell, if at least four mana was spent to cast it, put a +1/+1 counter on CARDNAME. Then if it has three or more +1/+1 counters on it, transform it.",
+            "ValidCard": "Card.nonCreature",
+            "ValidSA": "Spell.ManaSpent GE4",
+            "TriggerZones": "Battlefield"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [
+        {
+          "mode": "Attacks",
+          "params": {
+            "Execute": "TrigDamageAll",
+            "TriggerDescription": "Starfall — Whenever CARDNAME attacks, it deals X damage to each opponent, where X is the number of noncreature, nonland cards in your graveyard.",
+            "ValidCard": "Card.Self"
+          }
+        }
+      ],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}

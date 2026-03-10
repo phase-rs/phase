@@ -1,0 +1,55 @@
+{
+  "$schema": "schema.json",
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "faces": [
+    {
+      "abilities": [
+        {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Battlefield",
+            "destination": "Exile",
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": "5 W W"
+          },
+          "sub_ability": null,
+          "remaining_params": {
+            "SubAbility": "DBReturn",
+            "SpellDescription": "Exile this Equipment, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
+            "StackDescription": "SpellDescription",
+            "RememberChanged": "True",
+            "SorcerySpeed": "True"
+          }
+        }
+      ],
+      "triggers": [],
+      "statics": [
+        {
+          "mode": "Continuous",
+          "params": {
+            "AddToughness": "1",
+            "Description": "Equipped creature gets +1/+1.",
+            "AddPower": "1",
+            "Affected": "Creature.EquippedBy"
+          }
+        }
+      ],
+      "replacements": []
+    },
+    {
+      "abilities": [],
+      "triggers": [],
+      "statics": [],
+      "replacements": []
+    }
+  ]
+}
