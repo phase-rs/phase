@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Arena UI
 status: executing
-stopped_at: Completed 20-06-PLAN.md
-last_updated: "2026-03-10T00:29:49.669Z"
-last_activity: 2026-03-10 — Completed 20-07 Effect Handlers & Replacement Effects
+stopped_at: Completed 20-08-PLAN.md
+last_updated: "2026-03-10T00:37:22.305Z"
+last_activity: 2026-03-10 — Completed 20-08 Day/Night Global State
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 43
-  completed_plans: 41
+  completed_plans: 42
   percent: 98
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 Phase: 20 of 20 (Implement all remaining effects)
 Plan: 9 of 10 in current phase
 Status: In Progress
-Last activity: 2026-03-10 — Completed 20-09 Morph/Manifest/Disguise Face-Down Mechanics
+Last activity: 2026-03-10 — Completed 20-08 Day/Night Global State
 
 Progress: [██████████] 98%
 
@@ -84,6 +84,7 @@ Progress: [██████████] 98%
 | Phase 20 P07 | 10min | 2 tasks | 8 files |
 | Phase 20 P06 | 11min | 2 tasks | 7 files |
 | Phase 20 P09 | 5min | 2 tasks | 7 files |
+| Phase 20 P08 | 5min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -207,6 +208,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - [Phase 20-09]: BackFaceData reused for storing original face-down characteristics (same pattern as DFC transform)
 - [Phase 20-09]: Manifested creature cards can turn face up; noncreature manifested cards cannot
 - [Phase 20-09]: TurnFaceUp trigger matcher supports ValidCard filter for conditional triggering
+- [Phase 20]: [Phase 20-08]: Day/night transition checked at cleanup step per MTG Rule 727.2; spells_cast_this_turn uses saturating_add
 
 ### Roadmap Evolution
 
@@ -228,5 +230,5 @@ None.
 ## Session Continuity
 
 Last activity: 2026-03-10 - Completed 20-09 Morph/Manifest/Disguise Face-Down Mechanics
-Stopped at: Completed 20-09-PLAN.md
+Stopped at: Completed 20-08-PLAN.md
 Resume file: None
