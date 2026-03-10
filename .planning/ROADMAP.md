@@ -119,9 +119,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 24-01-PLAN.md — Cost parser enhancement + migration tool binary + execute migration
-- [ ] 24-02-PLAN.md — Standard card manifest, MTGJSON fixture expansion, and Forge vs JSON parity tests
-- [ ] 24-03-PLAN.md — JSON coverage gate in coverage report binary + CI dual-gate update
+- [x] 24-01-PLAN.md — Cost parser enhancement + migration tool binary + execute migration — completed 2026-03-10
+- [x] 24-02-PLAN.md — Standard card manifest, MTGJSON fixture expansion, and Forge vs JSON parity tests — completed 2026-03-10
+- [x] 24-03-PLAN.md — JSON coverage gate in coverage report binary + CI dual-gate update — completed 2026-03-10
 
 ### Phase 25: Forge Removal & Relicensing
 **Goal**: The project contains no GPL-licensed data and is relicensed as MIT/Apache-2.0
@@ -133,11 +133,12 @@ Plans:
   3. PROJECT.md constraints and key decisions are updated to reflect MTGJSON + own ability format (no mention of Forge as a runtime dependency)
   4. `coverage.rs` reads JSON format and the CI gate (100% Standard coverage) passes on the main branch with no Forge data present
   5. `cargo build --target wasm32-unknown-unknown` succeeds and `cargo test --all` passes with the `forge-compat` feature disabled
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 25-01: TBD
-- [ ] 25-02: TBD
+- [ ] 25-01-PLAN.md — Refactor all dispatch from string-based to typed pattern matching on enums
+- [ ] 25-02-PLAN.md — Feature-gate Forge code, delete Forge data, simplify coverage binary and CI
+- [ ] 25-03-PLAN.md — License files, Cargo.toml updates, and documentation scrub
 
 ## Progress
 
@@ -152,4 +153,4 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 | 22. Test Infrastructure | 3/3 | Complete    | 2026-03-10 | - |
 | 23. Unified Card Loader | 2/2 | Complete    | 2026-03-10 | - |
 | 24. Card Migration | 3/3 | Complete    | 2026-03-10 | - |
-| 25. Forge Removal & Relicensing | v1.2 | 0/? | Not started | - |
+| 25. Forge Removal & Relicensing | v1.2 | 0/3 | Not started | - |
