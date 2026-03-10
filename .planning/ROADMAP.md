@@ -64,7 +64,7 @@
 **Plans**: 3 plans
 
 Plans:
-- [ ] 21-01-PLAN.md — Define typed enums (Effect, StaticMode, ReplacementEvent) and add schemars/insta deps
+- [x] 21-01-PLAN.md — Define typed enums (Effect, StaticMode, ReplacementEvent) and add schemars/insta deps — completed 2026-03-10
 - [ ] 21-02-PLAN.md — Refactor all ~13 consumer files to use typed ability structs
 - [ ] 21-03-PLAN.md — MTGJSON loader, ability JSON file, schema generation, and snapshot tests
 
@@ -139,7 +139,7 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
 |-------|-----------|----------------|--------|-----------|
 | 1-12 | v1.0 | 40/40 | Complete | 2026-03-08 |
 | 13-20 | v1.1 | 43/43 | Complete | 2026-03-10 |
-| 21. Schema & MTGJSON Foundation | v1.2 | 0/3 | Planning | - |
+| 21. Schema & MTGJSON Foundation | v1.2 | 1/3 | Executing | - |
 | 22. Test Infrastructure | v1.2 | 0/? | Not started | - |
 | 23. Unified Card Loader | v1.2 | 0/? | Not started | - |
 | 24. Card Migration | v1.2 | 0/? | Not started | - |

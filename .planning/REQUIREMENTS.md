@@ -10,7 +10,7 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 ### Data Pipeline
 
 - [ ] **DATA-01**: Engine loads card metadata (name, mana cost, types, P/T, colors, keywords, oracle text, layout) from MTGJSON AllCards AtomicCards.json using custom Rust types
-- [ ] **DATA-02**: Engine defines a typed JSON ability schema mapping to AbilityDefinition, TriggerDefinition, StaticDefinition, and ReplacementDefinition types
+- [x] **DATA-02**: Engine defines a typed JSON ability schema mapping to AbilityDefinition, TriggerDefinition, StaticDefinition, and ReplacementDefinition types
 - [ ] **DATA-03**: CardDatabase::load_json() merges MTGJSON metadata + ability JSON into CardFace, becoming the primary card loading path
 - [ ] **DATA-04**: Ability JSON schema exports a JSON Schema definition via schemars for editor autocompletion and build-time validation
 
@@ -64,7 +64,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | DATA-01 | Phase 21 | Pending |
-| DATA-02 | Phase 21 | Pending |
+| DATA-02 | Phase 21 | **Complete** (21-01) |
 | DATA-03 | Phase 23 | Pending |
 | DATA-04 | Phase 21 | Pending |
 | MIGR-01 | Phase 24 | Pending |
