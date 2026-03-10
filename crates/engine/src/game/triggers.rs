@@ -289,6 +289,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Promoted trigger matchers -- face-down mechanics
     r.insert(TriggerMode::TurnFaceUp, match_turn_face_up);
 
+    // Promoted trigger matchers -- day/night
+    r.insert(TriggerMode::DayTimeChanges, match_day_time_changes);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -332,7 +335,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::RolledDieOnce,
         TriggerMode::FlippedCoin,
         TriggerMode::Clashed,
-        TriggerMode::DayTimeChanges,
         TriggerMode::ClassLevelGained,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
@@ -1171,6 +1173,16 @@ fn match_turn_face_up(
     } else {
         false
     }
+}
+
+/// Matches DayTimeChanges trigger -- fires when day/night transitions.
+fn match_day_time_changes(
+    event: &GameEvent,
+    _params: &HashMap<String, String>,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::DayNightChanged { .. })
 }
 
 /// Fallback matcher for unimplemented trigger modes. Always returns false.

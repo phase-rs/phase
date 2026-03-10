@@ -10,6 +10,7 @@ use crate::types::zones::Zone;
 
 use super::combat;
 use super::combat_damage;
+use super::day_night;
 use super::zones;
 
 const PHASE_ORDER: [Phase; 12] = [
@@ -151,6 +152,9 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
 }
 
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // Check day/night transition at cleanup (per Rule 727.2)
+    day_night::check_day_night_transition(state, events);
+
     let active = state.active_player;
 
     // Discard down to 7 (auto-discard last cards for now)
