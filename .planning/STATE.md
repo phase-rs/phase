@@ -52,9 +52,10 @@ Progress: [░░░░░░░░░░] 0%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- [v1.2 init]: Emit Forge-compatible strings from JSON loader (safe path -- defers Vec<AbilityDefinition> refactor to avoid touching ~13 source files)
 - [v1.2 init]: Custom MTGJSON types (~50 lines) instead of mtgjson crate (missing defense field, unnecessary transitive deps)
 - [v1.2 init]: Author ability definitions from oracle text/rules, use Forge output only for validation (GPL contamination avoidance)
+- [Phase 21 context]: REVERSED prior decision — Vec<AbilityDefinition> refactor included in Phase 21 (not deferred). Emitting Forge-compatible strings perpetuates licensing risk. Typed enums for all four definition types (Effect, TriggerMode, StaticMode, ReplacementEvent)
+- [Phase 21 context]: AtomicCards.json committed to repo, one ability JSON per card in data/abilities/, schemars for schema generation
 
 ### Pending Todos
 
