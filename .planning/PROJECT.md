@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A TypeScript/Rust Magic: The Gathering game engine porting Forge's 32,300+ card definitions. The Rust engine compiles to native (Tauri desktop) and WASM (PWA/browser), with a React frontend featuring full game UI, AI opponent, WebSocket multiplayer, and deck builder. Uses functional architecture (discriminated unions, pure reducers, immutable state) with Forge's card definition format as the upstream compatibility surface.
+A Rust/TypeScript Magic: The Gathering game engine porting Forge's 32,300+ card definitions with an MTGA-quality React frontend. The Rust engine compiles to native (Tauri desktop) and WASM (PWA/browser), featuring art-crop card presentation, cinematic animations, audio, AI opponent, WebSocket multiplayer, and deck builder. Uses functional architecture (discriminated unions, pure reducers, immutable state) with 100% Standard-legal card coverage.
 
 ## Core Value
 
@@ -35,29 +35,29 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 - ✓ Card images from Scryfall API with IndexedDB caching — v1.0
 - ✓ Tauri desktop app (Windows, macOS, Linux) — v1.0
 - ✓ PWA + WASM build for tablet/browser — v1.0
+- ✓ MTGA-quality game board with responsive CSS custom property card sizing — v1.1
+- ✓ Canvas particle VFX and step-based animation queue with event normalizer — v1.1
+- ✓ Web Audio API sound effects (39 SFX) and WUBRG-themed background music — v1.1
+- ✓ AI auto-play game loop with auto-pass heuristics and opponent controller abstraction — v1.1
+- ✓ Stack visualization, smart mana auto-pay, combat assignment, and priority controls — v1.1
+- ✓ Combat evasion keywords, Ward, Protection, Wither/Infect, Prowess mechanics — v1.1
+- ✓ MTGA-faithful art-crop cards, golden targeting arcs, cinematic turn banners, death shatter — v1.1
+- ✓ Mode-first menu flow, deck gallery with art tiles, splash screen — v1.1
+- ✓ Mana abilities (Rule 605), equipment/aura attachment, Scry/Dig/Surveil interactive choices — v1.1
+- ✓ Planeswalker loyalty abilities, DFC transform, day/night, morph/manifest — v1.1
+- ✓ 100% Standard-legal card coverage with CI gate preventing regressions — v1.1
 
 ### Active
 
 <!-- Current scope. Building toward these. -->
 
-- [ ] Port Alchemy UI to replace current Forge.rs frontend
-- [ ] Wire Alchemy UI components through EngineAdapter to Rust/WASM engine
-- [ ] Responsive game board with CSS custom property card sizing
-- [ ] Canvas particle VFX and Framer Motion animations
-- [ ] Audio system with sound synthesis and ambient music
-- [ ] MTG-specific UI additions (stack, mana payment, instant-speed interaction)
-
-## Current Milestone: v1.1 Arena UI
-
-**Goal:** Replace the current frontend with a polished Arena-style UI ported from the Alchemy project, wired to the Rust/WASM engine via the existing EngineAdapter interface.
-
-**Target features:**
-- Port Alchemy's game board, hand, card, combat, and animation components
-- Canvas particle VFX, floating damage numbers, combat math bubbles
-- Responsive card sizing via CSS custom properties (mobile → desktop)
-- Audio system (sound synthesis, ambient music)
-- Preserve EngineAdapter abstraction (WASM, Tauri, WebSocket)
-- Build MTG-specific UI for stack visualization, mana payment, and priority interaction
+- [ ] MTGJSON integration — pull card metadata from MTGJSON's MIT-licensed JSON
+- [ ] Own ability format — typed JSON schema for abilities/triggers/effects mapping to Rust types
+- [ ] Card format migration — convert 78 curated Standard cards to new format
+- [ ] Remove Forge coupling — remove data/cardsfolder/, make Forge parser optional/dev-only
+- [ ] License change — relicense as MIT or Apache-2.0
+- [ ] Test suite — comprehensive rules correctness tests using XMage MIT scenarios as reference
+- [ ] Update project constraints — remove Forge format dependency from key decisions
 
 ### Out of Scope
 
@@ -71,25 +71,26 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 - React Native — web technologies (CSS Grid, transforms, Framer Motion) better suited for card game layouts
 - Mobile-first — desktop + tablet via PWA; native mobile app via Tauri v2 mobile deferred
 - Alchemy/digital-only mechanics — support paper MTG rules only
-- Learning challenges / educational system — not relevant to MTG gameplay
-- Campaign / adventure mode — narrative framework not core to gameplay
 - Tutorial system — defer to future milestone
+- Foil effects / element card effects — visual polish, defer to future milestone
 
 ## Context
 
-Shipped v1.0 with ~29,700 LOC (22.5k Rust + 7.2k TypeScript) across 5 Rust crates and a React frontend.
+Shipped v1.1 with ~51,500 LOC (33.4k Rust + 18.1k TypeScript) across 5 Rust crates and a React frontend.
 
-**Tech stack:** Rust (engine, AI, server) + React/TypeScript/Tailwind v4 (frontend) + Zustand (state) + Framer Motion (animations) + Vite (build) + Tauri v2 (desktop) + Axum (WebSocket server).
+**Tech stack:** Rust (engine, AI, server) + React/TypeScript/Tailwind v4 (frontend) + Zustand (state) + Framer Motion (animations) + Web Audio API (audio) + Vite (build) + Tauri v2 (desktop) + Axum (WebSocket server).
 
 **Crate structure:** `engine` (core rules) ← `forge-ai` (AI opponent) ← `engine-wasm` (browser bindings) / `server-core` (session management) ← `forge-server` (Axum WebSocket binary).
 
-**Architecture:** Pure `apply(state, action) -> ActionResult` reducer pattern. Event-driven with discriminated unions across the WASM boundary via serde + tsify. Three Zustand stores (game, UI, animation). Transport-agnostic `EngineAdapter` interface (WASM, Tauri IPC, WebSocket).
+**Architecture:** Pure `apply(state, action) -> ActionResult` reducer pattern. Event-driven with discriminated unions across the WASM boundary via serde + tsify. Three Zustand stores (game, UI, animation) + preferences store. Transport-agnostic `EngineAdapter` interface (WASM, Tauri IPC, WebSocket). AudioManager singleton with Web Audio API.
 
 **Card format:** Forge's `.txt` card definition format is the upstream compatibility surface — 15+ years stable, 32k+ cards. Parser handles all multi-face types (Split, Transform, MDFC, Adventure).
 
+**Standard coverage:** 100% of curated 78-card Standard-legal subset supported, enforced by CI gate.
+
 ## Constraints
 
-- **Card format**: Must parse Forge's `.txt` card definition format exactly — non-negotiable for upstream sync
+- **Card format**: MTGJSON (MIT) for card metadata + own typed JSON ability format — Forge parser retained as dev-only tool
 - **Engine language**: Rust — compiles to both native (Tauri) and WASM (PWA) from same source
 - **Frontend**: React + TypeScript — rendered in Tauri webview (desktop) or browser (PWA)
 - **Desktop wrapper**: Tauri v2 — native performance, small binary, iOS/Android support planned
@@ -111,16 +112,33 @@ Shipped v1.0 with ~29,700 LOC (22.5k Rust + 7.2k TypeScript) across 5 Rust crate
 | Rust engine + React frontend | Native performance for AI/rules engine, web flexibility for card game UI | ✓ Good — WASM binary only 19 KB, AI search fast in native Rust |
 | Tauri desktop + PWA/WASM tablet | Same engine compiles to native and WASM, thin adapter layer | ✓ Good — EngineAdapter abstraction works cleanly across all 3 transports |
 | Forge's .txt card format preserved | 15+ years stable, 32k+ cards, upstream sync is trivial | ✓ Good — parser handles all multi-face types and ability formats |
-| Standard format first | Popular format, moderate complexity, 2 years of sets | ✓ Good — focused scope, coverage analysis shows 60%+ achievable |
-| Scryfall for card images | Free for non-commercial, comprehensive API | ✓ Good — on-demand with IndexedDB caching, 75ms rate limiting |
+| Standard format first | Popular format, moderate complexity, 2 years of sets | ✓ Good — 100% Standard coverage achieved in v1.1 |
+| Scryfall for card images | Free for non-commercial, comprehensive API | ✓ Good — dual-size (art_crop + normal) with IndexedDB caching |
 | Event bus for triggers (not hardcoded) | 137 trigger types need extensible architecture | ✓ Good — per-call registry build is cheap and avoids static patterns |
 | Tree/DAG effect representation | Conditional ability chains need branching | ✓ Good — SVar resolution with sub-ability chaining handles complex cards |
 | HashMap<ObjectId, GameObject> central store | Zones as Vec<ObjectId> with central lookup | ✓ Good — simple, fast, avoids ownership complexity |
 | ChaCha20Rng for cross-platform determinism | StdRng not guaranteed same across platforms | ✓ Good — WASM and native produce identical sequences from same seed |
 | fn pointer effect/trigger/static registries | Built per apply() call, cheap HashMap | ✓ Good — simple, no trait objects or global state |
 | petgraph for layer dependency ordering | Seven-layer system needs topological sort | ✓ Good — handles cycles with fallback to timestamp ordering |
-| Port Alchemy UI as Arena-style frontend | Alchemy has polished game UI with clean architecture matching Forge.rs patterns (Zustand, discriminated unions, event-driven) | — Pending |
-| Preserve EngineAdapter abstraction during UI port | Keeps WASM + Tauri + WebSocket support without coupling to specific transport | — Pending |
+| Port Alchemy UI as Arena-style frontend | Alchemy has polished game UI with clean architecture matching Forge.rs patterns | ✓ Good — MTGA-quality board, animations, and audio shipped in v1.1 |
+| Preserve EngineAdapter abstraction during UI port | Keeps WASM + Tauri + WebSocket support without coupling to specific transport | ✓ Good — all 3 transports work with Arena UI |
+| Art-crop + normal dual image strategy | Battlefield needs compact art crops, hand/stack needs full card images | ✓ Good — cache hits from shared Scryfall URLs, visual fidelity matches MTGA |
+| AudioManager as plain TypeScript singleton | Matches dispatch.ts pattern, no React lifecycle coupling | ✓ Good — clean integration with animation pipeline via setTimeout offsets |
+| Step-based animation queue with event normalizer | Groups related game events into visual steps for smooth playback | ✓ Good — configurable speed, VFX quality levels, death creature persistence |
+| BackFaceData for symmetric DFC transform | Both faces preserved for unlimited round-trip transforms | ✓ Good — reused for morph/manifest face-down mechanics |
+| Standard card curation by name (not set code) | Forge files lack set codes; name-based matching works across printings | ✓ Good — 78 cards, 79 faces, CI gate prevents regressions |
+
+## Current Milestone: v1.2 Migrate Data Source & Add Tests
+
+**Goal:** Replace Forge's GPL card data with MTGJSON (MIT-licensed) + a custom ability format, add comprehensive test coverage, and relicense the project.
+
+**Target features:**
+- MTGJSON integration for card metadata
+- Own typed JSON ability/trigger/effect schema
+- Migration of 78 curated Standard cards
+- Remove Forge data dependency (parser optional/dev-only)
+- MIT/Apache-2.0 relicensing
+- Comprehensive rules correctness test suite (XMage MIT reference)
 
 ---
-*Last updated: 2026-03-08 after v1.1 milestone started*
+*Last updated: 2026-03-10 after v1.2 milestone started*
