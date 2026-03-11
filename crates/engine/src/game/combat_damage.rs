@@ -338,6 +338,7 @@ fn apply_combat_damage(
             source_has_wither,
             source_has_infect,
             source_controller,
+            source_is_commander,
         ) = state
             .objects
             .get(source_id)
@@ -348,6 +349,7 @@ fn apply_combat_damage(
                     o.has_keyword(&Keyword::Wither),
                     o.has_keyword(&Keyword::Infect),
                     o.controller,
+                    o.is_commander,
                 )
             })
             .unwrap_or((
@@ -356,6 +358,7 @@ fn apply_combat_damage(
                 false,
                 false,
                 crate::types::player::PlayerId(0),
+                false,
             ));
 
         let target_ref = match &assignment.target {
@@ -439,6 +442,27 @@ fn apply_combat_damage(
                                 target: TargetRef::Player(*player_id),
                                 amount,
                             });
+
+                            // Commander damage tracking
+                            if source_is_commander && amount > 0 {
+                                if let Some(entry) = state
+                                    .commander_damage
+                                    .iter_mut()
+                                    .find(|e| {
+                                        e.player == *player_id && e.commander == *source_id
+                                    })
+                                {
+                                    entry.damage += amount;
+                                } else {
+                                    state.commander_damage.push(
+                                        crate::types::game_state::CommanderDamageEntry {
+                                            player: *player_id,
+                                            commander: *source_id,
+                                            damage: amount,
+                                        },
+                                    );
+                                }
+                            }
                         }
                     }
                     amount
@@ -862,5 +886,88 @@ mod tests {
         // Infect gives poison, but lifelink still triggers
         assert_eq!(state.players[1].poison_counters, 3);
         assert_eq!(state.players[0].life, 23); // gained 3 life
+    }
+
+    #[test]
+    fn commander_damage_tracked_when_commander_hits_player() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Commander", 5, 5);
+        state.objects.get_mut(&attacker).unwrap().is_commander = true;
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Commander dealt 5 damage to player 1
+        assert_eq!(state.players[1].life, 15);
+        // Commander damage tracked
+        assert_eq!(state.commander_damage.len(), 1);
+        assert_eq!(state.commander_damage[0].player, PlayerId(1));
+        assert_eq!(state.commander_damage[0].commander, attacker);
+        assert_eq!(state.commander_damage[0].damage, 5);
+    }
+
+    #[test]
+    fn commander_damage_accumulates_over_multiple_combats() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Commander", 3, 3);
+        state.objects.get_mut(&attacker).unwrap().is_commander = true;
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+        assert_eq!(state.commander_damage[0].damage, 3);
+
+        // Second combat
+        state.combat = None;
+        state.objects.get_mut(&attacker).unwrap().tapped = false;
+        setup_combat(&mut state, vec![attacker], vec![]);
+        events.clear();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Accumulated: 3 + 3 = 6
+        assert_eq!(state.commander_damage[0].damage, 6);
+    }
+
+    #[test]
+    fn non_commander_damage_not_tracked() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        // is_commander defaults to false
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(state.players[1].life, 18);
+        assert!(state.commander_damage.is_empty());
+    }
+
+    #[test]
+    fn different_commanders_tracked_separately() {
+        let mut state = setup();
+        let cmd_a = create_creature(&mut state, PlayerId(0), "Cmd A", 3, 3);
+        state.objects.get_mut(&cmd_a).unwrap().is_commander = true;
+        let cmd_b = create_creature(&mut state, PlayerId(0), "Cmd B", 2, 2);
+        state.objects.get_mut(&cmd_b).unwrap().is_commander = true;
+        setup_combat(&mut state, vec![cmd_a, cmd_b], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Two separate entries
+        assert_eq!(state.commander_damage.len(), 2);
+        let entry_a = state
+            .commander_damage
+            .iter()
+            .find(|e| e.commander == cmd_a)
+            .unwrap();
+        let entry_b = state
+            .commander_damage
+            .iter()
+            .find(|e| e.commander == cmd_b)
+            .unwrap();
+        assert_eq!(entry_a.damage, 3);
+        assert_eq!(entry_b.damage, 2);
     }
 }

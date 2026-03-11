@@ -36,6 +36,15 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             return;
         }
 
+        // 704.6d: Commander damage -- player who has received 21+ combat damage
+        // from a single commander loses the game
+        check_commander_damage(state, events, &mut any_performed);
+
+        // If game is over, stop immediately
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return;
+        }
+
         // 704.5f: Creature with 0 or less toughness goes to graveyard
         check_zero_toughness(state, events, &mut any_performed);
 
@@ -91,6 +100,31 @@ fn check_poison_counters(
     for loser in to_eliminate {
         events.push(GameEvent::PlayerLost { player_id: loser });
         super::elimination::eliminate_player(state, loser, events);
+        *any_performed = true;
+    }
+}
+
+fn check_commander_damage(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    let threshold = match state.format_config.commander_damage_threshold {
+        Some(t) => t as u32,
+        None => return, // Not a Commander format
+    };
+
+    // Collect players who should be eliminated
+    let to_eliminate: Vec<PlayerId> = state
+        .commander_damage
+        .iter()
+        .filter(|entry| entry.damage >= threshold)
+        .map(|entry| entry.player)
+        .filter(|pid| !state.eliminated_players.contains(pid))
+        .collect();
+
+    for player_id in to_eliminate {
+        super::elimination::eliminate_player(state, player_id, events);
         *any_performed = true;
     }
 }
@@ -741,8 +775,71 @@ mod tests {
         // No new events for already-eliminated player
         assert!(!events.iter().any(|e| matches!(
             e,
-            GameEvent::PlayerLost { player_id: PlayerId(1) }
+            GameEvent::PlayerLost {
+                player_id: PlayerId(1)
+            }
         )));
+    }
+
+    #[test]
+    fn sba_commander_damage_21_eliminates_player() {
+        use crate::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        let cmd_id = ObjectId(999);
+        // Player 1 has taken 21 commander damage from cmd_id
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_id,
+            damage: 21,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // P1 should be eliminated
+        assert!(state.players[1].is_eliminated);
+        assert!(state.eliminated_players.contains(&PlayerId(1)));
+        // Game should NOT be over (3 remaining players)
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_commander_damage_20_does_not_eliminate() {
+        use crate::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        let cmd_id = ObjectId(999);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_id,
+            damage: 20,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // P1 should NOT be eliminated (threshold is 21)
+        assert!(!state.players[1].is_eliminated);
+    }
+
+    #[test]
+    fn sba_commander_damage_skipped_in_non_commander_format() {
+        use crate::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let cmd_id = ObjectId(999);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_id,
+            damage: 100,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // Not a commander format -> threshold is None -> no elimination
+        assert!(!state.players[1].is_eliminated);
     }
 
     #[test]
