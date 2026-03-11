@@ -504,7 +504,7 @@ function GamePageContent({
       <CardPreview cardName={inspectedCardName} />
 
       {/* WaitingFor-driven prompt overlays (only for human player) */}
-      {waitingFor?.type === "TargetSelection" && waitingFor.data.player === playerId && <TargetingOverlay />}
+      {(waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection") && waitingFor.data.player === playerId && <TargetingOverlay />}
       {waitingFor?.type === "ManaPayment" && waitingFor.data.player === playerId && <ManaPaymentUI />}
       {waitingFor?.type === "ReplacementChoice" && waitingFor.data.player === playerId && <ReplacementModal />}
 

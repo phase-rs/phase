@@ -20,10 +20,10 @@ export function TargetingOverlay() {
 
   const sourceRef = useRef<{ x: number; y: number } | null>(null);
 
-  const isTargetSelection = waitingFor?.type === "TargetSelection";
-  const pendingCast = isTargetSelection ? waitingFor.data.pending_cast : null;
-
-  const legalTargets = isTargetSelection ? waitingFor.data.legal_targets : null;
+  const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
+  const pendingCast = waitingFor?.type === "TargetSelection" ? waitingFor.data.pending_cast : null;
+  const legalTargets = isTargetSelection ? waitingFor!.data.legal_targets : null;
+  const isTriggerTargeting = waitingFor?.type === "TriggerTargetSelection";
 
   // Activate targeting mode when engine requests target selection
   useEffect(() => {
@@ -94,7 +94,7 @@ export function TargetingOverlay() {
         {/* Instruction text */}
         <div className="absolute left-0 right-0 top-4 flex justify-center">
           <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
-            Choose a target
+            {isTriggerTargeting ? "Choose a target for triggered ability" : "Choose a target"}
           </div>
         </div>
 
@@ -108,12 +108,14 @@ export function TargetingOverlay() {
               Confirm Target
             </button>
           )}
-          <button
-            onClick={handleCancel}
-            className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
-          >
-            Cancel
-          </button>
+          {!isTriggerTargeting && (
+            <button
+              onClick={handleCancel}
+              className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
+            >
+              Cancel
+            </button>
+          )}
         </div>
 
         {/* Arrows from source to selected targets */}
