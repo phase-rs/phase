@@ -850,4 +850,182 @@ mod tests {
         // Card should still be in hand after cancel
         assert!(!state.players[0].hand.is_empty());
     }
+
+    // --- Aura casting tests ---
+
+    use crate::types::ability::TargetFilter;
+    use crate::types::keywords::Keyword;
+
+    /// Create an Aura enchantment in hand with Enchant creature keyword.
+    fn create_aura_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(30),
+            player,
+            "Pacifism".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.keywords.push(Keyword::Enchant(TargetFilter::Typed {
+                card_type: Some(crate::types::ability::TypeFilter::Creature),
+                subtype: None,
+                controller: None,
+                properties: vec![],
+            }));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            };
+        }
+        obj_id
+    }
+
+    #[test]
+    fn aura_with_multiple_targets_returns_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let _aura = create_aura_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+
+        // Create two creatures as potential targets
+        for card_id_val in [50, 51] {
+            let cid = create_object(
+                &mut state,
+                CardId(card_id_val),
+                PlayerId(1),
+                "Goblin".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&cid)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
+
+        match result {
+            WaitingFor::TargetSelection { legal_targets, .. } => {
+                assert_eq!(legal_targets.len(), 2);
+            }
+            other => panic!("Expected TargetSelection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn aura_with_single_target_auto_targets() {
+        let mut state = setup_game_at_main_phase();
+        let _aura = create_aura_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+
+        // Create one creature as the only target
+        let creature = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
+
+        // Should auto-target and go straight to Priority (on stack)
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+        // Verify the target was recorded on the stack entry
+        if let StackEntryKind::Spell { ability, .. } = &state.stack[0].kind {
+            assert_eq!(
+                ability.targets,
+                vec![crate::types::ability::TargetRef::Object(creature)]
+            );
+        } else {
+            panic!("Expected spell on stack");
+        }
+    }
+
+    #[test]
+    fn aura_with_no_legal_targets_fails() {
+        let mut state = setup_game_at_main_phase();
+        let _aura = create_aura_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+
+        // No creatures on battlefield -- no legal targets for "Enchant creature"
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn aura_targeting_respects_hexproof() {
+        let mut state = setup_game_at_main_phase();
+        let _aura = create_aura_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+
+        // Create a hexproof creature controlled by opponent
+        let creature = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Hexproof Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Hexproof);
+        }
+
+        // Only target is hexproof opponent creature -- should fail
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn non_aura_enchantment_does_not_trigger_aura_targeting() {
+        let mut state = setup_game_at_main_phase();
+
+        // Create a global enchantment (no Aura subtype, no Enchant keyword)
+        let obj_id = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Intangible Virtue".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            // No "Aura" subtype, no Enchant keyword
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            };
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), CardId(40), &mut events).unwrap();
+
+        // Should resolve normally (Priority), not enter TargetSelection
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+    }
 }
