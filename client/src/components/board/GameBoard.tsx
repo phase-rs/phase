@@ -90,7 +90,8 @@ export function GameBoard() {
         />
       ) : (
         // Multiplayer: compact strips + optional focused battlefield
-        <>
+        // Wrapper takes flex-1 so opponent half always occupies its share of the board
+        <div className="flex min-h-0 flex-1 flex-col">
           {/* Compact opponent strips — fixed height, floats above focused area */}
           <div className="relative z-20 flex shrink-0 gap-2 overflow-x-auto px-2 py-1">
             {opponents.map((opId) => (
@@ -112,7 +113,7 @@ export function GameBoard() {
               mode="focused"
             />
           )}
-        </>
+        </div>
       )}
 
       {/* Minimal center gap */}
