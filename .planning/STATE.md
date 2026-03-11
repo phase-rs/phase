@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 25-01-PLAN.md
-last_updated: "2026-03-11T00:14:17Z"
-last_activity: 2026-03-11 — Completed Plan 25-01 (Typed Dispatch Migration)
+stopped_at: Phase 26 context gathered
+last_updated: "2026-03-11T00:34:17.662Z"
+last_activity: 2026-03-11 — Completed Plan 25-02 (Feature Gate & Data Deletion)
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 4
   total_plans: 15
   completed_plans: 14
-  percent: 93
+  percent: 96
 ---
 
 # Project State
@@ -21,23 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** A player can sit down, pick a Standard-legal deck, and play a full game of Magic against a competent AI opponent -- with all cards behaving correctly according to MTG comprehensive rules.
-**Current focus:** Phase 25 Forge Removal & Relicensing — Plan 01 complete
+**Current focus:** Phase 25 Forge Removal & Relicensing — Plan 02 complete
 
 ## Current Position
 
 Phase: 25 (fifth of 5 in v1.2) — Forge Removal & Relicensing
-Plan: 1/3 complete
+Plan: 2/3 complete
 Status: Executing Phase 25
-Last activity: 2026-03-11 — Completed Plan 25-01 (Typed Dispatch Migration)
+Last activity: 2026-03-11 — Completed Plan 25-02 (Feature Gate & Data Deletion)
 
-Progress: [█████████░] 93%
+Progress: [█████████░] 96%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 14 (v1.2)
+- Total plans completed: 15 (v1.2)
 - Average duration: 13min
-- Total execution time: 3.0 hours
+- Total execution time: 3.2 hours
 
 **By Phase:**
 
@@ -47,7 +47,7 @@ Progress: [█████████░] 93%
 | 22 | 3/3 | 35min | 12min |
 | 23 | 2/2 | 18min | 9min |
 | 24 | 3/3 | 43min | 14min |
-| 25 | 1/3 | 13min | 13min |
+| 25 | 2/3 | 27min | 14min |
 
 ## Accumulated Context
 
@@ -102,6 +102,10 @@ Recent decisions affecting current work:
 - [25-01]: effect_variant_name() as standalone function for production variant-to-string mapping (not a method on Effect)
 - [25-01]: Effect::to_params() stays ungated -- legitimate typed-to-HashMap serialization for SubAbility chains
 - [25-01]: Test code retains compat bridge methods (api_type, params, from_raw) -- gated in Plan 02
+- [25-02]: ResolvedAbility::from_raw() kept ungated -- used in production (triggers.rs empty-effect fallback)
+- [25-02]: card-data-export binary gated with required-features (Forge-only tool)
+- [25-02]: phase-server migrated from CardDatabase::load() to load_json() (last production consumer)
+- [25-02]: Test assertions migrated from api_type() to effect_variant_name() (preferred over feature-gating)
 
 ### Roadmap Evolution
 
@@ -117,6 +121,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T00:14:17Z
-Stopped at: Completed 25-01-PLAN.md
-Resume file: .planning/phases/25-forge-removal-relicensing/25-01-SUMMARY.md
+Last session: 2026-03-11T00:34:17.659Z
+Stopped at: Phase 26 context gathered
+Resume file: .planning/phases/26-polish-and-fix-multi-player-with-lobby-and-embedded-server/26-CONTEXT.md
