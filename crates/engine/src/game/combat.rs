@@ -10,6 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
+use super::players;
 use crate::types::statics::StaticMode;
 
 /// Represents who a creature is attacking: a player or a planeswalker.
@@ -305,10 +306,7 @@ pub fn declare_attackers(
                     || state.eliminated_players.contains(pid)
                     || *pid == state.active_player
                 {
-                    return Err(format!(
-                        "{:?} cannot attack player {:?}",
-                        attacker_id, pid
-                    ));
+                    return Err(format!("{:?} cannot attack player {:?}", attacker_id, pid));
                 }
             }
             AttackTarget::Planeswalker(pw_id) => {
@@ -322,14 +320,14 @@ pub fn declare_attackers(
                         .core_types
                         .contains(&crate::types::card_type::CoreType::Planeswalker)
                 {
-                    return Err(format!("{:?} is not a planeswalker on the battlefield", pw_id));
+                    return Err(format!(
+                        "{:?} is not a planeswalker on the battlefield",
+                        pw_id
+                    ));
                 }
                 // Can't attack your own planeswalker
                 if pw.controller == state.active_player {
-                    return Err(format!(
-                        "Cannot attack your own planeswalker {:?}",
-                        pw_id
-                    ));
+                    return Err(format!("Cannot attack your own planeswalker {:?}", pw_id));
                 }
             }
         }
@@ -365,12 +363,12 @@ pub fn declare_attackers(
         })
         .collect();
 
-    // Use the first attacker's defending player for the event (backward compat for 2-player)
+    // Use the first attacker's defending player for the event
     let defending_player = combat
         .attackers
         .first()
         .map(|a| a.defending_player)
-        .unwrap_or(PlayerId(1 - state.active_player.0));
+        .unwrap_or_else(|| players::next_player(state, state.active_player));
 
     events.push(GameEvent::AttackersDeclared {
         attacker_ids,
@@ -790,7 +788,12 @@ mod tests {
             .push(Keyword::Vigilance);
 
         let mut events = Vec::new();
-        declare_attackers(&mut state, &[(id, AttackTarget::Player(PlayerId(1)))], &mut events).unwrap();
+        declare_attackers(
+            &mut state,
+            &[(id, AttackTarget::Player(PlayerId(1)))],
+            &mut events,
+        )
+        .unwrap();
 
         assert!(!state.objects[&id].tapped);
     }
@@ -802,7 +805,12 @@ mod tests {
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
         let mut events = Vec::new();
-        declare_attackers(&mut state, &[(id, AttackTarget::Player(PlayerId(1)))], &mut events).unwrap();
+        declare_attackers(
+            &mut state,
+            &[(id, AttackTarget::Player(PlayerId(1)))],
+            &mut events,
+        )
+        .unwrap();
 
         assert!(state.objects[&id].tapped);
     }
@@ -814,7 +822,12 @@ mod tests {
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
         let mut events = Vec::new();
-        declare_attackers(&mut state, &[(id, AttackTarget::Player(PlayerId(1)))], &mut events).unwrap();
+        declare_attackers(
+            &mut state,
+            &[(id, AttackTarget::Player(PlayerId(1)))],
+            &mut events,
+        )
+        .unwrap();
 
         assert!(events.iter().any(|e| matches!(
             e,

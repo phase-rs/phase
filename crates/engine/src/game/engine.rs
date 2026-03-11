@@ -215,13 +215,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
         }
         (
-            WaitingFor::DeclareBlockers { player, .. },
+            WaitingFor::DeclareBlockers { player: _, .. },
             GameAction::DeclareBlockers { assignments },
         ) => {
-            let defending = PlayerId(1 - state.active_player.0);
-            if defending != *player {
-                return Err(EngineError::WrongPlayer);
-            }
             super::combat::declare_blockers(state, &assignments, &mut events)
                 .map_err(EngineError::InvalidAction)?;
 

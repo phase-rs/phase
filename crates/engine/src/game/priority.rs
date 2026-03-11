@@ -19,11 +19,7 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
     state.priority_pass_count += 1;
 
     // Count living players
-    let living_count = state
-        .players
-        .iter()
-        .filter(|p| !p.is_eliminated)
-        .count();
+    let living_count = state.players.iter().filter(|p| !p.is_eliminated).count();
 
     if state.priority_passes.len() >= living_count {
         // All living players have passed consecutively
@@ -47,9 +43,7 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
         let next = next_priority_player(state);
         state.priority_player = next;
 
-        events.push(GameEvent::PriorityPassed {
-            player_id: next,
-        });
+        events.push(GameEvent::PriorityPassed { player_id: next });
 
         WaitingFor::Priority { player: next }
     }
@@ -91,12 +85,6 @@ pub fn reset_priority(state: &mut GameState) {
     state.priority_pass_count = 0;
 }
 
-/// Deprecated wrapper for backward compatibility during migration.
-/// Returns the next living player after `player` in seat order.
-/// Plan 05 removes this function.
-pub fn opponent(player: PlayerId, state: &GameState) -> PlayerId {
-    players::next_player(state, player)
-}
 
 #[cfg(test)]
 mod tests {
@@ -228,13 +216,6 @@ mod tests {
         assert_eq!(state.priority_player, PlayerId(0));
         assert!(state.priority_passes.is_empty());
         assert_eq!(state.priority_pass_count, 0);
-    }
-
-    #[test]
-    fn opponent_returns_next_player_in_seat_order() {
-        let state = setup();
-        assert_eq!(opponent(PlayerId(0), &state), PlayerId(1));
-        assert_eq!(opponent(PlayerId(1), &state), PlayerId(0));
     }
 
     // --- 3-player N-player priority ---
