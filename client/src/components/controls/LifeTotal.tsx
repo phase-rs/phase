@@ -6,9 +6,10 @@ import { useGameStore } from "../../stores/gameStore.ts";
 interface LifeTotalProps {
   playerId: number;
   size?: "default" | "lg";
+  hideLabel?: boolean;
 }
 
-export function LifeTotal({ playerId, size = "default" }: LifeTotalProps) {
+export function LifeTotal({ playerId, size = "default", hideLabel = false }: LifeTotalProps) {
   const life = useGameStore(
     (s) => s.gameState?.players[playerId]?.life ?? 20,
   );
@@ -49,7 +50,7 @@ export function LifeTotal({ playerId, size = "default" }: LifeTotalProps) {
 
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-gray-400">P{playerId + 1}</span>
+      {!hideLabel && <span className="text-xs text-gray-400">P{playerId + 1}</span>}
       <motion.span
         key={life}
         initial={{ scale: 1.3 }}
