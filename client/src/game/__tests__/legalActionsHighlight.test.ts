@@ -65,7 +65,7 @@ function createMockState(overrides: Partial<GameState> = {}): GameState {
         trigger_definitions: [],
         replacement_definitions: [],
         static_definitions: [],
-        svars: {},
+
         color: [],
         base_power: null,
         base_toughness: null,
@@ -100,7 +100,7 @@ function createMockState(overrides: Partial<GameState> = {}): GameState {
         trigger_definitions: [],
         replacement_definitions: [],
         static_definitions: [],
-        svars: {},
+
         color: ["Red"],
         base_power: null,
         base_toughness: null,
@@ -135,7 +135,7 @@ function createMockState(overrides: Partial<GameState> = {}): GameState {
         trigger_definitions: [],
         replacement_definitions: [],
         static_definitions: [],
-        svars: {},
+
         color: ["White"],
         base_power: 1,
         base_toughness: 1,

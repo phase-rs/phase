@@ -1,5 +1,5 @@
 use crate::types::game_state::GameState;
-use crate::types::mana::{ManaCost, ManaColor};
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 
 /// Count a player's devotion to the given colors.
@@ -151,7 +151,11 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&id1).unwrap().mana_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Black, ManaCostShard::Black, ManaCostShard::Red],
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+            ],
             generic: 1,
         };
         // Perm 2: {U}{B} → 1 matching (the {B})

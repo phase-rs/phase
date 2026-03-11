@@ -5,7 +5,7 @@ use thiserror::Error;
 use super::card_type::CoreType;
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
-use super::mana::{ManaCost, ManaColor};
+use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
 use super::player::PlayerId;
 use super::replacements::ReplacementEvent;
@@ -26,11 +26,51 @@ pub enum DamageAmount {
 }
 
 /// Power/toughness value -- either a fixed integer or a variable reference (e.g. "*", "X").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","value":2}` (new)
+/// and plain strings like `"2"` or `"*"` (legacy card-data.json).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "type", content = "value")]
 pub enum PtValue {
     Fixed(i32),
     Variable(String),
+}
+
+impl<'de> serde::Deserialize<'de> for PtValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(s) => {
+                // Legacy format: plain string like "2", "*", "1+*"
+                match s.parse::<i32>() {
+                    Ok(n) => Ok(PtValue::Fixed(n)),
+                    Err(_) => Ok(PtValue::Variable(s.clone())),
+                }
+            }
+            serde_json::Value::Number(n) => Ok(PtValue::Fixed(n.as_i64().unwrap_or(0) as i32)),
+            serde_json::Value::Object(_) => {
+                // New tagged format: {"type":"Fixed","value":2}
+                #[derive(serde::Deserialize)]
+                #[serde(tag = "type", content = "value")]
+                enum PtValueHelper {
+                    Fixed(i32),
+                    Variable(String),
+                }
+                let helper: PtValueHelper =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                match helper {
+                    PtValueHelper::Fixed(n) => Ok(PtValue::Fixed(n)),
+                    PtValueHelper::Variable(s) => Ok(PtValue::Variable(s)),
+                }
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected string, number, or object for PtValue",
+            )),
+        }
+    }
 }
 
 /// Duration for temporary effects.
@@ -143,11 +183,19 @@ pub enum StaticCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum AbilityCost {
-    Mana { cost: ManaCost },
+    Mana {
+        cost: ManaCost,
+    },
     Tap,
-    Loyalty { amount: i32 },
-    Sacrifice { target: TargetFilter },
-    PayLife { amount: u32 },
+    Loyalty {
+        amount: i32,
+    },
+    Sacrifice {
+        target: TargetFilter,
+    },
+    PayLife {
+        amount: u32,
+    },
     Discard {
         count: u32,
         #[serde(default)]
@@ -158,8 +206,13 @@ pub enum AbilityCost {
         #[serde(default)]
         filter: Option<TargetFilter>,
     },
-    TapCreatures { count: u32, filter: TargetFilter },
-    Composite { costs: Vec<AbilityCost> },
+    TapCreatures {
+        count: u32,
+        filter: TargetFilter,
+    },
+    Composite {
+        costs: Vec<AbilityCost>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -814,7 +867,9 @@ mod tests {
                 sorcery_speed: false,
             })),
             valid_card: Some(TargetFilter::SelfRef),
-            description: Some("If damage would be dealt to ~, prevent it and gain 1 life.".to_string()),
+            description: Some(
+                "If damage would be dealt to ~, prevent it and gain 1 life.".to_string(),
+            ),
         };
         let json = serde_json::to_string(&replacement).unwrap();
         let deserialized: ReplacementDefinition = serde_json::from_str(&json).unwrap();

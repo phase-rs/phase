@@ -1,4 +1,4 @@
-import type { GameObject, ManaColor, ObjectId } from "../adapter/types";
+import type { GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
 
 export interface CardViewProps {
   id: ObjectId;
@@ -19,7 +19,7 @@ export interface CardViewProps {
   isLand: boolean;
   attachedTo: ObjectId | null;
   attachmentIds: ObjectId[];
-  keywords: string[];
+  keywords: Keyword[];
   colorIdentity: ManaColor[];
 }
 

@@ -162,9 +162,10 @@ fn has_targeting_requirement(def: &AbilityDefinition) -> bool {
         | Effect::Attach { target, .. }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::CopySpell { target, .. } => {
-            !matches!(target, TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller)
-        }
+        | Effect::CopySpell { target, .. } => !matches!(
+            target,
+            TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
+        ),
         _ => false,
     }
 }
@@ -226,9 +227,10 @@ fn build_resolved_from_def(
         targets: Vec::new(),
         source_id,
         controller,
-        sub_ability: def.sub_ability.as_ref().map(|sub| {
-            Box::new(build_resolved_from_def(sub, source_id, controller))
-        }),
+        sub_ability: def
+            .sub_ability
+            .as_ref()
+            .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
     }
 }
 

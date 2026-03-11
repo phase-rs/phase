@@ -116,8 +116,7 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                     StaticCondition::CheckSVar { compare, .. } => {
                         // Legacy path: evaluate compare string against devotion if colors available
                         if !obj.base_color.is_empty() {
-                            let devotion =
-                                count_devotion(state, obj.controller, &obj.base_color);
+                            let devotion = count_devotion(state, obj.controller, &obj.base_color);
                             if !evaluate_compare(compare, devotion) {
                                 continue;
                             }
@@ -316,7 +315,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::AddType { core_type } => {
                 if !obj.card_types.core_types.contains(core_type) {
-                    obj.card_types.core_types.push(core_type.clone());
+                    obj.card_types.core_types.push(*core_type);
                 }
             }
             ContinuousModification::RemoveType { core_type } => {
@@ -327,7 +326,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::AddColor { color } => {
                 if !obj.color.contains(color) {
-                    obj.color.push(color.clone());
+                    obj.color.push(*color);
                 }
             }
             ContinuousModification::AddAbility { .. } => { /* TODO: future */ }
@@ -340,7 +339,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, ContinuousModification, FilterProp, StaticDefinition, TargetFilter,
+        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
         TypeFilter,
     };
     use crate::types::card_type::CoreType;

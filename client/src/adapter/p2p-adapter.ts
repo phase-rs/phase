@@ -37,7 +37,6 @@ function scrubObject(obj: GameObject): void {
   obj.loyalty = null;
   obj.color = [];
   obj.base_color = [];
-  obj.svars = {};
   obj.trigger_definitions = [];
   obj.replacement_definitions = [];
   obj.static_definitions = [];

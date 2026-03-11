@@ -97,19 +97,23 @@ pub fn get_game_state() -> JsValue {
                         engine::game::combat::has_summoning_sickness(obj, turn);
                 }
 
-                // Compute per-card devotion for cards with CheckSVar in their statics
+                // Compute per-card devotion for cards with CheckSVar condition in their statics
                 // (Theros gods pattern — derive colors from the card's own base_color)
                 let devotion_cards: Vec<_> = state
                     .objects
                     .iter()
                     .filter_map(|(&id, obj)| {
                         let has_devotion_static = obj.static_definitions.iter().any(|def| {
-                            def.params.contains_key("CheckSVar")
-                                && def.params.contains_key("SVarCompare")
+                            matches!(
+                                &def.condition,
+                                Some(engine::types::ability::StaticCondition::CheckSVar { .. })
+                            ) || matches!(
+                                &def.condition,
+                                Some(engine::types::ability::StaticCondition::DevotionGE { .. })
+                            )
                         });
                         if has_devotion_static && !obj.base_color.is_empty() {
-                            let devotion =
-                                count_devotion(state, obj.controller, &obj.base_color);
+                            let devotion = count_devotion(state, obj.controller, &obj.base_color);
                             Some((id, devotion))
                         } else {
                             None

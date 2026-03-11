@@ -70,6 +70,16 @@ export type CounterType =
   | "Loyalty"
   | { Generic: string };
 
+// ── Keywords ─────────────────────────────────────────────────────────────
+
+/**
+ * Keyword type matching the Rust Keyword enum's serde output.
+ * Simple keywords serialize as strings (e.g. "Flying").
+ * Parameterized keywords serialize as objects (e.g. { Equip: { Cost: ... } }).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type Keyword = string | Record<string, any>;
+
 // ── Game Object ──────────────────────────────────────────────────────────
 
 export interface GameObject {
@@ -93,16 +103,15 @@ export interface GameObject {
   loyalty: number | null;
   card_types: CardType;
   mana_cost: ManaCost;
-  keywords: string[];
-  abilities: string[];
+  keywords: Keyword[];
+  abilities: unknown[];
   trigger_definitions: unknown[];
   replacement_definitions: unknown[];
   static_definitions: unknown[];
-  svars: Record<string, string>;
   color: ManaColor[];
   base_power: number | null;
   base_toughness: number | null;
-  base_keywords: string[];
+  base_keywords: Keyword[];
   base_color: ManaColor[];
   timestamp: number;
   entered_battlefield_turn: number | null;
@@ -114,8 +123,8 @@ export interface GameObject {
     power: number | null;
     toughness: number | null;
     card_types: CardType;
-    keywords: string[];
-    abilities: string[];
+    keywords: Keyword[];
+    abilities: unknown[];
     color: ManaColor[];
   } | null;
 }

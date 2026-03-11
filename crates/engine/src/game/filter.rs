@@ -48,7 +48,7 @@ fn filter_inner(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
-        TargetFilter::Player => false, // Players are not objects
+        TargetFilter::Player => false,     // Players are not objects
         TargetFilter::Controller => false, // Controller is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::Typed {
@@ -94,10 +94,7 @@ fn filter_inner(
                 }
             }
             // All properties must match
-            let source_attached_to = state
-                .objects
-                .get(&source_id)
-                .and_then(|s| s.attached_to);
+            let source_attached_to = state.objects.get(&source_id).and_then(|s| s.attached_to);
             properties.iter().all(|p| {
                 matches_filter_prop(
                     p,
@@ -319,18 +316,8 @@ mod tests {
         let mut state = setup();
         let a = add_creature(&mut state, PlayerId(0), "A");
         let b = add_creature(&mut state, PlayerId(0), "B");
-        assert!(matches_target_filter(
-            &state,
-            a,
-            &TargetFilter::SelfRef,
-            a
-        ));
-        assert!(!matches_target_filter(
-            &state,
-            b,
-            &TargetFilter::SelfRef,
-            a
-        ));
+        assert!(matches_target_filter(&state, a, &TargetFilter::SelfRef, a));
+        assert!(!matches_target_filter(&state, b, &TargetFilter::SelfRef, a));
     }
 
     #[test]

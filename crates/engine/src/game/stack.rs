@@ -77,7 +77,10 @@ fn execute_effect(
     events: &mut Vec<GameEvent>,
 ) {
     // Skip unimplemented effects (logged elsewhere as warnings)
-    if matches!(ability.effect, crate::types::ability::Effect::Unimplemented { .. }) {
+    if matches!(
+        ability.effect,
+        crate::types::ability::Effect::Unimplemented { .. }
+    ) {
         return;
     }
     // Use resolve_ability_chain to support SubAbility/Execute chaining

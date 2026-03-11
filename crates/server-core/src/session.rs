@@ -371,7 +371,6 @@ mod tests {
                 triggers: vec![],
                 static_abilities: vec![],
                 replacements: vec![],
-                svars: std::collections::HashMap::new(),
                 color_override: None,
                 scryfall_oracle_id: None,
             },

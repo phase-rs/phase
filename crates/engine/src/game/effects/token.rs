@@ -165,13 +165,50 @@ const KNOWN_KEYWORDS: &[(&str, Keyword)] = &[
 
 /// Suffixes in token names that are ability descriptions, not subtypes or keywords.
 const IGNORED_SUFFIXES: &[&str] = &[
-    "sac", "draw", "noblock", "lifegain", "lose", "con", "burn", "snipe",
-    "pwdestroy", "regenerate", "exile", "counter", "illusory", "decayed",
-    "opp", "life", "total", "ammo", "mana", "restrict", "tappump", "crewbuff",
-    "crewsaddlebuff", "unblockable", "toxic", "banding", "cardsinhand",
-    "mountainwalk", "leavedrain", "firebending", "exileplay", "search",
-    "mill", "nosferatu", "sound", "call", "resurgence", "grave", "pro",
-    "red", "burst", "spiritshadow", "landfall", "drawcounter",
+    "sac",
+    "draw",
+    "noblock",
+    "lifegain",
+    "lose",
+    "con",
+    "burn",
+    "snipe",
+    "pwdestroy",
+    "regenerate",
+    "exile",
+    "counter",
+    "illusory",
+    "decayed",
+    "opp",
+    "life",
+    "total",
+    "ammo",
+    "mana",
+    "restrict",
+    "tappump",
+    "crewbuff",
+    "crewsaddlebuff",
+    "unblockable",
+    "toxic",
+    "banding",
+    "cardsinhand",
+    "mountainwalk",
+    "leavedrain",
+    "firebending",
+    "exileplay",
+    "search",
+    "mill",
+    "nosferatu",
+    "sound",
+    "call",
+    "resurgence",
+    "grave",
+    "pro",
+    "red",
+    "burst",
+    "spiritshadow",
+    "landfall",
+    "drawcounter",
     "poison",
 ];
 
@@ -523,8 +560,8 @@ mod tests {
     fn emits_effect_resolved_event() {
         let (_, events) = resolve_token("w_1_1_soldier");
 
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::EffectResolved { api_type, .. } if api_type == "Token")));
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::EffectResolved { api_type, .. } if api_type == "Token")
+        ));
     }
 }

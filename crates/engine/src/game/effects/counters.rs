@@ -270,10 +270,7 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
-    fn make_counter_ability(
-        effect: Effect,
-        target: ObjectId,
-    ) -> ResolvedAbility {
+    fn make_counter_ability(effect: Effect, target: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
             effect,
             vec![TargetRef::Object(target)],

@@ -30,7 +30,7 @@ function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
     trigger_definitions: [],
     replacement_definitions: [],
     static_definitions: [],
-    svars: {},
+
     color: ["Green"],
     base_power: 3,
     base_toughness: 4,

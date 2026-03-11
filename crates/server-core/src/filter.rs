@@ -21,7 +21,6 @@ pub fn filter_state_for_player(state: &GameState, player: PlayerId) -> GameState
             obj.loyalty = None;
             obj.color.clear();
             obj.base_color.clear();
-            obj.svars.clear();
             obj.trigger_definitions.clear();
             obj.replacement_definitions.clear();
             obj.static_definitions.clear();
@@ -43,7 +42,6 @@ pub fn filter_state_for_player(state: &GameState, player: PlayerId) -> GameState
                 obj.loyalty = None;
                 obj.color.clear();
                 obj.base_color.clear();
-                obj.svars.clear();
                 obj.trigger_definitions.clear();
                 obj.replacement_definitions.clear();
                 obj.static_definitions.clear();
@@ -58,6 +56,9 @@ pub fn filter_state_for_player(state: &GameState, player: PlayerId) -> GameState
 mod tests {
     use super::*;
     use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetFilter,
+    };
     use engine::types::identifiers::CardId;
     use engine::types::zones::Zone;
 
@@ -72,8 +73,19 @@ mod tests {
             "Lightning Bolt".to_string(),
             Zone::Hand,
         );
-        state.objects.get_mut(&id0).unwrap().abilities =
-            vec![engine::parser::ability::parse_ability("SP$ DealDamage | NumDmg$ 3").unwrap()];
+        state.objects.get_mut(&id0).unwrap().abilities = vec![AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any,
+            },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        }];
 
         // Add cards to player 1's hand
         let id1 = create_object(
@@ -83,8 +95,18 @@ mod tests {
             "Counterspell".to_string(),
             Zone::Hand,
         );
-        state.objects.get_mut(&id1).unwrap().abilities =
-            vec![engine::parser::ability::parse_ability("SP$ Counter | ValidTgts$ Card").unwrap()];
+        state.objects.get_mut(&id1).unwrap().abilities = vec![AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::Counter {
+                target: TargetFilter::Any,
+            },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        }];
 
         // Add cards to libraries
         create_object(

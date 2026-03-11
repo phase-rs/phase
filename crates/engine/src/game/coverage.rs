@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use crate::database::CardDatabase;
 use crate::game::effects::is_known_effect;
 use crate::game::game_object::GameObject;
@@ -13,6 +11,8 @@ use crate::types::ability::{
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {

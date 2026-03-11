@@ -19,7 +19,10 @@ pub enum ProtectionTarget {
 /// Simple (unit) variants for keywords with no parameters.
 /// Parameterized variants carry associated data (ManaCost for costs, amounts, etc.).
 /// Unknown captures any unrecognized keyword string for forward compatibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// Custom Deserialize: accepts both the typed externally-tagged format (new)
+/// and plain "Name:Param" strings (legacy card-data.json).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub enum Keyword {
     // Evasion / Combat
     Flying,
@@ -92,7 +95,10 @@ pub enum Keyword {
     Enchant(TargetFilter),
 
     // ETB counter (e.g., P1P1:1)
-    EtbCounter { counter_type: String, count: u32 },
+    EtbCounter {
+        counter_type: String,
+        count: u32,
+    },
 
     // Equipment / attachment
     Reconfigure(ManaCost),
@@ -466,6 +472,228 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         "green" => ProtectionTarget::Color(ManaColor::Green),
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(s.to_string()),
         _ => ProtectionTarget::CardType(s.to_string()),
+    }
+}
+
+/// Custom Deserialize: accepts both the typed externally-tagged format (new)
+/// and plain "Name:Param" strings (legacy card-data.json).
+///
+/// Plain strings are parsed via FromStr (handles "Flying", "Equip:3", etc).
+/// Tagged objects are deserialized via the default externally-tagged format.
+impl<'de> Deserialize<'de> for Keyword {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        match &value {
+            serde_json::Value::String(s) => {
+                // Plain string: parse via FromStr (handles both "Flying" and "Equip:3")
+                Ok(s.parse::<Keyword>().unwrap())
+            }
+            serde_json::Value::Object(map) => {
+                // Externally-tagged enum: the key is the variant name
+                // For unit variants serialized as strings this path won't be hit.
+                // For parameterized variants: {"Kicker": {"Cost": ...}}
+                if let Some((variant, data)) = map.iter().next() {
+                    keyword_from_tagged(variant, data).map_err(serde::de::Error::custom)
+                } else {
+                    Err(serde::de::Error::custom("empty object for Keyword"))
+                }
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected string or object for Keyword",
+            )),
+        }
+    }
+}
+
+/// Reconstruct a Keyword from an externally-tagged JSON object.
+fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keyword, String> {
+    // Helper to deserialize ManaCost from Value
+    fn mana(v: &serde_json::Value) -> Result<ManaCost, String> {
+        serde_json::from_value(v.clone()).map_err(|e| format!("ManaCost: {e}"))
+    }
+    fn uint(v: &serde_json::Value) -> u32 {
+        v.as_u64().unwrap_or(0) as u32
+    }
+
+    match variant {
+        "Flying" => Ok(Keyword::Flying),
+        "FirstStrike" => Ok(Keyword::FirstStrike),
+        "DoubleStrike" => Ok(Keyword::DoubleStrike),
+        "Trample" => Ok(Keyword::Trample),
+        "Deathtouch" => Ok(Keyword::Deathtouch),
+        "Lifelink" => Ok(Keyword::Lifelink),
+        "Vigilance" => Ok(Keyword::Vigilance),
+        "Haste" => Ok(Keyword::Haste),
+        "Reach" => Ok(Keyword::Reach),
+        "Defender" => Ok(Keyword::Defender),
+        "Menace" => Ok(Keyword::Menace),
+        "Indestructible" => Ok(Keyword::Indestructible),
+        "Hexproof" => Ok(Keyword::Hexproof),
+        "Shroud" => Ok(Keyword::Shroud),
+        "Flash" => Ok(Keyword::Flash),
+        "Fear" => Ok(Keyword::Fear),
+        "Intimidate" => Ok(Keyword::Intimidate),
+        "Skulk" => Ok(Keyword::Skulk),
+        "Shadow" => Ok(Keyword::Shadow),
+        "Horsemanship" => Ok(Keyword::Horsemanship),
+        "Wither" => Ok(Keyword::Wither),
+        "Infect" => Ok(Keyword::Infect),
+        "Afflict" => Ok(Keyword::Afflict),
+        "Prowess" => Ok(Keyword::Prowess),
+        "Undying" => Ok(Keyword::Undying),
+        "Persist" => Ok(Keyword::Persist),
+        "Cascade" => Ok(Keyword::Cascade),
+        "Convoke" => Ok(Keyword::Convoke),
+        "Delve" => Ok(Keyword::Delve),
+        "Devoid" => Ok(Keyword::Devoid),
+        "Changeling" => Ok(Keyword::Changeling),
+        "Phasing" => Ok(Keyword::Phasing),
+        "Battlecry" => Ok(Keyword::Battlecry),
+        "Decayed" => Ok(Keyword::Decayed),
+        "Unleash" => Ok(Keyword::Unleash),
+        "Riot" => Ok(Keyword::Riot),
+        "LivingWeapon" => Ok(Keyword::LivingWeapon),
+        "TotemArmor" => Ok(Keyword::TotemArmor),
+        "Exalted" => Ok(Keyword::Exalted),
+        "Flanking" => Ok(Keyword::Flanking),
+        "Evolve" => Ok(Keyword::Evolve),
+        "Extort" => Ok(Keyword::Extort),
+        "Exploit" => Ok(Keyword::Exploit),
+        "Explore" => Ok(Keyword::Explore),
+        "Ascend" => Ok(Keyword::Ascend),
+        "Soulbond" => Ok(Keyword::Soulbond),
+        "Banding" => Ok(Keyword::Banding),
+        "Epic" => Ok(Keyword::Epic),
+        "Fuse" => Ok(Keyword::Fuse),
+        "Gravestorm" => Ok(Keyword::Gravestorm),
+        "Haunt" => Ok(Keyword::Haunt),
+        "Hideaway" => Ok(Keyword::Hideaway),
+        "Improvise" => Ok(Keyword::Improvise),
+        "Ingest" => Ok(Keyword::Ingest),
+        "Melee" => Ok(Keyword::Melee),
+        "Mentor" => Ok(Keyword::Mentor),
+        "Myriad" => Ok(Keyword::Myriad),
+        "Provoke" => Ok(Keyword::Provoke),
+        "Rebound" => Ok(Keyword::Rebound),
+        "Retrace" => Ok(Keyword::Retrace),
+        "SplitSecond" => Ok(Keyword::SplitSecond),
+        "Storm" => Ok(Keyword::Storm),
+        "Suspend" => Ok(Keyword::Suspend),
+        "Gift" => Ok(Keyword::Gift),
+        "Ravenous" => Ok(Keyword::Ravenous),
+        "Daybound" => Ok(Keyword::Daybound),
+        "Nightbound" => Ok(Keyword::Nightbound),
+        "Enlist" => Ok(Keyword::Enlist),
+        "ReadAhead" => Ok(Keyword::ReadAhead),
+        "Compleated" => Ok(Keyword::Compleated),
+        "Conspire" => Ok(Keyword::Conspire),
+        "Demonstrate" => Ok(Keyword::Demonstrate),
+        "Dethrone" => Ok(Keyword::Dethrone),
+        "DoubleTeam" => Ok(Keyword::DoubleTeam),
+        "LivingMetal" => Ok(Keyword::LivingMetal),
+        "Cumulative" => Ok(Keyword::Cumulative),
+        "Ripple" => Ok(Keyword::Ripple),
+        "Totem" => Ok(Keyword::Totem),
+        "Warp" => Ok(Keyword::Warp),
+        // Parameterized: ManaCost
+        "Kicker" => Ok(Keyword::Kicker(mana(data)?)),
+        "Cycling" => Ok(Keyword::Cycling(mana(data)?)),
+        "Flashback" => Ok(Keyword::Flashback(mana(data)?)),
+        "Ward" => Ok(Keyword::Ward(mana(data)?)),
+        "Equip" => Ok(Keyword::Equip(mana(data)?)),
+        "Ninjutsu" => Ok(Keyword::Ninjutsu(mana(data)?)),
+        "Reconfigure" => Ok(Keyword::Reconfigure(mana(data)?)),
+        "Bestow" => Ok(Keyword::Bestow(mana(data)?)),
+        "Embalm" => Ok(Keyword::Embalm(mana(data)?)),
+        "Eternalize" => Ok(Keyword::Eternalize(mana(data)?)),
+        "Unearth" => Ok(Keyword::Unearth(mana(data)?)),
+        "Prowl" => Ok(Keyword::Prowl(mana(data)?)),
+        "Morph" => Ok(Keyword::Morph(mana(data)?)),
+        "Megamorph" => Ok(Keyword::Megamorph(mana(data)?)),
+        "Madness" => Ok(Keyword::Madness(mana(data)?)),
+        "Dash" => Ok(Keyword::Dash(mana(data)?)),
+        "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
+        "Escape" => Ok(Keyword::Escape(mana(data)?)),
+        "Evoke" => Ok(Keyword::Evoke(mana(data)?)),
+        "Foretell" => Ok(Keyword::Foretell(mana(data)?)),
+        "Mutate" => Ok(Keyword::Mutate(mana(data)?)),
+        "Disturb" => Ok(Keyword::Disturb(mana(data)?)),
+        "Disguise" => Ok(Keyword::Disguise(mana(data)?)),
+        "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
+        "Overload" => Ok(Keyword::Overload(mana(data)?)),
+        "Spectacle" => Ok(Keyword::Spectacle(mana(data)?)),
+        "Surge" => Ok(Keyword::Surge(mana(data)?)),
+        "Encore" => Ok(Keyword::Encore(mana(data)?)),
+        "Buyback" => Ok(Keyword::Buyback(mana(data)?)),
+        "Echo" => Ok(Keyword::Echo(mana(data)?)),
+        "Outlast" => Ok(Keyword::Outlast(mana(data)?)),
+        "Scavenge" => Ok(Keyword::Scavenge(mana(data)?)),
+        "Fortify" => Ok(Keyword::Fortify(mana(data)?)),
+        "Prototype" => Ok(Keyword::Prototype(mana(data)?)),
+        "Plot" => Ok(Keyword::Plot(mana(data)?)),
+        "Craft" => Ok(Keyword::Craft(mana(data)?)),
+        "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
+        "Impending" => Ok(Keyword::Impending(mana(data)?)),
+        // Parameterized: u32
+        "Dredge" => Ok(Keyword::Dredge(uint(data))),
+        "Modular" => Ok(Keyword::Modular(uint(data))),
+        "Renown" => Ok(Keyword::Renown(uint(data))),
+        "Fabricate" => Ok(Keyword::Fabricate(uint(data))),
+        "Annihilator" => Ok(Keyword::Annihilator(uint(data))),
+        "Bushido" => Ok(Keyword::Bushido(uint(data))),
+        "Tribute" => Ok(Keyword::Tribute(uint(data))),
+        "Afterlife" => Ok(Keyword::Afterlife(uint(data))),
+        "Fading" => Ok(Keyword::Fading(uint(data))),
+        "Vanishing" => Ok(Keyword::Vanishing(uint(data))),
+        "Crew" => Ok(Keyword::Crew(uint(data))),
+        "Rampage" => Ok(Keyword::Rampage(uint(data))),
+        "Absorb" => Ok(Keyword::Absorb(uint(data))),
+        "Poisonous" => Ok(Keyword::Poisonous(uint(data))),
+        "Bloodthirst" => Ok(Keyword::Bloodthirst(uint(data))),
+        "Amplify" => Ok(Keyword::Amplify(uint(data))),
+        "Graft" => Ok(Keyword::Graft(uint(data))),
+        "Devour" => Ok(Keyword::Devour(uint(data))),
+        // Parameterized: special
+        "Protection" => {
+            let pt: ProtectionTarget =
+                serde_json::from_value(data.clone()).map_err(|e| format!("Protection: {e}"))?;
+            Ok(Keyword::Protection(pt))
+        }
+        "Landwalk" => Ok(Keyword::Landwalk(data.as_str().unwrap_or("").to_string())),
+        "Partner" => Ok(Keyword::Partner(
+            data.as_str().map(|s| s.to_string()).or_else(|| {
+                if data.is_null() {
+                    None
+                } else {
+                    Some(data.to_string())
+                }
+            }),
+        )),
+        "Companion" => Ok(Keyword::Companion(data.as_str().unwrap_or("").to_string())),
+        "Enchant" => {
+            let tf: TargetFilter =
+                serde_json::from_value(data.clone()).map_err(|e| format!("Enchant: {e}"))?;
+            Ok(Keyword::Enchant(tf))
+        }
+        "EtbCounter" => {
+            let obj = data.as_object().ok_or("EtbCounter: expected object")?;
+            let counter_type = obj
+                .get("counter_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("P1P1")
+                .to_string();
+            let count = obj.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+            Ok(Keyword::EtbCounter {
+                counter_type,
+                count,
+            })
+        }
+        "Unknown" => Ok(Keyword::Unknown(data.as_str().unwrap_or("").to_string())),
+        _ => Ok(Keyword::Unknown(format!("{variant}:{data}"))),
     }
 }
 

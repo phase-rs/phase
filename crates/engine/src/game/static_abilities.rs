@@ -415,9 +415,7 @@ fn static_filter_matches(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{
-        ControllerRef, StaticDefinition, TargetFilter, TypeFilter,
-    };
+    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypeFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::statics::StaticMode;

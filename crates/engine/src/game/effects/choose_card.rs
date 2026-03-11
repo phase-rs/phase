@@ -17,10 +17,7 @@ pub fn resolve(
         Effect::ChooseCard { choices, .. } => {
             // Choices can encode origin and count, e.g. ["Graveyard", "2"]
             let origin = choices.first().map(|s| s.as_str()).unwrap_or("Graveyard");
-            let count: usize = choices
-                .get(1)
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1);
+            let count: usize = choices.get(1).and_then(|v| v.parse().ok()).unwrap_or(1);
             (origin, count)
         }
         _ => ("Graveyard", 1),

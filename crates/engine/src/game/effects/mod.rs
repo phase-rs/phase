@@ -297,12 +297,8 @@ mod tests {
     #[test]
     fn chain_depth_exceeds_limit_returns_error() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility::new(
-            Effect::Draw { count: 1 },
-            vec![],
-            ObjectId(1),
-            PlayerId(0),
-        );
+        let ability =
+            ResolvedAbility::new(Effect::Draw { count: 1 }, vec![], ObjectId(1), PlayerId(0));
         let mut events = Vec::new();
 
         let result = resolve_ability_chain(&mut state, &ability, &mut events, 21);

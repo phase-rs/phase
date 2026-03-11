@@ -201,9 +201,10 @@ fn build_resolved_from_def(
         targets: Vec::new(),
         source_id,
         controller,
-        sub_ability: def.sub_ability.as_ref().map(|sub| {
-            Box::new(build_resolved_from_def(sub, source_id, controller))
-        }),
+        sub_ability: def
+            .sub_ability
+            .as_ref()
+            .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
     }
 }
 
@@ -454,22 +455,14 @@ fn target_filter_matches_object(
             // Check card type
             if let Some(type_filter) = card_type {
                 let type_match = match type_filter {
-                    TypeFilter::Creature => {
-                        obj.card_types.core_types.contains(&CoreType::Creature)
-                    }
+                    TypeFilter::Creature => obj.card_types.core_types.contains(&CoreType::Creature),
                     TypeFilter::Land => obj.card_types.core_types.contains(&CoreType::Land),
-                    TypeFilter::Artifact => {
-                        obj.card_types.core_types.contains(&CoreType::Artifact)
-                    }
+                    TypeFilter::Artifact => obj.card_types.core_types.contains(&CoreType::Artifact),
                     TypeFilter::Enchantment => {
                         obj.card_types.core_types.contains(&CoreType::Enchantment)
                     }
-                    TypeFilter::Instant => {
-                        obj.card_types.core_types.contains(&CoreType::Instant)
-                    }
-                    TypeFilter::Sorcery => {
-                        obj.card_types.core_types.contains(&CoreType::Sorcery)
-                    }
+                    TypeFilter::Instant => obj.card_types.core_types.contains(&CoreType::Instant),
+                    TypeFilter::Sorcery => obj.card_types.core_types.contains(&CoreType::Sorcery),
                     TypeFilter::Planeswalker => {
                         obj.card_types.core_types.contains(&CoreType::Planeswalker)
                     }
@@ -497,8 +490,7 @@ fn target_filter_matches_object(
             }
             // Check controller
             if let Some(ctrl_ref) = controller {
-                let source_controller =
-                    state.objects.get(&source_id).map(|o| o.controller);
+                let source_controller = state.objects.get(&source_id).map(|o| o.controller);
                 match ctrl_ref {
                     ControllerRef::You => {
                         if source_controller != Some(obj.controller) {
@@ -1309,7 +1301,9 @@ pub mod tests {
     use super::*;
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityKind, ControllerRef, TargetFilter, TriggerDefinition, TypeFilter};
+    use crate::types::ability::{
+        AbilityKind, ControllerRef, TargetFilter, TriggerDefinition, TypeFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
@@ -1563,9 +1557,24 @@ pub mod tests {
             controller: None,
             properties: vec![],
         };
-        assert!(matches_target_filter(&state, id, &creature_filter, ObjectId(99)));
-        assert!(!matches_target_filter(&state, id, &land_filter, ObjectId(99)));
-        assert!(matches_target_filter(&state, id, &TargetFilter::Any, ObjectId(99)));
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &creature_filter,
+            ObjectId(99)
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            id,
+            &land_filter,
+            ObjectId(99)
+        ));
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &TargetFilter::Any,
+            ObjectId(99)
+        ));
     }
 
     #[test]
@@ -1613,8 +1622,18 @@ pub mod tests {
             controller: Some(ControllerRef::You),
             properties: vec![],
         };
-        assert!(matches_target_filter(&state, target, &creature_you_ctrl, source));
-        assert!(!matches_target_filter(&state, opp_target, &creature_you_ctrl, source));
+        assert!(matches_target_filter(
+            &state,
+            target,
+            &creature_you_ctrl,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            opp_target,
+            &creature_you_ctrl,
+            source
+        ));
     }
 
     #[test]
@@ -1627,7 +1646,12 @@ pub mod tests {
             "Card".to_string(),
             Zone::Battlefield,
         );
-        assert!(matches_target_filter(&state, obj, &TargetFilter::SelfRef, obj));
+        assert!(matches_target_filter(
+            &state,
+            obj,
+            &TargetFilter::SelfRef,
+            obj
+        ));
         let other = create_object(
             &mut state,
             CardId(2),
@@ -1635,7 +1659,12 @@ pub mod tests {
             "Other".to_string(),
             Zone::Battlefield,
         );
-        assert!(!matches_target_filter(&state, obj, &TargetFilter::SelfRef, other));
+        assert!(!matches_target_filter(
+            &state,
+            obj,
+            &TargetFilter::SelfRef,
+            other
+        ));
     }
 
     #[test]
@@ -2327,10 +2356,7 @@ pub mod tests {
     fn build_triggered_ability_no_execute() {
         let trig_def = make_trigger(TriggerMode::ChangesZone);
         let ability = build_triggered_ability(&trig_def, ObjectId(1), PlayerId(0));
-        assert!(matches!(
-            ability.effect,
-            Effect::Unimplemented { .. }
-        ));
+        assert!(matches!(ability.effect, Effect::Unimplemented { .. }));
     }
 
     #[test]
@@ -2390,7 +2416,9 @@ pub mod tests {
         );
         let filter = TargetFilter::SelfRef;
         // SelfRef matches when object_id == source_id
-        assert!(target_filter_matches_object(&state, obj_id, &filter, obj_id));
+        assert!(target_filter_matches_object(
+            &state, obj_id, &filter, obj_id
+        ));
         // Does not match when source is different
         assert!(!target_filter_matches_object(
             &state,

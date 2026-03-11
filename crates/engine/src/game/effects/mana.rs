@@ -110,12 +110,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
-        resolve(
-            &mut state,
-            &make_mana_ability(vec![]),
-            &mut events,
-        )
-        .unwrap();
+        resolve(&mut state, &make_mana_ability(vec![]), &mut events).unwrap();
 
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }

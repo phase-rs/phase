@@ -41,27 +41,23 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
             );
             let is_own_turn = state.active_player == player;
 
-            // Categorize by abilities/svars
-            let has_destroy = obj.svars.values().any(|v| v.contains("Destroy"))
-                || obj
-                    .abilities
-                    .iter()
-                    .any(|a| effect_variant_name(&a.effect) == "Destroy");
-            let has_damage = obj.svars.values().any(|v| v.contains("DealDamage"))
-                || obj
-                    .abilities
-                    .iter()
-                    .any(|a| effect_variant_name(&a.effect) == "DealDamage");
-            let has_pump = obj.svars.values().any(|v| v.contains("Pump"))
-                || obj
-                    .abilities
-                    .iter()
-                    .any(|a| effect_variant_name(&a.effect) == "Pump");
-            let has_counter = obj.svars.values().any(|v| v.contains("Counter"))
-                || obj
-                    .abilities
-                    .iter()
-                    .any(|a| effect_variant_name(&a.effect) == "Counter");
+            // Categorize by typed ability effects
+            let has_destroy = obj
+                .abilities
+                .iter()
+                .any(|a| effect_variant_name(&a.effect) == "Destroy");
+            let has_damage = obj
+                .abilities
+                .iter()
+                .any(|a| effect_variant_name(&a.effect) == "DealDamage");
+            let has_pump = obj
+                .abilities
+                .iter()
+                .any(|a| effect_variant_name(&a.effect) == "Pump");
+            let has_counter = obj
+                .abilities
+                .iter()
+                .any(|a| effect_variant_name(&a.effect) == "Counter");
 
             // Removal: higher priority when opponent has high-value creatures
             if has_destroy || has_damage {
@@ -116,11 +112,11 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
 mod tests {
     use super::*;
     use engine::game::zones::create_object;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -130,12 +126,25 @@ mod tests {
         state
     }
 
+    fn make_ability(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect,
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        }
+    }
+
     fn add_spell_to_hand(
         state: &mut GameState,
         owner: PlayerId,
         name: &str,
         core_type: CoreType,
-        svars: HashMap<String, String>,
+        abilities: Vec<AbilityDefinition>,
     ) -> CardId {
         let id = create_object(
             state,
@@ -148,7 +157,7 @@ mod tests {
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(core_type);
         obj.mana_cost = ManaCost::zero();
-        obj.svars = svars;
+        obj.abilities = abilities;
         card_id
     }
 
@@ -166,14 +175,14 @@ mod tests {
     #[test]
     fn removal_scores_higher_with_opponent_creatures() {
         let mut state = make_state();
-        let mut svars = HashMap::new();
-        svars.insert("Mode".to_string(), "Destroy".to_string());
         let card_id = add_spell_to_hand(
             &mut state,
             PlayerId(0),
             "Murder",
             CoreType::Instant,
-            svars.clone(),
+            vec![make_ability(Effect::Destroy {
+                target: TargetFilter::Any,
+            })],
         );
 
         // No opponent creatures
@@ -218,14 +227,14 @@ mod tests {
     #[test]
     fn counterspells_score_low_on_own_turn() {
         let mut state = make_state();
-        let mut svars = HashMap::new();
-        svars.insert("Mode".to_string(), "Counter".to_string());
         let card_id = add_spell_to_hand(
             &mut state,
             PlayerId(0),
             "Counterspell",
             CoreType::Instant,
-            svars,
+            vec![make_ability(Effect::Counter {
+                target: TargetFilter::Any,
+            })],
         );
 
         let score = should_play_now(
@@ -246,14 +255,14 @@ mod tests {
     fn counterspells_score_high_on_opponent_turn() {
         let mut state = make_state();
         state.active_player = PlayerId(1); // Opponent's turn
-        let mut svars = HashMap::new();
-        svars.insert("Mode".to_string(), "Counter".to_string());
         let card_id = add_spell_to_hand(
             &mut state,
             PlayerId(0),
             "Counterspell",
             CoreType::Instant,
-            svars,
+            vec![make_ability(Effect::Counter {
+                target: TargetFilter::Any,
+            })],
         );
 
         let score = should_play_now(
@@ -273,13 +282,8 @@ mod tests {
     #[test]
     fn creatures_prefer_precombat_main() {
         let mut state = make_state();
-        let card_id = add_spell_to_hand(
-            &mut state,
-            PlayerId(0),
-            "Bear",
-            CoreType::Creature,
-            HashMap::new(),
-        );
+        let card_id =
+            add_spell_to_hand(&mut state, PlayerId(0), "Bear", CoreType::Creature, vec![]);
 
         let score_pre = should_play_now(
             &state,

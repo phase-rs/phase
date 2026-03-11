@@ -112,6 +112,10 @@ impl CardDatabase {
     pub fn iter(&self) -> impl Iterator<Item = (&str, &CardRules)> {
         self.cards.iter().map(|(k, v)| (k.as_str(), v))
     }
+
+    pub fn face_iter(&self) -> impl Iterator<Item = (&str, &CardFace)> {
+        self.face_index.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 #[cfg(feature = "forge-compat")]

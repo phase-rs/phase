@@ -366,8 +366,16 @@ async fn handle_client_message(
                     let session = mgr.sessions.get(&game_code).unwrap();
                     let legal_actions = get_legal_actions(&session.state);
                     let actor = server_core::acting_player(&session.state.waiting_for);
-                    let p1_legals = if actor == Some(PlayerId(1)) { legal_actions.clone() } else { vec![] };
-                    let p0_legals = if actor == Some(PlayerId(0)) { legal_actions } else { vec![] };
+                    let p1_legals = if actor == Some(PlayerId(1)) {
+                        legal_actions.clone()
+                    } else {
+                        vec![]
+                    };
+                    let p0_legals = if actor == Some(PlayerId(0)) {
+                        legal_actions
+                    } else {
+                        vec![]
+                    };
 
                     let mut conns = connections.lock().await;
                     conns
@@ -447,8 +455,16 @@ async fn handle_client_message(
                     let actor = server_core::acting_player(
                         &mgr.sessions.get(&game_code).unwrap().state.waiting_for,
                     );
-                    let p0_legals = if actor == Some(PlayerId(0)) { legal_actions.clone() } else { vec![] };
-                    let p1_legals = if actor == Some(PlayerId(1)) { legal_actions } else { vec![] };
+                    let p0_legals = if actor == Some(PlayerId(0)) {
+                        legal_actions.clone()
+                    } else {
+                        vec![]
+                    };
+                    let p1_legals = if actor == Some(PlayerId(1)) {
+                        legal_actions
+                    } else {
+                        vec![]
+                    };
 
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
@@ -498,7 +514,11 @@ async fn handle_client_message(
 
                     let legal_actions_all = get_legal_actions(&session.state);
                     let actor = server_core::acting_player(&session.state.waiting_for);
-                    let player_legals = if actor == Some(player) { legal_actions_all } else { vec![] };
+                    let player_legals = if actor == Some(player) {
+                        legal_actions_all
+                    } else {
+                        vec![]
+                    };
 
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.game_code = Some(game_code.clone());
@@ -685,8 +705,16 @@ async fn handle_client_message(
                     let joiner_name = session.display_names[1].clone();
                     let legal_actions = get_legal_actions(&session.state);
                     let actor = server_core::acting_player(&session.state.waiting_for);
-                    let p1_legals = if actor == Some(PlayerId(1)) { legal_actions.clone() } else { vec![] };
-                    let p0_legals = if actor == Some(PlayerId(0)) { legal_actions } else { vec![] };
+                    let p1_legals = if actor == Some(PlayerId(1)) {
+                        legal_actions.clone()
+                    } else {
+                        vec![]
+                    };
+                    let p0_legals = if actor == Some(PlayerId(0)) {
+                        legal_actions
+                    } else {
+                        vec![]
+                    };
 
                     let mut conns = connections.lock().await;
                     conns

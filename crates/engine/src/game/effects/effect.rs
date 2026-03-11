@@ -1,6 +1,4 @@
-use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef,
-};
+use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 

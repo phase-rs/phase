@@ -19,11 +19,7 @@ pub fn resolve(
             toughness,
             types,
             ..
-        } => (
-            power.unwrap_or(0),
-            toughness.unwrap_or(0),
-            types.as_slice(),
-        ),
+        } => (power.unwrap_or(0), toughness.unwrap_or(0), types.as_slice()),
         _ => (0, 0, [].as_slice()),
     };
 

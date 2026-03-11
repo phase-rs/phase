@@ -61,7 +61,9 @@ fn main() {
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
-                stats.errors.push((path.clone(), format!("Read error: {e}")));
+                stats
+                    .errors
+                    .push((path.clone(), format!("Read error: {e}")));
                 continue;
             }
         };
@@ -158,8 +160,7 @@ fn migrate_ability_file(root: &mut Value, path: &Path, stats: &mut Stats) -> boo
                     changed |= migrate_static_definition(static_def, path, stats);
                 }
             }
-            if let Some(replacements) =
-                face.get_mut("replacements").and_then(|v| v.as_array_mut())
+            if let Some(replacements) = face.get_mut("replacements").and_then(|v| v.as_array_mut())
             {
                 for repl in replacements.iter_mut() {
                     changed |= migrate_replacement_definition(repl, path, stats);
@@ -203,17 +204,14 @@ fn migrate_ability_definition(ability: &mut Value, path: &Path, stats: &mut Stat
                     .get("SpellDescription")
                     .or_else(|| map.get("StackDescription"))
                 {
-                    if ability.get("description").map_or(true, |v| v.is_null()) {
+                    if ability.get("description").is_none_or(|v| v.is_null()) {
                         ability["description"] = desc.clone();
                     }
                 }
 
                 // TgtPrompt -> target_prompt
                 if let Some(prompt) = map.get("TgtPrompt") {
-                    if ability
-                        .get("target_prompt")
-                        .map_or(true, |v| v.is_null())
-                    {
+                    if ability.get("target_prompt").is_none_or(|v| v.is_null()) {
                         ability["target_prompt"] = prompt.clone();
                     }
                 }
@@ -236,7 +234,7 @@ fn migrate_ability_definition(ability: &mut Value, path: &Path, stats: &mut Stat
                             _ => None,
                         };
                         if let Some(dur_val) = mapped {
-                            if ability.get("duration").map_or(true, |v| v.is_null()) {
+                            if ability.get("duration").is_none_or(|v| v.is_null()) {
                                 ability["duration"] = json!(dur_val);
                             }
                         }
@@ -391,11 +389,7 @@ fn migrate_cost(cost: &mut Value, _path: &Path, _stats: &Stats) -> bool {
 }
 
 /// Migrate a TriggerDefinition from old params format to typed fields.
-fn migrate_trigger_definition(
-    trigger: &mut Value,
-    path: &Path,
-    stats: &mut Stats,
-) -> bool {
+fn migrate_trigger_definition(trigger: &mut Value, path: &Path, stats: &mut Stats) -> bool {
     let mut changed = false;
 
     // Check if already migrated (has no "params" key)
@@ -423,7 +417,10 @@ fn migrate_trigger_definition(
     changed = true;
 
     // Extract typed fields from params
-    if let Some(desc) = params.get("TriggerDescription").or(params.get("Description")) {
+    if let Some(desc) = params
+        .get("TriggerDescription")
+        .or(params.get("Description"))
+    {
         trigger["description"] = desc.clone();
     }
 
@@ -445,7 +442,10 @@ fn migrate_trigger_definition(
 
     if let Some(tz) = params.get("TriggerZones") {
         if let Some(s) = tz.as_str() {
-            let zones: Vec<Value> = s.split(',').map(|z| json!(map_zone_string(z.trim()))).collect();
+            let zones: Vec<Value> = s
+                .split(',')
+                .map(|z| json!(map_zone_string(z.trim())))
+                .collect();
             trigger["trigger_zones"] = Value::Array(zones);
         }
     }
@@ -476,13 +476,11 @@ fn migrate_trigger_definition(
     }
 
     if let Some(vt) = params.get("ValidTarget") {
-        trigger["valid_target"] =
-            parse_forge_filter_to_target_filter(vt.as_str().unwrap_or(""));
+        trigger["valid_target"] = parse_forge_filter_to_target_filter(vt.as_str().unwrap_or(""));
     }
 
     if let Some(vs) = params.get("ValidSource") {
-        trigger["valid_source"] =
-            parse_forge_filter_to_target_filter(vs.as_str().unwrap_or(""));
+        trigger["valid_source"] = parse_forge_filter_to_target_filter(vs.as_str().unwrap_or(""));
     }
 
     // The Execute SVar reference can't be resolved from JSON alone (no SVar table).
@@ -509,11 +507,7 @@ fn migrate_trigger_definition(
 }
 
 /// Migrate a StaticDefinition from old params format to typed fields.
-fn migrate_static_definition(
-    static_def: &mut Value,
-    _path: &Path,
-    _stats: &mut Stats,
-) -> bool {
+fn migrate_static_definition(static_def: &mut Value, _path: &Path, _stats: &mut Stats) -> bool {
     let mut changed = false;
 
     // Check if already migrated
@@ -679,11 +673,7 @@ fn migrate_static_definition(
 }
 
 /// Migrate a ReplacementDefinition from old params format to typed fields.
-fn migrate_replacement_definition(
-    repl: &mut Value,
-    path: &Path,
-    stats: &mut Stats,
-) -> bool {
+fn migrate_replacement_definition(repl: &mut Value, path: &Path, stats: &mut Stats) -> bool {
     let mut changed = false;
 
     // Check if already migrated
@@ -750,10 +740,7 @@ fn migrate_target_filter(filter: &mut Value) -> bool {
     match filter_type.as_str() {
         "All" => {
             // Old: { "type": "All", "filter": "" } -> { "type": "Any" } or parse filter
-            let filter_str = filter
-                .get("filter")
-                .and_then(|f| f.as_str())
-                .unwrap_or("");
+            let filter_str = filter.get("filter").and_then(|f| f.as_str()).unwrap_or("");
             if filter_str.is_empty() {
                 *filter = json!({"type": "Any"});
             } else {
@@ -763,10 +750,7 @@ fn migrate_target_filter(filter: &mut Value) -> bool {
         }
         "Filtered" => {
             // Old: { "type": "Filtered", "filter": "Creature" } -> typed
-            let filter_str = filter
-                .get("filter")
-                .and_then(|f| f.as_str())
-                .unwrap_or("");
+            let filter_str = filter.get("filter").and_then(|f| f.as_str()).unwrap_or("");
             *filter = parse_forge_filter_to_target_filter(filter_str);
             true
         }
@@ -898,7 +882,7 @@ fn map_type_filter(s: &str) -> Option<&str> {
         "Permanent" | "permanent" => Some("Permanent"),
         "Card" | "card" => Some("Card"),
         "Any" | "any" => None, // No type filter for "Any"
-        _ => Some(s), // Preserve unknown types
+        _ => Some(s),          // Preserve unknown types
     }
 }
 

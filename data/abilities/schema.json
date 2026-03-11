@@ -1739,7 +1739,7 @@
       ]
     },
     "Keyword": {
-      "description": "All MTG keywords as typed enum variants.\nSimple (unit) variants for keywords with no parameters.\nParameterized variants carry associated data (ManaCost for costs, amounts, etc.).\nUnknown captures any unrecognized keyword string for forward compatibility.",
+      "description": "All MTG keywords as typed enum variants.\nSimple (unit) variants for keywords with no parameters.\nParameterized variants carry associated data (ManaCost for costs, amounts, etc.).\nUnknown captures any unrecognized keyword string for forward compatibility.\n\nCustom Deserialize: accepts both the typed externally-tagged format (new)\nand plain \"Name:Param\" strings (legacy card-data.json).",
       "oneOf": [
         {
           "type": "string",

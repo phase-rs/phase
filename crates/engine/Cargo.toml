@@ -32,6 +32,10 @@ path = "src/bin/migrate.rs"
 required-features = ["forge-compat"]
 
 [[bin]]
+name = "json-export"
+path = "src/bin/json_export.rs"
+
+[[bin]]
 name = "migrate-abilities"
 path = "src/bin/migrate_abilities.rs"
 
