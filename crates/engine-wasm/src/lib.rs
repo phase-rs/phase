@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 
 use engine::game::engine::apply;
 use engine::game::{load_deck_into_state, start_game, DeckPayload};
-use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, Zone};
+use engine::types::{GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, PlayerId, Zone};
 
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
