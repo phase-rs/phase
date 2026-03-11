@@ -43,6 +43,8 @@ pub enum ClientMessage {
         public: bool,
         password: Option<String>,
         timer_seconds: Option<u32>,
+        #[serde(default = "default_player_count")]
+        player_count: u8,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -54,6 +56,13 @@ pub enum ClientMessage {
     Emote {
         emote: String,
     },
+    SpectatorJoin {
+        game_code: String,
+    },
+}
+
+fn default_player_count() -> u8 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +77,8 @@ pub enum ServerMessage {
         your_player: PlayerId,
         opponent_name: Option<String>,
         #[serde(default)]
+        player_names: Vec<String>,
+        #[serde(default)]
         legal_actions: Vec<GameAction>,
     },
     StateUpdate {
@@ -75,14 +86,21 @@ pub enum ServerMessage {
         events: Vec<GameEvent>,
         #[serde(default)]
         legal_actions: Vec<GameAction>,
+        #[serde(default)]
+        eliminated_players: Vec<PlayerId>,
     },
     ActionRejected {
         reason: String,
     },
     OpponentDisconnected {
         grace_seconds: u32,
+        #[serde(default)]
+        player: Option<PlayerId>,
     },
-    OpponentReconnected,
+    OpponentReconnected {
+        #[serde(default)]
+        player: Option<PlayerId>,
+    },
     GameOver {
         winner: Option<PlayerId>,
         reason: String,
@@ -213,7 +231,7 @@ mod tests {
 
     #[test]
     fn server_message_tagged_json_format() {
-        let msg = ServerMessage::OpponentReconnected;
+        let msg = ServerMessage::OpponentReconnected { player: None };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "OpponentReconnected");
     }
@@ -245,6 +263,7 @@ mod tests {
             public: true,
             password: Some("secret".to_string()),
             timer_seconds: Some(60),
+            player_count: 4,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -254,12 +273,14 @@ mod tests {
                 public,
                 password,
                 timer_seconds,
+                player_count,
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
                 assert!(public);
                 assert_eq!(password, Some("secret".to_string()));
                 assert_eq!(timer_seconds, Some(60));
+                assert_eq!(player_count, 4);
             }
             _ => panic!("wrong variant"),
         }
@@ -321,6 +342,7 @@ mod tests {
             state: state.clone(),
             your_player: PlayerId(0),
             opponent_name: Some("Opponent".to_string()),
+            player_names: vec!["Me".to_string(), "Opponent".to_string()],
             legal_actions: vec![GameAction::PassPriority],
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -329,11 +351,13 @@ mod tests {
             ServerMessage::GameStarted {
                 your_player,
                 opponent_name,
+                player_names,
                 legal_actions,
                 ..
             } => {
                 assert_eq!(your_player, PlayerId(0));
                 assert_eq!(opponent_name, Some("Opponent".to_string()));
+                assert_eq!(player_names.len(), 2);
                 assert_eq!(legal_actions.len(), 1);
             }
             _ => panic!("wrong variant"),
@@ -347,6 +371,7 @@ mod tests {
             state,
             your_player: PlayerId(1),
             opponent_name: None,
+            player_names: vec![],
             legal_actions: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();

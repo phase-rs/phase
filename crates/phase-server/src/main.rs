@@ -256,10 +256,18 @@ async fn handle_socket(
         let mut mgr = state.lock().await;
         mgr.handle_disconnect(game_code, *player_id);
 
-        let opponent = PlayerId(1 - player_id.0);
+        // Notify all other connected players about this disconnection
         let conns = connections.lock().await;
-        if let Some(opp_sender) = conns.get(game_code).and_then(|m| m.get(&opponent)) {
-            let _ = opp_sender.send(ServerMessage::OpponentDisconnected { grace_seconds: 120 });
+        if let Some(players) = conns.get(game_code) {
+            let msg = ServerMessage::OpponentDisconnected {
+                grace_seconds: 120,
+                player: Some(*player_id),
+            };
+            for (&pid, sender) in players.iter() {
+                if pid != *player_id {
+                    let _ = sender.send(msg.clone());
+                }
+            }
         }
     }
 
@@ -358,56 +366,63 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             match mgr.join_game(&game_code, resolved) {
                 Ok((player_token, filtered_state)) => {
-                    info!(game = %game_code, "player joined, game starting");
-                    identity.game_code = Some(game_code.clone());
-                    identity.player_id = Some(PlayerId(1));
-                    identity.player_token = Some(player_token.clone());
-
                     let session = mgr.sessions.get(&game_code).unwrap();
-                    let legal_actions = get_legal_actions(&session.state);
-                    let actor = server_core::acting_player(&session.state.waiting_for);
-                    let p1_legals = if actor == Some(PlayerId(1)) {
-                        legal_actions.clone()
-                    } else {
-                        vec![]
-                    };
-                    let p0_legals = if actor == Some(PlayerId(0)) {
-                        legal_actions
-                    } else {
-                        vec![]
-                    };
+                    let joiner = session.player_for_token(&player_token).unwrap();
+                    info!(game = %game_code, player = ?joiner, "player joined");
+                    identity.game_code = Some(game_code.clone());
+                    identity.player_id = Some(joiner);
+                    identity.player_token = Some(player_token.clone());
 
                     let mut conns = connections.lock().await;
                     conns
                         .entry(game_code.clone())
                         .or_default()
-                        .insert(PlayerId(1), tx.clone());
+                        .insert(joiner, tx.clone());
 
-                    let msg = ServerMessage::GameStarted {
-                        state: filtered_state,
-                        your_player: PlayerId(1),
-                        opponent_name: None,
-                        legal_actions: p1_legals,
-                    };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    // Only send GameStarted when the game is full (all seats claimed)
+                    if session.is_full() {
+                        let legal_actions = get_legal_actions(&session.state);
+                        let actor = server_core::acting_player(&session.state.waiting_for);
+                        let player_names = session.display_names.clone();
 
-                    let p0_state = server_core::filter_state_for_player(
-                        &mgr.sessions.get(&game_code).unwrap().state,
-                        PlayerId(0),
-                    );
-                    if let Some(p0_sender) = conns.get(&game_code).and_then(|m| m.get(&PlayerId(0)))
-                    {
-                        info!(game = %game_code, "sending GameStarted to host");
-                        let _ = p0_sender.send(ServerMessage::GameStarted {
-                            state: p0_state,
-                            your_player: PlayerId(0),
+                        // Send GameStarted to the joiner
+                        let joiner_legals = if actor == Some(joiner) {
+                            legal_actions.clone()
+                        } else {
+                            vec![]
+                        };
+                        let msg = ServerMessage::GameStarted {
+                            state: filtered_state,
+                            your_player: joiner,
                             opponent_name: None,
-                            legal_actions: p0_legals,
-                        });
-                    } else {
-                        warn!(game = %game_code, "host channel not found in connections");
+                            player_names: player_names.clone(),
+                            legal_actions: joiner_legals,
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+
+                        // Send GameStarted to all other connected players
+                        for (&pid, sender) in conns.get(&game_code).unwrap().iter() {
+                            if pid != joiner {
+                                let p_state = server_core::filter_state_for_player(
+                                    &session.state,
+                                    pid,
+                                );
+                                let p_legals = if actor == Some(pid) {
+                                    legal_actions.clone()
+                                } else {
+                                    vec![]
+                                };
+                                let _ = sender.send(ServerMessage::GameStarted {
+                                    state: p_state,
+                                    your_player: pid,
+                                    opponent_name: None,
+                                    player_names: player_names.clone(),
+                                    legal_actions: p_legals,
+                                });
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -450,37 +465,28 @@ async fn handle_client_message(
             debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
             let mut mgr = state.lock().await;
             match mgr.handle_action(&game_code, &player_token, action) {
-                Ok((p0_state, p1_state, events, legal_actions)) => {
+                Ok((filtered_states, events, legal_actions)) => {
                     debug!(game = %game_code, events = events.len(), "action applied");
-                    let actor = server_core::acting_player(
-                        &mgr.sessions.get(&game_code).unwrap().state.waiting_for,
-                    );
-                    let p0_legals = if actor == Some(PlayerId(0)) {
-                        legal_actions.clone()
-                    } else {
-                        vec![]
-                    };
-                    let p1_legals = if actor == Some(PlayerId(1)) {
-                        legal_actions
-                    } else {
-                        vec![]
-                    };
+                    let session = mgr.sessions.get(&game_code).unwrap();
+                    let actor = server_core::acting_player(&session.state.waiting_for);
+                    let eliminated = session.state.eliminated_players.clone();
 
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
-                        if let Some(s) = players.get(&PlayerId(0)) {
-                            let _ = s.send(ServerMessage::StateUpdate {
-                                state: p0_state,
-                                events: events.clone(),
-                                legal_actions: p0_legals,
-                            });
-                        }
-                        if let Some(s) = players.get(&PlayerId(1)) {
-                            let _ = s.send(ServerMessage::StateUpdate {
-                                state: p1_state,
-                                events,
-                                legal_actions: p1_legals,
-                            });
+                        for (pid, pstate) in &filtered_states {
+                            if let Some(s) = players.get(pid) {
+                                let player_legals = if actor == Some(*pid) {
+                                    legal_actions.clone()
+                                } else {
+                                    vec![]
+                                };
+                                let _ = s.send(ServerMessage::StateUpdate {
+                                    state: pstate.clone(),
+                                    events: events.clone(),
+                                    legal_actions: player_legals,
+                                    eliminated_players: eliminated.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -504,13 +510,15 @@ async fn handle_client_message(
                 Ok(filtered_state) => {
                     let session = mgr.sessions.get(&game_code).unwrap();
                     let player = session.player_for_token(&player_token).unwrap();
-                    let opponent = PlayerId(1 - player.0);
-                    let opp_name = &session.display_names[opponent.0 as usize];
-                    let opponent_name = if opp_name.is_empty() {
-                        None
-                    } else {
-                        Some(opp_name.clone())
-                    };
+                    let player_names = session.display_names.clone();
+
+                    // Find first opponent name for backward compat
+                    let opponent_name = engine::game::players::opponents(&session.state, player)
+                        .first()
+                        .and_then(|&opp| {
+                            let name = &session.display_names[opp.0 as usize];
+                            if name.is_empty() { None } else { Some(name.clone()) }
+                        });
 
                     let legal_actions_all = get_legal_actions(&session.state);
                     let actor = server_core::acting_player(&session.state.waiting_for);
@@ -535,14 +543,21 @@ async fn handle_client_message(
                         state: filtered_state,
                         your_player: player,
                         opponent_name,
+                        player_names,
                         legal_actions: player_legals,
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
 
-                    if let Some(opp_sender) = conns.get(&game_code).and_then(|m| m.get(&opponent)) {
-                        let _ = opp_sender.send(ServerMessage::OpponentReconnected);
+                    // Notify all other players about the reconnection
+                    let reconnect_msg = ServerMessage::OpponentReconnected { player: Some(player) };
+                    if let Some(game_conns) = conns.get(&game_code) {
+                        for (&pid, sender) in game_conns.iter() {
+                            if pid != player {
+                                let _ = sender.send(reconnect_msg.clone());
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -586,6 +601,7 @@ async fn handle_client_message(
             public,
             password,
             timer_seconds,
+            player_count: requested_player_count,
         } => {
             info!(
                 display_name = %display_name,
@@ -608,9 +624,10 @@ async fn handle_client_message(
             };
 
             let mut mgr = state.lock().await;
+            let pc = requested_player_count.max(2).min(6);
             let (game_code, player_token) =
-                mgr.create_game_with_settings(resolved, display_name.clone(), timer_seconds);
-            info!(game = %game_code, host = %display_name, "game created via lobby");
+                mgr.create_game_n_players(resolved, display_name.clone(), timer_seconds, pc);
+            info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
 
             identity.game_code = Some(game_code.clone());
             identity.player_id = Some(PlayerId(0));
@@ -695,68 +712,77 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             match mgr.join_game_with_name(&game_code, resolved, display_name) {
                 Ok((player_token, filtered_state)) => {
-                    info!(game = %game_code, "player joined via lobby, game starting");
+                    let session = mgr.sessions.get(&game_code).unwrap();
+                    let joiner = session.player_for_token(&player_token).unwrap();
+                    info!(game = %game_code, player = ?joiner, "player joined via lobby");
                     identity.game_code = Some(game_code.clone());
-                    identity.player_id = Some(PlayerId(1));
+                    identity.player_id = Some(joiner);
                     identity.player_token = Some(player_token.clone());
 
-                    let session = mgr.sessions.get(&game_code).unwrap();
-                    let host_name = session.display_names[0].clone();
-                    let joiner_name = session.display_names[1].clone();
-                    let legal_actions = get_legal_actions(&session.state);
-                    let actor = server_core::acting_player(&session.state.waiting_for);
-                    let p1_legals = if actor == Some(PlayerId(1)) {
-                        legal_actions.clone()
-                    } else {
-                        vec![]
-                    };
-                    let p0_legals = if actor == Some(PlayerId(0)) {
-                        legal_actions
-                    } else {
-                        vec![]
-                    };
+                    let player_names = session.display_names.clone();
 
                     let mut conns = connections.lock().await;
                     conns
                         .entry(game_code.clone())
                         .or_default()
-                        .insert(PlayerId(1), tx.clone());
+                        .insert(joiner, tx.clone());
 
-                    let joiner_opp_name = if host_name.is_empty() {
-                        None
-                    } else {
-                        Some(host_name)
-                    };
-                    let msg = ServerMessage::GameStarted {
-                        state: filtered_state,
-                        your_player: PlayerId(1),
-                        opponent_name: joiner_opp_name,
-                        legal_actions: p1_legals,
-                    };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    // Only send GameStarted when the game is full
+                    if session.is_full() {
+                        let legal_actions = get_legal_actions(&session.state);
+                        let actor = server_core::acting_player(&session.state.waiting_for);
 
-                    let p0_state = server_core::filter_state_for_player(
-                        &mgr.sessions.get(&game_code).unwrap().state,
-                        PlayerId(0),
-                    );
-                    let host_opp_name = if joiner_name.is_empty() {
-                        None
-                    } else {
-                        Some(joiner_name)
-                    };
-                    if let Some(p0_sender) = conns.get(&game_code).and_then(|m| m.get(&PlayerId(0)))
-                    {
-                        info!(game = %game_code, "sending GameStarted to host");
-                        let _ = p0_sender.send(ServerMessage::GameStarted {
-                            state: p0_state,
-                            your_player: PlayerId(0),
-                            opponent_name: host_opp_name,
-                            legal_actions: p0_legals,
-                        });
-                    } else {
-                        warn!(game = %game_code, "host channel not found in connections");
+                        // Find first opponent name for backward compat
+                        let joiner_opp_name = engine::game::players::opponents(&session.state, joiner)
+                            .first()
+                            .and_then(|&opp| {
+                                let name = &session.display_names[opp.0 as usize];
+                                if name.is_empty() { None } else { Some(name.clone()) }
+                            });
+
+                        let joiner_legals = if actor == Some(joiner) {
+                            legal_actions.clone()
+                        } else {
+                            vec![]
+                        };
+                        let msg = ServerMessage::GameStarted {
+                            state: filtered_state,
+                            your_player: joiner,
+                            opponent_name: joiner_opp_name,
+                            player_names: player_names.clone(),
+                            legal_actions: joiner_legals,
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+
+                        // Send GameStarted to all other connected players
+                        for (&pid, sender) in conns.get(&game_code).unwrap().iter() {
+                            if pid != joiner {
+                                let p_state = server_core::filter_state_for_player(
+                                    &session.state,
+                                    pid,
+                                );
+                                let opp_name = engine::game::players::opponents(&session.state, pid)
+                                    .first()
+                                    .and_then(|&opp| {
+                                        let name = &session.display_names[opp.0 as usize];
+                                        if name.is_empty() { None } else { Some(name.clone()) }
+                                    });
+                                let p_legals = if actor == Some(pid) {
+                                    legal_actions.clone()
+                                } else {
+                                    vec![]
+                                };
+                                let _ = sender.send(ServerMessage::GameStarted {
+                                    state: p_state,
+                                    your_player: pid,
+                                    opponent_name: opp_name,
+                                    player_names: player_names.clone(),
+                                    legal_actions: p_legals,
+                                });
+                            }
+                        }
                     }
 
                     let mut lob = lobby.lock().await;
@@ -802,11 +828,30 @@ async fn handle_client_message(
             };
 
             info!(game = %game_code, player = ?player_id, "player conceded");
-            let opponent = PlayerId(1 - player_id.0);
 
             let conceded_msg = ServerMessage::Conceded { player: player_id };
+            // In 2-player, the opponent wins. In multiplayer, game continues unless only 1 remains.
+            let mgr_ref = state.lock().await;
+            let winner = if let Some(session) = mgr_ref.sessions.get(&game_code) {
+                let living: Vec<_> = session
+                    .state
+                    .players
+                    .iter()
+                    .filter(|p| p.id != player_id && !p.is_eliminated)
+                    .map(|p| p.id)
+                    .collect();
+                if living.len() == 1 {
+                    Some(living[0])
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            drop(mgr_ref);
+
             let game_over_msg = ServerMessage::GameOver {
-                winner: Some(opponent),
+                winner,
                 reason: "Opponent conceded".to_string(),
             };
 
@@ -823,6 +868,17 @@ async fn handle_client_message(
             mgr.sessions.remove(&game_code);
         }
 
+        ClientMessage::SpectatorJoin { game_code } => {
+            debug!(game = %game_code, "spectator join request");
+            // Spectator support is planned but not yet implemented
+            let msg = ServerMessage::Error {
+                message: "Spectator mode not yet available".to_string(),
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+
         ClientMessage::Emote { emote } => {
             let game_code = match &identity.game_code {
                 Some(c) => c.clone(),
@@ -834,15 +890,19 @@ async fn handle_client_message(
             };
 
             debug!(game = %game_code, player = ?player_id, emote = %emote, "emote");
-            let opponent = PlayerId(1 - player_id.0);
             let msg = ServerMessage::Emote {
                 from_player: player_id,
                 emote,
             };
 
+            // Send emote to all other players in the game
             let conns = connections.lock().await;
-            if let Some(opp_sender) = conns.get(&game_code).and_then(|m| m.get(&opponent)) {
-                let _ = opp_sender.send(msg);
+            if let Some(game_conns) = conns.get(&game_code) {
+                for (&pid, sender) in game_conns.iter() {
+                    if pid != player_id {
+                        let _ = sender.send(msg.clone());
+                    }
+                }
             }
         }
     }

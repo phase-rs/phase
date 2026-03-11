@@ -1,55 +1,53 @@
+use engine::game::players;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 /// Returns a filtered copy of the game state for the given player.
-/// Hides opponent hand contents and library order/contents for both players.
-pub fn filter_state_for_player(state: &GameState, player: PlayerId) -> GameState {
+/// Hides ALL opponents' hand contents and ALL players' library contents.
+pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
-    let opponent = PlayerId(1 - player.0);
 
-    // Hide opponent's hand card details
-    let opponent_hand: Vec<_> = filtered.players[opponent.0 as usize].hand.clone();
-    for &obj_id in &opponent_hand {
-        if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-            obj.face_down = true;
-            obj.name = "Hidden Card".to_string();
-            obj.abilities.clear();
-            obj.keywords.clear();
-            obj.base_keywords.clear();
-            obj.power = None;
-            obj.toughness = None;
-            obj.loyalty = None;
-            obj.color.clear();
-            obj.base_color.clear();
-            obj.trigger_definitions.clear();
-            obj.replacement_definitions.clear();
-            obj.static_definitions.clear();
-        }
+    // Hide hand card details for ALL opponents (not just one)
+    let opponents = players::opponents(state, viewer);
+    let opp_hand_ids: Vec<ObjectId> = opponents
+        .iter()
+        .flat_map(|&opp| filtered.players[opp.0 as usize].hand.iter().copied())
+        .collect();
+    for obj_id in opp_hand_ids {
+        hide_card(&mut filtered, obj_id);
     }
 
-    // Hide library contents for both players (opponent should never see card details)
-    for p in &filtered.players {
-        let lib: Vec<_> = p.library.clone();
-        for &obj_id in &lib {
-            if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-                obj.face_down = true;
-                obj.name = "Hidden Card".to_string();
-                obj.abilities.clear();
-                obj.keywords.clear();
-                obj.base_keywords.clear();
-                obj.power = None;
-                obj.toughness = None;
-                obj.loyalty = None;
-                obj.color.clear();
-                obj.base_color.clear();
-                obj.trigger_definitions.clear();
-                obj.replacement_definitions.clear();
-                obj.static_definitions.clear();
-            }
-        }
+    // Hide library contents for ALL players (no one should see card details in libraries)
+    let all_library_ids: Vec<ObjectId> = filtered
+        .players
+        .iter()
+        .flat_map(|p| p.library.iter().copied())
+        .collect();
+    for obj_id in all_library_ids {
+        hide_card(&mut filtered, obj_id);
     }
 
     filtered
+}
+
+/// Zero out all identifying information on a card object.
+fn hide_card(state: &mut GameState, obj_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&obj_id) {
+        obj.face_down = true;
+        obj.name = "Hidden Card".to_string();
+        obj.abilities.clear();
+        obj.keywords.clear();
+        obj.base_keywords.clear();
+        obj.power = None;
+        obj.toughness = None;
+        obj.loyalty = None;
+        obj.color.clear();
+        obj.base_color.clear();
+        obj.trigger_definitions.clear();
+        obj.replacement_definitions.clear();
+        obj.static_definitions.clear();
+    }
 }
 
 #[cfg(test)]

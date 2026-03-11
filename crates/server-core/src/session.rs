@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload};
@@ -36,23 +36,35 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
 pub struct GameSession {
     pub game_code: String,
     pub state: GameState,
-    pub player_tokens: [String; 2],
-    pub connected: [bool; 2],
-    pub decks: [Option<Vec<DeckEntry>>; 2],
-    pub display_names: [String; 2],
+    /// Player tokens indexed by seat (0..player_count). Empty string = seat not yet claimed.
+    pub player_tokens: Vec<String>,
+    pub connected: Vec<bool>,
+    pub decks: Vec<Option<Vec<DeckEntry>>>,
+    pub display_names: Vec<String>,
     pub timer_seconds: Option<u32>,
+    /// Number of human player seats in this game.
+    pub player_count: u8,
+    /// Seats controlled by AI (not occupied by a human player).
+    pub ai_seats: HashSet<PlayerId>,
 }
 
 impl GameSession {
-    /// Returns the player index (0 or 1) for the given token, if valid.
+    /// Returns the player index for the given token, if valid.
     pub fn player_for_token(&self, token: &str) -> Option<PlayerId> {
-        if self.player_tokens[0] == token {
-            Some(PlayerId(0))
-        } else if self.player_tokens[1] == token {
-            Some(PlayerId(1))
-        } else {
-            None
-        }
+        self.player_tokens
+            .iter()
+            .position(|t| !t.is_empty() && t == token)
+            .map(|i| PlayerId(i as u8))
+    }
+
+    /// Returns the first unclaimed seat index, if any.
+    pub fn first_open_seat(&self) -> Option<usize> {
+        self.player_tokens.iter().position(|t| t.is_empty())
+    }
+
+    /// Returns true if all seats are claimed.
+    pub fn is_full(&self) -> bool {
+        self.player_tokens.iter().all(|t| !t.is_empty())
     }
 }
 
@@ -80,46 +92,52 @@ impl SessionManager {
         }
     }
 
-    /// Create a new game session. Returns (game_code, player_token).
+    /// Create a new game session (2-player default). Returns (game_code, player_token).
     pub fn create_game(&mut self, deck: Vec<DeckEntry>) -> (String, String) {
-        let game_code = generate_game_code();
-        let player_token = generate_player_token();
-
-        let session = GameSession {
-            game_code: game_code.clone(),
-            state: GameState::new_two_player(rand::rng().random()),
-            player_tokens: [player_token.clone(), String::new()],
-            connected: [true, false],
-            decks: [Some(deck), None],
-            display_names: [String::new(), String::new()],
-            timer_seconds: None,
-        };
-
-        self.token_to_game
-            .insert(player_token.clone(), game_code.clone());
-        self.sessions.insert(game_code.clone(), session);
-
-        (game_code, player_token)
+        self.create_game_n_players(deck, String::new(), None, 2)
     }
 
-    /// Create a new game session with lobby settings. Returns (game_code, player_token).
+    /// Create a new game session with lobby settings (2-player default). Returns (game_code, player_token).
     pub fn create_game_with_settings(
         &mut self,
         deck: Vec<DeckEntry>,
         display_name: String,
         timer_seconds: Option<u32>,
     ) -> (String, String) {
+        self.create_game_n_players(deck, display_name, timer_seconds, 2)
+    }
+
+    /// Create a new N-player game session. Returns (game_code, player_token).
+    pub fn create_game_n_players(
+        &mut self,
+        deck: Vec<DeckEntry>,
+        display_name: String,
+        timer_seconds: Option<u32>,
+        player_count: u8,
+    ) -> (String, String) {
         let game_code = generate_game_code();
         let player_token = generate_player_token();
+        let pc = player_count as usize;
+
+        let mut player_tokens = vec![String::new(); pc];
+        player_tokens[0] = player_token.clone();
+        let mut connected = vec![false; pc];
+        connected[0] = true;
+        let mut decks = vec![None; pc];
+        decks[0] = Some(deck);
+        let mut display_names = vec![String::new(); pc];
+        display_names[0] = display_name;
 
         let session = GameSession {
             game_code: game_code.clone(),
             state: GameState::new_two_player(rand::rng().random()),
-            player_tokens: [player_token.clone(), String::new()],
-            connected: [true, false],
-            decks: [Some(deck), None],
-            display_names: [display_name, String::new()],
+            player_tokens,
+            connected,
+            decks,
+            display_names,
             timer_seconds,
+            player_count,
+            ai_seats: HashSet::new(),
         };
 
         self.token_to_game
@@ -129,46 +147,17 @@ impl SessionManager {
         (game_code, player_token)
     }
 
-    /// Join an existing game. Returns (player_token, initial_state_for_joiner) on success.
+    /// Join an existing game. Returns (player_id, player_token, initial_state_for_joiner) on success.
     pub fn join_game(
         &mut self,
         game_code: &str,
         deck: Vec<DeckEntry>,
     ) -> Result<(String, GameState), String> {
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {}", game_code))?;
-
-        if !session.player_tokens[1].is_empty() {
-            return Err("Game is already full".to_string());
-        }
-
-        let player_token = generate_player_token();
-        session.player_tokens[1] = player_token.clone();
-        session.connected[1] = true;
-        session.decks[1] = Some(deck);
-
-        self.token_to_game
-            .insert(player_token.clone(), game_code.to_string());
-
-        // Load deck data into game state before starting
-        let player_deck = session.decks[0].clone().unwrap_or_default();
-        let opponent_deck = session.decks[1].clone().unwrap_or_default();
-        let payload = DeckPayload {
-            player_deck,
-            opponent_deck,
-        };
-        load_deck_into_state(&mut session.state, &payload);
-
-        // Initialize the game via engine
-        let _result = start_game(&mut session.state);
-
-        let filtered = filter_state_for_player(&session.state, PlayerId(1));
-        Ok((player_token, filtered))
+        self.join_game_with_name(game_code, deck, String::new())
     }
 
     /// Join an existing game with a display name. Returns (player_token, initial_state_for_joiner) on success.
+    /// Assigns the first open seat and starts the game when the last seat is filled.
     pub fn join_game_with_name(
         &mut self,
         game_code: &str,
@@ -180,43 +169,47 @@ impl SessionManager {
             .get_mut(game_code)
             .ok_or_else(|| format!("Game not found: {}", game_code))?;
 
-        if !session.player_tokens[1].is_empty() {
-            return Err("Game is already full".to_string());
-        }
+        let seat = session
+            .first_open_seat()
+            .ok_or_else(|| "Game is already full".to_string())?;
 
         let player_token = generate_player_token();
-        session.player_tokens[1] = player_token.clone();
-        session.connected[1] = true;
-        session.decks[1] = Some(deck);
-        session.display_names[1] = display_name;
+        let player_id = PlayerId(seat as u8);
+        session.player_tokens[seat] = player_token.clone();
+        session.connected[seat] = true;
+        session.decks[seat] = Some(deck);
+        session.display_names[seat] = display_name;
 
         self.token_to_game
             .insert(player_token.clone(), game_code.to_string());
 
-        // Load deck data into game state before starting
-        let player_deck = session.decks[0].clone().unwrap_or_default();
-        let opponent_deck = session.decks[1].clone().unwrap_or_default();
-        let payload = DeckPayload {
-            player_deck,
-            opponent_deck,
-        };
-        load_deck_into_state(&mut session.state, &payload);
+        // Start the game when the last human seat is filled
+        if session.is_full() {
+            // Load deck data into game state before starting
+            let player_deck = session.decks[0].clone().unwrap_or_default();
+            let opponent_deck = session.decks[1].clone().unwrap_or_default();
+            let payload = DeckPayload {
+                player_deck,
+                opponent_deck,
+            };
+            load_deck_into_state(&mut session.state, &payload);
 
-        // Initialize the game via engine
-        let _result = start_game(&mut session.state);
+            // Initialize the game via engine
+            let _result = start_game(&mut session.state);
+        }
 
-        let filtered = filter_state_for_player(&session.state, PlayerId(1));
+        let filtered = filter_state_for_player(&session.state, player_id);
         Ok((player_token, filtered))
     }
 
     /// Handle a game action from a player.
-    /// Returns (filtered_state_p0, filtered_state_p1, events, legal_actions_for_next_actor) on success.
+    /// Returns (filtered_states_per_player, events, legal_actions_for_next_actor) on success.
     pub fn handle_action(
         &mut self,
         game_code: &str,
         player_token: &str,
         action: GameAction,
-    ) -> Result<(GameState, GameState, Vec<GameEvent>, Vec<GameAction>), String> {
+    ) -> Result<(Vec<(PlayerId, GameState)>, Vec<GameEvent>, Vec<GameAction>), String> {
         let session = self
             .sessions
             .get_mut(game_code)
@@ -227,27 +220,11 @@ impl SessionManager {
             .ok_or_else(|| "Invalid player token".to_string())?;
 
         // Validate it's this player's turn to act
-        let acting_player = match &session.state.waiting_for {
-            WaitingFor::Priority { player } => *player,
-            WaitingFor::MulliganDecision { player, .. } => *player,
-            WaitingFor::MulliganBottomCards { player, .. } => *player,
-            WaitingFor::ManaPayment { player } => *player,
-            WaitingFor::TargetSelection { player, .. } => *player,
-            WaitingFor::DeclareAttackers { player, .. } => *player,
-            WaitingFor::DeclareBlockers { player, .. } => *player,
-            WaitingFor::ReplacementChoice { player, .. } => *player,
-            WaitingFor::EquipTarget { player, .. } => *player,
-            WaitingFor::ScryChoice { player, .. } => *player,
-            WaitingFor::DigChoice { player, .. } => *player,
-            WaitingFor::SurveilChoice { player, .. } => *player,
-            WaitingFor::TriggerTargetSelection { player, .. } => *player,
-            WaitingFor::GameOver { .. } => {
-                return Err("Game is over".to_string());
-            }
-        };
-
-        if acting_player != player {
-            return Err("Not your turn to act".to_string());
+        let current_actor = acting_player(&session.state.waiting_for);
+        match current_actor {
+            None => return Err("Game is over".to_string()),
+            Some(actor) if actor != player => return Err("Not your turn to act".to_string()),
+            _ => {}
         }
 
         // Validate action is legal
@@ -260,11 +237,16 @@ impl SessionManager {
         let result =
             apply(&mut session.state, action).map_err(|e| format!("Engine error: {}", e))?;
 
-        let p0_state = filter_state_for_player(&session.state, PlayerId(0));
-        let p1_state = filter_state_for_player(&session.state, PlayerId(1));
+        // Filter state for each player
+        let filtered_states: Vec<(PlayerId, GameState)> = (0..session.player_count)
+            .map(|i| {
+                let pid = PlayerId(i);
+                (pid, filter_state_for_player(&session.state, pid))
+            })
+            .collect();
         let new_legal_actions = get_legal_actions(&session.state);
 
-        Ok((p0_state, p1_state, result.events, new_legal_actions))
+        Ok((filtered_states, result.events, new_legal_actions))
     }
 
     /// Mark a player as disconnected.
@@ -308,11 +290,11 @@ impl SessionManager {
         }
     }
 
-    /// Returns game codes waiting for a second player (for lobby).
+    /// Returns game codes waiting for more players (for lobby).
     pub fn open_games(&self) -> Vec<String> {
         self.sessions
             .values()
-            .filter(|s| s.player_tokens[1].is_empty())
+            .filter(|s| !s.is_full())
             .map(|s| s.game_code.clone())
             .collect()
     }
