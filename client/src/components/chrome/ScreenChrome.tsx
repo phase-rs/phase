@@ -6,7 +6,6 @@ import { PreferencesModal } from "../settings/PreferencesModal";
 
 interface ScreenChromeProps {
   onBack?: () => void;
-  showLogo?: boolean;
 }
 
 function BackIcon() {
@@ -44,7 +43,7 @@ function SettingsIcon() {
   );
 }
 
-export function ScreenChrome({ onBack, showLogo = false }: ScreenChromeProps) {
+export function ScreenChrome({ onBack }: ScreenChromeProps) {
   const [showSettings, setShowSettings] = useState(false);
 
   return (
@@ -67,21 +66,6 @@ export function ScreenChrome({ onBack, showLogo = false }: ScreenChromeProps) {
           >
             <BackIcon />
           </motion.button>
-        </div>
-      )}
-
-      {/* Logo — top-center */}
-      {showLogo && (
-        <div className="fixed top-[calc(env(safe-area-inset-top)+3rem)] left-1/2 -translate-x-1/2 z-20 pointer-events-none">
-          <img
-            src="/logo.webp"
-            alt="phase.rs"
-            className="w-56 max-w-[50vw]"
-            style={{
-              filter:
-                "drop-shadow(0 0 20px rgba(251, 146, 60, 0.45)) drop-shadow(0 0 45px rgba(251, 146, 60, 0.2))",
-            }}
-          />
         </div>
       )}
 

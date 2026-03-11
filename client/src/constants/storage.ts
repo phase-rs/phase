@@ -9,3 +9,15 @@ export const GAME_KEY_PREFIX = "phase-game:";
 
 /** Key for the active game metadata (id, mode, difficulty) */
 export const ACTIVE_GAME_KEY = "phase-active-game";
+
+/** List all saved deck names from localStorage, sorted alphabetically. */
+export function listSavedDeckNames(): string[] {
+  const names: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(STORAGE_KEY_PREFIX)) {
+      names.push(key.slice(STORAGE_KEY_PREFIX.length));
+    }
+  }
+  return names.sort();
+}

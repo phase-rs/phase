@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../../constants/storage";
 import { STARTER_DECKS } from "../../data/starterDecks";
 import { useCardImage } from "../../hooks/useCardImage";
+import { ImportDeckModal } from "./ImportDeckModal";
 import { menuButtonClass } from "./buttonStyles";
 import type { ParsedDeck } from "../../services/deckParser";
 
@@ -31,17 +32,6 @@ interface DeckGalleryProps {
   difficulty: string;
   onDifficultyChange: (d: string) => void;
   onStartGame: () => void;
-}
-
-function listSavedDeckNames(): string[] {
-  const names: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key?.startsWith(STORAGE_KEY_PREFIX)) {
-      names.push(key.slice(STORAGE_KEY_PREFIX.length));
-    }
-  }
-  return names.sort();
 }
 
 function getDeckColorIdentity(deckName: string): string[] {
@@ -92,6 +82,7 @@ export function DeckGallery({
   onStartGame,
 }: DeckGalleryProps) {
   const [deckNames, setDeckNames] = useState<string[]>([]);
+  const [showImport, setShowImport] = useState(false);
 
   useEffect(() => {
     setDeckNames(listSavedDeckNames());
@@ -106,6 +97,11 @@ export function DeckGallery({
       }
     }
   }, [activeDeckName, deckNames, onSelectDeck]);
+
+  const handleImported = (name: string, names: string[]) => {
+    setDeckNames(names);
+    onSelectDeck(name);
+  };
 
   const noDeckSelected = activeDeckName == null;
 
@@ -170,6 +166,17 @@ export function DeckGallery({
             </button>
           );
         })}
+
+        {/* Import deck tile */}
+        <button
+          onClick={() => setShowImport(true)}
+          className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-gray-700 transition hover:ring-gray-500 hover:bg-white/5"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300">
+            <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+          </svg>
+          <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">Import Deck</span>
+        </button>
       </div>
 
       <button
@@ -177,8 +184,14 @@ export function DeckGallery({
         disabled={noDeckSelected}
         className={menuButtonClass({ tone: "indigo", size: "sm", disabled: noDeckSelected })}
       >
-        {mode === "ai" ? "Start Game" : "Host Game"}
+        {mode === "ai" ? "Start Game" : "Continue"}
       </button>
+
+      <ImportDeckModal
+        open={showImport}
+        onClose={() => setShowImport(false)}
+        onImported={handleImported}
+      />
     </div>
   );
 }
