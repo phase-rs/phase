@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gains shadow until end of turn.",

@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Faerie",
+        "subtype": "Faerie",
         "type": "Typed"
       },
       "valid_source": {

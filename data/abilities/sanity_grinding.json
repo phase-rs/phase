@@ -6,7 +6,7 @@
       "description": "Chroma — Reveal the top ten cards of your library. For each blue mana symbol in the mana costs of the revealed cards, target opponent mills a card. Then put the cards you revealed this way on the bottom of your library in any order.",
       "effect": {
         "count": 10,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Spell",

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME gets -1/-1 and gains your choice of flying, vigilance, deathtouch, or haste.",

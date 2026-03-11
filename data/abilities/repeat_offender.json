@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If CARDNAME is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)",

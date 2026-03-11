@@ -11,8 +11,9 @@
                 "type": "Tap"
               },
               {
-                "cost": "SubCounter<1/NET>",
-                "type": "Mana"
+                "count": 1,
+                "counter_type": "NET",
+                "type": "RemoveCounter"
               }
             ],
             "type": "Composite"
@@ -57,7 +58,14 @@
           "cost": {
             "costs": [
               {
-                "cost": "3 U",
+                "cost": {
+                  "Cost": {
+                    "generic": 3,
+                    "shards": [
+                      "Blue"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {

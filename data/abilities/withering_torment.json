@@ -6,7 +6,7 @@
       "description": "Destroy target creature or enchantment. You lose 2 life.",
       "effect": {
         "target": {
-          "card_type": "Creature,Enchantment",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Destroy"

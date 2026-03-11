@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<5/Zombie>",
-        "type": "Mana"
+        "count": 5,
+        "filter": {
+          "subtype": "Zombie",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Put target creature card from a graveyard onto the battlefield under your control.",
       "effect": {

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "NICKNAME gets +X/-X until end of turn, where X is the number of Islands you control.",

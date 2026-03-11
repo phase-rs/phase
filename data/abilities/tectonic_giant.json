@@ -28,8 +28,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Spell",
         "controller": "Opponent",
+        "subtype": "Spell",
         "type": "Typed"
       },
       "valid_target": {

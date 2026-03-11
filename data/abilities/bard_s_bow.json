@@ -30,8 +30,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Bard",
-          "type": "AddType"
+          "subtype": "Bard",
+          "type": "AddSubtype"
         }
       ]
     }

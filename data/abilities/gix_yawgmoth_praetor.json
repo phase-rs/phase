@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "4 B B B",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Black",
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<X/Card/card>",
-            "type": "Mana"
+            "count": 0,
+            "type": "Discard"
           }
         ],
         "type": "Composite"

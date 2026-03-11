@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "8",
+        "cost": {
+          "Cost": {
+            "generic": 8,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, this creature gets +1/+1 for each permanent card in your graveyard.",

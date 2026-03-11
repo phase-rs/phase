@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "B G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Creature>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

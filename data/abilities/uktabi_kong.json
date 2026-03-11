@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Ape>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "subtype": "Ape",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Create a 1/1 green Ape creature token.",
       "effect": {

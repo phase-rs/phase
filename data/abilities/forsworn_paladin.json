@@ -5,15 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "PayLife<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayLife"
           }
         ],
         "type": "Composite"
@@ -33,7 +40,14 @@
     },
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gets +2/+0 until end of turn. If mana from a Treasure was spent to activate this ability, that creature also gains deathtouch until end of turn.",

@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<2/Creature>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

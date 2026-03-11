@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME can attack this turn as though it didn't have defender. Exile it at the beginning of the next end step.",

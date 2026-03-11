@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/TIME/Permanent.inZoneBattlefield;Card.suspended/a permanent you control or suspended card you own/Battlefield,Exile>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "TIME",
+            "target": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

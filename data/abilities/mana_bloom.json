@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/CHARGE>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "CHARGE",
+        "type": "RemoveCounter"
       },
       "description": "Add one mana of any color. Activate only once each turn.",
       "effect": {

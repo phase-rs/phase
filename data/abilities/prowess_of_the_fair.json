@@ -17,13 +17,13 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Elf",
             "properties": [
               {
                 "type": "Other",
                 "value": "YouOwn"
               }
             ],
+            "subtype": "Elf",
             "type": "Typed"
           },
           {

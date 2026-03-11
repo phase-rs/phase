@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, target creature gains \"This creature can't attack or block unless its controller pays {1} for each Cleric on the battlefield.\"",

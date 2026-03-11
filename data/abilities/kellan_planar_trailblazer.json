@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If NICKNAME is a Scout, it becomes a Human Faerie Detective and gains \"Whenever NICKNAME deals combat damage to a player, exile the top card of your library. You may play that card this turn.\"",
@@ -26,7 +33,14 @@
     },
     {
       "cost": {
-        "cost": "2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If NICKNAME is a Detective, it becomes a 3/2 Human Faerie Rogue and gains double strike.",

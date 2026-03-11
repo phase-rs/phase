@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -20,7 +27,7 @@
       "description": "Counter target spell or ability that targets you or a creature you control.",
       "effect": {
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "type": "Counter"

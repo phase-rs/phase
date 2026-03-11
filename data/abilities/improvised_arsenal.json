@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a token that's a copy of this Equipment.",

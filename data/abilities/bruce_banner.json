@@ -8,7 +8,15 @@
           "cost": {
             "costs": [
               {
-                "cost": "X X",
+                "cost": {
+                  "Cost": {
+                    "generic": 0,
+                    "shards": [
+                      "X",
+                      "X"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -28,7 +36,17 @@
         },
         {
           "cost": {
-            "cost": "2 R R G G",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red",
+                  "Red",
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME. Activate only as a sorcery.",

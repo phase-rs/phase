@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<4>",
-        "type": "Mana"
+        "amount": 4,
+        "type": "PayLife"
       },
       "description": "CARDNAME gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it.)",
       "effect": {

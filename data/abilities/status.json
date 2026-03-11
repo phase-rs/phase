@@ -31,7 +31,7 @@
           "description": "Destroy target artifact, creature or enchantment.",
           "effect": {
             "target": {
-              "card_type": "Artifact,Creature,Enchantment",
+              "card_type": "Artifact",
               "type": "Typed"
             },
             "type": "Destroy"

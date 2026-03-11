@@ -12,8 +12,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Mountain",
         "controller": "Opponent",
+        "subtype": "Mountain",
         "type": "Typed"
       }
     }

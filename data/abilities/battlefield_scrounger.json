@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PutCardToLibFromGrave<3/-1/Card>",
-        "type": "Mana"
+        "description": "PutCardToLibFromGrave<3/-1/Card>",
+        "type": "Unimplemented"
       },
       "description": "CARDNAME gets +3/+3 until end of turn. Activate only once each turn and only if there are seven or more cards in your graveyard.",
       "effect": {

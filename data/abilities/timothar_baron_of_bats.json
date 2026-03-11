@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Vampire",
             "controller": "You",
+            "subtype": "Vampire",
             "type": "Typed"
           },
           {

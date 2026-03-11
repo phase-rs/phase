@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "GU GU",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "Blue",
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature becomes the color or colors of your choice until end of turn.",

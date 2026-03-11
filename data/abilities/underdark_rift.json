@@ -17,15 +17,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "5",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Exile<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"
@@ -34,7 +42,7 @@
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Artifact,Creature,Planeswalker",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "toughness": 0,

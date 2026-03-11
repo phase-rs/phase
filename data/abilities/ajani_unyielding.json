@@ -9,7 +9,7 @@
       "description": "Reveal the top three cards of your library. Put all nonland permanent cards revealed this way into your hand and the rest on the bottom of your library in any order.",
       "effect": {
         "count": 3,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

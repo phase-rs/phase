@@ -8,7 +8,7 @@
       "description": "Untap target Gate.",
       "effect": {
         "target": {
-          "card_type": "Gate",
+          "subtype": "Gate",
           "type": "Typed"
         },
         "type": "Untap"

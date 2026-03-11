@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 W",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +X/+X until end of turn, where X is your life total.",

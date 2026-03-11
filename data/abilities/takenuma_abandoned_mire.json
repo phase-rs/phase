@@ -19,12 +19,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 B",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

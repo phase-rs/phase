@@ -25,8 +25,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<5/Myr>",
-            "type": "Mana"
+            "count": 5,
+            "filter": {
+              "subtype": "Myr",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 B B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return up to three target creature cards from your graveyard to your hand.",
@@ -30,12 +38,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 B B",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

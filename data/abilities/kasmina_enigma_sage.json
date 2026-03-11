@@ -16,8 +16,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "Create a 0/0 green and blue Fractal creature token. Put X +1/+1 counters on it.",
       "effect": {

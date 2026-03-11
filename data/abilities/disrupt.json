@@ -6,7 +6,7 @@
       "description": "Counter target instant or sorcery spell unless its controller pays {1}. Draw a card.",
       "effect": {
         "target": {
-          "card_type": "Instant,Sorcery",
+          "card_type": "Instant",
           "type": "Typed"
         },
         "type": "Counter"

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a copy of target creature card in your graveyard with mana value X, except its name is Lazav, the Multifarious, it's legendary in addition to its other types, and it has this ability.",

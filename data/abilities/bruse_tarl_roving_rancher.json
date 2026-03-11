@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Ox",
         "controller": "You",
+        "subtype": "Ox",
         "type": "Typed"
       },
       "description": "Oxen you control have double strike.",

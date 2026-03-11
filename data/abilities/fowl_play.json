@@ -29,8 +29,12 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Creature & Bird",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Bird",
+          "type": "AddSubtype"
         }
       ]
     }

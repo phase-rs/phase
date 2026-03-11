@@ -6,7 +6,7 @@
       "description": "Counter target instant or sorcery spell that targets you.Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, you may copy the spell countered this way. You may choose new targets for the copy.",
       "effect": {
         "target": {
-          "card_type": "Instant,Sorcery",
+          "card_type": "Instant",
           "type": "Typed"
         },
         "type": "Counter"

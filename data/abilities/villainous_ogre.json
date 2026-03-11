@@ -14,8 +14,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Demon",
           "controller": "You",
+          "subtype": "Demon",
           "type": "Typed"
         },
         "type": "IsPresent"

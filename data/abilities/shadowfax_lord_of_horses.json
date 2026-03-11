@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Horse",
         "controller": "You",
+        "subtype": "Horse",
         "type": "Typed"
       },
       "description": "Horses you control have haste. (They can attack and {T} as soon as they come under your control.)",

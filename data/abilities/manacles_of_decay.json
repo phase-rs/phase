@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Enchanted creature gets -1/-1 until end of turn.",
@@ -20,7 +27,14 @@
     },
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Enchanted creature can't block this turn.",

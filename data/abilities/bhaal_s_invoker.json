@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "8",
+        "cost": {
+          "Cost": {
+            "generic": 8,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 4 damage to each opponent.",

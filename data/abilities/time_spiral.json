@@ -6,7 +6,7 @@
       "description": "Each player shuffles their hand and graveyard into their library, then draws seven cards. Exile CARDNAME. You untap up to six lands.",
       "effect": {
         "destination": "Library",
-        "origin": "Hand,Graveyard",
+        "origin": "Hand",
         "target": {
           "type": "Any"
         },

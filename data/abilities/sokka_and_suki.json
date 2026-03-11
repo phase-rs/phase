@@ -38,8 +38,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Equipment",
         "controller": "You",
+        "subtype": "Equipment",
         "type": "Typed"
       }
     }

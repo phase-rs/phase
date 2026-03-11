@@ -24,8 +24,12 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/P1P1/NICKNAME>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "type": "SelfRef"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

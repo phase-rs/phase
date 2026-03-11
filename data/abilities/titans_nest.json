@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1/Card>",
-        "type": "Mana"
+        "count": 1,
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "Add {C}. Spend this mana only to cast a spell that's one or more colors without {X} in its mana cost.",
       "effect": {

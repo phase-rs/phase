@@ -5,12 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Land>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -27,12 +38,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Land>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -49,12 +71,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Land>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

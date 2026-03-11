@@ -22,7 +22,14 @@
     },
     {
       "cost": {
-        "cost": "5 W",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "(You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)",

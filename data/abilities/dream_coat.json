@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Enchanted creature becomes the color or colors of your choice. Activate only once each turn.",

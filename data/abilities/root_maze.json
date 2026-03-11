@@ -7,7 +7,7 @@
       "description": "Artifacts and lands enter tapped.",
       "event": "Moved",
       "valid_card": {
-        "card_type": "Artifact,Land",
+        "card_type": "Artifact",
         "type": "Typed"
       }
     }

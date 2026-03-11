@@ -14,13 +14,13 @@
     },
     {
       "description": "You may cast CARDNAME from your graveyard, but not from anywhere else.",
-      "effect_zone": "Graveyard,Hand,Library,Command,Stack",
+      "effect_zone": "Graveyard",
       "mode": "CantBeCast"
     },
     {
       "affected": {
-        "card_type": "Knight",
         "controller": "You",
+        "subtype": "Knight",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",

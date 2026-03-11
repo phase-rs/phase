@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a +1/+1 counter on another target attacking creature you control.",

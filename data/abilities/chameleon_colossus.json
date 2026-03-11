@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +X/+X until end of turn, where X is its power.",

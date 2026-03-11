@@ -7,7 +7,7 @@
   "triggers": [
     {
       "description": "Whenever CARDNAME or another creature you control leaves the battlefield without dying, put a +1/+1 counter on target creature you control.",
-      "destination": "Ante,Command,Exile,Hand,Library",
+      "destination": "Exile",
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "trigger_zones": [

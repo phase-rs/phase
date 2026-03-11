@@ -7,8 +7,8 @@
       "effect": {
         "power": null,
         "target": {
-          "card_type": "Time Lord",
           "controller": "You",
+          "subtype": "Time Lord",
           "type": "Typed"
         },
         "toughness": null,

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "RevealChosen<Player>",
-        "type": "Mana"
+        "description": "RevealChosen<Player>",
+        "type": "Unimplemented"
       },
       "description": "You and target permanent you control each gain protection from the chosen player until end of turn. Activate only once.",
       "effect": {

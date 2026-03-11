@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put target creature card from your graveyard on top of your library.",

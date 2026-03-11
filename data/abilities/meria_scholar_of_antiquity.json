@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Artifact.!token/nontoken artifact>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Add {G}.",
       "effect": {
@@ -18,8 +22,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<2/Artifact.!token/nontoken artifact>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Exile the top card of your library. You may play it this turn.",
       "effect": {

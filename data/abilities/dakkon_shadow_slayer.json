@@ -40,7 +40,7 @@
       "description": "You may put an artifact card from your hand or graveyard onto the battlefield.",
       "effect": {
         "destination": "Battlefield",
-        "origin": "Hand,Graveyard",
+        "origin": "Hand",
         "target": {
           "type": "Any"
         },

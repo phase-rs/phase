@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature you control becomes a copy of a creature card exiled with CARDNAME. Activate only as a sorcery and only once.",

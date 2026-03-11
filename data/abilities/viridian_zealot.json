@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 G",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -20,7 +27,7 @@
       "description": "Destroy target artifact or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

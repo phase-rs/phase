@@ -9,8 +9,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Dinosaur",
             "controller": "You",
+            "subtype": "Dinosaur",
             "type": "Typed"
           },
           {

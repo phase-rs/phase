@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Ally",
         "controller": "You",
+        "subtype": "Ally",
         "type": "Typed"
       },
       "description": "Allies you control get +1/+1.",

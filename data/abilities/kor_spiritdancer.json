@@ -21,7 +21,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Aura",
+        "subtype": "Aura",
         "type": "Typed"
       }
     }

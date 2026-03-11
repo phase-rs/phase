@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Choose a creature you control. It becomes a copy of target creature except for its name.",

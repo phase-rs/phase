@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 1 damage to each creature and each player.",
@@ -22,7 +29,14 @@
     },
     {
       "cost": {
-        "cost": "3 B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 3 damage to each creature and each player. Activate only if there are seven or more cards in your graveyard.",

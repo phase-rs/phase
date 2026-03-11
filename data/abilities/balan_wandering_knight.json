@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Attach all Equipment you control to NICKNAME.",
@@ -25,13 +32,13 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Equipment",
           "properties": [
             {
               "type": "Other",
               "value": "Attached"
             }
           ],
+          "subtype": "Equipment",
           "type": "Typed"
         },
         "type": "IsPresent"

@@ -22,8 +22,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Elemental",
             "controller": "You",
+            "subtype": "Elemental",
             "type": "Typed"
           },
           {

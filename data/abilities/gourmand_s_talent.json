@@ -18,8 +18,8 @@
           "type": "AddAbility"
         },
         {
-          "core_type": "Food",
-          "type": "AddType"
+          "subtype": "Food",
+          "type": "AddSubtype"
         }
       ]
     }

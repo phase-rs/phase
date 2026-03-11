@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Tap target creature blocking CARDNAME.",

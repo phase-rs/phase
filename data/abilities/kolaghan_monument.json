@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "4 B R",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 4/4 black and red Dragon artifact creature with flying until end of turn.",

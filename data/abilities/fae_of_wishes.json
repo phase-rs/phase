@@ -8,12 +8,19 @@
           "cost": {
             "costs": [
               {
-                "cost": "1 U",
+                "cost": {
+                  "Cost": {
+                    "generic": 1,
+                    "shards": [
+                      "Blue"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {
-                "cost": "Discard<2/Card>",
-                "type": "Mana"
+                "count": 2,
+                "type": "Discard"
               }
             ],
             "type": "Composite"
@@ -42,7 +49,7 @@
           "description": "You may reveal a noncreature card you own from outside the game and put it into your hand.",
           "effect": {
             "destination": "Hand",
-            "origin": "Sideboard",
+            "origin": "Exile",
             "target": {
               "type": "Any"
             },

@@ -16,7 +16,6 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Elf",
             "controller": "You",
             "properties": [
               {
@@ -24,6 +23,7 @@
                 "value": "YouCtrl,Berserker.!token"
               }
             ],
+            "subtype": "Elf",
             "type": "Typed"
           },
           {

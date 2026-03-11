@@ -5,12 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 W",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

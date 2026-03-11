@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a 4/4 Spirit artifact creature that's no longer an Equipment. Activate only if you control no creatures.",

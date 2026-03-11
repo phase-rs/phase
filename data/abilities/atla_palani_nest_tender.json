@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -41,8 +46,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Egg",
         "controller": "You",
+        "subtype": "Egg",
         "type": "Typed"
       }
     }

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "NICKNAME deals 3 damage to target creature.",
@@ -23,13 +30,20 @@
     },
     {
       "cost": {
-        "cost": "2 G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Destroy target artifact or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"
@@ -40,7 +54,14 @@
     },
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "You gain 3 life.",

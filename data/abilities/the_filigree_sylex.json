@@ -49,8 +49,13 @@
             "type": "Tap"
           },
           {
-            "cost": "RemoveAnyCounter<10/OIL/Permanent/permanents>",
-            "type": "Mana"
+            "count": 10,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           },
           {
             "target": {

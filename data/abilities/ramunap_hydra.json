@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Desert",
           "controller": "You",
+          "subtype": "Desert",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -35,8 +35,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Desert",
           "controller": "You",
+          "subtype": "Desert",
           "type": "Typed"
         },
         "type": "IsPresent"

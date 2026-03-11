@@ -22,8 +22,23 @@
       "abilities": [
         {
           "cost": {
-            "cost": "tapXType<2/Artifact.Other>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Artifact",
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "TapCreatures"
           },
           "description": "CARDNAME becomes an artifact creature until end of turn.",
           "effect": {

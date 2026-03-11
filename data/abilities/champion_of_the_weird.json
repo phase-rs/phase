@@ -5,12 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "PayLife<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayLife"
           },
           {
-            "cost": "Blight<2>",
-            "type": "Mana"
+            "description": "Blight<2>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

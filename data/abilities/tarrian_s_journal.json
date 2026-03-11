@@ -32,15 +32,20 @@
           "cost": {
             "costs": [
               {
-                "cost": "2",
+                "cost": {
+                  "Cost": {
+                    "generic": 2,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
                 "type": "Tap"
               },
               {
-                "cost": "Discard<1/Hand>",
-                "type": "Mana"
+                "count": 1,
+                "type": "Discard"
               }
             ],
             "type": "Composite"

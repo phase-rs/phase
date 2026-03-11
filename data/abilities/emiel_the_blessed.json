@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile another target creature you control, then return it to the battlefield under its owner's control.",

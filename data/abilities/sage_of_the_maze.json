@@ -39,8 +39,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<1/Gate>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "subtype": "Gate",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Untap CARDNAME.",
       "effect": {

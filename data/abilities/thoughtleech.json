@@ -13,8 +13,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Island",
         "controller": "Opponent",
+        "subtype": "Island",
         "type": "Typed"
       }
     }

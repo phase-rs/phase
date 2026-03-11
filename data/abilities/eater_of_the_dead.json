@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "If CARDNAME is tapped, exile target creature card from a graveyard and untap CARDNAME.",

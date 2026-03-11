@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 B B",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -40,8 +48,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Cleric",
             "controller": "You",
+            "subtype": "Cleric",
             "type": "Typed"
           },
           {

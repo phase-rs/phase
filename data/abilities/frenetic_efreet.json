@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Flip a coin. If you win the flip, CARDNAME phases out. If you lose the flip, sacrifice CARDNAME. (While it's phased out, it's treated as though it doesn't exist. It phases in before you untap during your next untap step.)",

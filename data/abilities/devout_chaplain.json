@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<2/Human>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "subtype": "Human",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"
@@ -19,7 +23,7 @@
         "destination": "Exile",
         "origin": "Battlefield",
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "ChangeZone"

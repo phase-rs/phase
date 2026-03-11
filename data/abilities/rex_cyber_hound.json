@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<2>",
-        "type": "Mana"
+        "amount": 2,
+        "type": "PayEnergy"
       },
       "description": "Choose target creature card in a graveyard. Exile it with a brain counter on it. Activate only as a sorcery.",
       "effect": {

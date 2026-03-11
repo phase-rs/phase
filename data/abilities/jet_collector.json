@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put target creature card with mana value X from your graveyard onto the battlefield with a finality counter on it. Activate only as a sorcery.",

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Double the number of +1/+1 counters on CARDNAME.",
@@ -30,7 +38,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

@@ -27,8 +27,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Illusion",
         "controller": "You",
+        "subtype": "Illusion",
         "type": "Typed"
       }
     }

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Spider",
         "controller": "You",
+        "subtype": "Spider",
         "type": "Typed"
       },
       "description": "Spiders you control get +1/+1 and can't be blocked by creatures with defender.",

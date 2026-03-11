@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains deathtouch until end of turn. (Any amount of damage it deals to a creature is enough to destroy it.)",

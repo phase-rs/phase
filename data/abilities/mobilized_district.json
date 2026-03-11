@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 3/3 Citizen creature with vigilance until end of turn. It's still a land. This ability costs {1} less to activate for each legendary creature and planeswalker you control.",

@@ -6,7 +6,7 @@
       "description": "Counter target instant or sorcery spell. Search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them. Then that player shuffles.",
       "effect": {
         "target": {
-          "card_type": "Instant,Sorcery",
+          "card_type": "Instant",
           "type": "Typed"
         },
         "type": "Counter"

@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "X B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<X/Card>",
-            "type": "Mana"
+            "count": 0,
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

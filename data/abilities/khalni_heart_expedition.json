@@ -5,8 +5,9 @@
       "cost": {
         "costs": [
           {
-            "cost": "SubCounter<3/QUEST>",
-            "type": "Mana"
+            "count": 3,
+            "counter_type": "QUEST",
+            "type": "RemoveCounter"
           },
           {
             "target": {

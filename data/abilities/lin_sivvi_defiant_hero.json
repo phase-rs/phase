@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "X",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -28,7 +35,12 @@
     },
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put target Rebel card in your graveyard on the bottom of your library.",
@@ -36,8 +48,8 @@
         "destination": "Library",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Rebel",
           "controller": "You",
+          "subtype": "Rebel",
           "type": "Typed"
         },
         "type": "ChangeZone"

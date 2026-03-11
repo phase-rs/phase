@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, target creature with a +1/+1 counter on it gains \"Whenever this creature deals combat damage to a creature, destroy that creature at end of combat.\"",

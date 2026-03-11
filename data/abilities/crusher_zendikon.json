@@ -31,8 +31,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Beast",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Beast",
+          "type": "AddSubtype"
         },
         {
           "colors": [

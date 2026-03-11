@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "AddCounter<1/SOUL>",
-            "type": "Mana"
+            "description": "AddCounter<1/SOUL>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

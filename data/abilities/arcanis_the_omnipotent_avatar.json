@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "XMin1 X",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "X",
+                  "X"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Return<1/Creature.cmcEQX/creature you control with mana value X>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "ReturnToHand"
           }
         ],
         "type": "Composite"

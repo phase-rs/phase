@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<X>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "PayLife"
       },
       "description": "CARDNAME becomes a 4/4 Phyrexian Horror creature with flying.",
       "duration": "Permanent",

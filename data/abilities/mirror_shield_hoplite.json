@@ -12,13 +12,13 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Ability",
         "properties": [
           {
             "type": "Other",
             "value": "Backup"
           }
         ],
+        "subtype": "Ability",
         "type": "Typed"
       },
       "valid_target": {

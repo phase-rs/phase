@@ -18,8 +18,8 @@
           "type": "AddAbility"
         },
         {
-          "core_type": "Clue",
-          "type": "AddType"
+          "subtype": "Clue",
+          "type": "AddSubtype"
         }
       ]
     }
@@ -32,7 +32,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Clue",
+        "subtype": "Clue",
         "type": "Typed"
       }
     }

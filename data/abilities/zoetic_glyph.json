@@ -26,8 +26,12 @@
           "value": 4
         },
         {
-          "core_type": "Creature & Golem",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Golem",
+          "type": "AddSubtype"
         }
       ]
     }

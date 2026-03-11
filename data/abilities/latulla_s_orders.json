@@ -21,13 +21,13 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Player",
         "properties": [
           {
             "type": "Other",
             "value": "TriggeredDefendingPlayer"
           }
         ],
+        "subtype": "Player",
         "type": "Typed"
       }
     }

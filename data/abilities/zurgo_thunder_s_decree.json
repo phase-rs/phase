@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Warrior",
         "controller": "You",
         "properties": [
           {
             "type": "Token"
           }
         ],
+        "subtype": "Warrior",
         "type": "Typed"
       },
       "description": "During your end step, Warrior tokens you control have \"This token can't be sacrificed.\"",

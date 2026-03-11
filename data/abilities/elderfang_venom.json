@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Elf",
         "controller": "You",
         "properties": [
           {
             "type": "Attacking"
           }
         ],
+        "subtype": "Elf",
         "type": "Typed"
       },
       "description": "Attacking Elves you control have deathtouch.",
@@ -35,8 +35,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Elf",
         "controller": "You",
+        "subtype": "Elf",
         "type": "Typed"
       }
     }

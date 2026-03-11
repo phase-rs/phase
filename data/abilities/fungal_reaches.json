@@ -17,7 +17,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -42,12 +47,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<X/STORAGE>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "STORAGE",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

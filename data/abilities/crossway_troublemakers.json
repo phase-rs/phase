@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Vampire",
         "controller": "You",
         "properties": [
           {
             "type": "Attacking"
           }
         ],
+        "subtype": "Vampire",
         "type": "Typed"
       },
       "description": "Attacking Vampires you control have deathtouch and lifelink.",
@@ -43,8 +43,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Vampire",
         "controller": "You",
+        "subtype": "Vampire",
         "type": "Typed"
       }
     }

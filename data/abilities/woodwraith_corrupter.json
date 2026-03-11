@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 B G",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -19,7 +27,7 @@
       "effect": {
         "power": 4,
         "target": {
-          "card_type": "Forest",
+          "subtype": "Forest",
           "type": "Typed"
         },
         "toughness": 4,

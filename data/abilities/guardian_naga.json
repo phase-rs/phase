@@ -22,7 +22,7 @@
             "destination": "Exile",
             "origin": "Battlefield",
             "target": {
-              "card_type": "Artifact,Enchantment",
+              "card_type": "Artifact",
               "type": "Typed"
             },
             "type": "ChangeZone"

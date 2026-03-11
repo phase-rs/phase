@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Each creature without flanking blocking CARDNAME gets -1/-1 until end of turn. Activate only once each turn.",

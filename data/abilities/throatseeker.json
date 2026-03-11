@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Ninja",
         "controller": "You",
         "properties": [
           {
             "type": "Attacking"
           }
         ],
+        "subtype": "Ninja",
         "type": "Typed"
       },
       "description": "Unblocked attacking Ninjas you control have lifelink.",

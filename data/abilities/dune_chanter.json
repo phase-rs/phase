@@ -31,8 +31,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Desert",
-          "type": "AddType"
+          "subtype": "Desert",
+          "type": "AddSubtype"
         }
       ]
     },

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put target artifact, instant, or sorcery card from a graveyard on the bottom of its owner's library.",
@@ -11,7 +16,7 @@
         "destination": "Library",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Artifact,Instant,Sorcery",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "ChangeZone"

@@ -23,8 +23,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Cave",
         "controller": "You",
+        "subtype": "Cave",
         "type": "Typed"
       }
     }

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "8",
+        "cost": {
+          "Cost": {
+            "generic": 8,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Psychic Blades — Creatures you control get +2/+0 and gain menace until end of turn. (A creature with menace can't be blocked except by two or more creatures.)",

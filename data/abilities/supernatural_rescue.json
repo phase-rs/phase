@@ -8,8 +8,8 @@
       "characteristic_defining": true,
       "condition": {
         "filter": {
-          "card_type": "Spirit",
           "controller": "You",
+          "subtype": "Spirit",
           "type": "Typed"
         },
         "type": "IsPresent"

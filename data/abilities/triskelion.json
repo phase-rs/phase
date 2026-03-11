@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/P1P1>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "P1P1",
+        "type": "RemoveCounter"
       },
       "description": "It deals 1 damage to any target.",
       "effect": {

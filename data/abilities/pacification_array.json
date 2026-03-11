@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -17,7 +22,7 @@
       "description": "Tap target artifact or creature.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Tap"

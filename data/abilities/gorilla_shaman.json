@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X X 1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "X",
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Destroy target noncreature artifact with mana value X.",

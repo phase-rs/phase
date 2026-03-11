@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 B",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, whenever one or more Gorgons and/or Snakes you control deal combat damage to a player, that player loses half their life, rounded up.",

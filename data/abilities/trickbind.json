@@ -6,7 +6,7 @@
       "description": "Counter target activated or triggered ability. If a permanent's ability is countered this way, activated abilities of that permanent can't be activated this turn. (Mana abilities can't be targeted.)",
       "effect": {
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "type": "Counter"

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "The next time an instant or sorcery spell would deal damage to you this turn, that spell deals that damage to its controller instead.",

@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -23,7 +28,7 @@
       "description": "Reveal a number of cards from the top of your library equal to the sacrificed creature's power. Put one into your hand and exile the rest.",
       "effect": {
         "count": 1,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

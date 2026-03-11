@@ -5,20 +5,27 @@
       "cost": {
         "costs": [
           {
-            "cost": "B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "PayLife<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayLife"
           },
           {
-            "cost": "Mill<1>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Mill"
           },
           {
-            "cost": "Discard<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Discard"
           },
           {
             "target": {

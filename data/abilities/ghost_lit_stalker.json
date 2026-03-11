@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "4 B",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -30,12 +37,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "5 B B",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

@@ -9,7 +9,7 @@
       "effect": {
         "power": null,
         "target": {
-          "card_type": "Forest",
+          "subtype": "Forest",
           "type": "Typed"
         },
         "toughness": null,

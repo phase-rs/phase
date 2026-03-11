@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Creature>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Copy target triggered ability you control. You may choose new targets for the copy. Activate only once each turn.",
       "effect": {

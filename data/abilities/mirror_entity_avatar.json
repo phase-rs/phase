@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.",

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 U B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a Treasure token.",

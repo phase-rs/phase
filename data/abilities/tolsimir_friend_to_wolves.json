@@ -23,8 +23,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Wolf",
         "controller": "You",
+        "subtype": "Wolf",
         "type": "Typed"
       }
     }

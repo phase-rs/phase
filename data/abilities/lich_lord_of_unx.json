@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "U B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -29,7 +37,17 @@
     },
     {
       "cost": {
-        "cost": "U U B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Blue",
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target player loses X life and mills X cards, where X is the number of Zombies you control.",

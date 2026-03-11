@@ -9,8 +9,8 @@
         "Other": "AddCounter"
       },
       "valid_card": {
-        "card_type": "Orc",
         "controller": "You",
+        "subtype": "Orc",
         "type": "Typed"
       }
     }

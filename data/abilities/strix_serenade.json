@@ -6,7 +6,7 @@
       "description": "Counter target artifact, creature, or planeswalker spell.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature,Planeswalker",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Counter"

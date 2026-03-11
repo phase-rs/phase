@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Each player loses 1 life.",

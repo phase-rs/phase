@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target player mills a card. CARDNAME gets +X/+X until end of turn, where X is the milled card's mana value.",

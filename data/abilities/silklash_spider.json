@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X G G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X",
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals X damage to each creature with flying.",

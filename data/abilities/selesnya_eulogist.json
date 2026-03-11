@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target creature card from a graveyard, then populate. (Create a token that's a copy of a creature token you control.)",

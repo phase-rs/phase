@@ -24,8 +24,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Spirit",
-          "type": "AddType"
+          "subtype": "Spirit",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Spider",
             "controller": "You",
             "properties": [
               {
@@ -80,6 +79,7 @@
                 "value": "YouCtrl,Wolf.Other"
               }
             ],
+            "subtype": "Spider",
             "type": "Typed"
           },
           {

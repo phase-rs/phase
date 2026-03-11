@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Another target creature you control can't be blocked this turn except by Spirits.",
@@ -33,7 +40,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Spell",
+        "subtype": "Spell",
         "type": "Typed"
       },
       "valid_target": {

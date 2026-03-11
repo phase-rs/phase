@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Card.nonBlack>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -29,8 +33,18 @@
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Card.Black>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Black"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

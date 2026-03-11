@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 1 damage to each creature and each player. Activate no more times each turn than the number of snow Swamps you control.",

@@ -31,8 +31,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Giant",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Giant",
+          "type": "AddSubtype"
         },
         {
           "colors": [

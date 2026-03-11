@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/JAVELIN>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "JAVELIN",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

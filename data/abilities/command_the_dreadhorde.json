@@ -7,7 +7,7 @@
       "effect": {
         "choices": [],
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "ChooseCard"

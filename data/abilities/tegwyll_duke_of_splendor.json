@@ -53,8 +53,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Faerie",
             "controller": "You",
+            "subtype": "Faerie",
             "type": "Typed"
           },
           {

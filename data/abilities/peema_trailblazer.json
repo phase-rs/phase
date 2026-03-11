@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<6>",
-        "type": "Mana"
+        "amount": 6,
+        "type": "PayEnergy"
       },
       "description": "Put two +1/+1 counters on this creature. Then draw cards equal to the greatest power among creatures you control. (Activate each exhaust ability only once.)",
       "effect": {

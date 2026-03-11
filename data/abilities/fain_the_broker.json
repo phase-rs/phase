@@ -36,8 +36,13 @@
             "type": "Tap"
           },
           {
-            "cost": "RemoveAnyCounter<1/Any/Creature>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -85,7 +90,14 @@
     },
     {
       "cost": {
-        "cost": "3 B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap CARDNAME.",

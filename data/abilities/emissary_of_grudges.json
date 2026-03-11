@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "RevealChosen<Player>",
-        "type": "Mana"
+        "description": "RevealChosen<Player>",
+        "type": "Unimplemented"
       },
       "description": "Choose new targets for target spell or ability if it's controlled by the chosen player and if it targets you or a permanent you control. Activate only once.",
       "effect": {

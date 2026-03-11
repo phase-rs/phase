@@ -6,7 +6,7 @@
       "description": "Counter target spell, activated ability, or triggered ability. Its controller loses life equal to the number of creatures you control.",
       "effect": {
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "type": "Counter"

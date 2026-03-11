@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target card from an opponent's graveyard. If it was a creature card, you create a 1/1 white and black Spirit creature token with flying.",

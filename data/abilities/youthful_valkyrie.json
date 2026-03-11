@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Angel",
             "controller": "You",
+            "subtype": "Angel",
             "type": "Typed"
           },
           {

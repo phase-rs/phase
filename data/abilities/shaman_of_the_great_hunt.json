@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 GU GU",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Blue",
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card for each creature with power 4 or greater you control.",

@@ -9,7 +9,7 @@
       "description": "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than the battlefield, put it onto the battlefield.",
       "destination": "Graveyard",
       "mode": "ChangesZone",
-      "origin": "Library,Hand,Exile,Command,Stack",
+      "origin": "Library",
       "trigger_zones": [
         "Battlefield"
       ],

@@ -3,7 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "UR UR UR UR",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Red",
+              "Blue",
+              "Red",
+              "Blue",
+              "Red",
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "You may put a blue or red creature card from your hand onto the battlefield.",

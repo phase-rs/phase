@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains your choice of reach, trample, or haste until end of turn.",

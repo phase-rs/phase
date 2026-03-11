@@ -8,8 +8,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Rogue",
             "controller": "You",
+            "subtype": "Rogue",
             "type": "Typed"
           },
           {
@@ -44,8 +44,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Rogue",
         "controller": "You",
+        "subtype": "Rogue",
         "type": "Typed"
       },
       "valid_target": {

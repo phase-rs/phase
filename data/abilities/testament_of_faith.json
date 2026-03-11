@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes an X/X Wall creature with defender in addition to its other types until end of turn.",

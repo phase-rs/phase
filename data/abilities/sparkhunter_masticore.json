@@ -5,12 +5,17 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -24,7 +29,12 @@
     },
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 1 damage to target planeswalker.",
@@ -45,7 +55,12 @@
     },
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains indestructible until end of turn.",

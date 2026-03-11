@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "NICKNAME gains protection from the color of your choice until end of turn.",

@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -26,7 +31,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -44,7 +56,7 @@
       "description": "Look at the top seven cards of your library. You may reveal a Dragon card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
       "effect": {
         "count": 7,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

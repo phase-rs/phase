@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Rat",
             "controller": "You",
+            "subtype": "Rat",
             "type": "Typed"
           },
           {

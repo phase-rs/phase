@@ -19,7 +19,15 @@
         },
         {
           "cost": {
-            "cost": "3 U U",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Return CARDNAME from your graveyard onto the battlefield transformed. Activate only as a sorcery.",

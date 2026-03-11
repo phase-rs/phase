@@ -26,7 +26,6 @@
               "value": "X"
             },
             "target": {
-              "card_type": "Opponent,Battle",
               "type": "Typed"
             },
             "type": "DealDamage"
@@ -37,7 +36,14 @@
         },
         {
           "cost": {
-            "cost": "5 RP",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform NICKNAME. Activate only as a sorcery.",

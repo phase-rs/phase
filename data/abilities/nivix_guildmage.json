@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card, then discard a card.",
@@ -16,7 +24,15 @@
     },
     {
       "cost": {
-        "cost": "2 U R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Copy target instant or sorcery spell you control. You may choose new targets for the copy.",

@@ -6,7 +6,7 @@
       "description": "Destroy target artifact or land.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

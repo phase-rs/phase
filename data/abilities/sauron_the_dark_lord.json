@@ -20,8 +20,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Army",
         "controller": "You",
+        "subtype": "Army",
         "type": "Typed"
       },
       "valid_target": {

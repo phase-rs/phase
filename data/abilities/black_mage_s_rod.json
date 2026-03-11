@@ -22,8 +22,8 @@
           "value": 1
         },
         {
-          "core_type": "Wizard",
-          "type": "AddType"
+          "subtype": "Wizard",
+          "type": "AddSubtype"
         }
       ]
     }

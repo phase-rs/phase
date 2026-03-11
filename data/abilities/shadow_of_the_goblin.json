@@ -16,7 +16,7 @@
     {
       "description": "Undying Vengeance — Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
       "mode": "LandPlayed",
-      "origin": "Ante,Command,Exile,Graveyard,Library",
+      "origin": "Exile",
       "trigger_zones": [
         "Battlefield"
       ],

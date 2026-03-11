@@ -12,13 +12,13 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "SpellAbility",
         "controller": "Opponent",
+        "subtype": "SpellAbility",
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Dragon",
         "controller": "You",
+        "subtype": "Dragon",
         "type": "Typed"
       }
     }

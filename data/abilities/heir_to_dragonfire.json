@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+0 until end of turn.",
@@ -22,12 +29,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 R",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Reveal<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Reveal"
           }
         ],
         "type": "Composite"

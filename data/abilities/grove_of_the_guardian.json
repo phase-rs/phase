@@ -17,15 +17,27 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 G W",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Green",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "tapXType<2/Creature>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           },
           {
             "target": {

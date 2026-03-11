@@ -12,7 +12,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Aura,Equipment",
         "type": "Typed"
       }
     }

@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "1 R W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 2/2 red and white Ox creature until end of turn. It's still a land.",

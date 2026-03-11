@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 1/1 Blinkmoth artifact creature with flying until end of turn. It's still a land.",
@@ -39,7 +44,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {

@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "description": "All Slivers have \"{1}: This permanent becomes the creature type of your choice in addition to its other types until end of turn.\"",

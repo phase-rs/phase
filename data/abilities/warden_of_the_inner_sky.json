@@ -3,8 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<3/Artifact;Creature/artifacts and/or creatures>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Artifact",
+              "type": "Typed"
+            },
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            }
+          ],
+          "type": "Or"
+        },
+        "type": "TapCreatures"
       },
       "description": "Put a +1/+1 counter on CARDNAME. Scry 1. Activate only as a sorcery.",
       "effect": {

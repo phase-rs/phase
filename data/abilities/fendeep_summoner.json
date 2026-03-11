@@ -9,7 +9,7 @@
       "effect": {
         "power": 3,
         "target": {
-          "card_type": "Swamp",
+          "subtype": "Swamp",
           "type": "Typed"
         },
         "toughness": 5,

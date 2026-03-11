@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Eldrazi",
         "controller": "You",
+        "subtype": "Eldrazi",
         "type": "Typed"
       },
       "description": "Eldrazi you control have \"{T}: Add one mana of any color.\"",

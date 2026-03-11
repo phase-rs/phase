@@ -6,7 +6,7 @@
       "description": "Destroy target artifact or enchantment. Revolt — If a permanent you controlled left the battlefield this turn, you gain 3 life.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

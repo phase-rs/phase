@@ -7,8 +7,8 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Desert",
           "controller": "You",
+          "subtype": "Desert",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -26,8 +26,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "SpellAbility",
         "controller": "Opponent",
+        "subtype": "SpellAbility",
         "type": "Typed"
       },
       "valid_target": {

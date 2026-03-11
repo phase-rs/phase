@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 C",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Colorless"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature can't be blocked this turn.",

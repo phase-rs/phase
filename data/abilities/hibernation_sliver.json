@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "description": "All Slivers have \"Pay 2 life, Return this permanent to its owner's hand.\"",

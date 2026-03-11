@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature you control gains deathtouch until end of turn.",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +X/+0 until end of turn, where X is the number of cards in your hand.",

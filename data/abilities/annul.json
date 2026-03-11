@@ -6,7 +6,7 @@
       "description": "Counter target artifact or enchantment spell.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Counter"

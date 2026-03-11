@@ -3,8 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<3/Advisor.YouCtrl;Monk.YouCtrl;Artificer.YouCtrl/Advisors, Artificers, and/or Monks you control>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "properties": [
+            {
+              "type": "Other",
+              "value": "YouCtrl;Monk.YouCtrl;Artificer.YouCtrl/Advisors, Artificers, and/or Monks you control"
+            }
+          ],
+          "subtype": "Advisor",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Draw a card.",
       "effect": {

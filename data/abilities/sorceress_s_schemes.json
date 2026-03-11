@@ -6,7 +6,7 @@
       "description": "Return target instant or sorcery card from your graveyard or exiled card with flashback you own to your hand. Add {R}.",
       "effect": {
         "destination": "Hand",
-        "origin": "Graveyard,Exile",
+        "origin": "Graveyard",
         "target": {
           "card_type": "Instant",
           "controller": "You",

@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "G U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Green",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -19,7 +27,7 @@
         "counter_type": "",
         "multiplier": 2,
         "target": {
-          "card_type": "Artifact,Creature,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "MultiplyCounter"

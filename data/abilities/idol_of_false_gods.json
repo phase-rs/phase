@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 C",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Colorless"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -76,8 +83,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Eldrazi",
             "controller": "You",
+            "subtype": "Eldrazi",
             "type": "Typed"
           },
           {

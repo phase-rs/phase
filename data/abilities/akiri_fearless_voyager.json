@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "You may unattach an Equipment from a creature you control. If you do, tap that creature and it gains indestructible until end of turn.",

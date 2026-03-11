@@ -23,8 +23,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Cartouche",
         "controller": "You",
+        "subtype": "Cartouche",
         "type": "Typed"
       }
     }

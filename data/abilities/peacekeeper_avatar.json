@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "For each opponent who controls a creature, create a token that's a copy of a card named Arrest and attach it to a creature that player controls chosen at random.",

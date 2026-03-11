@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayLife<4>",
-            "type": "Mana"
+            "amount": 4,
+            "type": "PayLife"
           },
           {
             "target": {

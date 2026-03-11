@@ -6,7 +6,7 @@
       "description": "Counter target creature or Aura spell.",
       "effect": {
         "target": {
-          "card_type": "Creature,Aura",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Counter"

@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 UR UR",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Red",
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "The next time you cast an instant or sorcery spell from your hand this turn, put that card into your hand instead of into your graveyard as it resolves.",

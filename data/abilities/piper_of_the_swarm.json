@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -31,7 +38,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -63,8 +78,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Rat",
         "controller": "You",
+        "subtype": "Rat",
         "type": "Typed"
       },
       "description": "Rats you control have menace.",

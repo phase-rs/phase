@@ -22,8 +22,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Artifact & Vehicle",
+          "core_type": "Artifact",
           "type": "AddType"
+        },
+        {
+          "subtype": "Vehicle",
+          "type": "AddSubtype"
         }
       ]
     }

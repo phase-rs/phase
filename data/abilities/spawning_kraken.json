@@ -13,13 +13,13 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Kraken",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Leviathan.YouCtrl,Octopus.YouCtrl,Serpent.YouCtrl"
           }
         ],
+        "subtype": "Kraken",
         "type": "Typed"
       },
       "valid_target": {

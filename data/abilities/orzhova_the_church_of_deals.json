@@ -17,7 +17,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 W B",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "White",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

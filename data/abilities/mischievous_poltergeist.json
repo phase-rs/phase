@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<1>",
-        "type": "Mana"
+        "amount": 1,
+        "type": "PayLife"
       },
       "description": "Regenerate CARDNAME.",
       "effect": {

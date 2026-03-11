@@ -8,7 +8,7 @@
       "statics": [
         {
           "affected": {
-            "card_type": "You",
+            "subtype": "You",
             "type": "Typed"
           },
           "description": "Creatures you control can boast twice during each of your turns rather than once.",
@@ -91,8 +91,8 @@
       "abilities": [
         {
           "cost": {
-            "cost": "Discard<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Discard"
           },
           "description": "Exile the top two cards of your library. You may play those cards this turn.",
           "effect": {

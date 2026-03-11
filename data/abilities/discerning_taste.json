@@ -6,7 +6,7 @@
       "description": "Look at the top four cards of your library. Put one of them into your hand and the rest into your graveyard. You gain life equal to the greatest power among creature cards put into your graveyard this way.",
       "effect": {
         "count": 4,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Spell",

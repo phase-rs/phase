@@ -3,8 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Creature.withFlying+Other/creature you control with flying>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Other/creature you control with flying"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME gains protection from the color of your choice until end of turn.",
       "effect": {

@@ -7,7 +7,7 @@
   "triggers": [
     {
       "description": "When enchanted permanent dies or is put into exile, return that card to the battlefield under your control.",
-      "destination": "Graveyard,Exile",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "valid_card": {

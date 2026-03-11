@@ -22,7 +22,7 @@
           "description": "Destroy target artifact or enchantment. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
             "target": {
-              "card_type": "Artifact,Enchantment",
+              "card_type": "Artifact",
               "type": "Typed"
             },
             "type": "Destroy"

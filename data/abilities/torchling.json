@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap CARDNAME.",
@@ -18,7 +25,14 @@
     },
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature blocks CARDNAME this turn if able.",
@@ -32,7 +46,14 @@
     },
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Change the target of target spell that targets only CARDNAME.",
@@ -47,7 +68,12 @@
     },
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/-1 until end of turn.",
@@ -64,7 +90,12 @@
     },
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets -1/+1 until end of turn.",

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains forestwalk until end of turn and deals 2 damage to you. (It can't be blocked as long as defending player controls a Forest.)",
@@ -20,7 +28,15 @@
     },
     {
       "cost": {
-        "cost": "B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains swampwalk until end of turn and deals 2 damage to you. (It can't be blocked as long as defending player controls a Swamp.)",

@@ -43,8 +43,16 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Artifact & Creature & Toy",
+          "core_type": "Artifact",
           "type": "AddType"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        },
+        {
+          "subtype": "Toy",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "BG BG",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Green",
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target card from a graveyard. You gain 1 life.",

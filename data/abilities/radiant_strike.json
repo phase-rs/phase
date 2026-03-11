@@ -6,7 +6,7 @@
       "description": "Destroy target artifact or tapped creature. You gain 3 life.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "properties": [
             {
               "type": "Tapped"

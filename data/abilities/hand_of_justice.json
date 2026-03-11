@@ -8,8 +8,18 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<3/Creature.White>",
-            "type": "Mana"
+            "count": 3,
+            "filter": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "White"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

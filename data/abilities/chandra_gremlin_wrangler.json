@@ -31,7 +31,7 @@
           "value": "X"
         },
         "target": {
-          "card_type": "Creature,Player",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "DealDamage"

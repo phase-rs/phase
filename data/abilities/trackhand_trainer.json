@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 U",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card.",
@@ -16,7 +23,14 @@
     },
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Conjure a card named Training Grounds onto the battlefield.",

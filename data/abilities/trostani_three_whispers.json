@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gains deathtouch until end of turn.",
@@ -22,7 +29,15 @@
     },
     {
       "cost": {
-        "cost": "GW",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gains vigilance until end of turn.",
@@ -41,7 +56,14 @@
     },
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gains double strike until end of turn.",

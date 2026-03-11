@@ -20,8 +20,12 @@
     },
     {
       "cost": {
-        "cost": "Discard<1/Card.namedOriss, Samite Guardian>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "Target player can't cast spells this turn, and creatures that player controls can't attack this turn.",
       "effect": {

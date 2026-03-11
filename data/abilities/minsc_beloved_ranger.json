@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, target creature you control has base power and toughness X/X and becomes a Giant in addition to its other types. Activate only as a sorcery.",

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Phyrexian",
         "controller": "You",
+        "subtype": "Phyrexian",
         "type": "Typed"
       },
       "description": "Phyrexians you control have reach.",

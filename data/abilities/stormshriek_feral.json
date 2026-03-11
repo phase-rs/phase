@@ -6,7 +6,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "This creature gets +1/+0 until end of turn.",

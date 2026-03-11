@@ -12,7 +12,6 @@
         "Battlefield"
       ],
       "valid_target": {
-        "card_type": "Cleric",
         "controller": "You",
         "properties": [
           {
@@ -20,6 +19,7 @@
             "value": "Creature"
           }
         ],
+        "subtype": "Cleric",
         "type": "Typed"
       }
     }

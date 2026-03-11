@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains all activated abilities of target creature until end of turn.",

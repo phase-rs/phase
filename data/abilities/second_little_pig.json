@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 WB WB",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "Black",
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME perpetually becomes a Boar Spirit with base power and toughness 4/4 and gains flying. Activate only if CARDNAME isn't a Spirit.",

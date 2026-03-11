@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6 R R W W",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": [
+              "Red",
+              "Red",
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME from your graveyard to the battlefield. Activate only during your upkeep.",

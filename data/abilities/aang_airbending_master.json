@@ -16,7 +16,7 @@
     },
     {
       "description": "Whenever one or more creatures you control leave the battlefield without dying, you get an experience counter.",
-      "destination": "Ante,Command,Exile,Hand,Library",
+      "destination": "Exile",
       "mode": "ChangesZoneAll",
       "origin": "Battlefield",
       "trigger_zones": [

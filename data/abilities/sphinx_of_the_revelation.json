@@ -5,15 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "W U U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White",
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<X>",
-            "type": "Mana"
+            "amount": 0,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"

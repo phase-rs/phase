@@ -17,8 +17,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "ImprintedCreatureType",
-          "type": "AddType"
+          "subtype": "ImprintedCreatureType",
+          "type": "AddSubtype"
         }
       ]
     }

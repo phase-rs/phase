@@ -5,12 +5,36 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 B B",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<7/Card.Other>",
-            "type": "Mana"
+            "count": 7,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Card",
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

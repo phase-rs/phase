@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<3/CHARGE>",
-        "type": "Mana"
+        "count": 3,
+        "counter_type": "CHARGE",
+        "type": "RemoveCounter"
       },
       "description": "CARDNAME becomes a 6/6 Construct artifact creature with trample until end of turn.",
       "effect": {

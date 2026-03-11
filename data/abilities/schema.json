@@ -154,6 +154,10 @@
               ],
               "default": null
             },
+            "random": {
+              "type": "boolean",
+              "default": false
+            },
             "type": {
               "type": "string",
               "const": "Discard"
@@ -186,6 +190,17 @@
             "type": {
               "type": "string",
               "const": "Exile"
+            },
+            "zone": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Zone"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "required": [
@@ -218,6 +233,134 @@
         {
           "type": "object",
           "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "counter_type": {
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TargetFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "RemoveCounter"
+            }
+          },
+          "required": [
+            "type",
+            "count",
+            "counter_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "PayEnergy"
+            }
+          },
+          "required": [
+            "type",
+            "amount"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "filter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TargetFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "ReturnToHand"
+            }
+          },
+          "required": [
+            "type",
+            "count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "Mill"
+            }
+          },
+          "required": [
+            "type",
+            "count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Exert"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "Reveal"
+            }
+          },
+          "required": [
+            "type",
+            "count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "costs": {
               "type": "array",
               "items": {
@@ -232,6 +375,22 @@
           "required": [
             "type",
             "costs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "Unimplemented"
+            }
+          },
+          "required": [
+            "type",
+            "description"
           ]
         }
       ]
@@ -472,6 +631,38 @@
           "required": [
             "type",
             "core_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "subtype": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "AddSubtype"
+            }
+          },
+          "required": [
+            "type",
+            "subtype"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "subtype": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "RemoveSubtype"
+            }
+          },
+          "required": [
+            "type",
+            "subtype"
           ]
         },
         {

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target Elf creature gains forestwalk until end of turn. (It can't be blocked as long as defending player controls a Forest.)",

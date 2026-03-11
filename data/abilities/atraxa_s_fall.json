@@ -6,7 +6,7 @@
       "description": "Destroy target artifact, battle, enchantment, or creature with flying.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Battle,Enchantment,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

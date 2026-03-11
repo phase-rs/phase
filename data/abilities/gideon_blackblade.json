@@ -87,8 +87,16 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Human & Soldier",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Human",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Soldier",
+          "type": "AddSubtype"
         }
       ]
     }

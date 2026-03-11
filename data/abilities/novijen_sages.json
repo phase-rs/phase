@@ -5,12 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "RemoveAnyCounter<2/P1P1/Creature>",
-            "type": "Mana"
+            "count": 2,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

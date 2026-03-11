@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate CARDNAME.",

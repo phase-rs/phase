@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Dragon",
         "controller": "You",
+        "subtype": "Dragon",
         "type": "Typed"
       },
       "description": "Untapped Dragons you control have hexproof.",

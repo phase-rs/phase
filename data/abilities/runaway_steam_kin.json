@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<3/P1P1>",
-        "type": "Mana"
+        "count": 3,
+        "counter_type": "P1P1",
+        "type": "RemoveCounter"
       },
       "description": "Add {R}{R}{R}.",
       "effect": {

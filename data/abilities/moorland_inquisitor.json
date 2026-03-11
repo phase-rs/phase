@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains first strike until end of turn. (It deals combat damage before creatures without first strike.)",

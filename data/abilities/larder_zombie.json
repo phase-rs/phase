@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<3/Creature/creature>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
       "effect": {

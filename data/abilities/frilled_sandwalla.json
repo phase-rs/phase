@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +2/+2 until end of turn. Activate only once each turn.",

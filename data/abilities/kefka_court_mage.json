@@ -6,7 +6,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "8",
+            "cost": {
+              "Cost": {
+                "generic": 8,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "Each opponent sacrifices a permanent of their choice. Transform NICKNAME. Activate only as a sorcery.",

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Add X mana in any combination of {U} and/or {R}, where X is CARDNAME's power. Activate only during your turn and only once each turn.",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gains lifelink until end of turn.",
@@ -29,8 +36,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Swamp",
           "controller": "You",
+          "subtype": "Swamp",
           "type": "Typed"
         },
         "type": "IsPresent"

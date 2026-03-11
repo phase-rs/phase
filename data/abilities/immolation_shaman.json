@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +3/+3 and gains menace until end of turn.",

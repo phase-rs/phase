@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Knights you control gain double strike until end of turn.",
@@ -26,8 +34,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Knight",
             "controller": "You",
+            "subtype": "Knight",
             "type": "Typed"
           },
           {

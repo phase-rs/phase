@@ -14,8 +14,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Angel",
         "controller": "You",
+        "subtype": "Angel",
         "type": "Typed"
       }
     },
@@ -28,8 +28,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Angel",
         "controller": "You",
+        "subtype": "Angel",
         "type": "Typed"
       }
     }

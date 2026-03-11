@@ -3,7 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W U B R G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "You may play target Elemental card from your graveyard without paying its mana cost.",

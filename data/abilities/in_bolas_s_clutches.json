@@ -31,8 +31,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Legendary",
-          "type": "AddType"
+          "subtype": "Legendary",
+          "type": "AddSubtype"
         }
       ]
     }

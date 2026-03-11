@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Creature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {

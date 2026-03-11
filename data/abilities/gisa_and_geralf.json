@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Zombie",
         "controller": "You",
+        "subtype": "Zombie",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap target creature.",

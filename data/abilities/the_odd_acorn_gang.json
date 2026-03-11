@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Squirrel",
         "controller": "You",
+        "subtype": "Squirrel",
         "type": "Typed"
       },
       "description": "Squirrels you control have \"{T}: Target Squirrel gets +2/+2 and gains trample until end of turn. Activate only as a sorcery.\"",
@@ -29,8 +29,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Squirrel",
         "controller": "You",
+        "subtype": "Squirrel",
         "type": "Typed"
       },
       "valid_target": {

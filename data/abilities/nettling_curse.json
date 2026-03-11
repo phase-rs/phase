@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Enchanted creature attacks this turn if able.",

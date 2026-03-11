@@ -48,11 +48,11 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Human",
+        "subtype": "Human",
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     }

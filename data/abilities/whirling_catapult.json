@@ -5,12 +5,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromTop<2/Card>",
-            "type": "Mana"
+            "count": 2,
+            "type": "Exile",
+            "zone": "Library"
           }
         ],
         "type": "Composite"

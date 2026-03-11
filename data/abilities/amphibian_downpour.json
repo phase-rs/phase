@@ -29,8 +29,12 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Creature & Frog",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Frog",
+          "type": "AddSubtype"
         },
         {
           "colors": [

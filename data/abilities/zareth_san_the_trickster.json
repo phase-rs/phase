@@ -5,12 +5,30 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Return<1/Rogue.unblocked+attacking+YouCtrl/unblocked attacking Rogue you control>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Attacking"
+                }
+              ],
+              "subtype": "Rogue",
+              "type": "Typed"
+            },
+            "type": "ReturnToHand"
           }
         ],
         "type": "Composite"

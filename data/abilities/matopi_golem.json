@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate CARDNAME. When it regenerates this way, put a -1/-1 counter on it.",

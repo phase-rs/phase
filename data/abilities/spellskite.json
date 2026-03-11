@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "UP",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Change a target of target spell or ability to CARDNAME.",

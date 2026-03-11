@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<5/Soldier>",
-        "type": "Mana"
+        "count": 5,
+        "filter": {
+          "subtype": "Soldier",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Exile target creature.",
       "effect": {

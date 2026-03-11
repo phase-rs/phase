@@ -26,8 +26,8 @@
           "value": 1
         },
         {
-          "core_type": "Rogue",
-          "type": "AddType"
+          "subtype": "Rogue",
+          "type": "AddSubtype"
         }
       ]
     }

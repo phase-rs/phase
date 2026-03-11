@@ -5,15 +5,28 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<X/Artifact>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Artifact",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

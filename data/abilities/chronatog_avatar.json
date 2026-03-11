@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw three cards. You skip your next turn. Activate only once each turn.",
@@ -20,7 +25,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "You have no maximum hand size.",

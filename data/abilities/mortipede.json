@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "All creatures able to block CARDNAME this turn do so.",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return target permanent you control to its owner's hand. If it has unearth, instead exile it, then return that card to its owner's hand. Activate only during your turn.",

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<3>",
-        "type": "Mana"
+        "amount": 3,
+        "type": "PayLife"
       },
       "description": "Return CARDNAME from your graveyard to your hand. Activate only if you had an Angel or Berserker enter the battlefield under your control this turn.",
       "effect": {

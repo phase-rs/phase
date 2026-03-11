@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "effect": {

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<1>",
-        "type": "Mana"
+        "amount": 1,
+        "type": "PayEnergy"
       },
       "description": "CARDNAME gains lifelink until end of turn.",
       "effect": {

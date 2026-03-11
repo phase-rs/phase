@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "W U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 2/2 white and blue Bird artifact creature with flying until end of turn.",

@@ -35,13 +35,13 @@
       "valid_source": {
         "filters": [
           {
-            "card_type": "Activated",
             "properties": [
               {
                 "type": "Other",
                 "value": "Creature"
               }
             ],
+            "subtype": "Activated",
             "type": "Typed"
           },
           {
@@ -54,7 +54,7 @@
         "type": "And"
       },
       "valid_target": {
-        "card_type": "Spell",
+        "subtype": "Spell",
         "type": "Typed"
       }
     },

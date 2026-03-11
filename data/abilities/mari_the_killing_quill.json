@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Assassin",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Mercenary.YouCtrl,Rogue.YouCtrl"
           }
         ],
+        "subtype": "Assassin",
         "type": "Typed"
       },
       "description": "Assassins, Mercenaries, and Rogues you control have deathtouch and \"Whenever this creature deals combat damage to a player, you may remove a hit counter from a card that player owns in exile. If you do, draw a card and create two Treasure tokens.\"",

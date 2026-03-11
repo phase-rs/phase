@@ -12,8 +12,8 @@
         "filter": {
           "filters": [
             {
-              "card_type": "Warrior",
               "controller": "You",
+              "subtype": "Warrior",
               "type": "Typed"
             },
             {

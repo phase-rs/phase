@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 G",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -20,7 +27,7 @@
       "description": "Reveal the top four card of your library. You may put an artifact, creature, enchantment, land, or planeswalker card from among them into your hand. Put the rest into your graveyard.",
       "effect": {
         "count": 4,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Cleric>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "subtype": "Cleric",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Prevent all damage target creature would deal this turn.",
       "effect": {
@@ -21,8 +25,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<2/Wizard>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "subtype": "Wizard",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Prevent all damage target spell would deal this turn.",
       "effect": {

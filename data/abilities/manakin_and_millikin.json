@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "Mill<1>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Mill"
           }
         ],
         "type": "Composite"

@@ -5,12 +5,29 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "tapXType<3/Creature.White/white creature>",
-            "type": "Mana"
+            "count": 3,
+            "filter": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "White/white creature"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

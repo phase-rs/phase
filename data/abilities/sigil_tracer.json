@@ -5,12 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "tapXType<2/Wizard>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "subtype": "Wizard",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

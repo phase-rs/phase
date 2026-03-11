@@ -22,7 +22,15 @@
       "abilities": [
         {
           "cost": {
-            "cost": "2 G G",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Another target Wolf or Werewolf you control fights target creature you don't control.",
@@ -31,7 +39,6 @@
             "target": {
               "filters": [
                 {
-                  "card_type": "Wolf",
                   "controller": "You",
                   "properties": [
                     {
@@ -39,6 +46,7 @@
                       "value": "YouCtrl,Werewolf.Other"
                     }
                   ],
+                  "subtype": "Wolf",
                   "type": "Typed"
                 },
                 {

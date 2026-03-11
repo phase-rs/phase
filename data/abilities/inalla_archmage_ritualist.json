@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<5/Wizard>",
-        "type": "Mana"
+        "count": 5,
+        "filter": {
+          "subtype": "Wizard",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Target player loses 7 life.",
       "effect": {
@@ -31,8 +35,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Wizard",
             "controller": "You",
+            "subtype": "Wizard",
             "type": "Typed"
           },
           {
@@ -57,8 +61,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Wizard",
             "controller": "You",
+            "subtype": "Wizard",
             "type": "Typed"
           },
           {

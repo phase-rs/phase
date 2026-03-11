@@ -25,12 +25,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Reveal<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Reveal"
           }
         ],
         "type": "Composite"

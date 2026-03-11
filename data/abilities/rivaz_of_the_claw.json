@@ -46,7 +46,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Dragon",
+        "subtype": "Dragon",
         "type": "Typed"
       }
     }

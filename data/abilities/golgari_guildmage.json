@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "4 B",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -34,7 +41,14 @@
     },
     {
       "cost": {
-        "cost": "4 G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a +1/+1 counter on target creature.",

@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "description": "All Slivers have \"Whenever this permanent becomes the target of a spell an opponent controls, you may draw a card.\"",

@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "AddCounter<1/PAGE>",
-            "type": "Mana"
+            "description": "AddCounter<1/PAGE>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"
@@ -26,15 +26,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "AddCounter<1/PAGE>",
-            "type": "Mana"
+            "description": "AddCounter<1/PAGE>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Waterbend<3>",
-        "type": "Mana"
+        "description": "Waterbend<3>",
+        "type": "Unimplemented"
       },
       "description": "Sacrifice this enchantment. If you do, scry 2.",
       "effect": {

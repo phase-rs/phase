@@ -5,12 +5,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"
@@ -34,7 +40,6 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You,Human",
         "controller": "You",
         "type": "Typed"
       },

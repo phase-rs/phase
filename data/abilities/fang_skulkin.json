@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target black creature gains wither until end of turn. (It deals damage to creatures in the form of -1/-1 counters.)",

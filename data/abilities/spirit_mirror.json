@@ -3,13 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Destroy target Reflection.",
       "effect": {
         "target": {
-          "card_type": "Reflection",
+          "subtype": "Reflection",
           "type": "Typed"
         },
         "type": "Destroy"

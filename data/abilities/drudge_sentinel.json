@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Tap CARDNAME. It gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it.)",

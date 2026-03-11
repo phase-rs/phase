@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw two cards.",

@@ -6,7 +6,7 @@
       "description": "Tap X target artifacts, creatures, and/or lands. You lose X life.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Tap"

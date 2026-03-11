@@ -44,7 +44,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Treefolk",
             "controller": "You",
             "properties": [
               {
@@ -52,6 +51,7 @@
                 "value": "YouCtrl,Forest.Other"
               }
             ],
+            "subtype": "Treefolk",
             "type": "Typed"
           },
           {

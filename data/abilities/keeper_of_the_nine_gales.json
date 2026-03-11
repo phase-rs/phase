@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<2/Bird>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "subtype": "Bird",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

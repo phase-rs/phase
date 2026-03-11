@@ -10,7 +10,7 @@
     },
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "Foretelling cards from your hand on any player's turn.",

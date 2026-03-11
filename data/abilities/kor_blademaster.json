@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Warrior",
         "controller": "You",
+        "subtype": "Warrior",
         "type": "Typed"
       },
       "description": "Equipped Warriors you control have double strike.",

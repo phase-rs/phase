@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "PayLife<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayLife"
           }
         ],
         "type": "Composite"
@@ -26,7 +33,14 @@
     },
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Prevent the next 1 damage that would be dealt to target Cleric or Wizard this turn.",
@@ -43,12 +57,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "AddCounter<1/M1M1/Creature.YouCtrl/a creature you control>",
-            "type": "Mana"
+            "description": "AddCounter<1/M1M1/Creature.YouCtrl/a creature you control>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

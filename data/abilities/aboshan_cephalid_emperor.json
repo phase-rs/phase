@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Octopus>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "subtype": "Octopus",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Tap target permanent.",
       "effect": {
@@ -19,7 +23,16 @@
     },
     {
       "cost": {
-        "cost": "U U U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Tap all creatures without flying.",

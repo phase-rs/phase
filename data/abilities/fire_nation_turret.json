@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a charge counter on this artifact.",
@@ -20,8 +27,9 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<50/CHARGE>",
-        "type": "Mana"
+        "count": 50,
+        "counter_type": "CHARGE",
+        "type": "RemoveCounter"
       },
       "description": "It deals 50 damage to any target.",
       "effect": {

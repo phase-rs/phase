@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Return<1/Permanent>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "ReturnToHand"
           }
         ],
         "type": "Composite"

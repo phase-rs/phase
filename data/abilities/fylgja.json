@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/HEALING>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "HEALING",
+        "type": "RemoveCounter"
       },
       "description": "Prevent the next 1 damage that would be dealt to enchanted creature this turn.",
       "effect": {
@@ -17,7 +18,14 @@
     },
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a healing counter on CARDNAME.",

@@ -3,8 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Halfling.Other/other halflings>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Other/other halflings"
+            }
+          ],
+          "subtype": "Halfling",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "NICKNAME gets +2/+0 and gains lifelink until end of turn.",
       "effect": {

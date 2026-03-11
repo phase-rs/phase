@@ -8,7 +8,7 @@
       "description": "Destroy target creature or land.",
       "effect": {
         "target": {
-          "card_type": "Land,Creature",
+          "card_type": "Land",
           "type": "Typed"
         },
         "type": "Destroy"

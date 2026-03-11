@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +2/+0 and gains indestructible until end of turn. Tap it.",

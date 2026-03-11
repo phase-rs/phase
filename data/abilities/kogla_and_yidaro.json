@@ -5,12 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 R G",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -18,7 +29,7 @@
       "description": "Destroy up to one target artifact or enchantment. Shuffle CARDNAME into your library from your graveyard, then draw a card.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

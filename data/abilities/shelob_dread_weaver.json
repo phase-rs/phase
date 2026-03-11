@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExiledMoveToGrave<1/Creature.ExiledWithSource>",
-            "type": "Mana"
+            "description": "ExiledMoveToGrave<1/Creature.ExiledWithSource>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"
@@ -29,7 +36,15 @@
     },
     {
       "cost": {
-        "cost": "X 1 B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "X",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put target creature card with mana value X exiled with NICKNAME onto the battlefield tapped under your control.",

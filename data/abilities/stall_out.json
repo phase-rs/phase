@@ -6,7 +6,7 @@
       "description": "Tap target creature or Vehicle, then put three stun counters on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
       "effect": {
         "target": {
-          "card_type": "Creature,Vehicle",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Tap"

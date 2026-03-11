@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "UR",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Switch CARDNAME's power and toughness until end of turn.",

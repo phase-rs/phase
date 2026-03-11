@@ -31,7 +31,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -44,13 +51,13 @@
       "effect": {
         "power": 1,
         "target": {
-          "card_type": "Lizard",
           "properties": [
             {
               "type": "Other",
               "value": "YouCtrl,Mouse.YouCtrl,Otter.YouCtrl,Raccoon.YouCtrl"
             }
           ],
+          "subtype": "Lizard",
           "type": "Typed"
         },
         "toughness": 0,

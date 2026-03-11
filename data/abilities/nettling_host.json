@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1/CARDNAME>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "type": "SelfRef"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "Conjure a card named Nettlecyst into your hand. Activate only if an opponent has three or more poison counters.",
       "effect": {

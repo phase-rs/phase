@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a Spirit Warrior with base power and toughness 2/3.",
@@ -25,7 +33,16 @@
     },
     {
       "cost": {
-        "cost": "S S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If CARDNAME is a Warrior, put a flying counter on it and it becomes an Angel Spirit Warrior with base power and toughness 4/4.",
@@ -42,7 +59,17 @@
     },
     {
       "cost": {
-        "cost": "S S S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow",
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If CARDNAME is an Angel, put two +1/+1 counters on it and it gains \"Whenever this creature deals combat damage to a player, draw a card.\"",

@@ -21,8 +21,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Detective",
         "controller": "You",
+        "subtype": "Detective",
         "type": "Typed"
       }
     },
@@ -34,8 +34,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Detective",
         "controller": "You",
+        "subtype": "Detective",
         "type": "Typed"
       }
     },

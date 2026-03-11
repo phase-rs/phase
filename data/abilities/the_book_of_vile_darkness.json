@@ -8,16 +8,29 @@
             "type": "Tap"
           },
           {
-            "cost": "Exile<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile"
           },
           {
-            "cost": "Exile<1/Artifact.YouCtrl+namedEye of Vecna>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Artifact",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "Exile"
           },
           {
-            "cost": "Exile<1/Artifact.YouCtrl+namedHand of Vecna>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Artifact",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"

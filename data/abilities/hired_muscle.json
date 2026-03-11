@@ -39,8 +39,9 @@
       "abilities": [
         {
           "cost": {
-            "cost": "SubCounter<1/KI>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "KI",
+            "type": "RemoveCounter"
           },
           "description": "Target creature gains fear until end of turn. (It can't be blocked except by artifact creatures and/or black creatures.)",
           "effect": {

@@ -6,7 +6,7 @@
       "description": "Counter target spell or ability that targets a permanent you control.",
       "effect": {
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "type": "Counter"

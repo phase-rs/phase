@@ -19,8 +19,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Archer",
         "controller": "You",
+        "subtype": "Archer",
         "type": "Typed"
       },
       "valid_target": {

@@ -23,7 +23,7 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Player,Permanent",
+        "card_type": "Permanent",
         "type": "Typed"
       }
     }

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "You draw a card and target opponent gains 3 life.",

@@ -22,7 +22,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Snake",
+        "subtype": "Snake",
         "type": "Typed"
       }
     }

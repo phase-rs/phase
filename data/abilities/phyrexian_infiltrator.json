@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 U U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exchange control of CARDNAME and target creature. (This effect lasts indefinitely.)",

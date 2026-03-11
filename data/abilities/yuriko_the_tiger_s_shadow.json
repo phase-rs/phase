@@ -13,8 +13,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Ninja",
         "controller": "You",
+        "subtype": "Ninja",
         "type": "Typed"
       },
       "valid_target": {

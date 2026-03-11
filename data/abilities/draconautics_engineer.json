@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Other creatures you control gain haste until end of turn. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",
@@ -20,7 +27,14 @@
     },
     {
       "cost": {
-        "cost": "3 R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 4/4 red Dinosaur Dragon creature token with flying.",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7 B",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gets -3/-3 until end of turn.",

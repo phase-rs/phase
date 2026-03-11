@@ -29,8 +29,12 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Creature & Fish",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Fish",
+          "type": "AddSubtype"
         },
         {
           "colors": [

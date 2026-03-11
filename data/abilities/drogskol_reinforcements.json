@@ -13,8 +13,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Spirit",
             "controller": "You",
+            "subtype": "Spirit",
             "type": "Typed"
           },
           {

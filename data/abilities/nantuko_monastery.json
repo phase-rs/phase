@@ -15,7 +15,15 @@
     },
     {
       "cost": {
-        "cost": "G W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 4/4 green and white Insect Monk creature with first strike until end of turn. It's still a land. Activate only if there are seven or more cards in your graveyard.",

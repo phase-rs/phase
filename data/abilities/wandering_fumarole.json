@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "2 U R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, this land becomes a 1/4 blue and red Elemental creature with \"{0}: Switch this creature's power and toughness until end of turn.\" It's still a land.",

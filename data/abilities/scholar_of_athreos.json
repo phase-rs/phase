@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Each opponent loses 1 life. You gain life equal to the life lost this way.",

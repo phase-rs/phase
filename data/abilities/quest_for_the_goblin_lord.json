@@ -44,8 +44,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Goblin",
         "controller": "You",
+        "subtype": "Goblin",
         "type": "Typed"
       }
     }

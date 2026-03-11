@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "Meet in Reverse — You draw cards from the bottom of your library rather than the top.",

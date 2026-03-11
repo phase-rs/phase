@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Rhino",
         "controller": "You",
+        "subtype": "Rhino",
         "type": "Typed"
       },
       "description": "Rhinos you control have menace.",

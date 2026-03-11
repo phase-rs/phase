@@ -23,8 +23,8 @@
         "Graveyard"
       ],
       "valid_card": {
-        "card_type": "Demon",
         "controller": "You",
+        "subtype": "Demon",
         "type": "Typed"
       }
     }

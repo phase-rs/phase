@@ -20,7 +20,15 @@
         },
         {
           "cost": {
-            "cost": "5 G G",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": [
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME.",

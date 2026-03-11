@@ -22,8 +22,8 @@
           "value": 3
         },
         {
-          "core_type": "Knight",
-          "type": "AddType"
+          "subtype": "Knight",
+          "type": "AddSubtype"
         }
       ]
     }

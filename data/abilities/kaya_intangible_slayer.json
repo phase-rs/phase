@@ -37,7 +37,7 @@
         "destination": "Exile",
         "origin": "Battlefield",
         "target": {
-          "card_type": "Creature,Enchantment",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "ChangeZone"

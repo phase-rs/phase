@@ -15,8 +15,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Aura",
         "controller": "You",
+        "subtype": "Aura",
         "type": "Typed"
       }
     }

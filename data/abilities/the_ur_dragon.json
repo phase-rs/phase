@@ -6,7 +6,7 @@
   "statics": [
     {
       "description": "Eminence — As long as CARDNAME is in the command zone or on the battlefield, other Dragon spells you cast cost {1} less to cast.",
-      "effect_zone": "Battlefield,Command",
+      "effect_zone": "Battlefield",
       "mode": "ReduceCost"
     }
   ],

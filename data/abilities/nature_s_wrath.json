@@ -22,7 +22,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Island,Card",
+        "card_type": "Card",
         "properties": [
           {
             "type": "Other",
@@ -41,7 +41,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Swamp,Card",
+        "card_type": "Card",
         "properties": [
           {
             "type": "Other",

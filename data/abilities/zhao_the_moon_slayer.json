@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a conqueror counter on NICKNAME.",
@@ -53,8 +58,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Mountain",
-          "type": "AddType"
+          "subtype": "Mountain",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -6,7 +6,7 @@
       "description": "Tap target artifact or creature. Draw a card.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Tap"

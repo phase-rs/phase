@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "NICKNAME gets +X/+X until end of turn, where X is the number of lands you control.",

@@ -22,7 +22,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Spirit,Arcane",
         "type": "Typed"
       }
     }

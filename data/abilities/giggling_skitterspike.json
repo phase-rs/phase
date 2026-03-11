@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "effect": {
@@ -45,7 +50,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Spell",
+        "subtype": "Spell",
         "type": "Typed"
       },
       "valid_target": {

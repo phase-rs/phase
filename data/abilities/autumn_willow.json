@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME can be the target of spells and abilities controlled by target player as though it didn't have shroud.",

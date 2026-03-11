@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "1 W U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a 2/3 white and blue Bird creature with flying. It's still a land.",

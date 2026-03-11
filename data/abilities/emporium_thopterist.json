@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Thopter",
         "controller": "You",
+        "subtype": "Thopter",
         "type": "Typed"
       },
       "description": "Thopters you control get +2/+0.",

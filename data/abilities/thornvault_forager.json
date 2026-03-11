@@ -19,7 +19,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "Forage",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -40,7 +45,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

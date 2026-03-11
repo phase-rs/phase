@@ -5,15 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "6",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<All/CHARGE>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "CHARGE",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -43,7 +49,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

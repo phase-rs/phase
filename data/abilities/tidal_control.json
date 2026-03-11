@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Counter target red or green spell. Any player may activate this ability.",
@@ -26,8 +31,8 @@
     },
     {
       "cost": {
-        "cost": "PayLife<2>",
-        "type": "Mana"
+        "amount": 2,
+        "type": "PayLife"
       },
       "description": "Counter target red or green spell. Any player may activate this ability.",
       "effect": {

@@ -11,13 +11,13 @@
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "valid_card": {
-        "card_type": "Curse",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Curse",
         "type": "Typed"
       }
     },

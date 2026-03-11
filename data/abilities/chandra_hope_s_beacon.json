@@ -30,8 +30,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "CARDNAME deals X damage to each of up to two targets.",
       "effect": {
@@ -59,7 +59,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

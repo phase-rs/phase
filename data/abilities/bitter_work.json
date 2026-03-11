@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Earthbend 4. Activate only during your turn. (Target land you control becomes a 0/0 creature with haste that's still a land. Put four +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped. Activate each exhaust ability only once.)",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return target artifact you control to its owner's hand.",
@@ -24,7 +31,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {

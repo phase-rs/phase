@@ -19,19 +19,30 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<12/TIME>",
-            "type": "Mana"
+            "count": 12,
+            "counter_type": "TIME",
+            "type": "RemoveCounter"
           },
           {
-            "cost": "Exile<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"
@@ -39,7 +50,7 @@
       "description": "Shuffle your graveyard and hand into your library, then draw seven cards. Activate only if you control a Time Lord.",
       "effect": {
         "destination": "Library",
-        "origin": "Graveyard,Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
         },

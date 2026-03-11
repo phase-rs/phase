@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "G G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -17,13 +25,13 @@
       "description": "Destroy target Aura attached to a land.",
       "effect": {
         "target": {
-          "card_type": "Aura",
           "properties": [
             {
               "type": "Other",
               "value": "AttachedTo Land"
             }
           ],
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "Destroy"

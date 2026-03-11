@@ -23,7 +23,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Library,Battlefield",
+      "affected_zone": "Library",
       "description": "You may look at the top card of your library and at face-down creatures you don't control any time.",
       "mode": "Continuous"
     }

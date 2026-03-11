@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "The next 1 damage that would be dealt to target white creature this turn is dealt to CARDNAME instead.",

@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Bear",
             "controller": "You",
+            "subtype": "Bear",
             "type": "Typed"
           },
           {

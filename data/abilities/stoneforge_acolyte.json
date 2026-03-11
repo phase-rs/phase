@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<1/Ally>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "subtype": "Ally",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"
@@ -17,7 +21,7 @@
       "description": "Look at the top four cards of your library. You may reveal an Equipment card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
       "effect": {
         "count": 4,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

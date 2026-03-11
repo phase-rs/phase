@@ -6,7 +6,7 @@
       "description": "Counter target instant or Aura spell that targets a permanent you control.",
       "effect": {
         "target": {
-          "card_type": "Instant,Aura",
+          "card_type": "Instant",
           "type": "Typed"
         },
         "type": "Counter"

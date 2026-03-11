@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a +1/+1 counter on this creature.",

@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Plains",
           "controller": "You",
+          "subtype": "Plains",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -31,8 +31,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Island",
           "controller": "You",
+          "subtype": "Island",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -52,8 +52,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Swamp",
           "controller": "You",
+          "subtype": "Swamp",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -73,8 +73,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Mountain",
           "controller": "You",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -98,8 +98,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Forest",
           "controller": "You",
+          "subtype": "Forest",
           "type": "Typed"
         },
         "type": "IsPresent"

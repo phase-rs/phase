@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Artifact,Instant,Sorcery",
+        "card_type": "Artifact",
         "type": "Typed"
       }
     }

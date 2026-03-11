@@ -21,8 +21,8 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Villain",
           "controller": "You",
+          "subtype": "Villain",
           "type": "Typed"
         },
         "type": "IsPresent"

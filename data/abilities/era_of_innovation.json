@@ -5,8 +5,8 @@
       "cost": {
         "costs": [
           {
-            "cost": "PayEnergy<6>",
-            "type": "Mana"
+            "amount": 6,
+            "type": "PayEnergy"
           },
           {
             "target": {

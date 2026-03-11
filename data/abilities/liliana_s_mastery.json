@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Zombie",
         "controller": "You",
+        "subtype": "Zombie",
         "type": "Typed"
       },
       "description": "Zombies you control get +1/+1.",

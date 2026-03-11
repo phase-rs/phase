@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains flying until end of turn. (It can't be blocked except by creatures with flying or reach.)",
@@ -20,7 +25,12 @@
     },
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains first strike until end of turn. (It deals combat damage before creatures without first strike.)",

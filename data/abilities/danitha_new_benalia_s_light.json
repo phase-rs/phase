@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Aura",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn,Equipment.YouOwn"
           }
         ],
+        "subtype": "Aura",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",

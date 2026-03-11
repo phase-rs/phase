@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Another target creature with power 2 or less can't be blocked this turn.",
@@ -18,15 +23,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Hand>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Discard"
           }
         ],
         "type": "Composite"

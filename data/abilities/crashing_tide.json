@@ -24,8 +24,8 @@
       "characteristic_defining": true,
       "condition": {
         "filter": {
-          "card_type": "Merfolk",
           "controller": "You",
+          "subtype": "Merfolk",
           "type": "Typed"
         },
         "type": "IsPresent"

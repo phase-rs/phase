@@ -25,7 +25,7 @@
           "description": "Destroy target creature or planeswalker. You lose 2 life. (Then exile this card. You may cast the creature later from exile.)",
           "effect": {
             "target": {
-              "card_type": "Creature,Planeswalker",
+              "card_type": "Creature",
               "type": "Typed"
             },
             "type": "Destroy"

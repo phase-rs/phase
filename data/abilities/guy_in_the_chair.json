@@ -17,7 +17,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 G",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -31,7 +38,7 @@
         "count": 1,
         "counter_type": "P1P1",
         "target": {
-          "card_type": "Spider",
+          "subtype": "Spider",
           "type": "Typed"
         },
         "type": "PutCounter"

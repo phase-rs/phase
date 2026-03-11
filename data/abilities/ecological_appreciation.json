@@ -6,7 +6,7 @@
       "description": "Search your library and graveyard for up to four creature cards with different names that each have mana value X or less and reveal them.",
       "effect": {
         "destination": "Library",
-        "origin": "Library,Graveyard",
+        "origin": "Library",
         "target": {
           "type": "Any"
         },

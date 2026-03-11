@@ -6,7 +6,7 @@
       "description": "Destroy target creature or Vehicle.",
       "effect": {
         "target": {
-          "card_type": "Creature,Vehicle",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Destroy"

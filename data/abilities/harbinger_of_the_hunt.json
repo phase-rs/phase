@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 1 damage to each creature without flying.",
@@ -22,7 +29,14 @@
     },
     {
       "cost": {
-        "cost": "2 G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 1 damage to each other creature with flying.",

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target player who lost life this turn loses 1 life.",
@@ -17,7 +25,15 @@
     },
     {
       "cost": {
-        "cost": "B R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target blocking creature gets -1/-1 until end of turn.",

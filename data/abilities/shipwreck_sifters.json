@@ -21,13 +21,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Spirit",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn,Card.YouOwn"
           }
         ],
+        "subtype": "Spirit",
         "type": "Typed"
       }
     }

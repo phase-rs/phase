@@ -17,7 +17,14 @@
     },
     {
       "cost": {
-        "cost": "5 U",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a 7/7 blue Giant creature with ward {3}. It's still a land. (Whenever it becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)",

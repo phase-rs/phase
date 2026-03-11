@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/GOLD>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "GOLD",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -48,8 +49,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Dragon",
         "controller": "You",
+        "subtype": "Dragon",
         "type": "Typed"
       }
     }

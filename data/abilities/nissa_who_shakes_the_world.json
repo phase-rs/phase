@@ -52,7 +52,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Forest",
+        "subtype": "Forest",
         "type": "Typed"
       }
     }

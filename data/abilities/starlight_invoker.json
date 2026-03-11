@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7 W",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "You gain 5 life.",

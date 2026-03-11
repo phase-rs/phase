@@ -32,8 +32,8 @@
           "value": 2
         },
         {
-          "core_type": "Bear",
-          "type": "AddType"
+          "subtype": "Bear",
+          "type": "AddSubtype"
         }
       ]
     }

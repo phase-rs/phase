@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +4/+4 until end of turn. Activate only if creatures you control have total power 8 or greater.",

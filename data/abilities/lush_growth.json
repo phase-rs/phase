@@ -18,8 +18,16 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Mountain & Forest & Plains",
-          "type": "AddType"
+          "subtype": "Mountain",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Forest",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Plains",
+          "type": "AddSubtype"
         }
       ]
     }

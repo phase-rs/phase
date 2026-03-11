@@ -13,7 +13,7 @@
           "value": 1
         },
         "target": {
-          "card_type": "Opponent,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

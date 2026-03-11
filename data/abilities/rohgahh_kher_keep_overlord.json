@@ -49,7 +49,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Kobold",
+        "subtype": "Kobold",
         "type": "Typed"
       }
     },
@@ -60,7 +60,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Dragon",
+        "subtype": "Dragon",
         "type": "Typed"
       }
     }

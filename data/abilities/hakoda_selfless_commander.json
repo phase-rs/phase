@@ -42,7 +42,6 @@
     },
     {
       "affected": {
-        "card_type": "Ally",
         "controller": "You",
         "properties": [
           {
@@ -54,6 +53,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Ally",
         "type": "Typed"
       },
       "affected_zone": "Library",

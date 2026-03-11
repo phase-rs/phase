@@ -13,8 +13,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Swamp",
-          "type": "AddType"
+          "subtype": "Swamp",
+          "type": "AddSubtype"
         }
       ]
     }

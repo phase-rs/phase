@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/DREAM/NICKNAME>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "DREAM",
+        "target": {
+          "type": "SelfRef"
+        },
+        "type": "RemoveCounter"
       },
       "description": "Add {C}.",
       "effect": {
@@ -16,8 +20,12 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<1/DREAM/NICKNAME>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "DREAM",
+        "target": {
+          "type": "SelfRef"
+        },
+        "type": "RemoveCounter"
       },
       "description": "Prevent the next 1 damage that would be dealt to NICKNAME this turn.",
       "effect": {

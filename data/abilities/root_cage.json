@@ -9,7 +9,7 @@
         "Other": "Untap"
       },
       "valid_card": {
-        "card_type": "Mercenary",
+        "subtype": "Mercenary",
         "type": "Typed"
       }
     }

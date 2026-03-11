@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target artifact creature gets +1/+0 until end of turn.",
@@ -30,7 +37,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {

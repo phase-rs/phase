@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Dragon",
           "controller": "You",
+          "subtype": "Dragon",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -37,7 +37,7 @@
         "Graveyard"
       ],
       "valid_card": {
-        "card_type": "Dragon",
+        "subtype": "Dragon",
         "type": "Typed"
       }
     }

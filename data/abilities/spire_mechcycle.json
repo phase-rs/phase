@@ -3,8 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Mount.Other;Vehicle.Other/another Mount or Vehicle>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Other;Vehicle.Other/another Mount or Vehicle"
+            }
+          ],
+          "subtype": "Mount",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "This Vehicle becomes an artifact creature. Put a +1/+1 counter on it for each Mount and/or Vehicle you control other than this Vehicle. (Activate each exhaust ability only once.)",
       "duration": "Permanent",

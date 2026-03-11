@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "You,Hero",
             "controller": "You",
             "type": "Typed"
           },

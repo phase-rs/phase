@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<2>",
-        "type": "Mana"
+        "amount": 2,
+        "type": "PayEnergy"
       },
       "description": "CARDNAME can attack this turn as though it didn't have defender.",
       "effect": {

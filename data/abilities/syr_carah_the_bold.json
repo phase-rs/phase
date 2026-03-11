@@ -31,7 +31,6 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Spell",
         "properties": [
           {
             "type": "Other",
@@ -46,6 +45,7 @@
             "value": "YouCtrl,Card.Self"
           }
         ],
+        "subtype": "Spell",
         "type": "Typed"
       },
       "valid_target": {

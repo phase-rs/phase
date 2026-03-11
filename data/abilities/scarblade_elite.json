@@ -8,8 +8,13 @@
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<1/Assassin>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "subtype": "Assassin",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

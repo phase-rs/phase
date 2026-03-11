@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "8",
+        "cost": {
+          "Cost": {
+            "generic": 8,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Return this card from your graveyard to the battlefield tapped with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)",

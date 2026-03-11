@@ -6,7 +6,7 @@
       "description": "Counter up to four target spells and/or abilities. Untap up to four target artifacts and/or creatures.",
       "effect": {
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "type": "Counter"

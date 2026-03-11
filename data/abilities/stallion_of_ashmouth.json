@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+1 until end of turn. Activate only if there are four or more card types among cards in your graveyard.",

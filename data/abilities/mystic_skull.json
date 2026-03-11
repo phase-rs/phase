@@ -8,7 +8,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "1",
+                "cost": {
+                  "Cost": {
+                    "generic": 1,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -29,7 +34,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "5",
+                "cost": {
+                  "Cost": {
+                    "generic": 5,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {

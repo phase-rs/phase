@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Prevent all damage that would be dealt to another target creature this turn by sources of the color of your choice.",
@@ -17,7 +24,15 @@
     },
     {
       "cost": {
-        "cost": "5 W W",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Prevent all damage that would be dealt to target player or planeswalker this turn by sources of the color of your choice.",

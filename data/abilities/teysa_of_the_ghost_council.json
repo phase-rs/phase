@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Spirit",
         "controller": "You",
+        "subtype": "Spirit",
         "type": "Typed"
       },
       "description": "Spirits you control get +X/+0, where X is NICKNAME's intensity.",

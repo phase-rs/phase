@@ -13,8 +13,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Snow",
-          "type": "RemoveType"
+          "subtype": "Snow",
+          "type": "RemoveSubtype"
         }
       ]
     }

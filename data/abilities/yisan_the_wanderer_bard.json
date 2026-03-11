@@ -5,15 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 G",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "AddCounter<1/VERSE>",
-            "type": "Mana"
+            "description": "AddCounter<1/VERSE>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

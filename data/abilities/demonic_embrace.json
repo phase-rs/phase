@@ -30,8 +30,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Demon",
-          "type": "AddType"
+          "subtype": "Demon",
+          "type": "AddSubtype"
         }
       ]
     },

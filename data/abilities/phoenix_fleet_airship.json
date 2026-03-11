@@ -20,7 +20,11 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Artifact & Creature",
+          "core_type": "Artifact",
+          "type": "AddType"
+        },
+        {
+          "core_type": "Creature",
           "type": "AddType"
         }
       ]

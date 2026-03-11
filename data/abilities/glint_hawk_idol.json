@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 2/2 Bird artifact creature with flying until end of turn.",

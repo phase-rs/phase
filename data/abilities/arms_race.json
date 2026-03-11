@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "You may put an artifact card from your hand onto the battlefield. The artifact gains haste. Sacrifice it at the beginning of the next end step.",

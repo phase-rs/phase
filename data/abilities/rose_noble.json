@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Doctor,Creature",
+        "card_type": "Creature",
         "type": "Typed"
       }
     }

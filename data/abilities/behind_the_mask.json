@@ -7,7 +7,7 @@
       "effect": {
         "power": null,
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "toughness": null,

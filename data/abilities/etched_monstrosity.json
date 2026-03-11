@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "W U B R G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White",
+                  "Blue",
+                  "Black",
+                  "Red",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<5/M1M1>",
-            "type": "Mana"
+            "count": 5,
+            "counter_type": "M1M1",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

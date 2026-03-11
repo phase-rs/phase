@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If target spell has only one target and that target is CARDNAME, change that spell's target to another creature.",

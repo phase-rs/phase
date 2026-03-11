@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Another target Cleric gains lifelink until end of turn.",
@@ -12,7 +19,7 @@
         "target": {
           "filters": [
             {
-              "card_type": "Cleric",
+              "subtype": "Cleric",
               "type": "Typed"
             },
             {

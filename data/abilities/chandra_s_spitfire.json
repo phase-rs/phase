@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Card,Emblem",
+        "card_type": "Card",
         "type": "Typed"
       },
       "valid_target": {

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature can't block CARDNAME this turn.",
@@ -16,7 +23,14 @@
     },
     {
       "cost": {
-        "cost": "2 G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature blocks CARDNAME this turn if able.",

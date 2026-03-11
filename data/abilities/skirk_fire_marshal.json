@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<5/Goblin>",
-        "type": "Mana"
+        "count": 5,
+        "filter": {
+          "subtype": "Goblin",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME deals 10 damage to each creature and each player.",
       "effect": {

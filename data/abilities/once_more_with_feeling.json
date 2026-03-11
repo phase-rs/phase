@@ -6,7 +6,7 @@
       "description": "Exile all permanents and all cards from all graveyards. Each player shuffles their hand into their library, then draws seven cards. Each player's life total becomes 10. Exile CARDNAME.",
       "effect": {
         "destination": "Exile",
-        "origin": "Battlefield,Graveyard",
+        "origin": "Battlefield",
         "target": {
           "type": "Any"
         },

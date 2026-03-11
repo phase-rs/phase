@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X 1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes an X/X Construct artifact creature. Sacrifice it at the beginning of the next end step.",

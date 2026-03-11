@@ -5,8 +5,11 @@
       "cost": {
         "costs": [
           {
-            "cost": "Return<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "ReturnToHand"
           },
           {
             "type": "Tap"

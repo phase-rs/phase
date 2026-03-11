@@ -37,7 +37,14 @@
           "cost": {
             "costs": [
               {
-                "cost": "2 U",
+                "cost": {
+                  "Cost": {
+                    "generic": 2,
+                    "shards": [
+                      "Blue"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -49,7 +56,7 @@
           "description": "Look at the top four cards of your library. You may reveal a noncreature, nonland card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
           "effect": {
             "count": 4,
-            "destination": "",
+            "destination": "Battlefield",
             "type": "Dig"
           },
           "kind": "Activated",

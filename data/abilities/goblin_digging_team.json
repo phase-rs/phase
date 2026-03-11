@@ -19,7 +19,7 @@
       "description": "Destroy target Wall.",
       "effect": {
         "target": {
-          "card_type": "Wall",
+          "subtype": "Wall",
           "type": "Typed"
         },
         "type": "Destroy"

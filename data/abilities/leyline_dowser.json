@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -27,8 +32,18 @@
     },
     {
       "cost": {
-        "cost": "tapXType<1/Creature.Legendary/untapped legendary creature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Legendary/untapped legendary creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Untap CARDNAME.",
       "effect": {

@@ -12,12 +12,12 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Wolf",
         "controller": "You",
+        "subtype": "Wolf",
         "type": "Typed"
       }
     }

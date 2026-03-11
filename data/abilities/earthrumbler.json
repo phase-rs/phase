@@ -3,8 +3,13 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1/Creature;Artifact/artifact or creature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "subtype": "Creature;Artifact",
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "This Vehicle becomes an artifact creature until end of turn.",
       "effect": {

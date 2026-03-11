@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 G",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature you control gets +3/+3 and gains trample until end of turn. Activate only if you control three or more creatures with different powers.",

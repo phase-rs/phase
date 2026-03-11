@@ -13,7 +13,7 @@
           "value": 1
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"
@@ -24,8 +24,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "Return target creature card with mana value X from your graveyard to the battlefield. That creature is a Vampire in addition to its other types.",
       "effect": {

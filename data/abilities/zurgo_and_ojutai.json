@@ -38,12 +38,11 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Dragon",
         "controller": "You",
+        "subtype": "Dragon",
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Player,Battle",
         "type": "Typed"
       }
     }

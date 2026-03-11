@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target opponent reveals a card at random from their hand. CARDNAME deals damage equal to that card's mana value to that player. Activate only as a sorcery.",

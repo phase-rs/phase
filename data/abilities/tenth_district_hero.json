@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 W",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "CollectEvidence<2>",
-            "type": "Mana"
+            "description": "CollectEvidence<2>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"
@@ -36,12 +43,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 W",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "CollectEvidence<4>",
-            "type": "Mana"
+            "description": "CollectEvidence<4>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

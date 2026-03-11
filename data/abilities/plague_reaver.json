@@ -5,8 +5,8 @@
       "cost": {
         "costs": [
           {
-            "cost": "Discard<2/Card>",
-            "type": "Mana"
+            "count": 2,
+            "type": "Discard"
           },
           {
             "target": {

@@ -6,7 +6,6 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Faerie",
         "properties": [
           {
             "type": "Other",
@@ -21,6 +20,7 @@
             "value": "YouOwn"
           }
         ],
+        "subtype": "Faerie",
         "type": "Typed"
       },
       "affected_zone": "Library",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME can attack this turn as though it didn't have defender.",

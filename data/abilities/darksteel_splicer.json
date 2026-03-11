@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Golem",
         "controller": "You",
+        "subtype": "Golem",
         "type": "Typed"
       },
       "description": "Golems you control have indestructible.",

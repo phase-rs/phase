@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a loyalty counter on target Gideon planeswalker.",

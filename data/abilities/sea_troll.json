@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate CARDNAME. Activate only if CARDNAME blocked or was blocked by a blue creature this turn.",

@@ -6,7 +6,7 @@
       "description": "Look at the top five cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in a random order. Create two 1/1 green and white Citizen creature tokens.",
       "effect": {
         "count": 5,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Spell",

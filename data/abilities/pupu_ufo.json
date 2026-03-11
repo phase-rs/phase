@@ -19,7 +19,12 @@
     },
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, this creature's base power becomes equal to the number of Towns you control.",

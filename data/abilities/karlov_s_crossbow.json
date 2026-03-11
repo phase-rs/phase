@@ -5,12 +5,17 @@
       "cost": {
         "costs": [
           {
-            "cost": "0",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Reveal<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Reveal"
           }
         ],
         "type": "Composite"

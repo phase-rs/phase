@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "effect": {

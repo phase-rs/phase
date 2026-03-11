@@ -43,7 +43,6 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Player,Battle",
         "type": "Typed"
       }
     }

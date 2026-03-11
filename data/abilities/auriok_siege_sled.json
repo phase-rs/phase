@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target artifact creature blocks CARDNAME this turn if able.",
@@ -18,7 +23,12 @@
     },
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target artifact creature can't block CARDNAME this turn.",

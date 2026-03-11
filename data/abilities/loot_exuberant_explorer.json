@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "4 G G",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -29,7 +37,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "You may play an additional land on each of your turns.",

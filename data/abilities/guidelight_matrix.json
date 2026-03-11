@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -29,7 +34,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -42,8 +52,8 @@
       "effect": {
         "power": null,
         "target": {
-          "card_type": "Vehicle",
           "controller": "You",
+          "subtype": "Vehicle",
           "type": "Typed"
         },
         "toughness": null,

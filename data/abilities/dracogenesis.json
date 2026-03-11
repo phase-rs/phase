@@ -6,10 +6,10 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Dragon",
+        "subtype": "Dragon",
         "type": "Typed"
       },
-      "affected_zone": "Hand,Graveyard,Library,Exile,Command",
+      "affected_zone": "Hand",
       "description": "You may cast Dragon spells without paying their mana costs.",
       "mode": "Continuous"
     }

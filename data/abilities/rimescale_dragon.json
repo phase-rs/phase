@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 S",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put an ice counter on target creature. Tap that creature.",

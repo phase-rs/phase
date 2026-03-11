@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target player reveals the top card of their library.",

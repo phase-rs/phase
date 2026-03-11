@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target card from a graveyard.",
@@ -38,7 +43,6 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Dinosaur",
         "properties": [
           {
             "type": "Other",
@@ -49,6 +53,7 @@
             "value": "YouOwn"
           }
         ],
+        "subtype": "Dinosaur",
         "type": "Typed"
       },
       "affected_zone": "Exile",

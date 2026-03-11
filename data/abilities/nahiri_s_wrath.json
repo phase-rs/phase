@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 R",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<X/Card>",
-            "type": "Mana"
+            "count": 0,
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -22,7 +29,7 @@
           "value": "Y"
         },
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "DealDamage"

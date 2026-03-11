@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Zombie",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Skeleton.YouCtrl,Vampire.YouCtrl"
           }
         ],
+        "subtype": "Zombie",
         "type": "Typed"
       },
       "description": "Skeletons, Vampires, and Zombies you control get +1/+1.",

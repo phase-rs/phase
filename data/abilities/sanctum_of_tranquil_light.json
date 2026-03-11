@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 W",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Tap target creature. This ability costs {1} less to activate for each Shrine you control.",

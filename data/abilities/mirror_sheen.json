@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 UR UR",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue",
+              "Red",
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Copy target instant or sorcery spell that targets you. You may choose new targets for the copy.",

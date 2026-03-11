@@ -7,7 +7,7 @@
   "triggers": [
     {
       "description": "Whenever another creature you control dies or is put into exile, put a +1/+1 counter on NICKNAME and you gain 1 life.",
-      "destination": "Graveyard,Exile",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "trigger_zones": [
@@ -32,7 +32,7 @@
     },
     {
       "description": "When NICKNAME dies or is put into exile while its power is 4 or greater, destroy up to one target nonland permanent.",
-      "destination": "Graveyard,Exile",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "trigger_zones": [

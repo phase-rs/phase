@@ -14,13 +14,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Mutant",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Ninja.YouCtrl,Turtle.YouCtrl"
           }
         ],
+        "subtype": "Mutant",
         "type": "Typed"
       }
     }

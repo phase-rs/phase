@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "UP",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, target creature you control becomes a blue artifact in addition to its other colors and types. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)",

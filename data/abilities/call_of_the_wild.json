@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Reveal the top card of your library. If it's a creature card, put it onto the battlefield. Otherwise, put it into your graveyard.",

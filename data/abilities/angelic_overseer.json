@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Human",
           "controller": "You",
+          "subtype": "Human",
           "type": "Typed"
         },
         "type": "IsPresent"

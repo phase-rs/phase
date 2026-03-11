@@ -30,15 +30,15 @@
     },
     {
       "affected": {
-        "card_type": "Goblin",
+        "subtype": "Goblin",
         "type": "Typed"
       },
       "description": "All Goblins are black and are Zombies in addition to their other creature types.",
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Zombie",
-          "type": "AddType"
+          "subtype": "Zombie",
+          "type": "AddSubtype"
         },
         {
           "colors": [

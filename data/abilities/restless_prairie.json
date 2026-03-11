@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "2 G W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 3/3 green and white Llama creature until end of turn. It's still a land.",

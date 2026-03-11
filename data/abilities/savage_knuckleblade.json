@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +2/+2 until end of turn. Activate only once each turn.",
@@ -20,7 +27,14 @@
     },
     {
       "cost": {
-        "cost": "2 U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME to its owner's hand.",
@@ -37,7 +51,14 @@
     },
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains haste until end of turn.",

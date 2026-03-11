@@ -39,8 +39,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Saga",
         "controller": "You",
+        "subtype": "Saga",
         "type": "Typed"
       }
     }

@@ -14,13 +14,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Aura",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Equipment.YouCtrl"
           }
         ],
+        "subtype": "Aura",
         "type": "Typed"
       }
     },

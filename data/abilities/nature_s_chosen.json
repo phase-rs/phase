@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap enchanted creature. Activate only during your turn and only once each turn.",
@@ -18,13 +23,27 @@
     },
     {
       "cost": {
-        "cost": "tapXType<1/Creature.AttachedBy+White>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "AttachedBy"
+            },
+            {
+              "type": "Other",
+              "value": "White"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Untap target artifact, creature, or land. Activate only if enchanted creature is white and untapped and only once each turn.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Untap"

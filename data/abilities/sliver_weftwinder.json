@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "affected_zone": "Hand",

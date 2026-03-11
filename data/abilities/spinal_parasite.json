@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<2/P1P1>",
-        "type": "Mana"
+        "count": 2,
+        "counter_type": "P1P1",
+        "type": "RemoveCounter"
       },
       "description": "Remove a counter from target permanent.",
       "effect": {

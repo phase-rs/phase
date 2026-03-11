@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Add one mana of any color.",
@@ -27,8 +32,20 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Cleric & Rogue & Warrior & Wizard",
-          "type": "AddType"
+          "subtype": "Cleric",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Rogue",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Warrior",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Wizard",
+          "type": "AddSubtype"
         }
       ]
     }

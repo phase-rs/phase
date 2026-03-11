@@ -24,8 +24,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Phoenix",
             "controller": "You",
+            "subtype": "Phoenix",
             "type": "Typed"
           },
           {

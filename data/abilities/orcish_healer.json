@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "R R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -25,7 +33,16 @@
       "cost": {
         "costs": [
           {
-            "cost": "B B R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black",
+                  "Black",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -48,7 +65,16 @@
       "cost": {
         "costs": [
           {
-            "cost": "R G G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red",
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

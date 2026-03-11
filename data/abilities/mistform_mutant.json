@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Choose a creature type other than Wall. Target creature becomes that type until end of turn.",

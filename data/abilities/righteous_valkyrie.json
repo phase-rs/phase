@@ -41,7 +41,6 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Cleric",
             "controller": "You",
             "properties": [
               {
@@ -49,6 +48,7 @@
                 "value": "YouCtrl,Angel.Other"
               }
             ],
+            "subtype": "Cleric",
             "type": "Typed"
           },
           {

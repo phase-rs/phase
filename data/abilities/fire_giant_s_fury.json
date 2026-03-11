@@ -7,8 +7,8 @@
       "effect": {
         "power": 2,
         "target": {
-          "card_type": "Giant",
           "controller": "You",
+          "subtype": "Giant",
           "type": "Typed"
         },
         "toughness": 2,

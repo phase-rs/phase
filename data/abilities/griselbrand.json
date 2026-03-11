@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<7>",
-        "type": "Mana"
+        "amount": 7,
+        "type": "PayLife"
       },
       "description": "Draw seven cards.",
       "effect": {

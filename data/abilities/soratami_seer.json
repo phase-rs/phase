@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "4",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Return<2/Land>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "ReturnToHand"
           }
         ],
         "type": "Composite"

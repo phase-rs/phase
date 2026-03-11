@@ -26,8 +26,8 @@
           "value": 1
         },
         {
-          "core_type": "Ninja",
-          "type": "AddType"
+          "subtype": "Ninja",
+          "type": "AddSubtype"
         }
       ]
     }

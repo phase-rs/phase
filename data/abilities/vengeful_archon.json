@@ -3,14 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Prevent the next X damage that would be dealt to you this turn. If damage is prevented this way, CARDNAME deals that much damage to target player or planeswalker.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "toughness": 0,

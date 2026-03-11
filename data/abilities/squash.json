@@ -10,7 +10,7 @@
           "value": 6
         },
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "DealDamage"
@@ -26,8 +26,8 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Giant",
           "controller": "You",
+          "subtype": "Giant",
           "type": "Typed"
         },
         "type": "IsPresent"

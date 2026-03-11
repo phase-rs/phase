@@ -14,8 +14,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Sliver",
-          "type": "AddType"
+          "subtype": "Sliver",
+          "type": "AddSubtype"
         }
       ]
     }

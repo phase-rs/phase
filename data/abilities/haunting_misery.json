@@ -5,12 +5,25 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 B B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<X/Creature>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"
@@ -22,7 +35,7 @@
           "value": "X"
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

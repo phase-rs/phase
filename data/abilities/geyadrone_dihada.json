@@ -34,7 +34,7 @@
       "description": "Gain control of target creature or planeswalker until end of turn. Untap it and put a corruption counter on it. It gains haste until end of turn.",
       "effect": {
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "GainControl"

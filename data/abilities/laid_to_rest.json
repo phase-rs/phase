@@ -14,8 +14,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Human",
         "controller": "You",
+        "subtype": "Human",
         "type": "Typed"
       }
     },

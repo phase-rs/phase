@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put two +1/+1 counters on this creature. (Activate each exhaust ability only once.)",

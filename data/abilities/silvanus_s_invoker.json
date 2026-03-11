@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "8",
+        "cost": {
+          "Cost": {
+            "generic": 8,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap target land you control. It becomes an 8/8 Elemental creature with trample and haste until end of turn. It's still a land.",

@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "U B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes an Equipment artifact with equip {2}.",

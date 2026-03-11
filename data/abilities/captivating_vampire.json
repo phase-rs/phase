@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<5/Vampire>",
-        "type": "Mana"
+        "count": 5,
+        "filter": {
+          "subtype": "Vampire",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Gain control of target creature. It becomes a Vampire in addition to its other types.",
       "effect": {

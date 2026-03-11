@@ -11,13 +11,13 @@
       "affected_zone": "Graveyard",
       "condition": {
         "filter": {
-          "card_type": "Pirate",
           "controller": "You",
           "properties": [
             {
               "type": "Tapped"
             }
           ],
+          "subtype": "Pirate",
           "type": "Typed"
         },
         "type": "IsPresent"

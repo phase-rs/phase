@@ -31,8 +31,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Wall",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Wall",
+          "type": "AddSubtype"
         },
         {
           "colors": [

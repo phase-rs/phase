@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<3>",
-        "type": "Mana"
+        "amount": 3,
+        "type": "PayEnergy"
       },
       "description": "Create a tapped 3/3 colorless Robot artifact creature token.",
       "effect": {

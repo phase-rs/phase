@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "9",
+        "cost": {
+          "Cost": {
+            "generic": 9,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap this creature. Activate only during your upkeep.",

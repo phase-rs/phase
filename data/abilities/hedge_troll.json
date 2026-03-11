@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate CARDNAME.",
@@ -25,8 +32,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Plains",
           "controller": "You",
+          "subtype": "Plains",
           "type": "Typed"
         },
         "type": "IsPresent"

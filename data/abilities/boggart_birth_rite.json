@@ -8,8 +8,8 @@
         "destination": "Hand",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Goblin",
           "controller": "You",
+          "subtype": "Goblin",
           "type": "Typed"
         },
         "type": "ChangeZone"

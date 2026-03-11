@@ -41,15 +41,23 @@
           "cost": {
             "costs": [
               {
-                "cost": "B",
+                "cost": {
+                  "Cost": {
+                    "generic": 0,
+                    "shards": [
+                      "Black"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {
                 "type": "Tap"
               },
               {
-                "cost": "SubCounter<1/Dread>",
-                "type": "Mana"
+                "count": 1,
+                "counter_type": "Dread",
+                "type": "RemoveCounter"
               }
             ],
             "type": "Composite"

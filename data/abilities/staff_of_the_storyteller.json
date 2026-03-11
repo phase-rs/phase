@@ -5,15 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/STORY>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "STORY",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

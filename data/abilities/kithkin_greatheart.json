@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Giant",
           "controller": "You",
+          "subtype": "Giant",
           "type": "Typed"
         },
         "type": "IsPresent"

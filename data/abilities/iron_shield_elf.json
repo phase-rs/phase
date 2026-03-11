@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Card>",
-        "type": "Mana"
+        "count": 1,
+        "type": "Discard"
       },
       "description": "This creature gains indestructible until end of turn. Tap it. (Damage and effects that say \"destroy\" don't destroy it. If its toughness is 0 or less, it still dies.)",
       "effect": {

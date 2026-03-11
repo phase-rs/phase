@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<X/STORAGE>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "STORAGE",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

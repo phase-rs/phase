@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Waterbend<X>",
-        "type": "Mana"
+        "description": "Waterbend<X>",
+        "type": "Unimplemented"
       },
       "description": "Creatures you control have base power and toughness X/X until end of turn. X can't be 0. Activate only during your turn.",
       "effect": {

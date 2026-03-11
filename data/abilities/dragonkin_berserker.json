@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 5/5 red Dragon creature token with flying. (Activate only if this creature attacked this turn and only once each turn.)",

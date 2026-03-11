@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "description": "All Slivers have \"{1}, Sacrifice this permanent: This permanent deals 1 damage to any target.\"",
@@ -20,7 +20,7 @@
     },
     {
       "affected": {
-        "card_type": "Sliver",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "description": "All Slivers have \"{1}, Sacrifice this permanent: Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.\"",

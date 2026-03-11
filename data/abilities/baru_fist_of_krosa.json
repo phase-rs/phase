@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Card.namedBaru, Fist of Krosa>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "Create an X/X green Wurm creature token, where X is the number of lands you control.",
       "effect": {
@@ -33,7 +37,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Forest",
+        "subtype": "Forest",
         "type": "Typed"
       }
     }

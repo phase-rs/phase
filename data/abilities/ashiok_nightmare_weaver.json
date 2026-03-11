@@ -17,8 +17,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "Put a creature card with mana value X exiled with CARDNAME onto the battlefield under your control. That creature is a Nightmare in addition to its other types.",
       "effect": {
@@ -41,7 +41,7 @@
       "description": "Exile all cards from all opponents' hands and graveyards.",
       "effect": {
         "destination": "Exile",
-        "origin": "Graveyard,Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
         },

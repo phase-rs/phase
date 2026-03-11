@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Saga",
         "controller": "You",
+        "subtype": "Saga",
         "type": "Typed"
       },
       "affected_zone": "Stack",

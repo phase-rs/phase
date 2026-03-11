@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "This artifact becomes a 4/4 artifact creature until end of turn.",

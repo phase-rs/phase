@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards in your hand.",

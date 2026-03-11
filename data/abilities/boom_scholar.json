@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures and Vehicles you control gain trample until end of turn. Put two +1/+1 counters on this creature. (Activate each exhaust ability only once.)",

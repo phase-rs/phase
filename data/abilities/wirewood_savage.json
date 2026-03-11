@@ -15,7 +15,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Beast",
+        "subtype": "Beast",
         "type": "Typed"
       }
     }

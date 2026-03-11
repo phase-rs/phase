@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a lore counter on target Saga you control or remove one from it. (Activate only if this creature attacked this turn and only once each turn.)",
@@ -28,12 +33,12 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Saga",
         "controller": "You",
+        "subtype": "Saga",
         "type": "Typed"
       },
       "valid_source": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     }

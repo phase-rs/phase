@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<X/P1P1>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "P1P1",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

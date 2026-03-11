@@ -17,7 +17,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -45,8 +50,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<3>",
-            "type": "Mana"
+            "amount": 3,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"

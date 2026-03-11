@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 2 damage to each creature with flying and each player.",

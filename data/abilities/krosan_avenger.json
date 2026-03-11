@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate CARDNAME. Activate only if there are seven or more cards in your graveyard.",

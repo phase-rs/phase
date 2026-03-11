@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -42,8 +47,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "ChosenType",
-          "type": "AddType"
+          "subtype": "ChosenType",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -19,7 +19,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -47,12 +54,16 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/EON>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "EON",
+            "type": "RemoveCounter"
           },
           {
-            "cost": "Return<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "ReturnToHand"
           }
         ],
         "type": "Composite"

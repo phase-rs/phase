@@ -6,7 +6,6 @@
       "description": "Counter target Spirit or Arcane spell.",
       "effect": {
         "target": {
-          "card_type": "Spirit,Arcane",
           "type": "Typed"
         },
         "type": "Counter"

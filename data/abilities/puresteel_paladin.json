@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Equipment",
         "controller": "You",
+        "subtype": "Equipment",
         "type": "Typed"
       },
       "description": "Metalcraft — Equipment you control have equip {0} as long as you control three or more artifacts.",
@@ -31,8 +31,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Equipment",
         "controller": "You",
+        "subtype": "Equipment",
         "type": "Typed"
       }
     }

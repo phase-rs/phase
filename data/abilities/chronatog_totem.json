@@ -17,7 +17,14 @@
     },
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 1/2 blue Atog artifact creature until end of turn.",
@@ -39,7 +46,12 @@
     },
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +3/+3 until end of turn. You skip your next turn. Activate only once each turn and only if CARDNAME is a creature.",

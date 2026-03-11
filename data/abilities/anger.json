@@ -12,8 +12,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Mountain",
           "controller": "You",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "type": "IsPresent"

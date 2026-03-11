@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Vehicle",
         "properties": [
           {
             "type": "Other",
             "value": "AttachedBy"
           }
         ],
+        "subtype": "Vehicle",
         "type": "Typed"
       },
       "description": "As long as enchanted permanent is a Vehicle, it's a creature in addition to its other types.",

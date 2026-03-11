@@ -9,7 +9,7 @@
       "description": "Untap target artifact or creature. If it's an artifact creature, put a +1/+1 counter on it.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Untap"

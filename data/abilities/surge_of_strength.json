@@ -5,12 +5,30 @@
       "cost": {
         "costs": [
           {
-            "cost": "R G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Card.Green;Card.Red>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Green;Card.Red"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

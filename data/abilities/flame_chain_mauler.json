@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "This creature gets +1/+0 and gains menace until end of turn. (It can't be blocked except by two or more creatures.)",

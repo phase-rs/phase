@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<X/THEFT>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "THEFT",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -51,7 +60,7 @@
       "valid_target": {
         "filters": [
           {
-            "card_type": "Player",
+            "subtype": "Player",
             "type": "Typed"
           },
           {

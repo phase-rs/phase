@@ -8,8 +8,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Aetherborn",
             "controller": "You",
+            "subtype": "Aetherborn",
             "type": "Typed"
           },
           {

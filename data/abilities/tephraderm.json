@@ -20,7 +20,7 @@
       "description": "Whenever a spell deals damage to CARDNAME, CARDNAME deals that much damage to that spell's controller.",
       "mode": "DamageDone",
       "valid_source": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       },
       "valid_target": {

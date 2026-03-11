@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 1/1 green Saproling creature token.",
@@ -21,7 +28,14 @@
     },
     {
       "cost": {
-        "cost": "3 W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control get +1/+1 until end of turn.",

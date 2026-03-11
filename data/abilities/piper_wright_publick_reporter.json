@@ -23,8 +23,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Clue",
         "controller": "You",
+        "subtype": "Clue",
         "type": "Typed"
       }
     }

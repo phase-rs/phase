@@ -5,15 +5,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "AddCounter<1/BLOOD>",
-            "type": "Mana"
+            "description": "AddCounter<1/BLOOD>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"
@@ -28,7 +33,15 @@
     },
     {
       "cost": {
-        "cost": "U B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Remove a blood counter from CARDNAME.",

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Merfolk",
         "controller": "You",
+        "subtype": "Merfolk",
         "type": "Typed"
       },
       "affected_zone": "Stack",

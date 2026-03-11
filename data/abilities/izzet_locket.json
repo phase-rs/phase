@@ -20,7 +20,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "UR UR UR UR",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Red",
+                  "Blue",
+                  "Red",
+                  "Blue",
+                  "Red",
+                  "Blue",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target opponent reveals a card at random from their hand. You gain life equal to that card's mana value.",

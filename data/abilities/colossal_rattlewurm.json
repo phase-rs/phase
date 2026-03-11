@@ -5,12 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 G",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"
@@ -35,8 +46,8 @@
       "characteristic_defining": true,
       "condition": {
         "filter": {
-          "card_type": "Desert",
           "controller": "You",
+          "subtype": "Desert",
           "type": "Typed"
         },
         "type": "IsPresent"

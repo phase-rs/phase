@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExiledMoveToGrave<1/Card.ExiledWithSource/card exiled with CARDNAME>",
-        "type": "Mana"
+        "description": "ExiledMoveToGrave<1/Card.ExiledWithSource/card exiled with CARDNAME>",
+        "type": "Unimplemented"
       },
       "description": "CARDNAME gets +2/+2 until end of turn.",
       "effect": {

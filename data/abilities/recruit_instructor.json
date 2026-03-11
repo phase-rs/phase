@@ -19,8 +19,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "SpellAbility",
         "controller": "You",
+        "subtype": "SpellAbility",
         "type": "Typed"
       },
       "valid_target": {

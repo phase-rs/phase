@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Warlock",
         "controller": "You",
+        "subtype": "Warlock",
         "type": "Typed"
       },
       "description": "Warlocks you control have \"Ward — Pay 2 life.\"",

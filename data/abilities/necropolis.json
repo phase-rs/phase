@@ -3,8 +3,13 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1/Creature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "Put X +0/+1 counters on CARDNAME, where X is the exiled card's mana value.",
       "effect": {

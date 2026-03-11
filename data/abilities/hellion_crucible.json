@@ -17,7 +17,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -42,15 +49,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<2/PRESSURE>",
-            "type": "Mana"
+            "count": 2,
+            "counter_type": "PRESSURE",
+            "type": "RemoveCounter"
           },
           {
             "target": {

@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "description": "All Slivers have \"{T}: Target Sliver creature gets +X/+0 until end of turn, where X is the number of Slivers on the battlefield.\"",

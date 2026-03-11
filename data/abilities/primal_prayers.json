@@ -9,7 +9,7 @@
         "card_type": "Creature",
         "type": "Typed"
       },
-      "affected_zone": "Hand,Graveyard,Exile,Library,Command",
+      "affected_zone": "Hand",
       "description": "You may cast creature spells with mana value 3 or less by paying {E} rather than paying their mana costs. If you cast a spell this way, you may cast it as though it had flash.",
       "mode": "Continuous"
     }

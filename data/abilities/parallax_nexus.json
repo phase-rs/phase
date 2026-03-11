@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/FADE>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "FADE",
+        "type": "RemoveCounter"
       },
       "description": "Target opponent exiles a card from their hand. Activate only as a sorcery.",
       "effect": {

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Each player mills a card.",
@@ -26,7 +33,7 @@
       "description": "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, CARDNAME deals 1 damage to each opponent.",
       "destination": "Graveyard",
       "mode": "ChangesZone",
-      "origin": "Hand,Graveyard,Exile,Stack,Library,Command",
+      "origin": "Hand",
       "trigger_zones": [
         "Battlefield"
       ],

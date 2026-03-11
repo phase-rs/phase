@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Frog",
         "controller": "You",
+        "subtype": "Frog",
         "type": "Typed"
       },
       "description": "Frogs you control have \"{T}: Add {G} or {U}. Spend this mana only to cast a creature spell.\"",

@@ -14,7 +14,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Artifact,Creature,Enchantment",
+        "card_type": "Artifact",
         "type": "Typed"
       }
     }

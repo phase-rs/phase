@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Dragon",
         "properties": [
           {
             "type": "Other",
             "value": "YourTeamCtrl"
           }
         ],
+        "subtype": "Dragon",
         "type": "Typed"
       },
       "description": "Dragons your team controls have double strike.",

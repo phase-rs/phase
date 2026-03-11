@@ -5,12 +5,25 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 R R",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/Instant;Sorcery>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "subtype": "Instant;Sorcery",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

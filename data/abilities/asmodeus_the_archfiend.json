@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw seven cards.",
@@ -16,7 +25,14 @@
     },
     {
       "cost": {
-        "cost": "B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return all cards exiled with CARDNAME to their owner's hand and you lose that much life.",

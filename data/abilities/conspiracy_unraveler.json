@@ -16,7 +16,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Hand,Graveyard,Exile,Library,Command",
+      "affected_zone": "Hand",
       "description": "You may collect evidence 10 rather than pay the mana cost for spells that you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)",
       "mode": "Continuous"
     }

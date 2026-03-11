@@ -36,7 +36,7 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Player,Planeswalker",
+        "card_type": "Planeswalker",
         "type": "Typed"
       }
     }

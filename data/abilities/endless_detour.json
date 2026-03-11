@@ -6,7 +6,7 @@
       "description": "The owner of target spell, nonland permanent, or card in a graveyard puts it on the top or bottom of their library.",
       "effect": {
         "destination": "Library",
-        "origin": "Battlefield,Stack,Graveyard",
+        "origin": "Battlefield",
         "target": {
           "card_type": "Card",
           "type": "Typed"

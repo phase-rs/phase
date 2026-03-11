@@ -5,15 +5,30 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Mountain;Card.Red/Mountain card or a red card>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Red"
+                }
+              ],
+              "subtype": "Mountain;Card",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

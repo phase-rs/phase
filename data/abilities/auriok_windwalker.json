@@ -9,8 +9,8 @@
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Equipment",
           "controller": "You",
+          "subtype": "Equipment",
           "type": "Typed"
         },
         "toughness": 0,

@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/Elf>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "subtype": "Elf",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

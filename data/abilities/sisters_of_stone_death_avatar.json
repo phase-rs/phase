@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target creature that's blocking a creature you control.",

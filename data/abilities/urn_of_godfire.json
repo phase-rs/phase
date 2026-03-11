@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Add one mana of any color.",
@@ -18,7 +23,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "6",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -36,7 +46,7 @@
       "description": "Destroy target creature or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Creature,Enchantment",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Destroy"

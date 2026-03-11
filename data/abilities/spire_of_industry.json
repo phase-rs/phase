@@ -20,8 +20,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayLife<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayLife"
           }
         ],
         "type": "Composite"

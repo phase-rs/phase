@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "You have shroud. (You can't be the target of spells or abilities.)",

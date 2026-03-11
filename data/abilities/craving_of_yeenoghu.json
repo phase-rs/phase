@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME from your graveyard to the battlefield attached to target creature you control. CARDNAME perpetually gains \"Enchanted creature gets -1/-1.\" Activate only as a sorcery.",

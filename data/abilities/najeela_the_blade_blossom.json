@@ -3,7 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W U B R G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap all attacking creatures. They gain trample, lifelink, and haste until end of turn. After this phase, there is an additional combat phase. Activate only during combat.",
@@ -28,7 +39,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Warrior",
+        "subtype": "Warrior",
         "type": "Typed"
       }
     }

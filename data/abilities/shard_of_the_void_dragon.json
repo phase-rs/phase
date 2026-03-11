@@ -17,7 +17,7 @@
     },
     {
       "description": "Matter Absorption — Whenever an artifact is put into a graveyard from the battlefield or is put into exile from the battlefield, put two +1/+1 counters on CARDNAME.",
-      "destination": "Graveyard,Exile",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "valid_card": {

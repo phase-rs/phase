@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gets +X/+0 until end of turn, where X is its power. Sacrifice CARDNAME at the beginning of the next end step.",

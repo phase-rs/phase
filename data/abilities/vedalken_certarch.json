@@ -8,7 +8,7 @@
       "description": "Tap target artifact, creature or land. Activate only if you control three or more artifacts.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Tap"

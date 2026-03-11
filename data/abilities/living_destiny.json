@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Reveal<1/Creature>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Reveal"
           }
         ],
         "type": "Composite"

@@ -5,15 +5,27 @@
       "cost": {
         "costs": [
           {
-            "cost": "W W W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White",
+                  "White",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Exile<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"
@@ -23,7 +35,7 @@
         "count": 1,
         "counter_type": "ENLIGHTENED",
         "target": {
-          "card_type": "Angel",
+          "subtype": "Angel",
           "type": "Typed"
         },
         "type": "PutCounter"

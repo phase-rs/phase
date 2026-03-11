@@ -5,15 +5,27 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<1/Creature>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

@@ -29,8 +29,12 @@
           "type": "AddAbility"
         },
         {
-          "core_type": "Artifact & Food",
+          "core_type": "Artifact",
           "type": "AddType"
+        },
+        {
+          "subtype": "Food",
+          "type": "AddSubtype"
         }
       ]
     }
@@ -45,7 +49,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Food",
+        "subtype": "Food",
         "type": "Typed"
       }
     }

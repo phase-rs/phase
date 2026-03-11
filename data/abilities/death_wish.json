@@ -6,7 +6,7 @@
       "description": "You may put a card you own from outside the game into your hand. You lose half your life, rounded up. Exile CARDNAME.",
       "effect": {
         "destination": "Hand",
-        "origin": "Sideboard",
+        "origin": "Exile",
         "target": {
           "type": "Any"
         },

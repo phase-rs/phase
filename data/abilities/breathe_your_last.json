@@ -6,7 +6,7 @@
       "description": "Destroy target creature or planeswalker. You gain 1 life for each of its colors.",
       "effect": {
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Destroy"

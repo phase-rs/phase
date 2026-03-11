@@ -43,7 +43,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Library,Hand",
+      "affected_zone": "Library",
       "description": "Once during each of your turns, you may cast a spell from your hand or the top of your library without paying its mana cost.",
       "mode": "Continuous"
     }

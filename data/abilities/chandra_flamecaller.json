@@ -37,8 +37,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "CARDNAME deals X damage to each creature.",
       "effect": {

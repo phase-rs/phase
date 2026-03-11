@@ -8,7 +8,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "7",
+                "cost": {
+                  "Cost": {
+                    "generic": 7,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -49,7 +54,7 @@
             "Battlefield"
           ],
           "valid_card": {
-            "card_type": "Legendary",
+            "subtype": "Legendary",
             "type": "Typed"
           }
         }

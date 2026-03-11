@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Aura",
+        "subtype": "Aura",
         "type": "Typed"
       },
       "valid_target": {

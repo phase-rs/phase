@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "BP",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains infect until end of turn.",

@@ -3,13 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile CARDNAME and target creature unless that creature's controller pays {2}. Activate only if CARDNAME is in your graveyard.",
       "effect": {
         "destination": "Exile",
-        "origin": "Battlefield,Graveyard",
+        "origin": "Battlefield",
         "target": {
           "card_type": "Creature",
           "type": "Typed"

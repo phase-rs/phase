@@ -13,8 +13,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Saproling",
         "controller": "You",
+        "subtype": "Saproling",
         "type": "Typed"
       },
       "valid_target": {

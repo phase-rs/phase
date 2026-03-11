@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Waterbend<5>",
-        "type": "Mana"
+        "description": "Waterbend<5>",
+        "type": "Unimplemented"
       },
       "description": "Look at the top four cards of your library. You may reveal a creature card with power 3 or less from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
       "effect": {

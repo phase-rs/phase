@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Land;Shrine/land card or Shrine card>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "subtype": "Land;Shrine",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -22,7 +31,7 @@
           "value": "X"
         },
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "DealDamage"

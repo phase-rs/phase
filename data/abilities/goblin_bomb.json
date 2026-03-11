@@ -5,8 +5,9 @@
       "cost": {
         "costs": [
           {
-            "cost": "SubCounter<5/FUSE>",
-            "type": "Mana"
+            "count": 5,
+            "counter_type": "FUSE",
+            "type": "RemoveCounter"
           },
           {
             "target": {
@@ -24,7 +25,7 @@
           "value": 20
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

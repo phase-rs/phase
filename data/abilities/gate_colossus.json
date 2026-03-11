@@ -22,8 +22,8 @@
         "Graveyard"
       ],
       "valid_card": {
-        "card_type": "Gate",
         "controller": "You",
+        "subtype": "Gate",
         "type": "Typed"
       }
     }

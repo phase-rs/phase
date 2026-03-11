@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "This creature deals 1 damage to each opponent.",

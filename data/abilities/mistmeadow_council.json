@@ -7,8 +7,8 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Kithkin",
           "controller": "You",
+          "subtype": "Kithkin",
           "type": "Typed"
         },
         "type": "IsPresent"

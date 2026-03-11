@@ -16,13 +16,13 @@
       "description": "When you planeswalk away from CARDNAME, it deals damage equal to the number of pressure counters on it to each creature and each planeswalker.",
       "mode": "PlaneswalkedFrom",
       "valid_card": {
-        "card_type": "Plane",
         "properties": [
           {
             "type": "Other",
             "value": "Self"
           }
         ],
+        "subtype": "Plane",
         "type": "Typed"
       }
     },

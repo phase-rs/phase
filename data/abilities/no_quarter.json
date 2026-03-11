@@ -23,7 +23,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "LessPowerThanBlocker",
+        "subtype": "LessPowerThanBlocker",
         "type": "Typed"
       }
     }

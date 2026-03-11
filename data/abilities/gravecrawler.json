@@ -15,8 +15,8 @@
       "affected_zone": "Graveyard",
       "condition": {
         "filter": {
-          "card_type": "Zombie",
           "controller": "You",
+          "subtype": "Zombie",
           "type": "Typed"
         },
         "type": "IsPresent"

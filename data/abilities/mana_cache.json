@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/CHARGE>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "CHARGE",
+        "type": "RemoveCounter"
       },
       "description": "Add {C}. Any player may activate this ability but only during their turn before the end step.",
       "effect": {

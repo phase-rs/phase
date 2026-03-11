@@ -10,7 +10,7 @@
           "value": 3
         },
         "target": {
-          "card_type": "Creature,Planeswalker,Battle",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "DealDamage"

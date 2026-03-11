@@ -27,7 +27,6 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Opponent,Battle",
         "type": "Typed"
       }
     }

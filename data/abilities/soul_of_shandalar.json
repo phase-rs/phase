@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 3 damage to target player or planeswalker and 3 damage to up to one target creature that player or that planeswalker's controller controls.",
@@ -13,7 +21,7 @@
           "value": 3
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"
@@ -26,12 +34,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 R R",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Red",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"
@@ -43,7 +63,7 @@
           "value": 3
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

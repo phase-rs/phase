@@ -29,13 +29,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Food",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Clue.YouCtrl"
           }
         ],
+        "subtype": "Food",
         "type": "Typed"
       }
     }

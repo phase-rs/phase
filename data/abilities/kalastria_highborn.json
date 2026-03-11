@@ -17,13 +17,13 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Vampire",
             "properties": [
               {
                 "type": "Other",
                 "value": "YouCtrl,Card.Self"
               }
             ],
+            "subtype": "Vampire",
             "type": "Typed"
           },
           {

@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Creature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "CARDNAME gets +2/+2 until end of turn.",
       "effect": {

@@ -34,7 +34,7 @@
         "type": "And"
       },
       "valid_source": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     },

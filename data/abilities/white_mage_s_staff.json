@@ -26,8 +26,8 @@
           "value": 1
         },
         {
-          "core_type": "Cleric",
-          "type": "AddType"
+          "subtype": "Cleric",
+          "type": "AddSubtype"
         }
       ]
     }

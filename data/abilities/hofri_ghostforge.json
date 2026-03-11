@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Spirit",
         "controller": "You",
+        "subtype": "Spirit",
         "type": "Typed"
       },
       "description": "Spirits you control get +1/+1 and have trample and haste.",

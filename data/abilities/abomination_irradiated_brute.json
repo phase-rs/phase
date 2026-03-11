@@ -13,13 +13,13 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Gamma",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Villain.YouCtrl"
           }
         ],
+        "subtype": "Gamma",
         "type": "Typed"
       },
       "valid_target": {

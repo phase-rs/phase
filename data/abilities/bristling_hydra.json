@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<3>",
-        "type": "Mana"
+        "amount": 3,
+        "type": "PayEnergy"
       },
       "description": "Put a +1/+1 counter on CARDNAME. It gains hexproof until end of turn.",
       "effect": {

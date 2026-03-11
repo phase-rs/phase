@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You,Creature",
+        "card_type": "Creature",
         "controller": "You",
         "type": "Typed"
       },

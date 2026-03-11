@@ -42,7 +42,7 @@
         "target": {
           "filters": [
             {
-              "card_type": "Creature,Planeswalker",
+              "card_type": "Creature",
               "type": "Typed"
             },
             {

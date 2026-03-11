@@ -15,7 +15,7 @@
         "type": "SelfRef"
       },
       "valid_target": {
-        "card_type": "Vampire",
+        "subtype": "Vampire",
         "type": "Typed"
       }
     }

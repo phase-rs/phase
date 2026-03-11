@@ -9,7 +9,6 @@
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Player",
           "properties": [
             {
               "type": "Other",
@@ -20,6 +19,7 @@
               "value": "Active"
             }
           ],
+          "subtype": "Player",
           "type": "Typed"
         },
         "toughness": 0,

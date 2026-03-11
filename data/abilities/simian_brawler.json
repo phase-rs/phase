@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Land>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {

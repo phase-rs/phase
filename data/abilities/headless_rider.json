@@ -14,7 +14,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Zombie",
         "controller": "You",
         "properties": [
           {
@@ -22,6 +21,7 @@
             "value": "Other,Card.Self"
           }
         ],
+        "subtype": "Zombie",
         "type": "Typed"
       }
     }

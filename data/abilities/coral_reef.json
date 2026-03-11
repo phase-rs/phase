@@ -24,16 +24,34 @@
       "cost": {
         "costs": [
           {
-            "cost": "U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "tapXType<1/Creature.Blue>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Blue"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           },
           {
-            "cost": "SubCounter<1/POLYP>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "POLYP",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

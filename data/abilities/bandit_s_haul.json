@@ -17,15 +17,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<2/LOOT>",
-            "type": "Mana"
+            "count": 2,
+            "counter_type": "LOOT",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

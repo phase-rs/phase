@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Goblin",
             "controller": "You",
             "properties": [
               {
@@ -16,6 +15,7 @@
                 "value": "Other,Orc.YouCtrl"
               }
             ],
+            "subtype": "Goblin",
             "type": "Typed"
           },
           {

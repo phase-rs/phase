@@ -15,13 +15,13 @@
             "Battlefield"
           ],
           "valid_source": {
-            "card_type": "Wolf",
             "properties": [
               {
                 "type": "Other",
                 "value": "YouCtrl,Werewolf.YouCtrl"
               }
             ],
+            "subtype": "Wolf",
             "type": "Typed"
           },
           "valid_target": {
@@ -42,20 +42,29 @@
       "abilities": [
         {
           "cost": {
-            "cost": "X R G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X",
+                  "Red",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Target Wolf or Werewolf you control gets +X/+0 and gains trample until end of turn.",
           "effect": {
             "power": 0,
             "target": {
-              "card_type": "Wolf",
               "properties": [
                 {
                   "type": "Other",
                   "value": "YouCtrl,Werewolf.YouCtrl"
                 }
               ],
+              "subtype": "Wolf",
               "type": "Typed"
             },
             "toughness": 0,
@@ -77,13 +86,13 @@
             "Battlefield"
           ],
           "valid_source": {
-            "card_type": "Wolf",
             "properties": [
               {
                 "type": "Other",
                 "value": "YouCtrl,Werewolf.YouCtrl"
               }
             ],
+            "subtype": "Wolf",
             "type": "Typed"
           },
           "valid_target": {

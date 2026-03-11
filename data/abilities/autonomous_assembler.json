@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -19,8 +24,8 @@
         "count": 1,
         "counter_type": "P1P1",
         "target": {
-          "card_type": "Assembly-Worker",
           "controller": "You",
+          "subtype": "Assembly-Worker",
           "type": "Typed"
         },
         "type": "PutCounter"

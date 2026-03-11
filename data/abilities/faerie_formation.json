@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 1/1 blue Faerie creature token with flying. Draw a card.",

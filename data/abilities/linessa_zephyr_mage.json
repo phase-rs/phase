@@ -5,7 +5,16 @@
       "cost": {
         "costs": [
           {
-            "cost": "X U U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X",
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -29,8 +38,12 @@
     },
     {
       "cost": {
-        "cost": "Discard<1/Card.namedLinessa, Zephyr Mage>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "Target player returns a creature they control to its owner's hand, then repeats this process for an artifact, an enchantment, and a land.",
       "effect": {

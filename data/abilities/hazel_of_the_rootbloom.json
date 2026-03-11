@@ -8,12 +8,16 @@
             "type": "Tap"
           },
           {
-            "cost": "PayLife<2>",
-            "type": "Mana"
+            "amount": 2,
+            "type": "PayLife"
           },
           {
-            "cost": "tapXType<X/Card.token/token>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Card",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

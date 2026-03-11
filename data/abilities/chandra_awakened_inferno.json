@@ -35,8 +35,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "CARDNAME deals X damage to target creature or planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.",
       "effect": {
@@ -45,7 +45,7 @@
           "value": "X"
         },
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "DealDamage"

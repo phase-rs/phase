@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 2/1 white Cleric enchantment creature token.",

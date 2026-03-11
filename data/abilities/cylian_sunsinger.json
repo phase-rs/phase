@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R G W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red",
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME and each other creature with the same name as it get +3/+3 until end of turn.",

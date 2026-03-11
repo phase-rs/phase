@@ -9,7 +9,7 @@
         "Other": "ProduceMana"
       },
       "valid_card": {
-        "card_type": "Plains",
+        "subtype": "Plains",
         "type": "Typed"
       }
     },
@@ -19,7 +19,7 @@
         "Other": "ProduceMana"
       },
       "valid_card": {
-        "card_type": "Island",
+        "subtype": "Island",
         "type": "Typed"
       }
     },
@@ -29,7 +29,7 @@
         "Other": "ProduceMana"
       },
       "valid_card": {
-        "card_type": "Swamp",
+        "subtype": "Swamp",
         "type": "Typed"
       }
     },
@@ -39,7 +39,7 @@
         "Other": "ProduceMana"
       },
       "valid_card": {
-        "card_type": "Mountain",
+        "subtype": "Mountain",
         "type": "Typed"
       }
     },
@@ -49,7 +49,7 @@
         "Other": "ProduceMana"
       },
       "valid_card": {
-        "card_type": "Forest",
+        "subtype": "Forest",
         "type": "Typed"
       }
     }

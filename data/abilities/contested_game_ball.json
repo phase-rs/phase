@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -39,7 +44,7 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     }

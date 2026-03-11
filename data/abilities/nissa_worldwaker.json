@@ -34,7 +34,7 @@
       "description": "Untap up to four target Forests.",
       "effect": {
         "target": {
-          "card_type": "Forest",
+          "subtype": "Forest",
           "type": "Typed"
         },
         "type": "Untap"

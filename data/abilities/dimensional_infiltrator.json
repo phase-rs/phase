@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 C",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Colorless"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target opponent exiles the top card of their library. If it's a land card, you may return CARDNAME to its owner's hand.",

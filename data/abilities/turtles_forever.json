@@ -5,8 +5,8 @@
       "cost": null,
       "description": "Search your library and/or outside the game for exactly four legendary creature cards you own with different names, then reveal those cards. An opponent chooses two of them. Put the chosen cards into your hand and shuffle the rest into your library.",
       "effect": {
-        "destination": "",
-        "origin": "Library,Sideboard",
+        "destination": "Battlefield",
+        "origin": "Library",
         "target": {
           "type": "Any"
         },

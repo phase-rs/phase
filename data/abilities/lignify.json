@@ -29,8 +29,8 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Treefolk",
-          "type": "AddType"
+          "subtype": "Treefolk",
+          "type": "AddSubtype"
         }
       ]
     }

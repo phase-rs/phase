@@ -25,7 +25,7 @@
     },
     {
       "affected": {
-        "card_type": "Equipment",
+        "subtype": "Equipment",
         "type": "Typed"
       },
       "description": "Equipment named Sword of Kaldra, Shield of Kaldra, and Helm of Kaldra have indestructible.",

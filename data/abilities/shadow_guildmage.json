@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -33,7 +40,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

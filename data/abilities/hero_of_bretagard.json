@@ -21,8 +21,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Angel",
-          "type": "AddType"
+          "subtype": "Angel",
+          "type": "AddSubtype"
         }
       ]
     },
@@ -43,8 +43,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "God",
-          "type": "AddType"
+          "subtype": "God",
+          "type": "AddSubtype"
         }
       ]
     }

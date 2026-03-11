@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Player",
         "properties": [
           {
             "type": "Other",
             "value": "NotedForGreenAnchor"
           }
         ],
+        "subtype": "Player",
         "type": "Typed"
       },
       "description": "Each player who last chose green anchor may play an additional land during each of their turns.",

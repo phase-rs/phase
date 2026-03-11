@@ -8,7 +8,7 @@
       "description": "Tap target Spirit.",
       "effect": {
         "target": {
-          "card_type": "Spirit",
+          "subtype": "Spirit",
           "type": "Typed"
         },
         "type": "Tap"

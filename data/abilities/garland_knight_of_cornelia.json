@@ -6,7 +6,17 @@
       "abilities": [
         {
           "cost": {
-            "cost": "3 B B R R",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Black",
+                  "Black",
+                  "Red",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Return NICKNAME from your graveyard to the battlefield transformed. Activate only as a sorcery.",

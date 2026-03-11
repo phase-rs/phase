@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Attach CARDNAME to target creature you control.",

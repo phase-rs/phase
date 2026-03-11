@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Assassin",
         "controller": "You",
+        "subtype": "Assassin",
         "type": "Typed"
       },
       "description": "Assassins you control have menace.",

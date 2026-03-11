@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a fire counter on this Vehicle.",
@@ -37,7 +42,11 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Artifact & Creature",
+          "core_type": "Artifact",
+          "type": "AddType"
+        },
+        {
+          "core_type": "Creature",
           "type": "AddType"
         }
       ]

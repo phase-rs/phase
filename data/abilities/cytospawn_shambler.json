@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature with a +1/+1 counter on it gains trample until end of turn.",

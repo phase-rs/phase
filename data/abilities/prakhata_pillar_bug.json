@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains lifelink until end of turn. (Damage dealt by this creature also causes you to gain that much life.)",

@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromHand<1/CARDNAME>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "type": "SelfRef"
+        },
+        "type": "Exile",
+        "zone": "Hand"
       },
       "description": "Add {R}.",
       "effect": {

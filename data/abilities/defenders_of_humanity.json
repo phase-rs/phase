@@ -5,12 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "X 2 W",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "X",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Exile<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"

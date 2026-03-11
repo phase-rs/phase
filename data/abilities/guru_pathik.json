@@ -21,7 +21,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Lesson,Saga,Shrine",
         "type": "Typed"
       }
     }

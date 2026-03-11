@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 W W",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "White",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

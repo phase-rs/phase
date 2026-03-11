@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a sleight counter on CARDNAME and choose a color. X is the number of sleight counters on CARDNAME.",

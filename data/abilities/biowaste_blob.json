@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Ooze",
         "controller": "You",
+        "subtype": "Ooze",
         "type": "Typed"
       },
       "description": "Oozes you control get +1/+1.",

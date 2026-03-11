@@ -5,15 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "untapYType<1/Creature.YouCtrl/creature>",
-            "type": "Mana"
+            "description": "untapYType<1/Creature.YouCtrl/creature>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"
@@ -35,15 +42,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "W W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "untapYType<2/Creature.YouCtrl/creatures>",
-            "type": "Mana"
+            "description": "untapYType<2/Creature.YouCtrl/creatures>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"
@@ -60,15 +75,26 @@
       "cost": {
         "costs": [
           {
-            "cost": "W W W W W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White",
+                  "White",
+                  "White",
+                  "White",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "untapYType<15/Creature.YouCtrl/creatures>",
-            "type": "Mana"
+            "description": "untapYType<15/Creature.YouCtrl/creatures>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

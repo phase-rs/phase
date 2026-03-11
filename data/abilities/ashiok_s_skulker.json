@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME can't be blocked this turn.",

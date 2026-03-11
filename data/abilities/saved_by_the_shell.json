@@ -25,8 +25,8 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Turtle",
           "controller": "You",
+          "subtype": "Turtle",
           "type": "Typed"
         },
         "type": "IsPresent"

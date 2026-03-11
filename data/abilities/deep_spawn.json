@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains shroud until end of turn and doesn't untap during your next untap step. Tap CARDNAME. (A permanent with shroud can't be the target of spells or abilities.)",

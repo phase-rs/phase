@@ -17,13 +17,13 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Warrior",
             "properties": [
               {
                 "type": "Other",
                 "value": "YourTeamCtrl"
               }
             ],
+            "subtype": "Warrior",
             "type": "Typed"
           },
           {

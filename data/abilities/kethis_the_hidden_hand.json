@@ -3,8 +3,19 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<2/Card.Legendary/legendary card>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Legendary"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "Until end of turn, each legendary card in your graveyard gains \"You may play this card from your graveyard.\"",
       "effect": {

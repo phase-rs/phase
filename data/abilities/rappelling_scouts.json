@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains protection from the color of your choice until end of turn.",

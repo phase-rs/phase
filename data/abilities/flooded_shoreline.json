@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "U U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Return<2/Island>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "subtype": "Island",
+              "type": "Typed"
+            },
+            "type": "ReturnToHand"
           }
         ],
         "type": "Composite"

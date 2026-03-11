@@ -22,7 +22,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "God",
+        "subtype": "God",
         "type": "Typed"
       }
     },

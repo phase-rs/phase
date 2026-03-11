@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control gain haste until end of turn.",
@@ -20,7 +27,15 @@
     },
     {
       "cost": {
-        "cost": "3 R R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 5/5 red Dragon Spirit creature token with flying. Activate only if you control an attacking modified creature.",

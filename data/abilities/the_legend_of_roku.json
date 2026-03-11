@@ -12,7 +12,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "8",
+            "cost": {
+              "Cost": {
+                "generic": 8,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "Create a 4/4 red Dragon creature token with flying and firebending 4.",

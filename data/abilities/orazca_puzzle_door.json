@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -23,7 +28,7 @@
       "description": "Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.",
       "effect": {
         "count": 2,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

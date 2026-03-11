@@ -61,7 +61,7 @@
       "description": "Whenever one or more creatures you control and/or creature cards in your graveyard are put into exile, you may choose a creature card from among them. Until end of turn, target token you control becomes a copy of it, except it has flying.",
       "destination": "Exile",
       "mode": "ChangesZoneAll",
-      "origin": "Battlefield,Graveyard",
+      "origin": "Battlefield",
       "trigger_zones": [
         "Battlefield"
       ]

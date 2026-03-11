@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gets +3/+3 until end of turn. Untap that creature.",

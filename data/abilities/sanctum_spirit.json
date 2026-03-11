@@ -3,8 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Card.Historic/historic card>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Historic"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "CARDNAME gains indestructible until end of turn. (Artifacts, legendaries, and Sagas are historic.)",
       "effect": {

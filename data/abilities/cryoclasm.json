@@ -6,7 +6,6 @@
       "description": "Destroy target Plains or Island. CARDNAME deals 3 damage to that land's controller.",
       "effect": {
         "target": {
-          "card_type": "Plains,Island",
           "type": "Typed"
         },
         "type": "Destroy"

@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "3 G U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a 5/5 green and blue Plant creature with trample. It's still a land.",

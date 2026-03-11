@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/DIVINITY>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "DIVINITY",
+        "type": "RemoveCounter"
       },
       "description": "Destroy all lands.",
       "effect": {

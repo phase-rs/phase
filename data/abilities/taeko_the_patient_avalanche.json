@@ -15,7 +15,7 @@
   "triggers": [
     {
       "description": "Whenever another creature you control leaves the battlefield, if it didn't die, scry 1 and put a +1/+1 counter on NICKNAME.",
-      "destination": "Ante,Command,Exile,Hand,Library",
+      "destination": "Exile",
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "trigger_zones": [

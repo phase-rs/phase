@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7 R",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 5 damage to target player or planeswalker.",
@@ -13,7 +20,7 @@
           "value": 5
         },
         "target": {
-          "card_type": "Player, Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

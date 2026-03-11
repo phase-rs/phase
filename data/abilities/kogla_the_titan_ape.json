@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return target Human you control to its owner's hand. NICKNAME gains indestructible until end of turn.",
@@ -11,8 +18,8 @@
         "destination": "Hand",
         "origin": "Battlefield",
         "target": {
-          "card_type": "Human",
           "controller": "You",
+          "subtype": "Human",
           "type": "Typed"
         },
         "type": "ChangeZone"

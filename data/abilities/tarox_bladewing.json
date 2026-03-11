@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Card.namedTarox Bladewing>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "CARDNAME gets +X/+X until end of turn, where X is its power.",
       "effect": {

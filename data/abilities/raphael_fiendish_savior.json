@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Demon",
             "controller": "You",
             "properties": [
               {
@@ -24,6 +23,7 @@
                 "value": "YouCtrl,Tiefling.Other"
               }
             ],
+            "subtype": "Demon",
             "type": "Typed"
           },
           {

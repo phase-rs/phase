@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a copy of target artifact until end of turn.",
@@ -19,7 +24,15 @@
     },
     {
       "cost": {
-        "cost": "1 U R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a copy of target artifact, except it has this ability.",

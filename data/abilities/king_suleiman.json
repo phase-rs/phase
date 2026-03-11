@@ -8,7 +8,6 @@
       "description": "Destroy target Djinn or Efreet.",
       "effect": {
         "target": {
-          "card_type": "Djinn,Efreet",
           "type": "Typed"
         },
         "type": "Destroy"

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 1/1 colorless Eldrazi Sliver creature token. It has \"Sacrifice this creature: Add {C}.\"",
@@ -39,8 +44,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Sliver",
-          "type": "AddType"
+          "subtype": "Sliver",
+          "type": "AddSubtype"
         }
       ]
     },

@@ -22,8 +22,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Squirrel",
         "controller": "You",
+        "subtype": "Squirrel",
         "type": "Typed"
       },
       "valid_target": {

@@ -35,7 +35,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Rat",
+        "subtype": "Rat",
         "type": "Typed"
       },
       "description": "All Rats have fear.",

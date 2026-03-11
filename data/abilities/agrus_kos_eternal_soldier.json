@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Ability",
+        "subtype": "Ability",
         "type": "Typed"
       },
       "valid_target": {

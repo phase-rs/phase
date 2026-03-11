@@ -11,7 +11,7 @@
         "count": 2,
         "counter_type": "P1P1",
         "target": {
-          "card_type": "Elf",
+          "subtype": "Elf",
           "type": "Typed"
         },
         "type": "PutCounter"
@@ -57,8 +57,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Elf",
         "controller": "You",
+        "subtype": "Elf",
         "type": "Typed"
       },
       "description": "Elves you control have \"{T}: Add {B}.\"",

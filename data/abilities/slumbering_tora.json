@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/Spirit;Arcane/spirit or arcane card>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "subtype": "Spirit;Arcane",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

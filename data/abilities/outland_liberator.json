@@ -8,7 +8,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "1",
+                "cost": {
+                  "Cost": {
+                    "generic": 1,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -23,7 +28,7 @@
           "description": "Destroy target artifact or enchantment.",
           "effect": {
             "target": {
-              "card_type": "Artifact,Enchantment",
+              "card_type": "Artifact",
               "type": "Typed"
             },
             "type": "Destroy"
@@ -43,7 +48,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "1",
+                "cost": {
+                  "Cost": {
+                    "generic": 1,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -58,7 +68,7 @@
           "description": "Destroy target artifact or enchantment.",
           "effect": {
             "target": {
-              "card_type": "Artifact,Enchantment",
+              "card_type": "Artifact",
               "type": "Typed"
             },
             "type": "Destroy"

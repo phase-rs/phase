@@ -24,8 +24,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Demon",
             "controller": "You",
+            "subtype": "Demon",
             "type": "Typed"
           },
           {

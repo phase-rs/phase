@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Knight",
         "properties": [
           {
             "type": "Other",
             "value": "YourTeamCtrl"
           }
         ],
+        "subtype": "Knight",
         "type": "Typed"
       },
       "description": "Knights your team controls have flying and haste.",

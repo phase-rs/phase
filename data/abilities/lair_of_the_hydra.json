@@ -17,7 +17,16 @@
     },
     {
       "cost": {
-        "cost": "X G XMin1",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "X",
+              "Green",
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes an X/X green Hydra creature. It's still a land. X can't be 0.",

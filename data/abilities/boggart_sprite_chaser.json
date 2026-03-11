@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Faerie",
           "controller": "You",
+          "subtype": "Faerie",
           "type": "Typed"
         },
         "type": "IsPresent"

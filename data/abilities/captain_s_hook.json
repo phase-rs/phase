@@ -26,8 +26,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Pirate",
-          "type": "AddType"
+          "subtype": "Pirate",
+          "type": "AddSubtype"
         }
       ]
     }

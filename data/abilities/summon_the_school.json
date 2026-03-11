@@ -18,8 +18,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<4/Merfolk>",
-        "type": "Mana"
+        "count": 4,
+        "filter": {
+          "subtype": "Merfolk",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Return CARDNAME from your graveyard to your hand.",
       "effect": {

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Bird",
         "controller": "You",
+        "subtype": "Bird",
         "type": "Typed"
       },
       "description": "Birds you control get +1/+1 and have vigilance.",

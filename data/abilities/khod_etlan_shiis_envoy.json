@@ -13,8 +13,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Island",
-          "type": "AddType"
+          "subtype": "Island",
+          "type": "AddSubtype"
         }
       ]
     },
@@ -22,7 +22,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Homarid",
             "controller": "You",
             "properties": [
               {
@@ -42,6 +41,7 @@
                 "value": "YouCtrl,Merfolk.Other"
               }
             ],
+            "subtype": "Homarid",
             "type": "Typed"
           },
           {

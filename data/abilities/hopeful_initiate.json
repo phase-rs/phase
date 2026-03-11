@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 W",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "RemoveAnyCounter<2/P1P1/Creature>",
-            "type": "Mana"
+            "count": 2,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -18,7 +30,7 @@
       "description": "Destroy target artifact or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

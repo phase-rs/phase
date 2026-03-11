@@ -22,8 +22,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Legendary",
-          "type": "RemoveType"
+          "subtype": "Legendary",
+          "type": "RemoveSubtype"
         }
       ]
     }

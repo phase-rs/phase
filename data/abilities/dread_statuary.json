@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 4/2 Golem artifact creature until end of turn. It's still a land.",

@@ -23,7 +23,7 @@
       "description": "Untap target creature or land. Prevent all damage that would be dealt to and dealt by that permanent until your next turn.",
       "effect": {
         "target": {
-          "card_type": "Creature,Land",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Untap"

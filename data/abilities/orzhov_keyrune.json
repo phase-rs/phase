@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "W B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 1/4 white and black Thrull artifact creature with lifelink until end of turn.",

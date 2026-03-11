@@ -9,7 +9,7 @@
           "description": "Put target spell or nonland permanent into its owner's library second from the top.",
           "effect": {
             "destination": "Library",
-            "origin": "Battlefield,Stack",
+            "origin": "Battlefield",
             "target": {
               "card_type": "Permanent",
               "type": "Typed"
@@ -32,7 +32,7 @@
           "description": "Each player shuffles their graveyard and hand into their library, then draws seven cards.",
           "effect": {
             "destination": "Library",
-            "origin": "Hand,Graveyard",
+            "origin": "Hand",
             "target": {
               "type": "Any"
             },

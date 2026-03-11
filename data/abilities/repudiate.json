@@ -9,7 +9,7 @@
           "description": "Counter target activated or triggered ability.",
           "effect": {
             "target": {
-              "card_type": "Card,Emblem",
+              "card_type": "Card",
               "type": "Typed"
             },
             "type": "Counter"

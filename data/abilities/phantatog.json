@@ -22,8 +22,8 @@
     },
     {
       "cost": {
-        "cost": "Discard<1/Card>",
-        "type": "Mana"
+        "count": 1,
+        "type": "Discard"
       },
       "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {

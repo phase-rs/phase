@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "SpellAbility",
+        "subtype": "SpellAbility",
         "type": "Typed"
       },
       "valid_target": {

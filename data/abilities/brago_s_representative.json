@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "While voting, you get an additional vote. (The votes can be for different choices or for the same choice.)",

@@ -5,15 +5,33 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 W U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Card.Legendary/legendary>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Legendary"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

@@ -6,7 +6,7 @@
       "description": "Destroy target Equipment. Add {G}.",
       "effect": {
         "target": {
-          "card_type": "Equipment",
+          "subtype": "Equipment",
           "type": "Typed"
         },
         "type": "Destroy"

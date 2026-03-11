@@ -3,14 +3,22 @@
   "abilities": [
     {
       "cost": {
-        "cost": "WU",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target Human gains flying until end of turn.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Human",
+          "subtype": "Human",
           "type": "Typed"
         },
         "toughness": 0,

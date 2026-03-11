@@ -6,7 +6,7 @@
       "description": "Tap target artifact, creature or land. Draw a card at the beginning of next turn's upkeep.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Tap"

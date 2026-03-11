@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 GU",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Look at the top card of your library. If it's a Kraken, Leviathan, Octopus, or Serpent creature card, you may put it onto the battlefield.",

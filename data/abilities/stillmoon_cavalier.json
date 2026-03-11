@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "WB",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains flying until end of turn.",
@@ -20,7 +28,15 @@
     },
     {
       "cost": {
-        "cost": "WB",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains first strike until end of turn.",
@@ -37,7 +53,17 @@
     },
     {
       "cost": {
-        "cost": "WB WB",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black",
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+0 until end of turn.",

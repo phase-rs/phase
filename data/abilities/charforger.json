@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<3/OIL/CARDNAME>",
-        "type": "Mana"
+        "count": 3,
+        "counter_type": "OIL",
+        "target": {
+          "type": "SelfRef"
+        },
+        "type": "RemoveCounter"
       },
       "description": "Exile the top card of your library. You may play that card this turn.",
       "effect": {

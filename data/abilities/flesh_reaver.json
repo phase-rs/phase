@@ -15,7 +15,7 @@
         "type": "SelfRef"
       },
       "valid_target": {
-        "card_type": "Creature,Opponent",
+        "card_type": "Creature",
         "type": "Typed"
       }
     }

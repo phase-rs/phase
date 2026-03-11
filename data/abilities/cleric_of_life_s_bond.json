@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Cleric",
             "controller": "You",
+            "subtype": "Cleric",
             "type": "Typed"
           },
           {

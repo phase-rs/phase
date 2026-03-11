@@ -6,7 +6,7 @@
       "description": "Shuffle your hand and graveyard into your library, then draw seven cards. If the gift wasn't promised, each other player also shuffles their hand and graveyard into their library, then draws seven cards.",
       "effect": {
         "destination": "Library",
-        "origin": "Graveyard,Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
         },

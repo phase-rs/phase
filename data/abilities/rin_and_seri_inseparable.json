@@ -5,7 +5,16 @@
       "cost": {
         "costs": [
           {
-            "cost": "R G W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red",
+                  "Green",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -40,7 +49,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Dog",
+        "subtype": "Dog",
         "type": "Typed"
       }
     },
@@ -51,7 +60,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Cat",
+        "subtype": "Cat",
         "type": "Typed"
       }
     }

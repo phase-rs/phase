@@ -3,14 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target attacking Wolf or Werewolf gains indestructible until end of turn.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Wolf",
+          "subtype": "Wolf",
           "type": "Typed"
         },
         "toughness": 0,

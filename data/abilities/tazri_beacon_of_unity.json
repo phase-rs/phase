@@ -3,13 +3,23 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2U 2B 2R 2G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Look at the top six cards of your library. You may reveal up to two Cleric, Rogue, Warrior, and/or Ally cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
       "effect": {
         "count": 6,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

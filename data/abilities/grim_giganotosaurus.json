@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "10 B G",
+        "cost": {
+          "Cost": {
+            "generic": 10,
+            "shards": [
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Monstrosity 10. This ability costs {1} less to activate for each creature with power 4 or greater your opponents control.",

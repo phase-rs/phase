@@ -39,8 +39,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Island",
         "controller": "You",
+        "subtype": "Island",
         "type": "Typed"
       }
     }

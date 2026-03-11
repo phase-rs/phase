@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Move a +1/+1 counter from target creature onto another target creature with the same controller.",
@@ -18,19 +25,26 @@
     },
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Attach target Aura attached to a permanent to another permanent with the same controller.",
       "effect": {
         "target": {
-          "card_type": "Aura",
           "properties": [
             {
               "type": "Other",
               "value": "AttachedTo Permanent"
             }
           ],
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "Attach"

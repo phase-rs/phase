@@ -6,7 +6,16 @@
       "abilities": [
         {
           "cost": {
-            "cost": "3 B R G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Black",
+                  "Red",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME. Activate only as a sorcery.",

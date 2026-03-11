@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 C",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Colorless"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target opponent exiles a card from their hand. Activate only as a sorcery. ({C} represents colorless mana.)",

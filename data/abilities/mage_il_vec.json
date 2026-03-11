@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Random>",
-            "type": "Mana"
+            "count": 1,
+            "random": true,
+            "type": "Discard"
           }
         ],
         "type": "Composite"

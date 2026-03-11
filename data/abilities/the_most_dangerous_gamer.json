@@ -26,13 +26,13 @@
       "description": "Whenever you open an Attraction, put a +1/+1 counter on CARDNAME.",
       "destination": "Battlefield",
       "mode": "ChangesZone",
-      "origin": "AttractionDeck",
+      "origin": "Exile",
       "trigger_zones": [
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Attraction",
         "controller": "You",
+        "subtype": "Attraction",
         "type": "Typed"
       }
     },
@@ -43,8 +43,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Attraction",
         "controller": "You",
+        "subtype": "Attraction",
         "type": "Typed"
       }
     }

@@ -12,8 +12,8 @@
         "filter": {
           "filters": [
             {
-              "card_type": "Merfolk",
               "controller": "You",
+              "subtype": "Merfolk",
               "type": "Typed"
             },
             {
@@ -40,8 +40,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Merfolk",
             "controller": "You",
+            "subtype": "Merfolk",
             "type": "Typed"
           },
           {

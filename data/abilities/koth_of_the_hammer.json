@@ -9,7 +9,7 @@
       "description": "Untap target Mountain. It becomes a 4/4 red Elemental creature until end of turn. It's still a land.",
       "effect": {
         "target": {
-          "card_type": "Mountain",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "type": "Untap"

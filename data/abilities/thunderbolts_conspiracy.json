@@ -11,8 +11,8 @@
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "valid_card": {
-        "card_type": "Villain",
         "controller": "You",
+        "subtype": "Villain",
         "type": "Typed"
       }
     }

@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 3/3 Dinosaur artifact creature until end of turn.",

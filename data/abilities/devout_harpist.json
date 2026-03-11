@@ -8,13 +8,13 @@
       "description": "Destroy target Aura attached to a creature.",
       "effect": {
         "target": {
-          "card_type": "Aura",
           "properties": [
             {
               "type": "Other",
               "value": "AttachedTo Creature"
             }
           ],
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "Destroy"

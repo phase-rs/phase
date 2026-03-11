@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Another target nontoken creature you control gains first strike and double team until end of turn. Activate only as a sorcery and only once.",

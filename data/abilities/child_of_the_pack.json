@@ -6,7 +6,15 @@
       "abilities": [
         {
           "cost": {
-            "cost": "2 R G",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Create a 2/2 green Wolf creature token.",

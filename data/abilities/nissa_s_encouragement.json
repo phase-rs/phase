@@ -6,7 +6,7 @@
       "description": "Search your library and graveyard for a card named Forest, a card named Brambleweft Behemoth, and a card named Nissa, Genesis Mage. Reveal those cards, put them into your hand, then shuffle.",
       "effect": {
         "destination": "Hand",
-        "origin": "Library,Graveyard",
+        "origin": "Library",
         "target": {
           "type": "Any"
         },

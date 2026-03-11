@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<5>",
-            "type": "Mana"
+            "amount": 5,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"
@@ -40,7 +40,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

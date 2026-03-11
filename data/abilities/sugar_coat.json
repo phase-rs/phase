@@ -25,7 +25,11 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Food & Artifact",
+          "subtype": "Food",
+          "type": "AddSubtype"
+        },
+        {
+          "core_type": "Artifact",
           "type": "AddType"
         }
       ]

@@ -12,8 +12,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Boar",
         "controller": "You",
+        "subtype": "Boar",
         "type": "Typed"
       }
     }

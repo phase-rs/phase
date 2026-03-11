@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap CARDNAME.",
@@ -20,7 +27,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 W B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -32,7 +47,7 @@
       "description": "Destroy target creature or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Creature,Enchantment",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Destroy"

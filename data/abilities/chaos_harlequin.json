@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile the top card of your library. If that card is a land card, CARDNAME gets -4/-0 until end of turn. Otherwise, CARDNAME gets +2/+0 until end of turn.",

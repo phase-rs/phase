@@ -18,8 +18,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Flagbearer",
-          "type": "AddType"
+          "subtype": "Flagbearer",
+          "type": "AddSubtype"
         }
       ]
     },

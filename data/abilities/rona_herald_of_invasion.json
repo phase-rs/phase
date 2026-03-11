@@ -18,7 +18,14 @@
         },
         {
           "cost": {
-            "cost": "5 BP",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform NICKNAME. Activate only as a sorcery. ({B/P} can be paid with either {B} or 2 life.)",

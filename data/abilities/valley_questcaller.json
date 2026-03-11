@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Rabbit",
             "controller": "You",
             "properties": [
               {
@@ -24,6 +23,7 @@
                 "value": "YouCtrl,Mouse.Other"
               }
             ],
+            "subtype": "Rabbit",
             "type": "Typed"
           },
           {

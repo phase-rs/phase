@@ -9,7 +9,7 @@
         "card_type": "Creature",
         "type": "Typed"
       },
-      "affected_zone": "Hand,Graveyard,Library,Exile,Command",
+      "affected_zone": "Hand",
       "description": "Any player may cast creature spells with mana value 3 or less without paying their mana costs and as though they had flash.",
       "mode": "Continuous"
     }

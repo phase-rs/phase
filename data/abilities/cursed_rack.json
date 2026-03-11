@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Player",
         "properties": [
           {
             "type": "Other",
             "value": "Chosen"
           }
         ],
+        "subtype": "Player",
         "type": "Typed"
       },
       "description": "The chosen player's maximum hand size is four.",

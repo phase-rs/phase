@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Mount",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Vehicle.YouCtrl"
           }
         ],
+        "subtype": "Mount",
         "type": "Typed"
       },
       "description": "Mounts and Vehicles you control get +1/+1.",

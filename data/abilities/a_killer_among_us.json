@@ -11,8 +11,8 @@
             "type": "Sacrifice"
           },
           {
-            "cost": "RevealChosen<Type/creature type>",
-            "type": "Mana"
+            "description": "RevealChosen<Type/creature type>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

@@ -36,8 +36,8 @@
             "type": "Tap"
           },
           {
-            "cost": "CollectEvidence<3>",
-            "type": "Mana"
+            "description": "CollectEvidence<3>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

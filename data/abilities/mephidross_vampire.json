@@ -14,8 +14,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Vampire",
-          "type": "AddType"
+          "subtype": "Vampire",
+          "type": "AddSubtype"
         }
       ]
     }

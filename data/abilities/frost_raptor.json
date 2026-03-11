@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains shroud until end of turn.",

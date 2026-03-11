@@ -48,7 +48,6 @@
     },
     {
       "affected": {
-        "card_type": "Angel",
         "controller": "You",
         "properties": [
           {
@@ -60,6 +59,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Angel",
         "type": "Typed"
       },
       "affected_zone": "Library",

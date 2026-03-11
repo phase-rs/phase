@@ -3,8 +3,19 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1+/Card.Historic+withTotalCMCGE30>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Historic"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "You get an emblem with \"Creatures you control have base power and toughness 9/9.\"",
       "duration": "Permanent",

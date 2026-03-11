@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 4/3 Centaur creature in addition to its other types until end of turn.",

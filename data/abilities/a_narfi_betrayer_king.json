@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "S S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME from your graveyard to the battlefield tapped.",

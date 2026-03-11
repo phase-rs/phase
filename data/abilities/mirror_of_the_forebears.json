@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a copy of target creature you control of the chosen type, except it's an artifact in addition to its other types.",

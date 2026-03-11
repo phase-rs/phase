@@ -7,7 +7,7 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Island",
+          "subtype": "Island",
           "type": "Typed"
         },
         "type": "IsPresent"

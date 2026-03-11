@@ -18,12 +18,38 @@
       "cost": {
         "costs": [
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           },
           {
-            "cost": "ExileFromGrave<2/Card.Other+YouOwn+namedSay Its Name>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Card",
+                  "properties": [
+                    {
+                      "type": "Other",
+                      "value": "YouOwn"
+                    }
+                  ],
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

@@ -3,7 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W U B R G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Search your library for a legendary permanent card with mana value less than NICKNAME's power, put that card onto the battlefield, then shuffle.",

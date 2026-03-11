@@ -10,13 +10,13 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Orc",
           "properties": [
             {
               "type": "Other",
               "value": "YouCtrl,Goblin.YouCtrl"
             }
           ],
+          "subtype": "Orc",
           "type": "Typed"
         },
         "type": "IsPresent"

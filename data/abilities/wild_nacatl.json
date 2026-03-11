@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Mountain",
           "controller": "You",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -35,8 +35,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Plains",
           "controller": "You",
+          "subtype": "Plains",
           "type": "Typed"
         },
         "type": "IsPresent"

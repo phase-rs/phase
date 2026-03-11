@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromTop<1/Card>",
-        "type": "Mana"
+        "count": 1,
+        "type": "Exile",
+        "zone": "Library"
       },
       "description": "Put X +1/+1 counters on CARDNAME, where X is the exiled card's mana value.",
       "effect": {

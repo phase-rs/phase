@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, if you tap a land you control for mana, it produces {U} instead of any other type.",

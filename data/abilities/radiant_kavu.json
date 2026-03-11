@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R G W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red",
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Prevent all combat damage blue creatures and black creatures would deal this turn.",

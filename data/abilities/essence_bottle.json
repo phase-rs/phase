@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -33,8 +38,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<All/ELIXIR>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "ELIXIR",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

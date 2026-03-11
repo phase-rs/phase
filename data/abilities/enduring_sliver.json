@@ -8,8 +8,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Sliver",
             "controller": "You",
+            "subtype": "Sliver",
             "type": "Typed"
           },
           {

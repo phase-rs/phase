@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "7 G",
+            "cost": {
+              "Cost": {
+                "generic": 7,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -33,8 +40,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Wurm",
         "controller": "You",
+        "subtype": "Wurm",
         "type": "Typed"
       },
       "description": "Wurms you control get +2/+2 and have trample.",

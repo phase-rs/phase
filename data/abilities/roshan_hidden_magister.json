@@ -26,8 +26,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Assassin",
-          "type": "AddType"
+          "subtype": "Assassin",
+          "type": "AddSubtype"
         }
       ]
     },

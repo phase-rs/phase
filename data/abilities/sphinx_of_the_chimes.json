@@ -3,8 +3,22 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<2/Card.nonLand+WithSameName/nonland cards with the same name>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "NonType",
+              "value": "Land"
+            },
+            {
+              "type": "Other",
+              "value": "WithSameName"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "Draw four cards.",
       "effect": {

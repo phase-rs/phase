@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 W",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Blight<1>",
-            "type": "Mana"
+            "description": "Blight<1>",
+            "type": "Unimplemented"
           },
           {
             "target": {

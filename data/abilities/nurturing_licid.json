@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -33,7 +40,14 @@
     },
     {
       "cost": {
-        "cost": "G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate enchanted creature.",

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile the top card of each opponent's library. Until end of turn, you may play one of those cards without paying its mana cost.",

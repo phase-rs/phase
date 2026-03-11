@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Bird",
           "controller": "You",
+          "subtype": "Bird",
           "type": "Typed"
         },
         "type": "IsPresent"

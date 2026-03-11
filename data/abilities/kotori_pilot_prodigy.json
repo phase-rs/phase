@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Vehicle",
         "controller": "You",
+        "subtype": "Vehicle",
         "type": "Typed"
       },
       "description": "Vehicles you control have crew 2.",

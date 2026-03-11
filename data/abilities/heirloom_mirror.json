@@ -8,19 +8,24 @@
           "cost": {
             "costs": [
               {
-                "cost": "1",
+                "cost": {
+                  "Cost": {
+                    "generic": 1,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
                 "type": "Tap"
               },
               {
-                "cost": "PayLife<1>",
-                "type": "Mana"
+                "amount": 1,
+                "type": "PayLife"
               },
               {
-                "cost": "Discard<1/Card/card>",
-                "type": "Mana"
+                "count": 1,
+                "type": "Discard"
               }
             ],
             "type": "Composite"
@@ -43,7 +48,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "2 B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Exile target creature card from a graveyard.",

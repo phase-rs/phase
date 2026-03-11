@@ -6,7 +6,7 @@
       "description": "Counter target artifact or creature spell unless its controller pays {4}.",
       "effect": {
         "target": {
-          "card_type": "Creature,Artifact",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Counter"

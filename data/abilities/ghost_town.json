@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME to its owner's hand. Activate only if it's not your turn.",

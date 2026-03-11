@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/M1M1>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "M1M1",
+        "type": "RemoveCounter"
       },
       "description": "Put a -1/-1 counter on target creature.",
       "effect": {

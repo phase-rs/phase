@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Attacking creatures you control get +X/+X until end of turn, where X is the number of attacking creatures.",

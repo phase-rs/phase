@@ -23,7 +23,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -37,7 +44,7 @@
         "destination": "Exile",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Instant,Sorcery",
+          "card_type": "Instant",
           "type": "Typed"
         },
         "type": "ChangeZone"
@@ -50,7 +57,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

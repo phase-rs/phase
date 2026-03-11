@@ -8,12 +8,16 @@
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<2/Card>",
-            "type": "Mana"
+            "count": 2,
+            "type": "Exile",
+            "zone": "Graveyard"
           },
           {
-            "cost": "Exile<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"

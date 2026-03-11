@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X",
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gets -0/-X until end of turn and CARDNAME gets +X/+0 until end of turn.",

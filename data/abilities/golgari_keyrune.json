@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "B G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 2/2 black and green Insect artifact creature with deathtouch until end of turn.",

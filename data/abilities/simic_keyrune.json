@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "G U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 2/3 green and blue Crab artifact creature with hexproof until end of turn.",

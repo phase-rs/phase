@@ -16,7 +16,7 @@
       "description": "Whenever one or more cards are put into exile from your library and/or your graveyard, put a +1/+1 counter on NICKNAME.",
       "destination": "Exile",
       "mode": "ChangesZoneAll",
-      "origin": "Library,Graveyard",
+      "origin": "Library",
       "trigger_zones": [
         "Battlefield"
       ]

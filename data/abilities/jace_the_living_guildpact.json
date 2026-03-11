@@ -59,7 +59,7 @@
       "description": "Each player shuffles their hand and graveyard into their library. You draw seven cards.",
       "effect": {
         "destination": "Library",
-        "origin": "Hand,Graveyard",
+        "origin": "Hand",
         "target": {
           "type": "Any"
         },

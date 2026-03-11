@@ -3,8 +3,19 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1/Card.TopGraveyardCreature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "TopGraveyardCreature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "CARDNAME gets +2/+2 until end of turn.",
       "effect": {

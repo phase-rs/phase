@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Untap CARDNAME.",
@@ -52,8 +59,12 @@
           "value": 1
         },
         {
-          "core_type": "Human & Citizen",
-          "type": "AddType"
+          "subtype": "Human",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Citizen",
+          "type": "AddSubtype"
         }
       ]
     },

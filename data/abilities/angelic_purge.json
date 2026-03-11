@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 W",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -22,7 +29,7 @@
         "destination": "Exile",
         "origin": "Battlefield",
         "target": {
-          "card_type": "Artifact,Creature,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "ChangeZone"

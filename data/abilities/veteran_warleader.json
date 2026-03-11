@@ -3,8 +3,23 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Ally.Other>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "filters": [
+            {
+              "subtype": "Ally",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME gains your choice of first strike, vigilance, or trample until end of turn.",
       "effect": {

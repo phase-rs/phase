@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +2/+2 until end of turn.",

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return X target creatures to their owners' hands.",

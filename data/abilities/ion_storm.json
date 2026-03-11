@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/P1P1/Permanent/permanent you control>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "P1P1",
+            "target": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -33,12 +45,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/CHARGE/Permanent/permanent you control>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "CHARGE",
+            "target": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

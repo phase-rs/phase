@@ -6,7 +6,7 @@
       "description": "Destroy target artifact or creature. Its controller creates a 2/2 white Ox creature token.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

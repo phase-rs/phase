@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromStack<1/Spell.Instant+YouCtrl;Spell.Sorcery+YouCtrl/instant or sorcery spell>",
-        "type": "Mana"
+        "description": "ExileFromStack<1/Spell.Instant+YouCtrl;Spell.Sorcery+YouCtrl/instant or sorcery spell>",
+        "type": "Unimplemented"
       },
       "description": "Put two +1/+1 counters on CARDNAME. (That spell won't resolve.)",
       "effect": {

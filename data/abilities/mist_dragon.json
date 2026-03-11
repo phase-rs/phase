@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains flying. (This effect lasts indefinitely.)",
@@ -21,7 +26,12 @@
     },
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME loses flying. (This effect lasts indefinitely.)",
@@ -36,7 +46,15 @@
     },
     {
       "cost": {
-        "cost": "3 U U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME phases out.",

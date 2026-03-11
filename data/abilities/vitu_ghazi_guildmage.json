@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G W",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 3/3 green Centaur creature token.",
@@ -21,7 +29,15 @@
     },
     {
       "cost": {
-        "cost": "2 G W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "effect": {

@@ -26,8 +26,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Knight",
-          "type": "AddType"
+          "subtype": "Knight",
+          "type": "AddSubtype"
         }
       ]
     }

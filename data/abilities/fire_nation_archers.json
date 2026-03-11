@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "This creature deals 2 damage to each opponent. Create a 2/2 red Soldier creature token.",

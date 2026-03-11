@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "You may play an additional land on each of your turns.",
@@ -22,8 +22,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "AllBasicLandType",
-          "type": "AddType"
+          "subtype": "AllBasicLandType",
+          "type": "AddSubtype"
         }
       ]
     }

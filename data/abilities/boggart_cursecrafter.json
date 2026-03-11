@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Goblin",
             "controller": "You",
+            "subtype": "Goblin",
             "type": "Typed"
           },
           {

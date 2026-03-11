@@ -26,7 +26,12 @@
     },
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a Shapeshifter artifact creature with base power and toughness 3/3 until end of turn.",

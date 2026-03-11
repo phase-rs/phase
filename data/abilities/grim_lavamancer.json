@@ -5,15 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<2/Card>",
-            "type": "Mana"
+            "count": 2,
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

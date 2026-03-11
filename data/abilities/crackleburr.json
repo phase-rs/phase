@@ -5,15 +5,35 @@
       "cost": {
         "costs": [
           {
-            "cost": "UR UR",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Red",
+                  "Blue",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "tapXType<2/Creature.Red/red creature>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Red/red creature"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"
@@ -36,15 +56,25 @@
       "cost": {
         "costs": [
           {
-            "cost": "UR UR",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Red",
+                  "Blue",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "untapYType<2/Creature.Blue+YouCtrl/blue creature>",
-            "type": "Mana"
+            "description": "untapYType<2/Creature.Blue+YouCtrl/blue creature>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

@@ -5,12 +5,31 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 UP UP",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "RemoveAnyCounter<3/Any/Artifact.Other;Creature.Other;Planeswalker.Other/other artifacts, creatures, and planeswalkers>",
-            "type": "Mana"
+            "count": 3,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Artifact",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Other;Creature.Other;Planeswalker.Other"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

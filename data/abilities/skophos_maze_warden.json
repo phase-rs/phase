@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/-1 until end of turn.",
@@ -31,7 +36,6 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Ability",
         "controller": "You",
         "properties": [
           {
@@ -39,6 +43,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Ability",
         "type": "Typed"
       },
       "valid_target": {

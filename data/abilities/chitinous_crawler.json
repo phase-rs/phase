@@ -3,8 +3,13 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1/Permanent>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "You may play it. Activate only as a sorcery and only if there are eight or more permanent cards in your graveyard.",
       "effect": {

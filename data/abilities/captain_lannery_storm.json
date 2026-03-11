@@ -19,8 +19,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Treasure",
         "controller": "You",
+        "subtype": "Treasure",
         "type": "Typed"
       }
     }

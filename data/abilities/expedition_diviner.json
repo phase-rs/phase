@@ -12,8 +12,8 @@
         "filter": {
           "filters": [
             {
-              "card_type": "Wizard",
               "controller": "You",
+              "subtype": "Wizard",
               "type": "Typed"
             },
             {

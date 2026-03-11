@@ -6,7 +6,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1 B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Exile target card from an opponent's graveyard. If no cards are in that graveyard, flip CARDNAME.",
@@ -38,7 +45,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "4 B",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Put target creature card from a graveyard onto the battlefield under your control.",

@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R R G G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red",
+              "Red",
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "NICKNAME must be blocked each combat this turn if able.",

@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/COIN>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "COIN",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

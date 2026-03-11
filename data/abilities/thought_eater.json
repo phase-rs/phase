@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "Your maximum hand size is reduced by three.",

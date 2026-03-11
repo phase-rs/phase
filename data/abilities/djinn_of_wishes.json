@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U U",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/WISH>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "WISH",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

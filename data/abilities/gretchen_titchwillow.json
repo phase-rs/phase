@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card.",

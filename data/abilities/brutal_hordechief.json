@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 RW RW",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red",
+              "White",
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures your opponents control block this turn if able, and you choose how those creatures block.",

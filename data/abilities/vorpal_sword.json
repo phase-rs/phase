@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 B B B",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Black",
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME gains \"Whenever equipped creature deals combat damage to a player, that player loses the game.\"",

@@ -37,13 +37,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Desert",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Desert",
         "type": "Typed"
       }
     }

@@ -19,8 +19,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Food",
         "controller": "You",
+        "subtype": "Food",
         "type": "Typed"
       }
     }

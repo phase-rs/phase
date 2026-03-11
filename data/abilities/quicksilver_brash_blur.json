@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a +1/+1 counter and a double strike counter on NICKNAME. (Activate each power-up ability only once. Reduce the cost by his mana cost if he entered this turn.)",

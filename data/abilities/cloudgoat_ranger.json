@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<3/Kithkin>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "subtype": "Kithkin",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME gets +2/+0 and gains flying until end of turn.",
       "effect": {

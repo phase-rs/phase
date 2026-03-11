@@ -7,13 +7,13 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Giant",
           "properties": [
             {
               "type": "Other",
               "value": "YouCtrl,Wizard.YouCtrl"
             }
           ],
+          "subtype": "Giant",
           "type": "Typed"
         },
         "type": "IsPresent"

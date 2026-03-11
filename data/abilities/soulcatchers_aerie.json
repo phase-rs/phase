@@ -29,13 +29,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Bird",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Bird",
         "type": "Typed"
       }
     }

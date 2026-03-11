@@ -19,7 +19,14 @@
         },
         {
           "cost": {
-            "cost": "4 G",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Create a 0/0 green and blue Fractal creature token. Put a +1/+1 counter on it for each different mana value among nonland cards you own in exile with study counters on them.",
@@ -46,7 +53,16 @@
           "cost": {
             "costs": [
               {
-                "cost": "X U U",
+                "cost": {
+                  "Cost": {
+                    "generic": 0,
+                    "shards": [
+                      "X",
+                      "Blue",
+                      "Blue"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {

@@ -6,7 +6,7 @@
       "description": "Destroy target Wall. It can't be regenerated.",
       "effect": {
         "target": {
-          "card_type": "Wall",
+          "subtype": "Wall",
           "type": "Typed"
         },
         "type": "Destroy"

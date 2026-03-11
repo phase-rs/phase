@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 B",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Each opponent loses 2 life and you gain 2 life. This ability costs {4}{B} less to activate if you've drawn three or more cards this turn. Activate only once each turn.",

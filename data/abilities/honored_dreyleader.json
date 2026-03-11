@@ -28,7 +28,6 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Squirrel",
             "controller": "You",
             "properties": [
               {
@@ -36,6 +35,7 @@
                 "value": "YouCtrl,Food.Other"
               }
             ],
+            "subtype": "Squirrel",
             "type": "Typed"
           },
           {

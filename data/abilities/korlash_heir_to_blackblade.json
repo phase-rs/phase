@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate NICKNAME.",
@@ -17,8 +24,12 @@
     },
     {
       "cost": {
-        "cost": "Discard<1/Card.namedKorlash, Heir to Blackblade>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "Search your library for up to two Swamp cards, put them onto the battlefield tapped, then shuffle.",
       "effect": {

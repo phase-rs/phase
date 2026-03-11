@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Swamp",
+        "subtype": "Swamp",
         "type": "Typed"
       }
     }

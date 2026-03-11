@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/DEVOTION>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "DEVOTION",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

@@ -9,7 +9,7 @@
         "Other": "Untap"
       },
       "valid_card": {
-        "card_type": "Island",
+        "subtype": "Island",
         "type": "Typed"
       }
     }

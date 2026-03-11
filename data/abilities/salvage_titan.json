@@ -3,8 +3,13 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<3/Artifact>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "Return CARDNAME from your graveyard to your hand.",
       "effect": {

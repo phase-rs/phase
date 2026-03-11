@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put target Mercenary on the bottom of its owner's library.",
@@ -11,7 +18,7 @@
         "destination": "Library",
         "origin": "Battlefield",
         "target": {
-          "card_type": "Mercenary",
+          "subtype": "Mercenary",
           "type": "Typed"
         },
         "type": "ChangeZone"

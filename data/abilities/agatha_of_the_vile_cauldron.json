@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Other creatures you control get +1/+1 and gain trample and haste until end of turn.",

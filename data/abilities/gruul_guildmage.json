@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gets +2/+2 until end of turn.",
@@ -23,7 +30,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 R",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -42,7 +56,7 @@
           "value": 2
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

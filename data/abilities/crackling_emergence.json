@@ -44,8 +44,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Spirit",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Spirit",
+          "type": "AddSubtype"
         },
         {
           "colors": [

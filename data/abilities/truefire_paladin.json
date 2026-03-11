@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +2/+0 until end of turn.",
@@ -20,7 +28,15 @@
     },
     {
       "cost": {
-        "cost": "R W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains first strike until end of turn.",

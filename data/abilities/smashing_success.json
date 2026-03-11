@@ -6,7 +6,7 @@
       "description": "Destroy target artifact or land. If an artifact is destroyed this way, create a Treasure token.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

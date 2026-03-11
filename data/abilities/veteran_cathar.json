@@ -3,14 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target Human gains double strike until end of turn.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Human",
+          "subtype": "Human",
           "type": "Typed"
         },
         "toughness": 0,

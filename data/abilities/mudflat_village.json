@@ -31,7 +31,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -51,13 +58,13 @@
         "destination": "Hand",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Bat",
           "properties": [
             {
               "type": "Other",
               "value": "YouOwn,Lizard.YouOwn,Rat.YouOwn,Squirrel.YouOwn"
             }
           ],
+          "subtype": "Bat",
           "type": "Typed"
         },
         "type": "ChangeZone"

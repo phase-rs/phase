@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6 W W",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": [
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put each card exiled with this artifact into its owner's graveyard, then create a 2/2 colorless Robot artifact creature token for each card put into a graveyard this way. Sacrifice this artifact.",

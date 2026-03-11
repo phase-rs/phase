@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<2/Card>",
-        "type": "Mana"
+        "count": 2,
+        "type": "Discard"
       },
       "description": "CARDNAME's controller sacrifices it, then draws two cards. Only your opponents may activate this ability.",
       "effect": {

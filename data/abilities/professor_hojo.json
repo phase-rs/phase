@@ -22,7 +22,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Activated",
+        "subtype": "Activated",
         "type": "Typed"
       },
       "valid_target": {

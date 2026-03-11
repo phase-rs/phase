@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "2 R G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, this land becomes a 3/3 red and green Elemental creature with \"Whenever this creature attacks, put a +1/+1 counter on it.\" It's still a land.",

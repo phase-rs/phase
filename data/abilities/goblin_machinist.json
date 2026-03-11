@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Reveal cards from the top of your library until you reveal a nonland card. CARDNAME gets +X/+0 until end of turn, where X is that card's mana value. Put the revealed cards on the bottom of your library in any order.",

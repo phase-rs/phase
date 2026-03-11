@@ -6,7 +6,7 @@
       "description": "Gain control of X target creatures and/or planeswalkers.",
       "effect": {
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "GainControl"

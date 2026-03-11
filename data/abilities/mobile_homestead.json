@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Mount",
           "controller": "You",
+          "subtype": "Mount",
           "type": "Typed"
         },
         "type": "IsPresent"

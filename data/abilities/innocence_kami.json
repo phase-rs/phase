@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -37,7 +44,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Spirit,Arcane",
         "type": "Typed"
       }
     }

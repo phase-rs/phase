@@ -8,7 +8,7 @@
         "count": 5,
         "counter_type": "Any",
         "target": {
-          "card_type": "Artifact,Creature,Planeswalker,Opponent",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "RemoveCounter"

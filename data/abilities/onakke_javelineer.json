@@ -12,7 +12,6 @@
           "value": 2
         },
         "target": {
-          "card_type": "Player,Battle",
           "type": "Typed"
         },
         "type": "DealDamage"

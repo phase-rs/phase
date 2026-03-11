@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Robot",
             "controller": "You",
             "properties": [
               {
@@ -16,6 +15,7 @@
                 "value": "YouCtrl,Construct.Other"
               }
             ],
+            "subtype": "Robot",
             "type": "Typed"
           },
           {

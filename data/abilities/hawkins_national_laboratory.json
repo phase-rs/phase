@@ -20,7 +20,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "4",
+                "cost": {
+                  "Cost": {
+                    "generic": 4,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -60,8 +65,8 @@
                 "type": "Tap"
               },
               {
-                "cost": "PayLife<1>",
-                "type": "Mana"
+                "amount": 1,
+                "type": "PayLife"
               }
             ],
             "type": "Composite"

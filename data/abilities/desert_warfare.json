@@ -12,8 +12,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Desert",
         "controller": "You",
+        "subtype": "Desert",
         "type": "Typed"
       }
     },
@@ -21,19 +21,19 @@
       "description": "Whenever you sacrifice a Desert and whenever a Desert card is put into your graveyard from your hand or library, put that card onto the battlefield under your control at the beginning of your next end step.",
       "destination": "Graveyard",
       "mode": "ChangesZone",
-      "origin": "Hand,Library",
+      "origin": "Hand",
       "secondary": true,
       "trigger_zones": [
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Desert",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Desert",
         "type": "Typed"
       }
     },

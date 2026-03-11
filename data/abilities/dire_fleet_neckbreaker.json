@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Pirate",
         "controller": "You",
         "properties": [
           {
             "type": "Attacking"
           }
         ],
+        "subtype": "Pirate",
         "type": "Typed"
       },
       "description": "Attacking Pirates you control get +2/+0.",

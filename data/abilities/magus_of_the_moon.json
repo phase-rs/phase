@@ -13,8 +13,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Mountain",
-          "type": "AddType"
+          "subtype": "Mountain",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PutCardToLibFromHand<1/0/Card>",
-        "type": "Mana"
+        "description": "PutCardToLibFromHand<1/0/Card>",
+        "type": "Unimplemented"
       },
       "description": "The next time a black or red source of your choice would deal damage this turn, prevent that damage.",
       "effect": {

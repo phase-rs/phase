@@ -3,8 +3,11 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/CARDNAME>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "type": "SelfRef"
+        },
+        "type": "Discard"
       },
       "description": "Exile up to two target cards from graveyards.",
       "effect": {

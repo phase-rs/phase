@@ -10,8 +10,8 @@
     },
     {
       "affected": {
-        "card_type": "Goblin",
         "controller": "You",
+        "subtype": "Goblin",
         "type": "Typed"
       },
       "description": "Goblins you control have haste.",

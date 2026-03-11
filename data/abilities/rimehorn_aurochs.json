@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 S",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature blocks target creature this turn if able.",

@@ -3,8 +3,11 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Exile<1/CARDNAME>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "type": "SelfRef"
+        },
+        "type": "Exile"
       },
       "description": "Each creature you control that's an artifact or Human gains indestructible until end of turn.",
       "effect": {

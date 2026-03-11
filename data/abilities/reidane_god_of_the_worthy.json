@@ -46,14 +46,14 @@
             "Battlefield"
           ],
           "valid_source": {
-            "card_type": "SpellAbility",
             "controller": "Opponent",
+            "subtype": "SpellAbility",
             "type": "Typed"
           },
           "valid_target": {
             "filters": [
               {
-                "card_type": "You,Permanent",
+                "card_type": "Permanent",
                 "controller": "You",
                 "type": "Typed"
               },

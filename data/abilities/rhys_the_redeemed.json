@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 GW",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Green",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -31,7 +39,17 @@
       "cost": {
         "costs": [
           {
-            "cost": "4 GW GW",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Green",
+                  "White",
+                  "Green",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

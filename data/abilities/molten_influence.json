@@ -6,7 +6,7 @@
       "description": "Counter target instant or sorcery spell unless its controller has CARDNAME deal 4 damage to them.",
       "effect": {
         "target": {
-          "card_type": "Instant,Sorcery",
+          "card_type": "Instant",
           "type": "Typed"
         },
         "type": "Counter"

@@ -5,12 +5,36 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 W",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "tapXType<2/Artifact;Creature;Land/artifacts, creatures, and/or lands>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Artifact",
+                  "type": "Typed"
+                },
+                {
+                  "card_type": "Creature",
+                  "type": "Typed"
+                },
+                {
+                  "card_type": "Land",
+                  "type": "Typed"
+                }
+              ],
+              "type": "Or"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

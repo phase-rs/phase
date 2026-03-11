@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target opponent loses 2 life and you gain 2 life. Activate only if you control a Liliana planeswalker.",

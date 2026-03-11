@@ -8,9 +8,9 @@
       "affected": {
         "type": "SelfRef"
       },
-      "affected_zone": "Exile,Graveyard",
+      "affected_zone": "Exile",
       "description": "You may cast CARDNAME from your graveyard or from exile.",
-      "effect_zone": "Exile,Graveyard",
+      "effect_zone": "Exile",
       "mode": "Continuous"
     }
   ],

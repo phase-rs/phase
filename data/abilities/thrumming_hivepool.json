@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
         "controller": "You",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "description": "Slivers you control have double strike and haste.",

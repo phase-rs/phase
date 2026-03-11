@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 B B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control gain lifelink until end of turn.",

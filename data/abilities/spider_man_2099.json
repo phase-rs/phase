@@ -25,7 +25,7 @@
     },
     {
       "mode": "LandPlayed",
-      "origin": "Exile,Library,Graveyard",
+      "origin": "Exile",
       "valid_card": {
         "card_type": "Land",
         "controller": "You",

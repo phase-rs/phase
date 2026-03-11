@@ -21,8 +21,12 @@
           "value": 2
         },
         {
-          "core_type": "Creature & Bear",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Bear",
+          "type": "AddSubtype"
         }
       ]
     }

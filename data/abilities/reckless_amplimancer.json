@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Double CARDNAME's power and toughness until end of turn.",

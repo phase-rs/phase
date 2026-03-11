@@ -17,7 +17,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "5",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {

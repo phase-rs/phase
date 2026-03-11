@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "Blight<1>",
-            "type": "Mana"
+            "description": "Blight<1>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

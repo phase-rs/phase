@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -47,7 +54,7 @@
   "triggers": [
     {
       "description": "Whenever one or more other creatures you control leave the battlefield without dying, draw a card.",
-      "destination": "Ante,Command,Exile,Hand,Library",
+      "destination": "Exile",
       "mode": "ChangesZoneAll",
       "origin": "Battlefield",
       "trigger_zones": [

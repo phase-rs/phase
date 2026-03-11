@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 G U",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",

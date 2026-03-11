@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Ally",
             "controller": "You",
+            "subtype": "Ally",
             "type": "Typed"
           },
           {

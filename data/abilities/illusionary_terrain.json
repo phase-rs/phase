@@ -23,8 +23,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "ChosenType2",
-          "type": "AddType"
+          "subtype": "ChosenType2",
+          "type": "AddSubtype"
         }
       ]
     }

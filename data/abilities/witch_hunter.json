@@ -12,7 +12,7 @@
           "value": 1
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"
@@ -25,7 +25,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 W W",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

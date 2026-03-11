@@ -5,7 +5,16 @@
       "cost": {
         "costs": [
           {
-            "cost": "B B B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black",
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -15,8 +24,8 @@
             "type": "Sacrifice"
           },
           {
-            "cost": "Discard<0/Hand>",
-            "type": "Mana"
+            "count": 0,
+            "type": "Discard"
           }
         ],
         "type": "Composite"

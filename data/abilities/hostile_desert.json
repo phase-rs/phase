@@ -17,12 +17,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/Land>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

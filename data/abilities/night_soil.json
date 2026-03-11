@@ -5,12 +5,17 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileSameGrave<2/Creature>",
-            "type": "Mana"
+            "description": "ExileSameGrave<2/Creature>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

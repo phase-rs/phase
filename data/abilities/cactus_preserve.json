@@ -16,7 +16,12 @@
     },
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes an X/X green Plant creature with reach, where X is the greatest mana value among your commanders. It's still a land.",

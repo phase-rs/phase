@@ -6,7 +6,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "2 W",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "NICKNAME gains indestructible until end of turn.",

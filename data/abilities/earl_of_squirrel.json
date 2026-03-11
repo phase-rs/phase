@@ -20,8 +20,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Squirrel",
-          "type": "AddType"
+          "subtype": "Squirrel",
+          "type": "AddSubtype"
         }
       ]
     },
@@ -29,8 +29,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Squirrel",
             "controller": "You",
+            "subtype": "Squirrel",
             "type": "Typed"
           },
           {

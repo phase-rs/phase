@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Copy target instant or sorcery spell you control. Activate this ability only once.",
@@ -18,7 +26,15 @@
     },
     {
       "cost": {
-        "cost": "G U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Copy target creature spell you control. Activate this ability only once.",

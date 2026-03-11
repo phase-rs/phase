@@ -8,7 +8,7 @@
       "description": "Gain control of target Dragon for as long as you control NICKNAME and NICKNAME remains tapped.",
       "effect": {
         "target": {
-          "card_type": "Dragon",
+          "subtype": "Dragon",
           "type": "Typed"
         },
         "type": "GainControl"

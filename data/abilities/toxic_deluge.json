@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "PayLife<X>",
-            "type": "Mana"
+            "amount": 0,
+            "type": "PayLife"
           }
         ],
         "type": "Composite"

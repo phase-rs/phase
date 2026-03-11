@@ -12,8 +12,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Pirate",
         "controller": "You",
+        "subtype": "Pirate",
         "type": "Typed"
       },
       "valid_target": {

@@ -6,7 +6,7 @@
       "description": "Each player shuffles their graveyard and hand into their library, then draws seven cards. Exile CARDNAME.",
       "effect": {
         "destination": "Library",
-        "origin": "Hand,Graveyard",
+        "origin": "Hand",
         "target": {
           "type": "Any"
         },

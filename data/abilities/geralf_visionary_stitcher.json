@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -39,8 +46,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Zombie",
         "controller": "You",
+        "subtype": "Zombie",
         "type": "Typed"
       },
       "description": "Zombies you control have flying.",

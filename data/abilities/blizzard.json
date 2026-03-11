@@ -18,7 +18,6 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Snow",
           "controller": "You",
           "properties": [
             {
@@ -26,6 +25,7 @@
               "value": "Land"
             }
           ],
+          "subtype": "Snow",
           "type": "Typed"
         },
         "type": "IsPresent"

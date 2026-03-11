@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -40,8 +47,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Zombie",
             "controller": "You",
+            "subtype": "Zombie",
             "type": "Typed"
           },
           {

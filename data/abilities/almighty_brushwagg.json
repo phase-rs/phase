@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +3/+3 until end of turn.",

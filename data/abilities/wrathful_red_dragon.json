@@ -12,8 +12,8 @@
         "Battlefield"
       ],
       "valid_target": {
-        "card_type": "Dragon",
         "controller": "You",
+        "subtype": "Dragon",
         "type": "Typed"
       }
     }

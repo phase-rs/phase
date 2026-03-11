@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+0 until end of turn.",
@@ -20,7 +25,14 @@
     },
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Destroy each nonland permanent with mana value X whose controller was dealt combat damage by CARDNAME this turn. Activate only once each turn.",

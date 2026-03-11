@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<8>",
-        "type": "Mana"
+        "amount": 8,
+        "type": "PayLife"
       },
       "description": "Untap this creature.",
       "effect": {

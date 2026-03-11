@@ -25,7 +25,11 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Clue & Artifact",
+          "subtype": "Clue",
+          "type": "AddSubtype"
+        },
+        {
+          "core_type": "Artifact",
           "type": "AddType"
         }
       ]

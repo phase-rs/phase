@@ -20,8 +20,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Junk",
         "controller": "You",
+        "subtype": "Junk",
         "type": "Typed"
       }
     }

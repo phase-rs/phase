@@ -43,7 +43,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Rat",
+        "subtype": "Rat",
         "type": "Typed"
       }
     }

@@ -10,7 +10,7 @@
         "count": 1,
         "counter_type": "Menace,Trample,Reach,Haste",
         "target": {
-          "card_type": "Dinosaur",
+          "subtype": "Dinosaur",
           "type": "Typed"
         },
         "type": "PutCounter"

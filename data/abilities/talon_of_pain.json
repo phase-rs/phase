@@ -5,15 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "X",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<X/CHARGE>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "CHARGE",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

@@ -6,7 +6,7 @@
       "description": "Return target nonland permanent or suspended card to its owner's hand.",
       "effect": {
         "destination": "Hand",
-        "origin": "",
+        "origin": "Battlefield",
         "target": {
           "card_type": "Permanent",
           "properties": [

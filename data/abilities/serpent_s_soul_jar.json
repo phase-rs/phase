@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayLife<2>",
-            "type": "Mana"
+            "amount": 2,
+            "type": "PayLife"
           }
         ],
         "type": "Composite"
@@ -35,8 +35,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Elf",
         "controller": "You",
+        "subtype": "Elf",
         "type": "Typed"
       }
     }

@@ -5,12 +5,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "R W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Unattach<CARDNAME/CARDNAME>",
-            "type": "Mana"
+            "description": "Unattach<CARDNAME/CARDNAME>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

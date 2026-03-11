@@ -78,8 +78,16 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Dragon & God",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Dragon",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "God",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "U B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 2/2 blue and black Horror artifact creature until end of turn and can't be blocked this turn.",

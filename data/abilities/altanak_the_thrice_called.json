@@ -5,12 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 G",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -47,8 +57,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "SpellAbility",
         "controller": "Opponent",
+        "subtype": "SpellAbility",
         "type": "Typed"
       },
       "valid_target": {

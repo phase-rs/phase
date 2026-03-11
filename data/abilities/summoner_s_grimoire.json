@@ -18,8 +18,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Shaman",
-          "type": "AddType"
+          "subtype": "Shaman",
+          "type": "AddSubtype"
         }
       ]
     }

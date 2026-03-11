@@ -23,8 +23,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayLife<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayLife"
           }
         ],
         "type": "Composite"
@@ -43,7 +43,12 @@
     },
     {
       "cost": {
-        "cost": "7",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put seven +1/+1 counters on CARDNAME. It becomes a 0/0 Spirit creature in addition to its other types. Activate only once.",

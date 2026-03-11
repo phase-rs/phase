@@ -15,7 +15,15 @@
     },
     {
       "cost": {
-        "cost": "3 B G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a black and green Plant Zombie creature with \"This creature's power and toughness are each equal to the number of creature cards in your graveyard.\" It's still a land.",

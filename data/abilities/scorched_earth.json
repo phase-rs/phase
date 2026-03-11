@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "X R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<X/Land/land card(s)>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

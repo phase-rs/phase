@@ -29,8 +29,12 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Creature & Coward",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Coward",
+          "type": "AddSubtype"
         }
       ]
     }

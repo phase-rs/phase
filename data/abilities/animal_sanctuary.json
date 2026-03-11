@@ -17,7 +17,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -31,7 +36,6 @@
         "count": 1,
         "counter_type": "P1P1",
         "target": {
-          "card_type": "Bird,Cat,Dog,Goat,Ox,Snake",
           "type": "Typed"
         },
         "type": "PutCounter"

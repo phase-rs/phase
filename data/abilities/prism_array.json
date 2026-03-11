@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/CRYSTAL>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "CRYSTAL",
+        "type": "RemoveCounter"
       },
       "description": "Tap target creature.",
       "effect": {
@@ -19,7 +20,18 @@
     },
     {
       "cost": {
-        "cost": "W U B R G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Scry 3. (Look at the top three cards of your library, then put any number of them on the bottom of your library and the rest on top in any order.)",

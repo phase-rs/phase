@@ -8,8 +8,19 @@
             "type": "Tap"
           },
           {
-            "cost": "RemoveAnyCounter<1/Any/Permanent.nonLand/nonland permanent>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Permanent",
+              "properties": [
+                {
+                  "type": "NonType",
+                  "value": "Land"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

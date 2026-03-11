@@ -17,7 +17,16 @@
     },
     {
       "cost": {
-        "cost": "2 G G G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 5/3 green Treefolk artifact creature with trample until end of turn.",

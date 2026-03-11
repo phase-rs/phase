@@ -30,7 +30,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "3 G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Put 4 +1/+1 counters on target land you control. That land becomes a 0/0 Elemental creature with haste. It's still a land.",

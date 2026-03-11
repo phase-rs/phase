@@ -15,7 +15,7 @@
       "statics": [
         {
           "affected": {
-            "card_type": "You",
+            "subtype": "You",
             "type": "Typed"
           },
           "description": "You have hexproof.",
@@ -36,7 +36,7 @@
       "statics": [
         {
           "affected": {
-            "card_type": "You",
+            "subtype": "You",
             "type": "Typed"
           },
           "description": "You have hexproof.",

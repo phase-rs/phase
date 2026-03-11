@@ -17,7 +17,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 B R",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Black",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -33,7 +41,7 @@
           "value": 2
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

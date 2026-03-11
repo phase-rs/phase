@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -28,7 +35,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -43,7 +57,7 @@
       "description": "Counter target activated or triggered ability.",
       "effect": {
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "type": "Counter"

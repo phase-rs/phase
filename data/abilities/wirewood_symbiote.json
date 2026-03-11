@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Return<1/Elf>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "subtype": "Elf",
+          "type": "Typed"
+        },
+        "type": "ReturnToHand"
       },
       "description": "Untap target creature. Activate only once each turn.",
       "effect": {

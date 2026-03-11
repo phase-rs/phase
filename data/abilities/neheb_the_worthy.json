@@ -8,8 +8,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Minotaur",
             "controller": "You",
+            "subtype": "Minotaur",
             "type": "Typed"
           },
           {
@@ -36,8 +36,8 @@
     },
     {
       "affected": {
-        "card_type": "Minotaur",
         "controller": "You",
+        "subtype": "Minotaur",
         "type": "Typed"
       },
       "condition": {

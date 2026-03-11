@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7 G",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Seek a creature card. This ability costs {1} less to activate for each basic land type among lands you control.",

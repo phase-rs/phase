@@ -17,8 +17,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Wall",
-          "type": "AddType"
+          "subtype": "Wall",
+          "type": "AddSubtype"
         }
       ]
     }
@@ -35,7 +35,7 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     },

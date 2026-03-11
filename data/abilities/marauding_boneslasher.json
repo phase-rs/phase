@@ -9,8 +9,8 @@
         "filter": {
           "filters": [
             {
-              "card_type": "Zombie",
               "controller": "You",
+              "subtype": "Zombie",
               "type": "Typed"
             },
             {

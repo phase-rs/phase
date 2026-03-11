@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Search your library for an artifact card with mana value 5 or less, put it onto the battlefield tapped, then shuffle.",
@@ -22,12 +27,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "5",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

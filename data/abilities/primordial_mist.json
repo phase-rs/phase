@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Exile<1/Permanent.faceDown>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "Exile"
       },
       "description": "You may play that card this turn. (You still pay its costs. Timing rules still apply.)",
       "effect": {

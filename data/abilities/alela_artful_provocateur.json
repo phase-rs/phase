@@ -39,7 +39,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Artifact,Enchantment",
+        "card_type": "Artifact",
         "type": "Typed"
       }
     }

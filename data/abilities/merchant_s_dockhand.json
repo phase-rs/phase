@@ -5,15 +5,26 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 U",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "tapXType<X/Artifact>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Artifact",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

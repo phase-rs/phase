@@ -22,7 +22,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery,Wizard",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

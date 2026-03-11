@@ -3,13 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target player other than CARDNAME's owner gains control of it. Activate only during your turn.",
       "effect": {
         "target": {
-          "card_type": "Player",
+          "subtype": "Player",
           "type": "Typed"
         },
         "type": "GainControl"

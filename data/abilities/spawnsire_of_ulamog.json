@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Create two 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this creature: Add {C}.\"",
@@ -21,7 +26,12 @@
     },
     {
       "cost": {
-        "cost": "20",
+        "cost": {
+          "Cost": {
+            "generic": 20,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Cast any number of Eldrazi spells from among cards you own outside the game without paying their mana costs.",

@@ -7,7 +7,7 @@
       "description": "If an instant or sorcery would be put in a graveyard from anywhere, exile it instead.",
       "event": "Moved",
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

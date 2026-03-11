@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "U U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -29,7 +37,15 @@
     },
     {
       "cost": {
-        "cost": "U U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "This creature gets -1/-0 until end of turn and deals 1 damage to target attacking creature without flying.",

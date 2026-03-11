@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Pest",
         "controller": "You",
         "properties": [
           {
             "type": "Attacking"
           }
         ],
+        "subtype": "Pest",
         "type": "Typed"
       },
       "description": "Attacking Pests you control get +1/+0 and have menace.",

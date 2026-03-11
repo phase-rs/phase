@@ -5,12 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 W",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "RemoveAnyCounter<1/Any/CARDNAME/this creature>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "Any",
+            "target": {
+              "type": "SelfRef"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

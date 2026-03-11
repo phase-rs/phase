@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -37,8 +42,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<6/Creature>",
-        "type": "Mana"
+        "count": 6,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Return CARDNAME from your graveyard to the battlefield. If you tapped six legendary creatures this way, you win the game.",
       "effect": {

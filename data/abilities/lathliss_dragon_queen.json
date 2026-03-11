@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Dragons you control get +1/+0 until end of turn.",
@@ -34,8 +41,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Dragon",
             "controller": "You",
+            "subtype": "Dragon",
             "type": "Typed"
           },
           {

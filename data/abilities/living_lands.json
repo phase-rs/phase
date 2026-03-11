@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Forest",
+        "subtype": "Forest",
         "type": "Typed"
       },
       "description": "All Forests are 1/1 creatures that are still lands.",

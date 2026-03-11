@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Permanents you control gain indestructible until end of turn.",
@@ -22,12 +27,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "5",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

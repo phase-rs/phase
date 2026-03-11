@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -29,8 +34,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<2/Permanent.token/token>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME becomes an artifact creature until end of turn.",
       "effect": {

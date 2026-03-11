@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card, then discard a card. Put a +1/+1 counter on this creature. (Activate each exhaust ability only once.)",

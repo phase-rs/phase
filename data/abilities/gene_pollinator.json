@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<1/Permanent>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Permanent",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

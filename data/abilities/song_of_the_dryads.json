@@ -18,8 +18,12 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Land & Forest",
+          "core_type": "Land",
           "type": "AddType"
+        },
+        {
+          "subtype": "Forest",
+          "type": "AddSubtype"
         }
       ]
     }

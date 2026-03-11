@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "At the beginning of your next upkeep, choose a basic land type. CARDNAME gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)",

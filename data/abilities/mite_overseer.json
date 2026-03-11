@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 WP",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 1/1 colorless Phyrexian Mite artifact creature token with toxic 1 and \"This creature can't block.\" (Players dealt combat damage by it also get a poison counter. {W/P} can be paid with either {W} or 2 life.)",

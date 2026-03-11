@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -19,7 +26,7 @@
         "destination": "Battlefield",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Aura",
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "ChangeZone"

@@ -6,7 +6,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "CARDNAME gets +1/-1 until end of turn.",
@@ -23,7 +30,15 @@
         },
         {
           "cost": {
-            "cost": "5 R R",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": [
+                  "Red",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME.",
@@ -44,7 +59,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "CARDNAME gets +1/+0 until end of turn.",

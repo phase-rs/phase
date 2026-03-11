@@ -17,7 +17,7 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Elf",
+            "subtype": "Elf",
             "type": "Typed"
           },
           {

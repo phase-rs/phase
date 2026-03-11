@@ -17,7 +17,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -47,8 +52,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "AllNonBasicLandType",
-          "type": "AddType"
+          "subtype": "AllNonBasicLandType",
+          "type": "AddSubtype"
         }
       ]
     }

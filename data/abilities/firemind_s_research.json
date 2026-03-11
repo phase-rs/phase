@@ -5,12 +5,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<2/CHARGE>",
-            "type": "Mana"
+            "count": 2,
+            "counter_type": "CHARGE",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -27,12 +35,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 R",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<5/CHARGE>",
-            "type": "Mana"
+            "count": 5,
+            "counter_type": "CHARGE",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -63,7 +79,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

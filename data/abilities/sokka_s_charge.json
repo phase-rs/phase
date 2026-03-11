@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Ally",
         "controller": "You",
+        "subtype": "Ally",
         "type": "Typed"
       },
       "description": "During your turn, Allies you control have double strike and lifelink.",

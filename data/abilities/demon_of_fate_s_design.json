@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -49,7 +56,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Hand,Graveyard,Exile,Library,Command",
+      "affected_zone": "Hand",
       "description": "Once during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.",
       "mode": "Continuous"
     }

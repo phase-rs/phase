@@ -3,7 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W U B R G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White",
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Other creatures you control get +X/+X until end of turn, where X is the number of Towns you control.",

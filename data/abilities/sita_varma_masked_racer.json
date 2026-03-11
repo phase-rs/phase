@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X G G U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X",
+              "Green",
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put X +1/+1 counters on NICKNAME. Then you may have the base power and toughness of each other creature you control become equal to NICKNAME's power until end of turn. (Activate each exhaust ability only once.)",

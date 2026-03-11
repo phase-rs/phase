@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 U U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +4/-4 until end of turn and can attack this turn as though it didn't have defender.",

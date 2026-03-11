@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a charge counter on CARDNAME.",
@@ -20,8 +25,9 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<1/CHARGE>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "CHARGE",
+        "type": "RemoveCounter"
       },
       "description": "Add one mana of any color.",
       "effect": {

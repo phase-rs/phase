@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",

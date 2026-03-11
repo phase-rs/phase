@@ -3,8 +3,19 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromGrave<1+/Card.Black+withTotalManaSymbols_Black_GE15>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Card",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Black"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "Exile",
+        "zone": "Graveyard"
       },
       "description": "Copy those exiled cards. You may cast up to three of the copies without paying their mana costs. (Activate only if this creature attacked this turn and only once each turn.)",
       "effect": {

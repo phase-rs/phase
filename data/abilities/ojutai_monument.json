@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "4 W U",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 4/4 white and blue Dragon artifact creature with flying until end of turn.",

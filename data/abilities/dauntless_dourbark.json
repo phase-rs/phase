@@ -20,8 +20,8 @@
         "filter": {
           "filters": [
             {
-              "card_type": "Treefolk",
               "controller": "You",
+              "subtype": "Treefolk",
               "type": "Typed"
             },
             {

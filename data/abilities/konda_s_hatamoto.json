@@ -10,7 +10,6 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Samurai",
           "controller": "You",
           "properties": [
             {
@@ -18,6 +17,7 @@
               "value": "Legendary"
             }
           ],
+          "subtype": "Samurai",
           "type": "Typed"
         },
         "type": "IsPresent"

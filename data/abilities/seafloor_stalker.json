@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 U",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+0 until end of turn and can't be blocked this turn. This ability costs {1} less to activate for each creature in your party.",

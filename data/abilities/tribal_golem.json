@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Beast",
           "controller": "You",
+          "subtype": "Beast",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -31,8 +31,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Goblin",
           "controller": "You",
+          "subtype": "Goblin",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -52,8 +52,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Soldier",
           "controller": "You",
+          "subtype": "Soldier",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -77,8 +77,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Wizard",
           "controller": "You",
+          "subtype": "Wizard",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -98,8 +98,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Zombie",
           "controller": "You",
+          "subtype": "Zombie",
           "type": "Typed"
         },
         "type": "IsPresent"

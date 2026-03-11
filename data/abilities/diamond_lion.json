@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "Discard<0/Hand>",
-            "type": "Mana"
+            "count": 0,
+            "type": "Discard"
           },
           {
             "target": {

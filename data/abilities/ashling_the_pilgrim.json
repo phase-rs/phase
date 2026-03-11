@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a +1/+1 counter on CARDNAME. If this is the third time this ability has resolved this turn, remove all +1/+1 counters from CARDNAME, and it deals that much damage to each creature and each player.",

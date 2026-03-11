@@ -5,15 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 W",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -21,7 +28,7 @@
       "description": "Destroy target artifact or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

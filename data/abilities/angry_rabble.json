@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 R",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put two +1/+1 counters on this creature. Activate only as a sorcery.",

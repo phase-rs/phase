@@ -26,8 +26,8 @@
           "value": 2
         },
         {
-          "core_type": "Warrior",
-          "type": "AddType"
+          "subtype": "Warrior",
+          "type": "AddSubtype"
         }
       ]
     }

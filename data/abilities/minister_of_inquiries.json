@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"

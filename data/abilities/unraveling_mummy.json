@@ -3,19 +3,26 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target attacking Zombie gains lifelink until end of turn.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Zombie",
           "properties": [
             {
               "type": "Attacking"
             }
           ],
+          "subtype": "Zombie",
           "type": "Typed"
         },
         "toughness": 0,
@@ -27,19 +34,26 @@
     },
     {
       "cost": {
-        "cost": "1 B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target attacking Zombie gains deathtouch until end of turn.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Zombie",
           "properties": [
             {
               "type": "Attacking"
             }
           ],
+          "subtype": "Zombie",
           "type": "Typed"
         },
         "toughness": 0,

@@ -34,8 +34,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Minotaur",
         "controller": "You",
+        "subtype": "Minotaur",
         "type": "Typed"
       }
     }

@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 R",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -20,7 +27,6 @@
       "description": "Destroy target Scarecrow or Plains.",
       "effect": {
         "target": {
-          "card_type": "Scarecrow,Plains",
           "type": "Typed"
         },
         "type": "Destroy"

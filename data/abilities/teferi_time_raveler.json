@@ -24,7 +24,7 @@
         "destination": "Hand",
         "origin": "Battlefield",
         "target": {
-          "card_type": "Artifact,Creature,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "ChangeZone"

@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R R R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red",
+              "Red",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME from your graveyard to your hand.",

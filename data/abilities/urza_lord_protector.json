@@ -6,7 +6,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "7",
+            "cost": {
+              "Cost": {
+                "generic": 7,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "If you both own and control CARDNAME and an artifact named The Mightstone and Weakstone, exile them, then meld them into Urza, Planeswalker. Activate only as a sorcery.",

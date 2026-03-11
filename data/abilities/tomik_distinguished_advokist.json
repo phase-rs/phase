@@ -5,7 +5,7 @@
   "replacements": [],
   "statics": [
     {
-      "affected_zone": "Battlefield,Graveyard",
+      "affected_zone": "Battlefield",
       "description": "Lands on the battlefield and land cards in graveyards can't be the targets of spells or abilities your opponents control.",
       "mode": {
         "Other": "CantTarget"

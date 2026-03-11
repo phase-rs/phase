@@ -5,12 +5,17 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Unattach<Equipment.Attached+cmcEQX/an Equipment attached to NICKNAME>",
-            "type": "Mana"
+            "description": "Unattach<Equipment.Attached+cmcEQX/an Equipment attached to NICKNAME>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

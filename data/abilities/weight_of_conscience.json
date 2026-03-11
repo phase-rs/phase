@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Creature.sharesCreatureTypeWith/creatures that share a creature type>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Exile enchanted creature.",
       "effect": {

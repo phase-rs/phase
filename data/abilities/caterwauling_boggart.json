@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Goblin",
         "controller": "You",
+        "subtype": "Goblin",
         "type": "Typed"
       },
       "description": "Goblin creatures you control have menace.",
@@ -21,8 +21,8 @@
     },
     {
       "affected": {
-        "card_type": "Elemental",
         "controller": "You",
+        "subtype": "Elemental",
         "type": "Typed"
       },
       "description": "Elemental creatures you control have menace.",

@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/OIL/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "OIL",
+            "target": {
+              "type": "SelfRef"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -17,7 +21,7 @@
       "description": "Tap target artifact or creature.",
       "effect": {
         "target": {
-          "card_type": "Creature,Artifact",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Tap"

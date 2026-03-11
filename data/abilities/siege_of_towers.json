@@ -8,7 +8,7 @@
       "effect": {
         "power": 3,
         "target": {
-          "card_type": "Mountain",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "toughness": 1,

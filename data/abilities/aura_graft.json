@@ -6,13 +6,13 @@
       "description": "Gain control of target Aura that's attached to a permanent. Attach it to another permanent it can enchant.",
       "effect": {
         "target": {
-          "card_type": "Aura",
           "properties": [
             {
               "type": "Other",
               "value": "AttachedTo Permanent"
             }
           ],
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "GainControl"

@@ -5,15 +5,35 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "tapXType<1/Creature.Other>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Creature",
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

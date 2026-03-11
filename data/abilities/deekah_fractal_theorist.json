@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature token can't be blocked this turn.",
@@ -26,7 +33,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

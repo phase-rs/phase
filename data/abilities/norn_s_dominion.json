@@ -9,13 +9,13 @@
       "description": "When you planeswalk away from CARDNAME, destroy each nonland permanent without a fate counter on it, then remove all fate counters from all permanents.",
       "mode": "PlaneswalkedFrom",
       "valid_card": {
-        "card_type": "Plane",
         "properties": [
           {
             "type": "Other",
             "value": "Self"
           }
         ],
+        "subtype": "Plane",
         "type": "Typed"
       }
     },

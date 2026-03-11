@@ -51,8 +51,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Snake",
         "controller": "You",
+        "subtype": "Snake",
         "type": "Typed"
       },
       "valid_target": {

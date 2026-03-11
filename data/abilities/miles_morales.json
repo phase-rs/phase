@@ -6,7 +6,16 @@
       "abilities": [
         {
           "cost": {
-            "cost": "3 R G W",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Red",
+                  "Green",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME. Activate only as a sorcery.",
@@ -38,7 +47,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "Put a +1/+1 counter on CARDNAME. He gains hexproof and becomes colorless until end of turn.",

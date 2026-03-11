@@ -3,13 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Creature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Tap target artifact or creature.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Tap"

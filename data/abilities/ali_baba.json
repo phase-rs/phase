@@ -3,13 +3,20 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Tap target Wall.",
       "effect": {
         "target": {
-          "card_type": "Wall",
+          "subtype": "Wall",
           "type": "Typed"
         },
         "type": "Tap"

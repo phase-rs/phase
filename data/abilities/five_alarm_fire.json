@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<5/BLAZE>",
-        "type": "Mana"
+        "count": 5,
+        "counter_type": "BLAZE",
+        "type": "RemoveCounter"
       },
       "description": "It deals 5 damage to any target.",
       "effect": {

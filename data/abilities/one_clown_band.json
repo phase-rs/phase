@@ -3,14 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target Robot gets +2/+0 until end of turn.",
       "effect": {
         "power": 2,
         "target": {
-          "card_type": "Robot",
+          "subtype": "Robot",
           "type": "Typed"
         },
         "toughness": 0,

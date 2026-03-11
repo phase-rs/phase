@@ -46,8 +46,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Legendary",
-          "type": "AddType"
+          "subtype": "Legendary",
+          "type": "AddSubtype"
         }
       ]
     }

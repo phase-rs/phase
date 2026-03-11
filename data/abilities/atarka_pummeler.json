@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control gain menace until end of turn. Activate only if creatures you control have total power 8 or greater.",

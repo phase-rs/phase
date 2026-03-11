@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control get +1/+1 and gain vigilance until end of turn. Activate only during your turn.",

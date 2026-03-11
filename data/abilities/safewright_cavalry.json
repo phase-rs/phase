@@ -3,15 +3,20 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target Elf you control gets +2/+2 until end of turn.",
       "effect": {
         "power": 2,
         "target": {
-          "card_type": "Elf",
           "controller": "You",
+          "subtype": "Elf",
           "type": "Typed"
         },
         "toughness": 2,

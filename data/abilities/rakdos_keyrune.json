@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "B R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 3/1 black and red Devil artifact creature with first strike until end of turn.",

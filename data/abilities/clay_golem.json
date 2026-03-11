@@ -5,12 +5,17 @@
       "cost": {
         "costs": [
           {
-            "cost": "6",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "RollDice<1/8/X>",
-            "type": "Mana"
+            "description": "RollDice<1/8/X>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

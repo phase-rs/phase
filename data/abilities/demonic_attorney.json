@@ -6,7 +6,7 @@
       "description": "Each player antes the top card of their library.",
       "effect": {
         "count": 1,
-        "destination": "Ante",
+        "destination": "Exile",
         "type": "Dig"
       },
       "kind": "Spell",

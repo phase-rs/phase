@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<3/SPORE>",
-        "type": "Mana"
+        "count": 3,
+        "counter_type": "SPORE",
+        "type": "RemoveCounter"
       },
       "description": "Create a 1/1 green Saproling creature token.",
       "effect": {

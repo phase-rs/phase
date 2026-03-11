@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 BG BG",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black",
+              "Green",
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put CARDNAME from exile onto the battlefield tapped. Activate only as a sorcery.",

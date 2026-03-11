@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "XMin1 X G U",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "X",
+              "X",
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "For each number between 1 and X, conjure a duplicate of a random creature card with that mana value onto the battlefield. X can't be 0.",

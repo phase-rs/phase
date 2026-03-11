@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<2/Artifact>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "card_type": "Artifact",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"
@@ -34,8 +38,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<X/Creature>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"
@@ -43,7 +51,7 @@
       "description": "Look at the top X cards of your library. You may reveal an artifact card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
       "effect": {
         "count": 1,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

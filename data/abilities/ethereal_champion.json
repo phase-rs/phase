@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<1>",
-        "type": "Mana"
+        "amount": 1,
+        "type": "PayLife"
       },
       "description": "Prevent the next 1 damage that would be dealt to CARDNAME this turn.",
       "effect": {

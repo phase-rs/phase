@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "XMin1 X U",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "X",
+              "X",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target spell's controller exiles it with X delay counters on it.",

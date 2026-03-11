@@ -3,8 +3,23 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Merfolk.Other>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "filters": [
+            {
+              "subtype": "Merfolk",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME can't be blocked this turn.",
       "effect": {
@@ -15,8 +30,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<3/Merfolk>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "subtype": "Merfolk",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Draw a card.",
       "effect": {
@@ -28,8 +47,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<5/Merfolk>",
-        "type": "Mana"
+        "count": 5,
+        "filter": {
+          "subtype": "Merfolk",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Put a +1/+1 counter on each Merfolk you control.",
       "effect": {

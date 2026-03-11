@@ -18,8 +18,8 @@
     },
     {
       "cost": {
-        "cost": "AddCounter<1/M1M1>",
-        "type": "Mana"
+        "description": "AddCounter<1/M1M1>",
+        "type": "Unimplemented"
       },
       "description": "Untap CARDNAME.",
       "effect": {

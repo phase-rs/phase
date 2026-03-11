@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/Indestructible>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "Indestructible",
+        "type": "RemoveCounter"
       },
       "description": "Copy target permanent spell you control three times. (The copies become tokens.)",
       "effect": {

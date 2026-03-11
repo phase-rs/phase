@@ -8,8 +8,14 @@
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<X/Card.YouCtrl>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Card",
+              "controller": "You",
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

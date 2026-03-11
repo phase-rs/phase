@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Goblin",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Orc.YouCtrl"
           }
         ],
+        "subtype": "Goblin",
         "type": "Typed"
       },
       "description": "Goblins and Orcs you control have ward {2}.",

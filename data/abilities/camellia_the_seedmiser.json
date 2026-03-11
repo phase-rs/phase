@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 Forage",
+        "cost": {
+          "Cost": {
+            "generic": 8,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a +1/+1 counter on each other Squirrel you control. (To forage, exile three cards from your graveyard or sacrifice a Food.)",
@@ -23,8 +28,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Squirrel",
             "controller": "You",
+            "subtype": "Squirrel",
             "type": "Typed"
           },
           {
@@ -54,7 +59,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Food",
+        "subtype": "Food",
         "type": "Typed"
       }
     }

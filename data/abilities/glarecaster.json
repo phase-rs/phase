@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 W",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "The next time damage would be dealt to CARDNAME and/or you this turn, that damage is dealt to any target instead.",

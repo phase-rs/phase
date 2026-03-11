@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<2/Card>",
-        "type": "Mana"
+        "count": 2,
+        "type": "Discard"
       },
       "description": "Create a 2/2 black Zombie creature token.",
       "effect": {

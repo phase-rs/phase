@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X 2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "X",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "This Vehicle deals X damage to any target. Put a +1/+1 counter on this Vehicle. (Activate each exhaust ability only once.)",

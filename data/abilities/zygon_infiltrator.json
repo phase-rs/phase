@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Tap another target creature and put a stun counter on it. CARDNAME becomes a copy of that creature for as long as that creature remains tapped. Activate only as a sorcery. (If a permanent with a stun counter would become untapped, remove one from it instead.)",

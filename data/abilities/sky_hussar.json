@@ -5,12 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "tapXType<2/Creature.White;Creature.Blue/white and/or blue creatures>",
-            "type": "Mana"
+            "count": 2,
+            "filter": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "White;Creature.Blue/white and/or blue creatures"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           },
           {
-            "cost": "Reveal<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Reveal"
           }
         ],
         "type": "Composite"

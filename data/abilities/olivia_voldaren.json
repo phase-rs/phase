@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 1 damage to another target creature. That creature becomes a Vampire in addition to its other types. Put a +1/+1 counter on CARDNAME.",
@@ -34,7 +41,15 @@
     },
     {
       "cost": {
-        "cost": "3 B B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Gain control of target vampire for as long as you control CARDNAME.",

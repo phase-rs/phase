@@ -6,7 +6,6 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Food",
         "controller": "You",
         "properties": [
           {
@@ -14,6 +13,7 @@
             "value": "Creature"
           }
         ],
+        "subtype": "Food",
         "type": "Typed"
       },
       "description": "Each noncreature Food you control is an Equipment with equip {1} and \"Equipped creature gets +1/+1.\"",
@@ -24,8 +24,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Equipment",
-          "type": "AddType"
+          "subtype": "Equipment",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -8,7 +8,7 @@
       "description": "Destroy target artifact or creature.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

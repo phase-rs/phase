@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<7/Merfolk>",
-        "type": "Mana"
+        "count": 7,
+        "filter": {
+          "subtype": "Merfolk",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Counter target spell.",
       "effect": {

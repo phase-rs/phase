@@ -23,7 +23,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Hand,Graveyard,Exile,Command,Library",
+      "affected_zone": "Hand",
       "description": "You may cast spells with mana value less than or equal to the number of lands you control without paying their mana costs.",
       "mode": "Continuous"
     }

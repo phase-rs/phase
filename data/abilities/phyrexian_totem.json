@@ -17,7 +17,14 @@
     },
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 5/5 black Phyrexian Horror artifact creature with trample until end of turn.",

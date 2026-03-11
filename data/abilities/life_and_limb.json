@@ -6,7 +6,6 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Forest,Saproling",
         "type": "Typed"
       },
       "description": "All Forests and all Saprolings are 1/1 green Saproling creatures and Forest lands in addition to their other types. (They're affected by summoning sickness.)",
@@ -21,8 +20,20 @@
           "value": 1
         },
         {
-          "core_type": "Land & Creature & Forest & Saproling",
+          "core_type": "Land",
           "type": "AddType"
+        },
+        {
+          "core_type": "Creature",
+          "type": "AddType"
+        },
+        {
+          "subtype": "Forest",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Saproling",
+          "type": "AddSubtype"
         },
         {
           "colors": [

@@ -25,13 +25,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Island",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Pirate.YouCtrl,Vehicle.YouCtrl"
           }
         ],
+        "subtype": "Island",
         "type": "Typed"
       }
     }

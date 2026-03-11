@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Merfolk",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn,Druid.YouOwn"
           }
         ],
+        "subtype": "Merfolk",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",

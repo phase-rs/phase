@@ -5,12 +5,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 R",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/P1P1>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "P1P1",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -18,7 +26,7 @@
       "description": "Destroy target artifact or land.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

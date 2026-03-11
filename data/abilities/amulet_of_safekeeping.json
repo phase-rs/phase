@@ -32,12 +32,12 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "SpellAbility",
         "controller": "Opponent",
+        "subtype": "SpellAbility",
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     }

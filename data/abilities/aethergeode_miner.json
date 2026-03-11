@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<2>",
-        "type": "Mana"
+        "amount": 2,
+        "type": "PayEnergy"
       },
       "description": "Exile CARDNAME, then return it to the battlefield under its owner's control.",
       "effect": {

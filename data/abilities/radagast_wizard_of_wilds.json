@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Beast",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Bird.YouCtrl"
           }
         ],
+        "subtype": "Beast",
         "type": "Typed"
       },
       "description": "Beasts and Birds you control have ward {1}.",

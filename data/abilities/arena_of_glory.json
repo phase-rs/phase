@@ -19,15 +19,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "R",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Exert<1/CARDNAME>",
-            "type": "Mana"
+            "type": "Exert"
           }
         ],
         "type": "Composite"

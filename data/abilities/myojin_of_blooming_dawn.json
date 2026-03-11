@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/Indestructible>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "Indestructible",
+        "type": "RemoveCounter"
       },
       "description": "Create a 1/1 colorless Spirit creature token for each permanent you control.",
       "effect": {

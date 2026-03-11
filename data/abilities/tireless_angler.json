@@ -14,13 +14,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Island",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Swamp.YouCtrl"
           }
         ],
+        "subtype": "Island",
         "type": "Typed"
       }
     }

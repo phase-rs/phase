@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return this card and target land card from your graveyard to the battlefield tapped.",

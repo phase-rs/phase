@@ -29,7 +29,7 @@
       "effect": {
         "power": 3,
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "toughness": 3,

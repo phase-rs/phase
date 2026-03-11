@@ -24,8 +24,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/OIL>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "OIL",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +3/+0 and gains flying until end of turn.",

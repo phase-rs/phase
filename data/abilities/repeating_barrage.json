@@ -19,7 +19,15 @@
     },
     {
       "cost": {
-        "cost": "3 R R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME from your graveyard to your hand. Activate only if you attacked this turn.",

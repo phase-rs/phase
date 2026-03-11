@@ -6,7 +6,7 @@
       "description": "Gain control of target Equipment, then create a 0/0 black Phyrexian Germ creature token and attach that Equipment to it.",
       "effect": {
         "target": {
-          "card_type": "Equipment",
+          "subtype": "Equipment",
           "type": "Typed"
         },
         "type": "GainControl"

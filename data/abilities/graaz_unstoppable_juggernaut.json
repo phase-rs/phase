@@ -44,8 +44,8 @@
           "value": 3
         },
         {
-          "core_type": "Juggernaut",
-          "type": "AddType"
+          "subtype": "Juggernaut",
+          "type": "AddSubtype"
         }
       ]
     }

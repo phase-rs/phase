@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/PALLIATION>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "PALLIATION",
+        "type": "RemoveCounter"
       },
       "description": "Prevent the next 1 damage that would be dealt to you this turn.",
       "effect": {

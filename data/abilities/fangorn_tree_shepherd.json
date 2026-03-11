@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Treefolk",
         "controller": "You",
+        "subtype": "Treefolk",
         "type": "Typed"
       },
       "description": "Treefolk you control have vigilance.",

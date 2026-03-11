@@ -8,7 +8,7 @@
       "description": "Destroy target attacking or blocking Dragon. It can't be regenerated. You gain life equal to its power.",
       "effect": {
         "target": {
-          "card_type": "Dragon",
+          "subtype": "Dragon",
           "type": "Typed"
         },
         "type": "Destroy"

@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<3/CHARGE>",
-        "type": "Mana"
+        "count": 3,
+        "counter_type": "CHARGE",
+        "type": "RemoveCounter"
       },
       "description": "When you next cast an instant or sorcery spell this turn, copy it and you may choose new targets for the copy.",
       "effect": {
@@ -27,7 +28,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "effect": {
@@ -55,7 +63,7 @@
         "Battlefield"
       ],
       "valid_target": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     }

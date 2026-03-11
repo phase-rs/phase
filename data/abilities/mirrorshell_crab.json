@@ -5,12 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"
@@ -18,7 +28,7 @@
       "description": "Counter target spell or ability unless its controller pays {3}.",
       "effect": {
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "type": "Counter"

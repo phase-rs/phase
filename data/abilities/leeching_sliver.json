@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Sliver",
         "controller": "You",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "mode": "Continuous"
@@ -21,8 +21,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Sliver",
         "controller": "You",
+        "subtype": "Sliver",
         "type": "Typed"
       }
     }

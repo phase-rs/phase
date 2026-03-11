@@ -8,8 +8,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Warlock",
             "controller": "You",
+            "subtype": "Warlock",
             "type": "Typed"
           },
           {

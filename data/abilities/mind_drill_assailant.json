@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 UB",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Surveil 1. (Look at the top card of your library. You may put it into your graveyard.)",

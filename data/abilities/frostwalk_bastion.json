@@ -15,7 +15,14 @@
     },
     {
       "cost": {
-        "cost": "1 S",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a 2/3 Construct artifact creature. It's still a land. ({S} can be paid with one mana from a snow source.)",

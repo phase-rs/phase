@@ -15,7 +15,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Hand,Graveyard,Exile,Library,Command,Stack",
+      "affected_zone": "Hand",
       "description": "Creature cards you own that aren't on the battlefield have flash.",
       "mode": "Continuous",
       "modifications": [

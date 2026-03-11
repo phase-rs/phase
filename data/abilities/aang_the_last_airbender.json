@@ -21,7 +21,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Lesson",
+        "subtype": "Lesson",
         "type": "Typed"
       }
     }

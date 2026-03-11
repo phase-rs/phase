@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "You may cast target creature card in a graveyard this turn. When you cast it this turn, CARDNAME gains all activated abilities of that card until end of turn.",

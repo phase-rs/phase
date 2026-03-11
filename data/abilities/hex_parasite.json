@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X BP",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "X",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Remove up to X counters from target permanent. For each counter removed this way, CARDNAME gets +1/+0 until end of turn.",

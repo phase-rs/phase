@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Permanent.token/token>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Add one mana of any color.",
       "effect": {
@@ -16,8 +20,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<3/Permanent.token/token>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Draw a card.",
       "effect": {
@@ -29,8 +37,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<4/Permanent.token/token>",
-        "type": "Mana"
+        "count": 4,
+        "filter": {
+          "card_type": "Permanent",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Put three +1/+1 counters on CARDNAME. It gains trample until end of turn.",
       "effect": {

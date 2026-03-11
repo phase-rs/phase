@@ -13,8 +13,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Faerie",
         "controller": "You",
+        "subtype": "Faerie",
         "type": "Typed"
       },
       "valid_target": {

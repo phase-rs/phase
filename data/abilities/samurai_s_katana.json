@@ -38,8 +38,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Samurai",
-          "type": "AddType"
+          "subtype": "Samurai",
+          "type": "AddSubtype"
         }
       ]
     }

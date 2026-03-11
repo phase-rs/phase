@@ -7,7 +7,7 @@
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Card,Emblem",
+          "card_type": "Card",
           "type": "Typed"
         },
         "toughness": 0,

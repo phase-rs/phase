@@ -33,7 +33,7 @@
     },
     {
       "description": "Whenever a creature with a coin counter on it dies or is put into exile, return that card to the battlefield under your control.",
-      "destination": "Graveyard,Exile",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "trigger_zones": [

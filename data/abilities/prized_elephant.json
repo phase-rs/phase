@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets trample until end of turn.",
@@ -28,8 +35,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Forest",
           "controller": "You",
+          "subtype": "Forest",
           "type": "Typed"
         },
         "type": "IsPresent"

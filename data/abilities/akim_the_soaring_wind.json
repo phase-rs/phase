@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U R W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue",
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creature tokens you control gain double strike until end of turn.",

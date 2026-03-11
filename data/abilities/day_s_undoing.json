@@ -6,7 +6,7 @@
       "description": "Each player shuffles their hand and graveyard into their library, then draws seven cards. If it's your turn, end the turn. (Exile all spells and abilities from the stack, including this card. Discard down to your maximum hand size. Damage wears off, and \"this turn\" and \"until end of turn\" effects end.)",
       "effect": {
         "destination": "Library",
-        "origin": "Hand,Graveyard",
+        "origin": "Hand",
         "target": {
           "type": "Any"
         },

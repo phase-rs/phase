@@ -5,15 +5,31 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<X/Any/Artifact.YouCtrl;Creature.YouCtrl/an artifact or creature you control>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Artifact",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "YouCtrl;Creature.YouCtrl"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Demon",
         "controller": "You",
+        "subtype": "Demon",
         "type": "Typed"
       },
       "description": "Demons you control have menace, lifelink, and haste.",

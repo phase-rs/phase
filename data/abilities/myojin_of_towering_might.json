@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/Indestructible>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "Indestructible",
+        "type": "RemoveCounter"
       },
       "description": "Distribute eight +1/+1 counters among any number of target creatures you control.",
       "effect": {

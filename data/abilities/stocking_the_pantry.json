@@ -5,12 +5,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/SUPPLY>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "SUPPLY",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -40,7 +46,7 @@
         "type": "Typed"
       },
       "valid_source": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     }

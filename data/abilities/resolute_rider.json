@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "WB WB",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black",
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains lifelink until end of turn.",
@@ -20,7 +30,19 @@
     },
     {
       "cost": {
-        "cost": "WB WB WB",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black",
+              "White",
+              "Black",
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it.)",

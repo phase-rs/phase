@@ -10,7 +10,7 @@
         "destination": "Exile",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Instant,Sorcery",
+          "card_type": "Instant",
           "type": "Typed"
         },
         "type": "ChangeZone"

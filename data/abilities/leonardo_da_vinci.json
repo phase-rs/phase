@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, Thopters you control have base power and toughness X/X, where X is the number of cards in your hand.",
@@ -19,7 +27,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

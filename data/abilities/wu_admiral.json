@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Island",
           "controller": "Opponent",
+          "subtype": "Island",
           "type": "Typed"
         },
         "type": "IsPresent"

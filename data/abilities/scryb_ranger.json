@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Return<1/Forest>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "subtype": "Forest",
+          "type": "Typed"
+        },
+        "type": "ReturnToHand"
       },
       "description": "Untap target creature. Activate only once each turn.",
       "effect": {

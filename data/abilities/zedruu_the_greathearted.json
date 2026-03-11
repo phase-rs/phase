@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U R W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target opponent gains control of target permanent you control.",

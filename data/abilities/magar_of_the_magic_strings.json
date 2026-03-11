@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 B R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Note the name of target instant or sorcery card in your graveyard and put it onto the battlefield face down. It's a 3/3 creature with \"Whenever this creature deals combat damage to a player, you may create a copy of the card with the noted name. You may cast the copy without paying its mana cost\" and \"If this creature would leave the battlefield, exile it instead of putting it anywhere else.\"",

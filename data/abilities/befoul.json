@@ -6,7 +6,7 @@
       "description": "Destroy target land or nonblack creature. It can't be regenerated.",
       "effect": {
         "target": {
-          "card_type": "Land,Creature",
+          "card_type": "Land",
           "type": "Typed"
         },
         "type": "Destroy"

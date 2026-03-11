@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gets +1/+0 until end of turn.",
@@ -21,7 +28,15 @@
     },
     {
       "cost": {
-        "cost": "U U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature you control gains flying until end of turn. Sacrifice it at the beginning of the next end step.",

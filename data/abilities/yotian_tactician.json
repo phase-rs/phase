@@ -8,8 +8,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Soldier",
             "controller": "You",
+            "subtype": "Soldier",
             "type": "Typed"
           },
           {

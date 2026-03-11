@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target card from a graveyard. If it was a creature card, create a 1/1 white Human Soldier creature token.",
@@ -26,7 +34,6 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Human",
         "controller": "You",
         "properties": [
           {
@@ -34,6 +41,7 @@
             "value": "Legendary"
           }
         ],
+        "subtype": "Human",
         "type": "Typed"
       },
       "description": "Legendary Humans you control have indestructible.",

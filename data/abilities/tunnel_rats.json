@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 B",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return this card from your graveyard to the battlefield tapped.",

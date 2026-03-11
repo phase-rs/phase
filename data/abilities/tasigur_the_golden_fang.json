@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 GU GU",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Blue",
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Mill two cards, then return a nonland card of an opponent's choice from your graveyard to your hand.",

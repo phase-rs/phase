@@ -3,7 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W U B R G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a Dragon, gets +5/+3, and gains flying and trample.",

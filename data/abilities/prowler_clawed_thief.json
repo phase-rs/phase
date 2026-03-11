@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Villain",
             "controller": "You",
+            "subtype": "Villain",
             "type": "Typed"
           },
           {

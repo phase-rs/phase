@@ -26,8 +26,12 @@
           "value": 6
         },
         {
-          "core_type": "Creature & Treefolk",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Treefolk",
+          "type": "AddSubtype"
         },
         {
           "colors": [

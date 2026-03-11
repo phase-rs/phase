@@ -9,7 +9,7 @@
       "description": "Look at the top two cards of your library. Exile one of them and put the other into your hand.",
       "effect": {
         "count": 2,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

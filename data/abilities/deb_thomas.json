@@ -21,8 +21,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "Employees and Dogs you control get +X/+0 until end of turn.",
       "effect": {
@@ -50,8 +50,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Employee",
         "controller": "You",
+        "subtype": "Employee",
         "type": "Typed"
       }
     }

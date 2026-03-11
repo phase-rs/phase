@@ -23,7 +23,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Djinn,Efreet",
         "type": "Typed"
       }
     }

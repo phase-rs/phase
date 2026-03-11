@@ -42,8 +42,8 @@
           "type": "AddAbility"
         },
         {
-          "core_type": "Dragon",
-          "type": "AddType"
+          "subtype": "Dragon",
+          "type": "AddSubtype"
         }
       ]
     }

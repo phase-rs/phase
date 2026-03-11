@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 W",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control get +1/+1 until end of turn.",
@@ -28,8 +35,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Plains",
           "controller": "You",
+          "subtype": "Plains",
           "type": "Typed"
         },
         "type": "IsPresent"

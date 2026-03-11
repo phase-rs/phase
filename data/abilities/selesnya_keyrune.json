@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "G W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 3/3 green and white Wolf artifact creature until end of turn.",

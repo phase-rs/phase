@@ -42,8 +42,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Zombie",
         "controller": "Opponent",
+        "subtype": "Zombie",
         "type": "Typed"
       }
     }

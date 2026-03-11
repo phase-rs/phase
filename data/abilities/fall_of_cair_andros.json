@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7 R",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 7 damage to target creature.",

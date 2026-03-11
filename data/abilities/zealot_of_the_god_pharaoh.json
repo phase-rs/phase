@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 2 damage to target opponent or planeswalker.",
@@ -13,7 +20,7 @@
           "value": 2
         },
         "target": {
-          "card_type": "Opponent,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

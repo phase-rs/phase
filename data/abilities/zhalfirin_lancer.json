@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Knight",
             "controller": "You",
+            "subtype": "Knight",
             "type": "Typed"
           },
           {

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Roll a d20. Activate only if CARDNAME is in your graveyard.",

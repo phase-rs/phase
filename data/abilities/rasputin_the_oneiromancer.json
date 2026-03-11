@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<X1+/DREAM/NICKNAME>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "DREAM",
+            "target": {
+              "type": "SelfRef"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -29,8 +33,12 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/DREAM/NICKNAME>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "DREAM",
+            "target": {
+              "type": "SelfRef"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

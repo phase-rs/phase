@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Mount",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Vehicle.YouCtrl"
           }
         ],
+        "subtype": "Mount",
         "type": "Typed"
       },
       "description": "Mounts and Vehicles you control have haste.",
@@ -35,8 +35,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Mount",
         "controller": "You",
+        "subtype": "Mount",
         "type": "Typed"
       }
     },
@@ -49,8 +49,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Vehicle",
         "controller": "You",
+        "subtype": "Vehicle",
         "type": "Typed"
       }
     }

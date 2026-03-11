@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7 U",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Adapt 4. This ability costs {1} less to activate for each instant and sorcery card in your graveyard. (If this creature has no +1/+1 counters on it, put four +1/+1 counters on it.)",

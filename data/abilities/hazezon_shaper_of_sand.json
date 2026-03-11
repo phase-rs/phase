@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Desert",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Desert",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",
@@ -30,8 +30,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Desert",
         "controller": "You",
+        "subtype": "Desert",
         "type": "Typed"
       }
     }

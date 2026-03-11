@@ -25,8 +25,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Dinosaur",
         "controller": "You",
+        "subtype": "Dinosaur",
         "type": "Typed"
       }
     }

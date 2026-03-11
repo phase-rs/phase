@@ -14,8 +14,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "AllBasicLandType",
-          "type": "AddType"
+          "subtype": "AllBasicLandType",
+          "type": "AddSubtype"
         }
       ]
     }

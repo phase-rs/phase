@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Gate>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "subtype": "Gate",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME deals 1 damage to each opponent.",
       "effect": {

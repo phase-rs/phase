@@ -3,13 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<4/Creature>",
-        "type": "Mana"
+        "count": 4,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Destroy target artifact or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

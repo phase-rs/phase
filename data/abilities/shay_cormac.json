@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.",
@@ -27,8 +32,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "SpellAbility",
         "controller": "You",
+        "subtype": "SpellAbility",
         "type": "Typed"
       },
       "valid_target": {

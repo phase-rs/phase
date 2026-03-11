@@ -6,7 +6,16 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1 G W U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Green",
+                  "White",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME. Activate only as a sorcery.",
@@ -40,8 +49,8 @@
       "statics": [
         {
           "affected": {
-            "card_type": "Legendary",
             "controller": "You",
+            "subtype": "Legendary",
             "type": "Typed"
           },
           "affected_zone": "Stack",

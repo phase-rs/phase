@@ -6,7 +6,7 @@
       "description": "Each player may ante the top card of their library. If a player does, that player's life total becomes 20.",
       "effect": {
         "count": 1,
-        "destination": "Ante",
+        "destination": "Exile",
         "type": "Dig"
       },
       "kind": "Spell",

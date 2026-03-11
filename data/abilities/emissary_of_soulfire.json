@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<2>",
-        "type": "Mana"
+        "amount": 2,
+        "type": "PayEnergy"
       },
       "description": "Put an exalted counter on target creature you control. Activate only as a sorcery.",
       "effect": {

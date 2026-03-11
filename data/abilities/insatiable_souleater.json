@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "GP",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains trample until end of turn.",

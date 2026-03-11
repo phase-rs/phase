@@ -43,8 +43,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Gorgon",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Gorgon",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -15,7 +15,7 @@
         "type": "SelfRef"
       },
       "valid_target": {
-        "card_type": "Dinosaur",
+        "subtype": "Dinosaur",
         "type": "Typed"
       }
     }

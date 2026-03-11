@@ -3,14 +3,21 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target Vampire gains haste until end of turn.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Vampire",
+          "subtype": "Vampire",
           "type": "Typed"
         },
         "toughness": 0,

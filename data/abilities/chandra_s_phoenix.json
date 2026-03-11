@@ -12,7 +12,6 @@
         "Graveyard"
       ],
       "valid_source": {
-        "card_type": "Spell",
         "controller": "You",
         "properties": [
           {
@@ -32,6 +31,7 @@
             "value": "Red"
           }
         ],
+        "subtype": "Spell",
         "type": "Typed"
       },
       "valid_target": {

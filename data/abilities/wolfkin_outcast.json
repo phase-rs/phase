@@ -9,13 +9,13 @@
         {
           "condition": {
             "filter": {
-              "card_type": "Wolf",
               "properties": [
                 {
                   "type": "Other",
                   "value": "YouCtrl,Werewolf.YouCtrl"
                 }
               ],
+              "subtype": "Wolf",
               "type": "Typed"
             },
             "type": "IsPresent"

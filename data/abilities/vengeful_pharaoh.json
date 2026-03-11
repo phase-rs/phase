@@ -17,7 +17,7 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "You,Planeswalker",
+        "card_type": "Planeswalker",
         "controller": "You",
         "type": "Typed"
       }

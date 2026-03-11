@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 R G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+1 until end of turn for each Elemental you control.",
@@ -26,8 +34,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Elemental",
             "controller": "You",
+            "subtype": "Elemental",
             "type": "Typed"
           },
           {

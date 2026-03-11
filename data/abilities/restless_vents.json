@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "1 B R",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, CARDNAME becomes a 2/3 black and red Insect creature with menace. It's still a land.",

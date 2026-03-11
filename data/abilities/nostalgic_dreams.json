@@ -5,12 +5,35 @@
       "cost": {
         "costs": [
           {
-            "cost": "G G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<X/Card.Other/cards>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Card",
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return target Spirit you control to its owner's hand.",
@@ -11,8 +18,8 @@
         "destination": "Hand",
         "origin": "Battlefield",
         "target": {
-          "card_type": "Spirit",
           "controller": "You",
+          "subtype": "Spirit",
           "type": "Typed"
         },
         "type": "ChangeZone"

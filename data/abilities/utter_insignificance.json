@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 C",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Colorless"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile enchanted creature.",

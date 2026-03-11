@@ -50,7 +50,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Merfolk",
+        "subtype": "Merfolk",
         "type": "Typed"
       }
     }

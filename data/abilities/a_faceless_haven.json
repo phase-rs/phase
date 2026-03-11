@@ -15,7 +15,16 @@
     },
     {
       "cost": {
-        "cost": "S S S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow",
+              "Snow",
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 3/3 creature with vigilance and all creature types until end of turn. It's still a land.",

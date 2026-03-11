@@ -9,13 +9,13 @@
       "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, select target player at random. That player discards a card. If that player discards a land card this way, they lose 3 life.",
       "mode": "PlaneswalkedTo",
       "valid_card": {
-        "card_type": "Plane",
         "properties": [
           {
             "type": "Other",
             "value": "Self"
           }
         ],
+        "subtype": "Plane",
         "type": "Typed"
       }
     },

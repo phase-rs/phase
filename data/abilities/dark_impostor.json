@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 B B",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target creature and put a +1/+1 counter on CARDNAME.",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 G",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME from your graveyard to the battlefield tapped with a finality counter on it. This ability costs {1} less to activate for each basic land type among lands you control.",

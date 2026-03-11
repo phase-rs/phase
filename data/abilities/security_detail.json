@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 1/1 white Soldier creature token. Activate only if you control no creatures and only once each turn.",

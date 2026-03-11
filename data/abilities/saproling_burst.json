@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/FADE>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "FADE",
+        "type": "RemoveCounter"
       },
       "description": "Create a green Saproling creature token. It has \"This creature's power and toughness are each equal to the number of fade counters on CARDNAME.\"",
       "effect": {

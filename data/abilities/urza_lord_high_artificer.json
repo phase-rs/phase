@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Artifact>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Artifact",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Add {U}.",
       "effect": {
@@ -18,7 +22,12 @@
     },
     {
       "cost": {
-        "cost": "5",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Shuffle your library, then exile the top card. Until end of turn, you may play that card without paying its mana cost.",

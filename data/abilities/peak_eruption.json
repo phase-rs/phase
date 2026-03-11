@@ -6,7 +6,7 @@
       "description": "Destroy target Mountain. CARDNAME deals 3 damage to that land's controller.",
       "effect": {
         "target": {
-          "card_type": "Mountain",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "type": "Destroy"

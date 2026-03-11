@@ -23,8 +23,8 @@
       "statics": [
         {
           "affected": {
-            "card_type": "Werewolf",
             "controller": "You",
+            "subtype": "Werewolf",
             "type": "Typed"
           },
           "description": "Werewolves you control has menace.",

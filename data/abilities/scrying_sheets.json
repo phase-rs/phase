@@ -17,7 +17,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 S",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Snow"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -29,7 +36,7 @@
       "description": "Look at the top card of your library. If that card is snow, you may reveal it and put it into your hand. ({S} can be paid with one mana from a snow source.)",
       "effect": {
         "count": 1,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<2>",
-        "type": "Mana"
+        "amount": 2,
+        "type": "PayEnergy"
       },
       "description": "Prevent all damage that would be dealt to you this turn by a source of your choice.",
       "effect": {

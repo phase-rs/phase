@@ -17,7 +17,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -54,7 +59,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "4",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -74,7 +84,7 @@
         "count": 1,
         "counter_type": "Indestructible",
         "target": {
-          "card_type": "God",
+          "subtype": "God",
           "type": "Typed"
         },
         "type": "PutCounter"

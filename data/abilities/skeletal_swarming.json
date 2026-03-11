@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Skeleton",
         "controller": "You",
+        "subtype": "Skeleton",
         "type": "Typed"
       },
       "description": "Each Skeleton you control has trample, attacks each combat if able, and gets +X/+0, where X is the number of other Skeletons you control.",

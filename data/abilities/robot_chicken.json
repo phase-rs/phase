@@ -22,8 +22,8 @@
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "valid_card": {
-        "card_type": "Egg",
         "controller": "You",
+        "subtype": "Egg",
         "type": "Typed"
       }
     }

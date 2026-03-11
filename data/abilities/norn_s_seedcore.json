@@ -9,13 +9,13 @@
       "description": "When you planeswalk to CARDNAME, chaos ensues.",
       "mode": "PlaneswalkedTo",
       "valid_card": {
-        "card_type": "Plane",
         "properties": [
           {
             "type": "Other",
             "value": "Self"
           }
         ],
+        "subtype": "Plane",
         "type": "Typed"
       }
     },

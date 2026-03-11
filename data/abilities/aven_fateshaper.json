@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 U",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Look at the top four cards of your library, then put them back in any order.",

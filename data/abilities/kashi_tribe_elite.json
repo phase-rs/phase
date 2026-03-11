@@ -6,7 +6,6 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Snake",
         "controller": "You",
         "properties": [
           {
@@ -14,6 +13,7 @@
             "value": "Legendary"
           }
         ],
+        "subtype": "Snake",
         "type": "Typed"
       },
       "description": "Legendary Snakes you control have shroud. (They can't be the targets of spells or abilities.)",

@@ -22,7 +22,6 @@
     },
     {
       "affected": {
-        "card_type": "Spider",
         "properties": [
           {
             "type": "Other",
@@ -45,6 +44,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Spider",
         "type": "Typed"
       },
       "affected_zone": "Library",

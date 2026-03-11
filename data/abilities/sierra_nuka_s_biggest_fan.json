@@ -28,7 +28,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Food",
+        "subtype": "Food",
         "type": "Typed"
       }
     }

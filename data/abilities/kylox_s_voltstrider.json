@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "CollectEvidence<6>",
-        "type": "Mana"
+        "description": "CollectEvidence<6>",
+        "type": "Unimplemented"
       },
       "description": "CARDNAME becomes an artifact creature until end of turn.",
       "effect": {

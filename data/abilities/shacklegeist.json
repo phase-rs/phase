@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Spirit>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "subtype": "Spirit",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Tap target creature you don't control.",
       "effect": {

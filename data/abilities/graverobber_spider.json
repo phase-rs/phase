@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +X/+X until end of turn, where X is the number of creature cards in your graveyard. Activate only once each turn.",

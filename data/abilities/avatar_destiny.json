@@ -18,8 +18,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Avatar",
-          "type": "AddType"
+          "subtype": "Avatar",
+          "type": "AddSubtype"
         }
       ]
     }

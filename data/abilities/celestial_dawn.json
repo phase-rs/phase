@@ -14,8 +14,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Plains",
-          "type": "AddType"
+          "subtype": "Plains",
+          "type": "AddSubtype"
         }
       ]
     },
@@ -34,7 +34,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Hand,Library,Graveyard,Exile,Command",
+      "affected_zone": "Hand",
       "description": "Nonland permanents you control are white. The same is true for spells you control and nonland cards you own that aren't on the battlefield.",
       "mode": "Continuous",
       "modifications": [
@@ -58,7 +58,7 @@
         ],
         "type": "Typed"
       },
-      "affected_zone": "Battlefield,Stack",
+      "affected_zone": "Battlefield",
       "mode": "Continuous",
       "modifications": [
         {

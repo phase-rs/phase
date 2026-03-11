@@ -51,13 +51,13 @@
         "Command"
       ],
       "valid_target": {
-        "card_type": "Player",
         "properties": [
           {
             "type": "Other",
             "value": "Chosen"
           }
         ],
+        "subtype": "Player",
         "type": "Typed"
       }
     }

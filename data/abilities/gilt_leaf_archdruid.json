@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<7/Druid>",
-        "type": "Mana"
+        "count": 7,
+        "filter": {
+          "subtype": "Druid",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Gain control of all lands target player controls.",
       "effect": {
@@ -29,7 +33,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Druid",
+        "subtype": "Druid",
         "type": "Typed"
       }
     }

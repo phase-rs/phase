@@ -6,7 +6,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Put a hatchling counter on CARDNAME. Then if there are five or more hatchling counters on it, remove all of them and transform it.",

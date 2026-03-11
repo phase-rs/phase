@@ -20,7 +20,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "1",
+                "cost": {
+                  "Cost": {
+                    "generic": 1,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -57,7 +62,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "4",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "CARDNAME phases out.",

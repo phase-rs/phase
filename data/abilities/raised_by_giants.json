@@ -31,8 +31,8 @@
           "value": 10
         },
         {
-          "core_type": "Giant",
-          "type": "AddType"
+          "subtype": "Giant",
+          "type": "AddSubtype"
         }
       ]
     }

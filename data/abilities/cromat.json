@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Destroy target creature blocking or blocked by CARDNAME.",
@@ -20,7 +28,15 @@
     },
     {
       "cost": {
-        "cost": "U R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains flying until end of turn.",
@@ -37,7 +53,15 @@
     },
     {
       "cost": {
-        "cost": "B G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate CARDNAME.",
@@ -51,7 +75,15 @@
     },
     {
       "cost": {
-        "cost": "R W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+1 until end of turn.",
@@ -68,7 +100,15 @@
     },
     {
       "cost": {
-        "cost": "G U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put CARDNAME on top of its owner's library.",

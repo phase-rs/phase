@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME to its owner's hand. Activate only if CARDNAME is on the battlefield or in your graveyard.",
@@ -20,7 +27,14 @@
     },
     {
       "cost": {
-        "cost": "2 W",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME to its owner's hand. Activate only if CARDNAME is on the battlefield or in your graveyard.",

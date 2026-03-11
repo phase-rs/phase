@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U B",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Whenever a card is put into an opponent's graveyard from anywhere this turn, that player loses 1 life.",
@@ -15,7 +23,15 @@
     },
     {
       "cost": {
-        "cost": "2 U B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target player mills two cards.",

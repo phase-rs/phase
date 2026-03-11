@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Clue",
         "controller": "You",
+        "subtype": "Clue",
         "type": "Typed"
       },
       "description": "Clues you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0\" and equip {2}.",
@@ -18,8 +18,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Equipment",
-          "type": "AddType"
+          "subtype": "Equipment",
+          "type": "AddSubtype"
         }
       ]
     }

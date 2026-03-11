@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 G",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ChooseCreatureType<1>",
-            "type": "Mana"
+            "description": "ChooseCreatureType<1>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

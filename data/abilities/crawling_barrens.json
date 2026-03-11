@@ -15,7 +15,12 @@
     },
     {
       "cost": {
-        "cost": "4",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put two +1/+1 counters on CARDNAME. Then you may have it become a 0/0 Elemental creature until end of turn. It's still a land.",

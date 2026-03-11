@@ -59,7 +59,14 @@
           "cost": {
             "costs": [
               {
-                "cost": "3 G",
+                "cost": {
+                  "Cost": {
+                    "generic": 3,
+                    "shards": [
+                      "Green"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {
@@ -71,7 +78,7 @@
           "description": "Look at the top four cards of your library. You may reveal a creature card from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
           "effect": {
             "count": 4,
-            "destination": "",
+            "destination": "Battlefield",
             "type": "Dig"
           },
           "kind": "Activated",

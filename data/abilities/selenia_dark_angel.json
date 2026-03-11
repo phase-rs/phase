@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<2>",
-        "type": "Mana"
+        "amount": 2,
+        "type": "PayLife"
       },
       "description": "Return CARDNAME to its owner's hand.",
       "effect": {

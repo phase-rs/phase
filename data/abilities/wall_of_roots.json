@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "AddCounter<1/M0M1>",
-        "type": "Mana"
+        "description": "AddCounter<1/M0M1>",
+        "type": "Unimplemented"
       },
       "description": "Add {G}. Activate only once each turn.",
       "effect": {

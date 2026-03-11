@@ -32,8 +32,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Equipment",
             "controller": "You",
+            "subtype": "Equipment",
             "type": "Typed"
           },
           {

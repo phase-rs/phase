@@ -18,8 +18,8 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Otter",
           "controller": "You",
+          "subtype": "Otter",
           "type": "Typed"
         },
         "type": "IsPresent"

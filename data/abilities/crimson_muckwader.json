@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate CARDNAME.",
@@ -25,8 +32,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Swamp",
           "controller": "You",
+          "subtype": "Swamp",
           "type": "Typed"
         },
         "type": "IsPresent"

@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "ExileFromTop<1/Card>",
-        "type": "Mana"
+        "count": 1,
+        "type": "Exile",
+        "zone": "Library"
       },
       "description": "Prevent the next 1 damage that would be dealt to you this turn.",
       "effect": {

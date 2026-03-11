@@ -6,7 +6,7 @@
       "description": "Destroy X target Mountains. CARDNAME deals damage to each creature and each player equal to the number of Mountains put into a graveyard this way.",
       "effect": {
         "target": {
-          "card_type": "Mountain",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "type": "Destroy"

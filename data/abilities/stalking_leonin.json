@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "RevealChosen<Player>",
-        "type": "Mana"
+        "description": "RevealChosen<Player>",
+        "type": "Unimplemented"
       },
       "description": "Exile target creature that's attacking you if it's controlled by the chosen player. Activate only once.",
       "effect": {

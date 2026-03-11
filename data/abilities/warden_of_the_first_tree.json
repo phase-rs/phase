@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 WB",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a Human Warrior with base power and toughness 3/3.",
@@ -25,7 +33,17 @@
     },
     {
       "cost": {
-        "cost": "2 WB WB",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "Black",
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If CARDNAME is a Warrior, it becomes a Human Spirit Warrior with trample and lifelink.",
@@ -48,7 +66,19 @@
     },
     {
       "cost": {
-        "cost": "3 WB WB WB",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White",
+              "Black",
+              "White",
+              "Black",
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If CARDNAME is a Spirit, put five +1/+1 counters on it.",

@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "2 G U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, this land becomes a 3/3 green and blue Elemental creature with hexproof. It's still a land.",

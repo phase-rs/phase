@@ -32,12 +32,12 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Player",
         "properties": [
           {
             "type": "EnchantedBy"
           }
         ],
+        "subtype": "Player",
         "type": "Typed"
       }
     }

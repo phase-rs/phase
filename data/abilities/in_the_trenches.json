@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 W",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile target nonland permanent you don't control until CARDNAME leaves the battlefield. Activate only as a sorcery and only once.",

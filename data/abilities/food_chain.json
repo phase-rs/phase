@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Exile<1/Creature>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "Exile"
       },
       "description": "Add X mana of any one color, where X is 1 plus the exiled creature's mana value. Spend this mana only to cast creature spells.",
       "effect": {

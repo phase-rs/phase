@@ -12,7 +12,6 @@
         "filter": {
           "filters": [
             {
-              "card_type": "Island",
               "controller": "You",
               "properties": [
                 {
@@ -20,6 +19,7 @@
                   "value": "YouCtrl,Creature.Merfolk"
                 }
               ],
+              "subtype": "Island",
               "type": "Typed"
             },
             {

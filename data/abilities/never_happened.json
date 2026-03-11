@@ -6,7 +6,7 @@
       "description": "Target opponent reveals their hand. You choose a nonland card from that player's graveyard or hand and exile it.",
       "effect": {
         "destination": "Exile",
-        "origin": "Hand,Graveyard",
+        "origin": "Hand",
         "target": {
           "type": "Player"
         },

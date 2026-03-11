@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6 B",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Adapt 4. This ability costs {1} less to activate for each other artifact you control. (If this creature has no +1/+1 counters on it, put four +1/+1 counters on it.)",

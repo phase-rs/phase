@@ -32,8 +32,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Plains",
         "controller": "You",
+        "subtype": "Plains",
         "type": "Typed"
       }
     }

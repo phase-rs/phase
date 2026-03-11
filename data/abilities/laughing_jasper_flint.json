@@ -20,8 +20,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Mercenary",
-          "type": "AddType"
+          "subtype": "Mercenary",
+          "type": "AddSubtype"
         }
       ]
     }

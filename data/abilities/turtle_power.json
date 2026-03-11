@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Turtle",
         "controller": "You",
+        "subtype": "Turtle",
         "type": "Typed"
       },
       "description": "Turtles you control get +2/+2.",

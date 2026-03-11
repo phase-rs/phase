@@ -6,9 +6,9 @@
       "description": "The owner of target spell or creature puts it on their choice of the top or bottom of their library.",
       "effect": {
         "destination": "Library",
-        "origin": "Battlefield,Stack",
+        "origin": "Battlefield",
         "target": {
-          "card_type": "Creature,Card",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "ChangeZone"

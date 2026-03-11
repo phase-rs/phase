@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<1/BOOK>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "BOOK",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -26,15 +27,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<2/BOOK>",
-            "type": "Mana"
+            "count": 2,
+            "counter_type": "BOOK",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -59,7 +66,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Instant,Sorcery",
+        "card_type": "Instant",
         "type": "Typed"
       }
     }

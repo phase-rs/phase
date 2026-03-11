@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 W",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Move any number of counters from target permanent you control to another target permanent you control.",

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put an ice counter on CARDNAME.",
@@ -20,8 +25,9 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<1/ICE>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "ICE",
+        "type": "RemoveCounter"
       },
       "description": "Add {C}.",
       "effect": {

@@ -21,8 +21,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Cleric",
           "controller": "You",
+          "subtype": "Cleric",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -48,8 +48,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Rogue",
           "controller": "You",
+          "subtype": "Rogue",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -74,8 +74,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Warrior",
           "controller": "You",
+          "subtype": "Warrior",
           "type": "Typed"
         },
         "type": "IsPresent"
@@ -100,8 +100,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Wizard",
           "controller": "You",
+          "subtype": "Wizard",
           "type": "Typed"
         },
         "type": "IsPresent"

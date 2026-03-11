@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target artifact creature becomes blue until end of turn.",
@@ -29,8 +36,18 @@
     },
     {
       "cost": {
-        "cost": "tapXType<1/Creature.Blue>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Blue"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
       "effect": {

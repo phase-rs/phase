@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Pegasus",
             "controller": "You",
             "properties": [
               {
@@ -20,6 +19,7 @@
                 "value": "YouCtrl,Horse.Other"
               }
             ],
+            "subtype": "Pegasus",
             "type": "Typed"
           },
           {

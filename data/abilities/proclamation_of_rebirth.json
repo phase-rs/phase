@@ -22,12 +22,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "5 W",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Reveal<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Reveal"
           }
         ],
         "type": "Composite"

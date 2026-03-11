@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "3",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -19,7 +24,7 @@
         "count": 1,
         "counter_type": "ExistingCounter",
         "target": {
-          "card_type": "Permanent,Player",
+          "card_type": "Permanent",
           "type": "Typed"
         },
         "type": "PutCounter"

@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Change CARDNAME's base toughness to 1 plus the power of target creature blocking or blocked by CARDNAME. (This effect lasts indefinitely.)",

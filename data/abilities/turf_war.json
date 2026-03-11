@@ -26,7 +26,7 @@
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "Player",
+        "subtype": "Player",
         "type": "Typed"
       }
     }

@@ -5,12 +5,25 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 R R R",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Red",
+                  "Red",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "tapXType<X/Creature>",
-            "type": "Mana"
+            "count": 0,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

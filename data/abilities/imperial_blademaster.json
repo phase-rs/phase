@@ -12,13 +12,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Samurai",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Warrior.YouCtrl"
           }
         ],
+        "subtype": "Samurai",
         "type": "Typed"
       }
     }

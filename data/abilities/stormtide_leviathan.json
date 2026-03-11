@@ -13,8 +13,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Island",
-          "type": "AddType"
+          "subtype": "Island",
+          "type": "AddSubtype"
         }
       ]
     },

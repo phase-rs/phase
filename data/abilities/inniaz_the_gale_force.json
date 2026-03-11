@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 WU",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Attacking creatures with flying get +1/+1 until end of turn.",

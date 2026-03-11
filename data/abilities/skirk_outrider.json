@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Beast",
           "controller": "You",
+          "subtype": "Beast",
           "type": "Typed"
         },
         "type": "IsPresent"

@@ -3,13 +3,20 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 G",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Look at the top three cards of your library. You may reveal a permanent card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
       "effect": {
         "count": 3,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Activated",

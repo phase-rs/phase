@@ -5,12 +5,24 @@
       "cost": {
         "costs": [
           {
-            "cost": "XMin1 X",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "X",
+                  "X"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<X/P1P1/NICKNAME>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "P1P1",
+            "target": {
+              "type": "SelfRef"
+            },
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

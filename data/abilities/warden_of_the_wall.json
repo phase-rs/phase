@@ -46,8 +46,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Gargoyle",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Gargoyle",
+          "type": "AddSubtype"
         }
       ]
     }

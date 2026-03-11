@@ -37,7 +37,7 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Kavu",
+            "subtype": "Kavu",
             "type": "Typed"
           },
           {

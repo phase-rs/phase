@@ -21,8 +21,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Phyrexian",
         "controller": "You",
+        "subtype": "Phyrexian",
         "type": "Typed"
       }
     }

@@ -6,7 +6,7 @@
       "description": "Destroy target artifact, enchantment, or planeswalker.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment,Planeswalker",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

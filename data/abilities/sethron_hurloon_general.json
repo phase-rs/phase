@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 BR",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Minotaurs you control get +1/+0 and gain menace and haste until end of turn.",

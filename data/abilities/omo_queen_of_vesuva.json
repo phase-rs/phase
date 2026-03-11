@@ -13,8 +13,12 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "AllBasicLandType & AllNonBasicLandType",
-          "type": "AddType"
+          "subtype": "AllBasicLandType",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "AllNonBasicLandType",
+          "type": "AddSubtype"
         }
       ]
     },

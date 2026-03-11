@@ -13,13 +13,13 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Goblin",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Orc.YouCtrl"
           }
         ],
+        "subtype": "Goblin",
         "type": "Typed"
       },
       "valid_target": {

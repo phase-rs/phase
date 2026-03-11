@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Card>",
-        "type": "Mana"
+        "count": 1,
+        "type": "Discard"
       },
       "description": "CARDNAME gains shroud until end of turn and can't be blocked this turn. (A creature with shroud can't be the target of spells or abilities.)",
       "effect": {

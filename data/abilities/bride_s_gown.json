@@ -35,13 +35,13 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Equipment",
           "properties": [
             {
               "type": "Other",
               "value": "AttachedTo Creature.YouCtrl"
             }
           ],
+          "subtype": "Equipment",
           "type": "Typed"
         },
         "type": "IsPresent"

@@ -6,7 +6,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "4 UP",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME. Activate only as a sorcery. ({U/P} can be paid with either {U} or 2 life.)",
@@ -37,7 +44,6 @@
             "type": "SelfRef"
           },
           "valid_target": {
-            "card_type": "Player,Battle",
             "type": "Typed"
           }
         }

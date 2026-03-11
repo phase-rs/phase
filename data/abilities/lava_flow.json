@@ -6,7 +6,7 @@
       "description": "Destroy target creature or land.",
       "effect": {
         "target": {
-          "card_type": "Creature,Land",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Destroy"

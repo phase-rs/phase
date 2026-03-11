@@ -3,7 +3,17 @@
   "abilities": [
     {
       "cost": {
-        "cost": "WB WB",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black",
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If CARDNAME is a Citizen, it becomes a Halfling Scout with base power and toughness 2/3 and lifelink.",
@@ -25,7 +35,16 @@
     },
     {
       "cost": {
-        "cost": "B B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "If NICKNAME is a Scout, it becomes a Halfling Rogue with \"Whenever this creature deals combat damage to a player, that player loses the game if the Ring has tempted you four or more times this game. Otherwise, the Ring tempts you.\"",

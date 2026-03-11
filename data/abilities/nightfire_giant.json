@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 R",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME deals 2 damage to any target.",
@@ -30,8 +37,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Mountain",
           "controller": "You",
+          "subtype": "Mountain",
           "type": "Typed"
         },
         "type": "IsPresent"

@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "5 G G",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": [
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -36,8 +44,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Food",
         "controller": "You",
+        "subtype": "Food",
         "type": "Typed"
       },
       "description": "Foods you control have \"{T}: Add {G}.\"",

@@ -14,7 +14,7 @@
             "Battlefield"
           ],
           "valid_card": {
-            "card_type": "Instant,Sorcery",
+            "card_type": "Instant",
             "type": "Typed"
           }
         }
@@ -26,7 +26,15 @@
           "cost": {
             "costs": [
               {
-                "cost": "6 B R",
+                "cost": {
+                  "Cost": {
+                    "generic": 6,
+                    "shards": [
+                      "Black",
+                      "Red"
+                    ]
+                  }
+                },
                 "type": "Mana"
               },
               {

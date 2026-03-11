@@ -8,7 +8,6 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Plant",
             "controller": "You",
             "properties": [
               {
@@ -16,6 +15,7 @@
                 "value": "YouCtrl,Treefolk.Other"
               }
             ],
+            "subtype": "Plant",
             "type": "Typed"
           },
           {

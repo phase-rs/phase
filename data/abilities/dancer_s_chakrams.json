@@ -30,8 +30,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Performer",
-          "type": "AddType"
+          "subtype": "Performer",
+          "type": "AddSubtype"
         }
       ]
     }

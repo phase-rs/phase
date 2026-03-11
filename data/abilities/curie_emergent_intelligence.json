@@ -5,12 +5,40 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Exile<1/Artifact.!token+Other+Creature/select another target artifact creature>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Artifact",
+                  "properties": [
+                    {
+                      "type": "Other",
+                      "value": "Creature"
+                    }
+                  ],
+                  "type": "Typed"
+                },
+                {
+                  "filter": {
+                    "type": "SelfRef"
+                  },
+                  "type": "Not"
+                }
+              ],
+              "type": "And"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"

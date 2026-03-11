@@ -6,13 +6,13 @@
       "description": "Attach target Aura attached to a creature or land to another permanent of that type.",
       "effect": {
         "target": {
-          "card_type": "Aura",
           "properties": [
             {
               "type": "Other",
               "value": "AttachedTo Creature,Aura.AttachedTo Land"
             }
           ],
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "Attach"

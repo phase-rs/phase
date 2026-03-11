@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Zombie",
         "controller": "You",
         "properties": [
           {
             "type": "Token"
           }
         ],
+        "subtype": "Zombie",
         "type": "Typed"
       },
       "description": "Zombie tokens you control have deathtouch.",

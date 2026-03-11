@@ -6,7 +6,7 @@
       "description": "Reveal the top three cards of your library. Put all creature cards revealed this way into your hand and the rest into your graveyard.",
       "effect": {
         "count": 3,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Spell",

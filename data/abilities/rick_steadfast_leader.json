@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Human",
         "controller": "You",
+        "subtype": "Human",
         "type": "Typed"
       },
       "condition": {
@@ -38,8 +38,8 @@
     },
     {
       "affected": {
-        "card_type": "Human",
         "controller": "You",
+        "subtype": "Human",
         "type": "Typed"
       },
       "condition": {
@@ -65,8 +65,8 @@
     },
     {
       "affected": {
-        "card_type": "Human",
         "controller": "You",
+        "subtype": "Human",
         "type": "Typed"
       },
       "condition": {
@@ -96,14 +96,14 @@
     },
     {
       "affected": {
-        "card_type": "Human",
         "controller": "You",
+        "subtype": "Human",
         "type": "Typed"
       },
       "condition": {
         "filter": {
-          "card_type": "Human",
           "controller": "You",
+          "subtype": "Human",
           "type": "Typed"
         },
         "type": "IsPresent"

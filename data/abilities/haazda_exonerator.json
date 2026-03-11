@@ -19,7 +19,7 @@
       "description": "Destroy target Aura.",
       "effect": {
         "target": {
-          "card_type": "Aura",
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "Destroy"

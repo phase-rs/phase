@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<50>",
-        "type": "Mana"
+        "amount": 50,
+        "type": "PayLife"
       },
       "description": "CARDNAME deals 50 damage to any target.",
       "effect": {

@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "untapYType<1/Land.OppCtrl/land>",
-            "type": "Mana"
+            "description": "untapYType<1/Land.OppCtrl/land>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

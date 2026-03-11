@@ -25,13 +25,13 @@
         "destination": "Hand",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Dinosaur",
           "properties": [
             {
               "type": "Other",
               "value": "YouOwn"
             }
           ],
+          "subtype": "Dinosaur",
           "type": "Typed"
         },
         "type": "ChangeZone"

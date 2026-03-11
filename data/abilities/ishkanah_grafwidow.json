@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6 B",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target opponent loses 1 life for each Spider you control.",

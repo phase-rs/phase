@@ -25,7 +25,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Aura",
         "controller": "You",
         "properties": [
           {
@@ -33,6 +32,7 @@
             "value": "YouOwn"
           }
         ],
+        "subtype": "Aura",
         "type": "Typed"
       }
     }

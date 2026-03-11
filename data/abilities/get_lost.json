@@ -6,7 +6,7 @@
       "description": "Destroy target creature, enchantment, or planeswalker. Its controller creates two Map tokens. (They're artifacts with \"{1}, {T}, Sacrifice this artifact: Target creature you control explores. Activate only as a sorcery.\")",
       "effect": {
         "target": {
-          "card_type": "Creature,Enchantment,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Destroy"

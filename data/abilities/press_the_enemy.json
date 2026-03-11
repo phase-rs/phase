@@ -6,7 +6,7 @@
       "description": "Return target spell or nonland permanent an opponent controls to its owner's hand.",
       "effect": {
         "destination": "Hand",
-        "origin": "Battlefield,Stack",
+        "origin": "Battlefield",
         "target": {
           "card_type": "Permanent",
           "controller": "Opponent",

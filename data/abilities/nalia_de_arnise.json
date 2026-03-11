@@ -25,7 +25,6 @@
     },
     {
       "affected": {
-        "card_type": "Cleric",
         "properties": [
           {
             "type": "Other",
@@ -52,6 +51,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Cleric",
         "type": "Typed"
       },
       "affected_zone": "Library",

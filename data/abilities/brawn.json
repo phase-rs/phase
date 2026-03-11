@@ -12,8 +12,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Forest",
           "controller": "You",
+          "subtype": "Forest",
           "type": "Typed"
         },
         "type": "IsPresent"

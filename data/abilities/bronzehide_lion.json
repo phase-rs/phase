@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains indestructible until end of turn.",

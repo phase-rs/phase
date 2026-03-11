@@ -14,13 +14,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Kithkin",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Kithkin",
         "type": "Typed"
       }
     },

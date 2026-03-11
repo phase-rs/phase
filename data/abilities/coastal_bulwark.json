@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -32,8 +37,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Island",
           "controller": "You",
+          "subtype": "Island",
           "type": "Typed"
         },
         "type": "IsPresent"

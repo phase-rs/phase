@@ -5,15 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 UP",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "ExileFromStack<1/Card.YouCtrl/spell you control>",
-            "type": "Mana"
+            "description": "ExileFromStack<1/Card.YouCtrl/spell you control>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

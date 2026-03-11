@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<1/Creature>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"
@@ -26,7 +30,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 W U B R G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "White",
+                  "Blue",
+                  "Black",
+                  "Red",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

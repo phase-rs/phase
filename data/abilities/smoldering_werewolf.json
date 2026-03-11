@@ -6,7 +6,15 @@
       "abilities": [
         {
           "cost": {
-            "cost": "4 R R",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Red",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME.",

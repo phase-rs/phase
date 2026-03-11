@@ -29,13 +29,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Hamster",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Mouse.YouCtrl,Rat.YouCtrl,Squirrel.YouCtrl"
           }
         ],
+        "subtype": "Hamster",
         "type": "Typed"
       }
     }

@@ -6,8 +6,13 @@
       "abilities": [
         {
           "cost": {
-            "cost": "RemoveAnyCounter<X1+/P1P1/Artifact>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "Any",
+            "target": {
+              "card_type": "Artifact",
+              "type": "Typed"
+            },
+            "type": "RemoveCounter"
           },
           "description": "Target player adds that much {C}. This mana can't be spent to cast nonartifact spells.",
           "effect": {
@@ -26,7 +31,16 @@
       "abilities": [
         {
           "cost": {
-            "cost": "U U U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Convert NICKNAME, then adapt 3. (If it has no +1/+1 counters on it, put three +1/+1 counters on it.)",

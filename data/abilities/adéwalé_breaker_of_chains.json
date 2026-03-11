@@ -23,8 +23,8 @@
         "Graveyard"
       ],
       "valid_source": {
-        "card_type": "Vehicle",
         "controller": "You",
+        "subtype": "Vehicle",
         "type": "Typed"
       },
       "valid_target": {

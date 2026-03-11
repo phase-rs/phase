@@ -6,7 +6,7 @@
       "description": "Destroy target Spirit or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Spirit,Enchantment",
+          "card_type": "Enchantment",
           "type": "Typed"
         },
         "type": "Destroy"

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Clue",
         "controller": "You",
+        "subtype": "Clue",
         "type": "Typed"
       },
       "description": "Clues you control have exalted. (Whenever a creature you control attacks alone, that creature gets +1/+1 until end of turn for each instance of exalted among permanents you control.)",

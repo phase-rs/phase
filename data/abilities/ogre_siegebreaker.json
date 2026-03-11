@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Destroy target creature that was dealt damage this turn.",

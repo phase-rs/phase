@@ -29,12 +29,12 @@
     },
     {
       "affected": {
-        "card_type": "Human",
         "properties": [
           {
             "type": "EquippedBy"
           }
         ],
+        "subtype": "Human",
         "type": "Typed"
       },
       "description": "As long as equipped creature is a Human, it gets +1/+1.",

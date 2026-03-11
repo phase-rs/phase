@@ -19,15 +19,26 @@
       "cost": {
         "costs": [
           {
-            "cost": "6 B",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "Exile<1/Creature>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"

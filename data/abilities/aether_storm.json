@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<4>",
-        "type": "Mana"
+        "amount": 4,
+        "type": "PayLife"
       },
       "description": "Destroy CARDNAME. It can't be regenerated. Any player may activate this ability.",
       "effect": {

@@ -12,7 +12,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Lizard",
+        "subtype": "Lizard",
         "type": "Typed"
       }
     }

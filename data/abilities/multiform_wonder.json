@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<1>",
-        "type": "Mana"
+        "amount": 1,
+        "type": "PayEnergy"
       },
       "description": "CARDNAME gains your choice of flying, vigilance, or lifelink until end of turn.",
       "effect": {
@@ -20,8 +20,8 @@
     },
     {
       "cost": {
-        "cost": "PayEnergy<1>",
-        "type": "Mana"
+        "amount": 1,
+        "type": "PayEnergy"
       },
       "description": "CARDNAME gets +2/-2 or -2/+2 until end of turn.",
       "effect": {

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Shuffle your library.",
@@ -17,7 +25,14 @@
     },
     {
       "cost": {
-        "cost": "X",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Look at the top X cards of your library, then put them back in any order.",

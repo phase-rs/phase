@@ -5,12 +5,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/Indestructible>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "Indestructible",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

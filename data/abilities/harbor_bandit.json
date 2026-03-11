@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 U",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME can't be blocked this turn.",
@@ -23,8 +30,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Island",
           "controller": "You",
+          "subtype": "Island",
           "type": "Typed"
         },
         "type": "IsPresent"

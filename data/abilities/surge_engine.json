@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME loses defender and gains \"This creature can't be blocked.\"",
@@ -22,7 +29,14 @@
     },
     {
       "cost": {
-        "cost": "2 U",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes blue and has base power and toughness 5/4. Activate only if CARDNAME doesn't have defender.",
@@ -41,7 +55,15 @@
     },
     {
       "cost": {
-        "cost": "4 U U",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw three cards. Activate only if CARDNAME is blue and only once.",

@@ -22,7 +22,6 @@
     },
     {
       "affected": {
-        "card_type": "Merfolk",
         "controller": "You",
         "properties": [
           {
@@ -30,6 +29,7 @@
             "value": "TopLibrary"
           }
         ],
+        "subtype": "Merfolk",
         "type": "Typed"
       },
       "affected_zone": "Library",
@@ -46,7 +46,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Merfolk",
+        "subtype": "Merfolk",
         "type": "Typed"
       }
     }

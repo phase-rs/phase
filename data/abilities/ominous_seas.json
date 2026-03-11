@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<8/FORESHADOW>",
-        "type": "Mana"
+        "count": 8,
+        "counter_type": "FORESHADOW",
+        "type": "RemoveCounter"
       },
       "description": "Create an 8/8 blue Kraken creature token.",
       "effect": {

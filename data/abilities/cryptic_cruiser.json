@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExiledMoveToGrave<1/Card.OppOwn/card an opponent owns>",
-            "type": "Mana"
+            "description": "ExiledMoveToGrave<1/Card.OppOwn/card an opponent owns>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

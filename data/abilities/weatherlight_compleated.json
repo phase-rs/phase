@@ -19,8 +19,12 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Creature & Phyrexian",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Phyrexian",
+          "type": "AddSubtype"
         }
       ]
     }

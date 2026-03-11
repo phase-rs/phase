@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Creature>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "card_type": "Creature",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Until end of turn, CARDNAME becomes a copy of the exiled card, except it's a Vehicle artifact in addition to its other types.",
       "duration": "UntilEndOfTurn",

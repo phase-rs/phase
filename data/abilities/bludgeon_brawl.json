@@ -27,8 +27,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Equipment",
-          "type": "AddType"
+          "subtype": "Equipment",
+          "type": "AddSubtype"
         }
       ]
     }

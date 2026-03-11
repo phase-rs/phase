@@ -24,7 +24,6 @@
           "affected": {
             "filters": [
               {
-                "card_type": "Wolf",
                 "controller": "You",
                 "properties": [
                   {
@@ -32,6 +31,7 @@
                     "value": "YouCtrl,Werewolf.Other"
                   }
                 ],
+                "subtype": "Wolf",
                 "type": "Typed"
               },
               {

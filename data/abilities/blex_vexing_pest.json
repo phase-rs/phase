@@ -10,7 +10,6 @@
           "affected": {
             "filters": [
               {
-                "card_type": "Pest",
                 "controller": "You",
                 "properties": [
                   {
@@ -30,6 +29,7 @@
                     "value": "YouCtrl,Spider.Other"
                   }
                 ],
+                "subtype": "Pest",
                 "type": "Typed"
               },
               {

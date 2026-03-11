@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 G G G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Green",
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a 2/2 green Ooze creature token.",

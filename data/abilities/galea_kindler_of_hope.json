@@ -22,7 +22,6 @@
     },
     {
       "affected": {
-        "card_type": "Aura",
         "controller": "You",
         "properties": [
           {
@@ -34,6 +33,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Aura",
         "type": "Typed"
       },
       "affected_zone": "Library",
@@ -50,7 +50,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Equipment",
+        "subtype": "Equipment",
         "type": "Typed"
       }
     }

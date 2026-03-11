@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -30,7 +37,15 @@
     },
     {
       "cost": {
-        "cost": "3 U U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Counter target enchantment spell.",

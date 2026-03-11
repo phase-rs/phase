@@ -6,7 +6,7 @@
       "description": "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.",
       "effect": {
         "count": 3,
-        "destination": "",
+        "destination": "Battlefield",
         "type": "Dig"
       },
       "kind": "Spell",
@@ -27,8 +27,8 @@
       "affected_zone": "Graveyard",
       "condition": {
         "filter": {
-          "card_type": "Giant",
           "controller": "You",
+          "subtype": "Giant",
           "type": "Typed"
         },
         "type": "IsPresent"

@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 G",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -36,8 +43,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Forest",
         "controller": "You",
+        "subtype": "Forest",
         "type": "Typed"
       },
       "description": "Forests you control are 1/1 green Elf creatures that are still lands.",
@@ -52,8 +59,12 @@
           "value": 1
         },
         {
-          "core_type": "Creature & Elf",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Elf",
+          "type": "AddSubtype"
         },
         {
           "colors": [

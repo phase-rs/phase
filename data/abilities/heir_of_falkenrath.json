@@ -6,8 +6,8 @@
       "abilities": [
         {
           "cost": {
-            "cost": "Discard<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Discard"
           },
           "description": "Transform CARDNAME. Activate only once each turn.",
           "effect": {

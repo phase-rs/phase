@@ -7,7 +7,7 @@
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "toughness": 0,

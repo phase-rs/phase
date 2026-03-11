@@ -5,12 +5,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/M1M1>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "M1M1",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -18,7 +26,7 @@
       "description": "Destroy target artifact or enchantment.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

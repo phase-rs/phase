@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Displacement — Return CARDNAME to its owner's hand.",

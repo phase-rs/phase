@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<2>",
-            "type": "Mana"
+            "amount": 2,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"
@@ -36,8 +36,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<8>",
-            "type": "Mana"
+            "amount": 8,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"
@@ -49,7 +49,7 @@
           "value": 6
         },
         "target": {
-          "card_type": "Player,Planeswalker",
+          "card_type": "Planeswalker",
           "type": "Typed"
         },
         "type": "DealDamage"

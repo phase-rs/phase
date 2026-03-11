@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "U U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Blue",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return target Aura card from your graveyard to the battlefield attached to CARDNAME. Activate only during your upkeep and only if NICKNAME isn't enchanted.",
@@ -11,13 +19,13 @@
         "destination": "Battlefield",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Aura",
           "properties": [
             {
               "type": "Other",
               "value": "YouOwn"
             }
           ],
+          "subtype": "Aura",
           "type": "Typed"
         },
         "type": "ChangeZone"
@@ -29,7 +37,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "U U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {

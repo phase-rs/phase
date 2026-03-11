@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Hero",
             "controller": "You",
+            "subtype": "Hero",
             "type": "Typed"
           },
           {

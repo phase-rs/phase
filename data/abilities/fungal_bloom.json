@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a spore counter on target Fungus.",
@@ -11,7 +19,7 @@
         "count": 1,
         "counter_type": "SPORE",
         "target": {
-          "card_type": "Fungus",
+          "subtype": "Fungus",
           "type": "Typed"
         },
         "type": "PutCounter"

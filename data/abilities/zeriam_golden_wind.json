@@ -13,8 +13,8 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Griffin",
         "controller": "You",
+        "subtype": "Griffin",
         "type": "Typed"
       },
       "valid_target": {

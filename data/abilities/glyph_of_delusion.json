@@ -7,7 +7,7 @@
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Wall",
+          "subtype": "Wall",
           "type": "Typed"
         },
         "toughness": 0,

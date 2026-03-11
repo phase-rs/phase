@@ -21,7 +21,15 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1 B B",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Black",
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Each creature you control with flying, deathtouch and/or lifelink gets +1/+0 until end of turn.",

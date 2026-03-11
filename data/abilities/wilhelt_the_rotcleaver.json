@@ -16,8 +16,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Zombie",
             "controller": "You",
+            "subtype": "Zombie",
             "type": "Typed"
           },
           {

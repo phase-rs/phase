@@ -98,7 +98,6 @@
     },
     {
       "affected": {
-        "card_type": "Battle",
         "properties": [
           {
             "type": "Other",
@@ -109,6 +108,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Battle",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",

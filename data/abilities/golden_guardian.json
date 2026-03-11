@@ -6,7 +6,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "CARDNAME fights another target creature you control.",
@@ -56,7 +61,12 @@
           "cost": {
             "costs": [
               {
-                "cost": "4",
+                "cost": {
+                  "Cost": {
+                    "generic": 4,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {

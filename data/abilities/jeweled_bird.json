@@ -7,7 +7,7 @@
       },
       "description": "Ante CARDNAME. If you do, put all other cards you own from the ante into your graveyard, then draw a card.",
       "effect": {
-        "destination": "Ante",
+        "destination": "Exile",
         "origin": "Battlefield",
         "target": {
           "type": "Any"

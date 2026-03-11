@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 W",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Another target Vehicle you control becomes an artifact creature until end of turn.",
@@ -12,8 +19,8 @@
         "target": {
           "filters": [
             {
-              "card_type": "Vehicle",
               "controller": "You",
+              "subtype": "Vehicle",
               "type": "Typed"
             },
             {

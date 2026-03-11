@@ -6,7 +6,7 @@
       "description": "Counter target creature or planeswalker spell. Create a 1/1 colorless Thopter artifact creature token with flying.",
       "effect": {
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Counter"

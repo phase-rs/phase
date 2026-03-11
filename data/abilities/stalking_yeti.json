@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 S",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME to its owner's hand. Activate only as a sorcery.",

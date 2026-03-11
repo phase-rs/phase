@@ -18,7 +18,15 @@
     },
     {
       "cost": {
-        "cost": "R W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME becomes a 1/1 red and white Soldier artifact creature with double strike until end of turn.",

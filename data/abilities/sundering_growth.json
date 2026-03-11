@@ -6,7 +6,7 @@
       "description": "Destroy target artifact or enchantment, then populate. (Create a token that's a copy of a creature token you control.)",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

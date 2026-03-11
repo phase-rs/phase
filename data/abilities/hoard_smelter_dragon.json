@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 R",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Destroy target artifact. CARDNAME gets +X/+0 until end of turn, where X is that artifact's mana value.",

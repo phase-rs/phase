@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "5",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -16,9 +21,7 @@
       },
       "description": "Create a 2/2 creature token of the chosen color and type.",
       "effect": {
-        "colors": [
-          "ChosenColor"
-        ],
+        "colors": [],
         "keywords": [],
         "name": "volraths_laboratory",
         "power": 0,

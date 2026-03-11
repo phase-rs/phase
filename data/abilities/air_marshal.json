@@ -3,14 +3,19 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Target Soldier gains flying until end of turn.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Soldier",
+          "subtype": "Soldier",
           "type": "Typed"
         },
         "toughness": 0,

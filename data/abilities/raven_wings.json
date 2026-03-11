@@ -26,8 +26,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Bird",
-          "type": "AddType"
+          "subtype": "Bird",
+          "type": "AddSubtype"
         }
       ]
     }

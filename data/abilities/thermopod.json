@@ -20,7 +20,14 @@
     },
     {
       "cost": {
-        "cost": "S",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Snow"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains haste until end of turn.",

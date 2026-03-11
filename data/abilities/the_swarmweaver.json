@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Insect",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Spider.YouCtrl"
           }
         ],
+        "subtype": "Insect",
         "type": "Typed"
       },
       "description": "Delirium — As long as there are four or more card types among cards in your graveyard, Insects and Spiders you control get +1/+1 and have deathtouch.",

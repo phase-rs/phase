@@ -22,8 +22,8 @@
           "value": 1
         },
         {
-          "core_type": "Monk",
-          "type": "AddType"
+          "subtype": "Monk",
+          "type": "AddSubtype"
         }
       ]
     }

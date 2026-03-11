@@ -22,8 +22,12 @@
       "abilities": [
         {
           "cost": {
-            "cost": "Discard<1/Land>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Land",
+              "type": "Typed"
+            },
+            "type": "Discard"
           },
           "description": "CARDNAME deals 2 damage to any target.",
           "effect": {

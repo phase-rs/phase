@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<2/CARRION>",
-        "type": "Mana"
+        "count": 2,
+        "counter_type": "CARRION",
+        "type": "RemoveCounter"
       },
       "description": "CARDNAME gets +1/+1 until end of turn.",
       "effect": {

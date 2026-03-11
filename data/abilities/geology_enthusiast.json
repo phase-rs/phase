@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card and put a +1/+1 counter on CARDNAME.",

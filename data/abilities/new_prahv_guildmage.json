@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature gains flying until end of turn.",
@@ -21,7 +29,15 @@
     },
     {
       "cost": {
-        "cost": "3 W U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Detain target nonland permanent an opponent controls. (Until your next turn, that permanent can't attack or block and its activated abilities can't be activated.)",

@@ -5,7 +5,15 @@
       "cost": {
         "costs": [
           {
-            "cost": "X G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -34,12 +42,25 @@
       "cost": {
         "costs": [
           {
-            "cost": "X G G",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X",
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/NICKNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "subtype": "NICKNAME",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

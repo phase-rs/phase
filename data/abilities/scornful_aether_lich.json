@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains fear and vigilance until end of turn.",

@@ -5,12 +5,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/P1P1>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "P1P1",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -32,12 +38,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/P1P1>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "P1P1",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

@@ -39,8 +39,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Attraction",
         "controller": "You",
+        "subtype": "Attraction",
         "type": "Typed"
       }
     }

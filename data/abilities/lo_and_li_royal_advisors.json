@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 UB",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target player mills four cards. (They put the top four cards of their library into their graveyard.)",

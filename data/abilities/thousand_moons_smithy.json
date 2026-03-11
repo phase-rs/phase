@@ -50,7 +50,7 @@
           "description": "Whenever you cast an artifact or creature spell using mana produced by CARDNAME, create a white Gnome Soldier artifact creature token with \"This creature's power and toughness are each equal to the number of artifacts and/or creatures you control.\"",
           "mode": "SpellCast",
           "valid_card": {
-            "card_type": "Artifact,Creature",
+            "card_type": "Artifact",
             "type": "Typed"
           }
         }

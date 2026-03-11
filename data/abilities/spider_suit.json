@@ -26,8 +26,12 @@
           "value": 2
         },
         {
-          "core_type": "Spider & Hero",
-          "type": "AddType"
+          "subtype": "Spider",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Hero",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -10,13 +10,13 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Lesson",
           "properties": [
             {
               "type": "Other",
               "value": "YouOwn"
             }
           ],
+          "subtype": "Lesson",
           "type": "Typed"
         },
         "type": "IsPresent"

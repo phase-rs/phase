@@ -30,11 +30,11 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Spell",
+        "subtype": "Spell",
         "type": "Typed"
       },
       "valid_target": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       }
     }

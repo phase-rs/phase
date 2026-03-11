@@ -29,8 +29,12 @@
           "type": "RemoveAllAbilities"
         },
         {
-          "core_type": "Creature & Elk",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Elk",
+          "type": "AddSubtype"
         },
         {
           "colors": [

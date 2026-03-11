@@ -22,13 +22,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Blood",
         "controller": "You",
         "properties": [
           {
             "type": "Token"
           }
         ],
+        "subtype": "Blood",
         "type": "Typed"
       }
     }

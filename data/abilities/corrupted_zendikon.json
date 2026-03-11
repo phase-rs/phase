@@ -27,8 +27,12 @@
           "value": 3
         },
         {
-          "core_type": "Creature & Ooze",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Ooze",
+          "type": "AddSubtype"
         },
         {
           "colors": [

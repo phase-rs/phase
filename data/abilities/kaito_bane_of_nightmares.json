@@ -75,8 +75,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Ninja",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Ninja",
+          "type": "AddSubtype"
         }
       ]
     }

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayEnergy<4>",
-        "type": "Mana"
+        "amount": 4,
+        "type": "PayEnergy"
       },
       "description": "Return CARDNAME to its owner's hand.",
       "effect": {

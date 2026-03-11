@@ -6,7 +6,7 @@
       "description": "The owner of target spell or nonland permanent puts it on the top or bottom of their library.",
       "effect": {
         "destination": "Library",
-        "origin": "Battlefield,Stack",
+        "origin": "Battlefield",
         "target": {
           "card_type": "Permanent",
           "type": "Typed"

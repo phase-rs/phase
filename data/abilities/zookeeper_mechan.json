@@ -17,7 +17,14 @@
     },
     {
       "cost": {
-        "cost": "6 R",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature you control gets +4/+0 until end of turn. Activate only as a sorcery.",

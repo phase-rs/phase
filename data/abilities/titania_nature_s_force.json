@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Forest",
         "properties": [
           {
             "type": "Other",
             "value": "YouOwn"
           }
         ],
+        "subtype": "Forest",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",
@@ -30,8 +30,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Forest",
         "controller": "You",
+        "subtype": "Forest",
         "type": "Typed"
       }
     },
@@ -41,8 +41,8 @@
       "mode": "ChangesZone",
       "origin": "Battlefield",
       "valid_card": {
-        "card_type": "Elemental",
         "controller": "You",
+        "subtype": "Elemental",
         "type": "Typed"
       }
     }

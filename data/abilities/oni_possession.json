@@ -45,8 +45,12 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Demon & Spirit",
-          "type": "AddType"
+          "subtype": "Demon",
+          "type": "AddSubtype"
+        },
+        {
+          "subtype": "Spirit",
+          "type": "AddSubtype"
         }
       ]
     }

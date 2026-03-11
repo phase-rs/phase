@@ -19,15 +19,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<7/Card>",
-            "type": "Mana"
+            "count": 7,
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

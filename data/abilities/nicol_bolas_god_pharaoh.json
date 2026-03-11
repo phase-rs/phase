@@ -44,7 +44,7 @@
           "value": 7
         },
         "target": {
-          "card_type": "Opponent,Creature",
+          "card_type": "Creature",
           "properties": [
             {
               "type": "Other",

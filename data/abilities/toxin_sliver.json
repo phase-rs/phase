@@ -13,7 +13,7 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Sliver",
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "valid_target": {

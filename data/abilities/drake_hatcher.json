@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<3/INCUBATION>",
-        "type": "Mana"
+        "count": 3,
+        "counter_type": "INCUBATION",
+        "type": "RemoveCounter"
       },
       "description": "Create a 2/2 blue Drake creature token with flying.",
       "effect": {

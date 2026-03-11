@@ -32,8 +32,8 @@
             "Battlefield"
           ],
           "valid_card": {
-            "card_type": "Werewolf",
             "controller": "You",
+            "subtype": "Werewolf",
             "type": "Typed"
           }
         },

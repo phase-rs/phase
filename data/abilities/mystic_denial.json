@@ -6,7 +6,7 @@
       "description": "Counter target creature or sorcery spell.",
       "effect": {
         "target": {
-          "card_type": "Creature,Sorcery",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Counter"

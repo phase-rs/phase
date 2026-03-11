@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X U",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X",
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "This turn, creatures can't attack unless their controller pays {X} for each attacking creature they control.",

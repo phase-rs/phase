@@ -9,7 +9,7 @@
       "effect": {
         "power": 1,
         "target": {
-          "card_type": "Merfolk",
+          "subtype": "Merfolk",
           "type": "Typed"
         },
         "toughness": 1,

@@ -6,7 +6,7 @@
       "description": "You may reveal a creature or land card you own from outside the game and put it into your hand. Exile CARDNAME.",
       "effect": {
         "destination": "Hand",
-        "origin": "Sideboard",
+        "origin": "Exile",
         "target": {
           "type": "Any"
         },

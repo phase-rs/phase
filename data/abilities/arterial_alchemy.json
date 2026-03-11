@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Blood",
         "controller": "You",
         "properties": [
           {
             "type": "Token"
           }
         ],
+        "subtype": "Blood",
         "type": "Typed"
       },
       "description": "Blood tokens you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0\" and equip {2}.",
@@ -23,8 +23,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Equipment",
-          "type": "AddType"
+          "subtype": "Equipment",
+          "type": "AddSubtype"
         }
       ]
     }

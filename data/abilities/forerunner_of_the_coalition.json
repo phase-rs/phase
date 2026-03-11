@@ -26,8 +26,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Pirate",
             "controller": "You",
+            "subtype": "Pirate",
             "type": "Typed"
           },
           {

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Fish",
         "controller": "You",
+        "subtype": "Fish",
         "type": "Typed"
       },
       "description": "Fish you control have haste and can't be blocked by Humans.",

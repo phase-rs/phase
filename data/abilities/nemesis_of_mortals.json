@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7 G G",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Monstrosity 5. This ability costs {1} less to activate for each creature card in your graveyard.",

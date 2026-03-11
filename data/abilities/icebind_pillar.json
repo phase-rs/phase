@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "S",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Snow"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -17,7 +24,7 @@
       "description": "Tap target artifact or creature.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Tap"

@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "1 B G",
+        "cost": {
+          "Cost": {
+            "generic": 1,
+            "shards": [
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature you control with toxic gains deathtouch until end of turn.",

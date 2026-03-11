@@ -15,7 +15,15 @@
     },
     {
       "cost": {
-        "cost": "10 R G",
+        "cost": {
+          "Cost": {
+            "generic": 10,
+            "shards": [
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put any number of permanent cards from your hand onto the battlefield. (Activate each exhaust ability only once.)",

@@ -9,7 +9,7 @@
       "description": "Untap up to one target Elf. That Elf and a random Elf creature card in your hand perpetually get +1/+1.",
       "effect": {
         "target": {
-          "card_type": "Elf",
+          "subtype": "Elf",
           "type": "Typed"
         },
         "type": "Untap"

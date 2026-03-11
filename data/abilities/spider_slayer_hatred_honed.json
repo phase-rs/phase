@@ -5,12 +5,21 @@
       "cost": {
         "costs": [
           {
-            "cost": "6",
+            "cost": {
+              "Cost": {
+                "generic": 6,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"
@@ -43,7 +52,7 @@
         "type": "SelfRef"
       },
       "valid_target": {
-        "card_type": "Spider",
+        "subtype": "Spider",
         "type": "Typed"
       }
     }

@@ -6,7 +6,15 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1 W W",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "White",
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Transform CARDNAME. Activate only if you control three or more creatures with different powers.",

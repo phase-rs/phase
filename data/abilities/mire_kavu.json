@@ -10,8 +10,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Swamp",
           "controller": "You",
+          "subtype": "Swamp",
           "type": "Typed"
         },
         "type": "IsPresent"

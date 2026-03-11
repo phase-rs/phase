@@ -5,16 +5,38 @@
       "cost": {
         "costs": [
           {
-            "cost": "5",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Exile<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Exile"
           },
           {
-            "cost": "Exile<4/Artifact.Creature+Other;Vehicle.Other/other artifact creatures and/or Vehicle>",
-            "type": "Mana"
+            "count": 4,
+            "filter": {
+              "card_type": "Artifact",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "Creature"
+                },
+                {
+                  "type": "Other",
+                  "value": "Other;Vehicle.Other"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Exile"
           }
         ],
         "type": "Composite"

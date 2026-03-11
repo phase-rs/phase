@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "If damage would be dealt to you this turn by a source of your choice, prevent that damage. CARDNAME deals damage to you and target opponent or planeswalker equal to half the damage prevented this way, rounded up. Activate only once each turn.",

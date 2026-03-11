@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "X W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "X",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put target card with mana value X exiled with CARDNAME into its owner's graveyard. You gain X life.",

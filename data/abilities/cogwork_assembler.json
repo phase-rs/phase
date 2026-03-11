@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "7",
+        "cost": {
+          "Cost": {
+            "generic": 7,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Create a token that's a copy of target artifact. That token gains haste. Exile it at the beginning of the next end step.",

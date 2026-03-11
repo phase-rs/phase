@@ -23,13 +23,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Insect",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Leech.YouCtrl,Slug.YouCtrl,Worm.YouCtrl"
           }
         ],
+        "subtype": "Insect",
         "type": "Typed"
       }
     }

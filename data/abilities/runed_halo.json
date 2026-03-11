@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "You have protection from the chosen card name. (You can't be targeted, dealt damage, or enchanted by anything with that name.)",

@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Mana<0\\EnchantedCost>",
-        "type": "Mana"
+        "description": "Mana<0\\EnchantedCost>",
+        "type": "Unimplemented"
       },
       "description": "Remove a net counter from this Aura. Only the controller of the enchanted creature may activate this ability.",
       "effect": {

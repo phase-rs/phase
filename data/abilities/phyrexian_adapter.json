@@ -6,13 +6,13 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Incubator",
         "controller": "You",
         "properties": [
           {
             "type": "Token"
           }
         ],
+        "subtype": "Incubator",
         "type": "Typed"
       },
       "description": "All Incubator tokens you control become Food, Blood, Clue, Treasure, and Powerstone in addition to their other types, and have the respective abilities of those tokens. (Once they transform, they're no longer Incubator tokens.)",
@@ -23,8 +23,8 @@
           "type": "AddAbility"
         },
         {
-          "core_type": "Food,Blood,Clue,Treasure,Powerstone",
-          "type": "AddType"
+          "subtype": "Food,Blood,Clue,Treasure,Powerstone",
+          "type": "AddSubtype"
         }
       ]
     }

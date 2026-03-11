@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Saga",
         "controller": "You",
+        "subtype": "Saga",
         "type": "Typed"
       },
       "description": "History Teacher — Sagas you control have read ahead. (As a Saga enters, choose a chapter and start with that many lore counters. Skipped chapters don't trigger.)",

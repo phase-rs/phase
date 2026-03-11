@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"
@@ -34,8 +34,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<3>",
-            "type": "Mana"
+            "amount": 3,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"
@@ -55,8 +55,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<5>",
-            "type": "Mana"
+            "amount": 5,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"

@@ -34,8 +34,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Tentacle",
         "controller": "You",
+        "subtype": "Tentacle",
         "type": "Typed"
       }
     }

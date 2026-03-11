@@ -5,12 +5,28 @@
       "cost": {
         "costs": [
           {
-            "cost": "W",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "White"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "tapXType<5/Creature.attacking+namedTemplar Knight/attacking creatures named Templar Knight>",
-            "type": "Mana"
+            "count": 5,
+            "filter": {
+              "card_type": "Creature",
+              "properties": [
+                {
+                  "type": "Attacking"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"

@@ -28,7 +28,7 @@
           "value": 4
         },
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "DealDamage"
@@ -39,8 +39,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "Create X 1/1 red Devil creature tokens with \"When this creature dies, it deals 1 damage to any target.\"",
       "effect": {

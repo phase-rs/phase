@@ -22,7 +22,6 @@
     },
     {
       "affected": {
-        "card_type": "Goblin",
         "controller": "You",
         "properties": [
           {
@@ -34,6 +33,7 @@
             "value": "Land"
           }
         ],
+        "subtype": "Goblin",
         "type": "Typed"
       },
       "affected_zone": "Library",

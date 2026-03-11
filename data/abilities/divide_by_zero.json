@@ -6,7 +6,7 @@
       "description": "Return target spell or permanent with mana value 1 or greater to its owner's hand.",
       "effect": {
         "destination": "Hand",
-        "origin": "Battlefield,Stack",
+        "origin": "Battlefield",
         "target": {
           "card_type": "Permanent",
           "type": "Typed"

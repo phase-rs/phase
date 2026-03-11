@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Conjure a card named Muraganda Petroglyphs onto the battlefield, then this creature loses this ability. Activate only as a sorcery.",

@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 B",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +1/+0 until end of turn.",
@@ -30,8 +37,8 @@
         "filter": {
           "filters": [
             {
-              "card_type": "Faerie",
               "controller": "You",
+              "subtype": "Faerie",
               "type": "Typed"
             },
             {

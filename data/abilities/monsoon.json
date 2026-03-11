@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Island",
+        "subtype": "Island",
         "type": "Typed"
       },
       "mode": "Continuous"

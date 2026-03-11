@@ -6,7 +6,7 @@
       "description": "Destroy any number of target artifacts and/or enchantments.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

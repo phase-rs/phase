@@ -3,8 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<3/Creature.Other/other creature>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "card_type": "Creature",
+          "properties": [
+            {
+              "type": "Other",
+              "value": "Other/other creature"
+            }
+          ],
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Until end of turn, this Vehicle becomes an artifact creature and gains flying. Put a +1/+1 counter on it.",
       "effect": {

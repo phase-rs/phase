@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<5/Elf>",
-        "type": "Mana"
+        "count": 5,
+        "filter": {
+          "subtype": "Elf",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Create a 7/7 green Elemental creature token with trample.",
       "effect": {

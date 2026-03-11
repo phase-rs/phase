@@ -9,13 +9,13 @@
       "description": "When you planeswalk to CARDNAME or at the beginning of your upkeep, put a scroll counter on CARDNAME, then you gain life equal to the number of scroll counters on it.",
       "mode": "PlaneswalkedTo",
       "valid_card": {
-        "card_type": "Plane",
         "properties": [
           {
             "type": "Other",
             "value": "Self"
           }
         ],
+        "subtype": "Plane",
         "type": "Typed"
       }
     },

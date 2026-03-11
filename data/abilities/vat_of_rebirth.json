@@ -5,15 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 B",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<4/OIL>",
-            "type": "Mana"
+            "count": 4,
+            "counter_type": "OIL",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

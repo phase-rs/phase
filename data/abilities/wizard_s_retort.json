@@ -21,8 +21,8 @@
     {
       "condition": {
         "filter": {
-          "card_type": "Wizard",
           "controller": "You",
+          "subtype": "Wizard",
           "type": "Typed"
         },
         "type": "IsPresent"

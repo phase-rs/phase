@@ -10,7 +10,7 @@
         "controller": "You",
         "type": "Typed"
       },
-      "affected_zone": "Graveyard,Stack",
+      "affected_zone": "Graveyard",
       "description": "Each instant and sorcery card in your graveyard that's exactly two colors has jump-start.",
       "mode": "Continuous",
       "modifications": [

@@ -13,7 +13,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "You have no maximum hand size and don't lose the game for having 0 or less life.",

@@ -5,15 +5,23 @@
       "cost": {
         "costs": [
           {
-            "cost": "2 U U",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": [
+                  "Blue",
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "PutCardToLibFromBattlefield<1/-1/CARDNAME>",
-            "type": "Mana"
+            "description": "PutCardToLibFromBattlefield<1/-1/CARDNAME>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

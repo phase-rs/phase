@@ -8,8 +8,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Goblin",
             "controller": "You",
+            "subtype": "Goblin",
             "type": "Typed"
           },
           {

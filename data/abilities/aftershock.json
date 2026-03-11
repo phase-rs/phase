@@ -6,7 +6,7 @@
       "description": "Destroy target artifact, creature or land. CARDNAME deals 3 damage to you.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Creature,Land",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

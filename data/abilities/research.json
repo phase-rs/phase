@@ -9,7 +9,7 @@
           "description": "Shuffle up to four cards you own from outside the game into your library.",
           "effect": {
             "destination": "Library",
-            "origin": "Sideboard",
+            "origin": "Exile",
             "target": {
               "type": "Any"
             },

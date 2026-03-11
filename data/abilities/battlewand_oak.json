@@ -14,8 +14,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Forest",
         "controller": "You",
+        "subtype": "Forest",
         "type": "Typed"
       }
     },
@@ -26,7 +26,7 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Treefolk",
+        "subtype": "Treefolk",
         "type": "Typed"
       }
     }

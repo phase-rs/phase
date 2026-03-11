@@ -12,7 +12,6 @@
     },
     {
       "affected": {
-        "card_type": "Sliver",
         "controller": "You",
         "properties": [
           {
@@ -20,6 +19,7 @@
             "value": "Creature"
           }
         ],
+        "subtype": "Sliver",
         "type": "Typed"
       },
       "affected_zone": "Graveyard",

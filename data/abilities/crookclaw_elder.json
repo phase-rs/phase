@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<2/Bird>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "subtype": "Bird",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Draw a card.",
       "effect": {
@@ -16,8 +20,12 @@
     },
     {
       "cost": {
-        "cost": "tapXType<2/Wizard>",
-        "type": "Mana"
+        "count": 2,
+        "filter": {
+          "subtype": "Wizard",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Target creature gains flying until end of turn.",
       "effect": {

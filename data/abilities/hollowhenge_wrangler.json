@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<1/Land/land>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "Discard"
       },
       "description": "Conjure a card named Hollowhenge Beast into your hand. You may also activate this ability while CARDNAME is in your graveyard.",
       "effect": {

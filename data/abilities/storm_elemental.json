@@ -5,12 +5,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromTop<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Exile",
+            "zone": "Library"
           }
         ],
         "type": "Composite"
@@ -31,12 +39,20 @@
       "cost": {
         "costs": [
           {
-            "cost": "U",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromTop<1/Card>",
-            "type": "Mana"
+            "count": 1,
+            "type": "Exile",
+            "zone": "Library"
           }
         ],
         "type": "Composite"

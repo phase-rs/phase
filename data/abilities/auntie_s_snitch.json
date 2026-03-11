@@ -19,13 +19,13 @@
         "Graveyard"
       ],
       "valid_source": {
-        "card_type": "Goblin",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Rogue.YouCtrl"
           }
         ],
+        "subtype": "Goblin",
         "type": "Typed"
       },
       "valid_target": {

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Rogue",
         "controller": "You",
+        "subtype": "Rogue",
         "type": "Typed"
       },
       "condition": {

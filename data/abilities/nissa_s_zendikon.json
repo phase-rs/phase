@@ -39,8 +39,12 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Creature & Elemental",
+          "core_type": "Creature",
           "type": "AddType"
+        },
+        {
+          "subtype": "Elemental",
+          "type": "AddSubtype"
         }
       ]
     }

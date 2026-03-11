@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "X",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -19,13 +26,13 @@
         "destination": "Battlefield",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Saga",
           "properties": [
             {
               "type": "Other",
               "value": "YouOwn"
             }
           ],
+          "subtype": "Saga",
           "type": "Typed"
         },
         "type": "ChangeZone"

@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Treasure",
         "controller": "You",
+        "subtype": "Treasure",
         "type": "Typed"
       },
       "description": "Treasures you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0,\" equip Pirate {1}, and equip {3}.",
@@ -26,8 +26,8 @@
           "type": "AddKeyword"
         },
         {
-          "core_type": "Equipment",
-          "type": "AddType"
+          "subtype": "Equipment",
+          "type": "AddSubtype"
         }
       ]
     }

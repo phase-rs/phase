@@ -6,15 +6,15 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Mountain",
+        "subtype": "Mountain",
         "type": "Typed"
       },
       "description": "All Mountains are Plains.",
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Plains",
-          "type": "AddType"
+          "subtype": "Plains",
+          "type": "AddSubtype"
         }
       ]
     }

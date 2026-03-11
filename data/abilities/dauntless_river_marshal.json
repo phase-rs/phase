@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Tap target creature.",
@@ -27,8 +34,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Island",
           "controller": "You",
+          "subtype": "Island",
           "type": "Typed"
         },
         "type": "IsPresent"

@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<1/OIL>",
-        "type": "Mana"
+        "count": 1,
+        "counter_type": "OIL",
+        "type": "RemoveCounter"
       },
       "description": "Target creature you control gains haste until end of turn.",
       "effect": {

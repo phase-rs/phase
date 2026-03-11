@@ -39,7 +39,7 @@
       "description": "You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
       "effect": {
         "destination": "Hand",
-        "origin": "Sideboard,Exile",
+        "origin": "Exile",
         "target": {
           "type": "Any"
         },

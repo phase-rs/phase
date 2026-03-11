@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 W B",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "White",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control with power 2 or less gain deathtouch and lifelink until end of turn.",

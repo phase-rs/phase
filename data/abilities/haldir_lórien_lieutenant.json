@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 G",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, other Elves you control gain vigilance and get +1/+1 for each +1/+1 counter on NICKNAME.",

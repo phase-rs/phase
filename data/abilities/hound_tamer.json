@@ -6,7 +6,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "3 G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Put a +1/+1 counter on target creature.",
@@ -31,7 +38,14 @@
       "abilities": [
         {
           "cost": {
-            "cost": "3 G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Put a +1/+1 counter on target creature.",
@@ -54,7 +68,6 @@
           "affected": {
             "filters": [
               {
-                "card_type": "Wolf",
                 "controller": "You",
                 "properties": [
                   {
@@ -62,6 +75,7 @@
                     "value": "YouCtrl,Werewolf.Other"
                   }
                 ],
+                "subtype": "Wolf",
                 "type": "Typed"
               },
               {

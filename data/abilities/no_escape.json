@@ -6,7 +6,7 @@
       "description": "Counter target creature or planeswalker spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard.",
       "effect": {
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Counter"

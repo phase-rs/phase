@@ -3,7 +3,16 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 G G G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Green",
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Elf creatures you control get +3/+3 and gain trample until end of turn.",
@@ -20,7 +29,14 @@
     },
     {
       "cost": {
-        "cost": "G",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate another target Elf.",

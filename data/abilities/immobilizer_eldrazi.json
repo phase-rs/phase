@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 C",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Colorless"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Each creature with toughness greater than its power can't block this turn.",

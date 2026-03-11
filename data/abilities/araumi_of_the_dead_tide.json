@@ -8,8 +8,9 @@
             "type": "Tap"
           },
           {
-            "cost": "ExileFromGrave<X/Card>",
-            "type": "Mana"
+            "count": 0,
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

@@ -26,8 +26,8 @@
           "value": -1
         },
         {
-          "core_type": "Zombie",
-          "type": "AddType"
+          "subtype": "Zombie",
+          "type": "AddSubtype"
         },
         {
           "color": "Black",

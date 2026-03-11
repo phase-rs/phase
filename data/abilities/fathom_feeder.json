@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 U B",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Blue",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card. Each opponent exiles the top card of their library.",

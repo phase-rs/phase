@@ -19,7 +19,16 @@
     },
     {
       "cost": {
-        "cost": "2 R R R",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Red",
+              "Red",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Return CARDNAME from your graveyard to your hand. Activate only during your upkeep.",

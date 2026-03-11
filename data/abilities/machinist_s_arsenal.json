@@ -18,8 +18,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Artificer",
-          "type": "AddType"
+          "subtype": "Artificer",
+          "type": "AddSubtype"
         }
       ]
     }

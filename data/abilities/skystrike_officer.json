@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<3/Soldier>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "subtype": "Soldier",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Draw a card.",
       "effect": {

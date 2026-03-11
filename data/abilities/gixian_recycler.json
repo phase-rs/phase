@@ -18,7 +18,7 @@
       "description": "When CARDNAME dies or is put into your graveyard from your hand or library, conjure a card named Gixian Recycler into your graveyard.",
       "destination": "Graveyard",
       "mode": "ChangesZone",
-      "origin": "Hand,Library",
+      "origin": "Hand",
       "secondary": true,
       "valid_card": {
         "type": "SelfRef"

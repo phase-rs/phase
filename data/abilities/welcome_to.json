@@ -29,13 +29,13 @@
       "statics": [
         {
           "affected": {
-            "card_type": "Dinosaur",
             "properties": [
               {
                 "type": "Other",
                 "value": "YouOwn"
               }
             ],
+            "subtype": "Dinosaur",
             "type": "Typed"
           },
           "affected_zone": "Graveyard",

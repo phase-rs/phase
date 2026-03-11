@@ -8,8 +8,8 @@
             "type": "Tap"
           },
           {
-            "cost": "PayEnergy<1>",
-            "type": "Mana"
+            "amount": 1,
+            "type": "PayEnergy"
           }
         ],
         "type": "Composite"
@@ -17,7 +17,7 @@
       "description": "Tap target creature or planeswalker. Its activated abilities can't be activated this turn.",
       "effect": {
         "target": {
-          "card_type": "Creature,Planeswalker",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "Tap"

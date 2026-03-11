@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Regenerate NICKNAME.",
@@ -17,7 +25,14 @@
     },
     {
       "cost": {
-        "cost": "B",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains haste until end of turn.",

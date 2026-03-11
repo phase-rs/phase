@@ -54,8 +54,8 @@
         },
         {
           "cost": {
-            "cost": "SubCounter<X/LOYALTY>",
-            "type": "Mana"
+            "amount": 0,
+            "type": "Loyalty"
           },
           "description": "Return target nonlegendary creature card with mana value X from your graveyard to the battlefield.",
           "effect": {

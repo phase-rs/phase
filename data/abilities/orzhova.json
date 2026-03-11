@@ -9,13 +9,13 @@
       "description": "When you planeswalk away from CARDNAME, each player returns all creature cards from their graveyard to the battlefield.",
       "mode": "PlaneswalkedFrom",
       "valid_card": {
-        "card_type": "Plane",
         "properties": [
           {
             "type": "Other",
             "value": "Self"
           }
         ],
+        "subtype": "Plane",
         "type": "Typed"
       }
     },

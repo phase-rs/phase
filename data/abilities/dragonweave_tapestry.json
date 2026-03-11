@@ -34,7 +34,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Dragon,Omen",
         "type": "Typed"
       }
     }

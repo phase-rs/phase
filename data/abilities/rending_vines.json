@@ -6,7 +6,7 @@
       "description": "Destroy target artifact or enchantment if its mana value is less than or equal to the number of cards in your hand.",
       "effect": {
         "target": {
-          "card_type": "Artifact,Enchantment",
+          "card_type": "Artifact",
           "type": "Typed"
         },
         "type": "Destroy"

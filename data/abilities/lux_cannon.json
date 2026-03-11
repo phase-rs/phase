@@ -24,8 +24,9 @@
             "type": "Tap"
           },
           {
-            "cost": "SubCounter<3/CHARGE>",
-            "type": "Mana"
+            "count": 3,
+            "counter_type": "CHARGE",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

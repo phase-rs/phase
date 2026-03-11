@@ -6,8 +6,8 @@
       "abilities": [
         {
           "cost": {
-            "cost": "Waterbend<8>",
-            "type": "Mana"
+            "description": "Waterbend<8>",
+            "type": "Unimplemented"
           },
           "description": "Transform NICKNAME.",
           "effect": {

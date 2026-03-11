@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "B R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control with menace get +1/+0 until end of turn.",

@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -19,13 +24,13 @@
         "destination": "Hand",
         "origin": "Graveyard",
         "target": {
-          "card_type": "Equipment",
           "properties": [
             {
               "type": "Other",
               "value": "YouOwn,Vehicle.YouOwn"
             }
           ],
+          "subtype": "Equipment",
           "type": "Typed"
         },
         "type": "ChangeZone"

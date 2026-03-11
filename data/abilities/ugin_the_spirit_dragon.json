@@ -22,8 +22,8 @@
     },
     {
       "cost": {
-        "cost": "SubCounter<X/LOYALTY>",
-        "type": "Mana"
+        "amount": 0,
+        "type": "Loyalty"
       },
       "description": "Exile each permanent with mana value X or less that's one or more colors.",
       "effect": {

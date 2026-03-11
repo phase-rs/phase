@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<2/CURRENCY>",
-        "type": "Mana"
+        "count": 2,
+        "counter_type": "CURRENCY",
+        "type": "RemoveCounter"
       },
       "description": "Untap target basic land. Activate only during an opponent's upkeep.",
       "effect": {

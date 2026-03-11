@@ -3,7 +3,18 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 W U B R G",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "White",
+              "Blue",
+              "Black",
+              "Red",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile the top three cards of your library. You may play them this turn without paying their mana costs.",

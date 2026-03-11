@@ -5,8 +5,8 @@
       "cost": {
         "costs": [
           {
-            "cost": "Waterbend<5>",
-            "type": "Mana"
+            "description": "Waterbend<5>",
+            "type": "Unimplemented"
           },
           {
             "type": "Tap"

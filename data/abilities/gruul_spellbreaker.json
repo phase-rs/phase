@@ -6,7 +6,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You,Card",
+        "card_type": "Card",
         "properties": [
           {
             "type": "Other",

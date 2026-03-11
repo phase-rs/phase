@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "3 W",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Put a +1/+1 counter on target Mount or Vehicle.",
@@ -11,7 +18,6 @@
         "count": 1,
         "counter_type": "P1P1",
         "target": {
-          "card_type": "Mount,Vehicle",
           "type": "Typed"
         },
         "type": "PutCounter"

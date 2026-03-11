@@ -6,7 +6,7 @@
       "description": "Each player shuffles their hand and graveyard into their library.",
       "effect": {
         "destination": "Library",
-        "origin": "Graveyard,Hand",
+        "origin": "Graveyard",
         "target": {
           "type": "Any"
         },

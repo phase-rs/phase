@@ -5,12 +5,28 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "ExileFromGrave<1/Card.TopGraveyard>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Card",
+              "properties": [
+                {
+                  "type": "Other",
+                  "value": "TopGraveyard"
+                }
+              ],
+              "type": "Typed"
+            },
+            "type": "Exile",
+            "zone": "Graveyard"
           }
         ],
         "type": "Composite"

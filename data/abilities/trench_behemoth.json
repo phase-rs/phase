@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Return<1/Land>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "card_type": "Land",
+          "type": "Typed"
+        },
+        "type": "ReturnToHand"
       },
       "description": "Untap CARDNAME. It gains hexproof until end of turn.",
       "effect": {

@@ -18,8 +18,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Wizard",
-          "type": "AddType"
+          "subtype": "Wizard",
+          "type": "AddSubtype"
         }
       ]
     }

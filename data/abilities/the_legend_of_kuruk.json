@@ -12,8 +12,8 @@
       "abilities": [
         {
           "cost": {
-            "cost": "Waterbend<20>",
-            "type": "Mana"
+            "description": "Waterbend<20>",
+            "type": "Unimplemented"
           },
           "description": "Take an extra turn after this one.",
           "effect": {

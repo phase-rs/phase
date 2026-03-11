@@ -6,10 +6,10 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Spell,Permanent",
+        "card_type": "Permanent",
         "type": "Typed"
       },
-      "affected_zone": "Stack,Battlefield",
+      "affected_zone": "Stack",
       "description": "All instances of color words in the text of spells and permanents are changed to the chosen color word.",
       "mode": "Continuous"
     }

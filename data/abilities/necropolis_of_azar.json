@@ -5,12 +5,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "5",
+            "cost": {
+              "Cost": {
+                "generic": 5,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<1/HUSK>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "HUSK",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"

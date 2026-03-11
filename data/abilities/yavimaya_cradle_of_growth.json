@@ -13,8 +13,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Forest",
-          "type": "AddType"
+          "subtype": "Forest",
+          "type": "AddSubtype"
         }
       ]
     }

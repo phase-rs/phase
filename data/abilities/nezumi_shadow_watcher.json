@@ -11,7 +11,7 @@
       "description": "Destroy target Ninja.",
       "effect": {
         "target": {
-          "card_type": "Ninja",
+          "subtype": "Ninja",
           "type": "Typed"
         },
         "type": "Destroy"

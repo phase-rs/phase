@@ -18,7 +18,7 @@
     },
     {
       "description": "When CARDNAME dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.",
-      "destination": "Graveyard,Exile",
+      "destination": "Graveyard",
       "mode": "ChangesZone",
       "optional": true,
       "origin": "Battlefield",

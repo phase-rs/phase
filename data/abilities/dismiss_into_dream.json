@@ -14,8 +14,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Illusion",
-          "type": "AddType"
+          "subtype": "Illusion",
+          "type": "AddSubtype"
         }
       ]
     }

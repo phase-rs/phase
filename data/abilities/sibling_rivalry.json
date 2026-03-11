@@ -6,7 +6,7 @@
       "description": "Gain control of target artifact or creature until end of turn. Untap it. It gains haste until end of turn. Create a tapped Powerstone token. (It's an artifact with \"{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.\")",
       "effect": {
         "target": {
-          "card_type": "Creature,Artifact",
+          "card_type": "Creature",
           "type": "Typed"
         },
         "type": "GainControl"

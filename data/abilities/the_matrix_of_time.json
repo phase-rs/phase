@@ -26,13 +26,13 @@
       "description": "When you planeswalk to CARDNAME, each player exiles the top card of their library.",
       "mode": "PlaneswalkedTo",
       "valid_card": {
-        "card_type": "Plane",
         "properties": [
           {
             "type": "Other",
             "value": "Self"
           }
         ],
+        "subtype": "Plane",
         "type": "Typed"
       }
     },

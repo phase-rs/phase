@@ -3,15 +3,20 @@
   "abilities": [
     {
       "cost": {
-        "cost": "0",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Attach target Equipment you control to CARDNAME.",
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Equipment",
           "controller": "You",
+          "subtype": "Equipment",
           "type": "Typed"
         },
         "toughness": 0,

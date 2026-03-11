@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "B",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "Black"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -18,7 +25,6 @@
       "effect": {
         "power": 0,
         "target": {
-          "card_type": "Faerie,Elf",
           "type": "Typed"
         },
         "toughness": 0,

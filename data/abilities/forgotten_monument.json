@@ -21,8 +21,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Cave",
             "controller": "You",
+            "subtype": "Cave",
             "type": "Typed"
           },
           {

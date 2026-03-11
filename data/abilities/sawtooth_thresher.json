@@ -3,8 +3,9 @@
   "abilities": [
     {
       "cost": {
-        "cost": "SubCounter<2/P1P1>",
-        "type": "Mana"
+        "count": 2,
+        "counter_type": "P1P1",
+        "type": "RemoveCounter"
       },
       "description": "CARDNAME gets +4/+4 until end of turn.",
       "effect": {

@@ -20,19 +20,24 @@
       "abilities": [
         {
           "cost": {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           "description": "Attach target Aura attached to a creature to another creature.",
           "effect": {
             "target": {
-              "card_type": "Aura",
               "properties": [
                 {
                   "type": "Other",
                   "value": "AttachedTo Creature"
                 }
               ],
+              "subtype": "Aura",
               "type": "Typed"
             },
             "type": "Attach"

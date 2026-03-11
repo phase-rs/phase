@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Waterbend<3>",
-        "type": "Mana"
+        "description": "Waterbend<3>",
+        "type": "Unimplemented"
       },
       "description": "This creature can't be blocked this turn.",
       "effect": {

@@ -5,12 +5,19 @@
       "cost": {
         "costs": [
           {
-            "cost": "X",
+            "cost": {
+              "Cost": {
+                "generic": 0,
+                "shards": [
+                  "X"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "RevealFromExile<1/Creature.YouOwn+NotedForCallerOfTheUntamed>",
-            "type": "Mana"
+            "description": "RevealFromExile<1/Creature.YouOwn+NotedForCallerOfTheUntamed>",
+            "type": "Unimplemented"
           },
           {
             "type": "Tap"

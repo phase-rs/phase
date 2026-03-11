@@ -5,15 +5,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "3 G",
+            "cost": {
+              "Cost": {
+                "generic": 3,
+                "shards": [
+                  "Green"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
             "type": "Tap"
           },
           {
-            "cost": "CollectEvidence<4>",
-            "type": "Mana"
+            "description": "CollectEvidence<4>",
+            "type": "Unimplemented"
           }
         ],
         "type": "Composite"

@@ -15,7 +15,6 @@
             "Battlefield"
           ],
           "valid_card": {
-            "card_type": "Spirit,Arcane",
             "type": "Typed"
           }
         },
@@ -33,8 +32,9 @@
       "abilities": [
         {
           "cost": {
-            "cost": "SubCounter<1/KI>",
-            "type": "Mana"
+            "count": 1,
+            "counter_type": "KI",
+            "type": "RemoveCounter"
           },
           "description": "Prevent all damage that would be dealt to target creature this turn.",
           "effect": {

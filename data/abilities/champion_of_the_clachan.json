@@ -13,8 +13,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Kithkin",
             "controller": "You",
+            "subtype": "Kithkin",
             "type": "Typed"
           },
           {

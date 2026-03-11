@@ -5,7 +5,14 @@
       "cost": {
         "costs": [
           {
-            "cost": "1 U",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
@@ -39,8 +46,8 @@
       "valid_card": {
         "filters": [
           {
-            "card_type": "Human",
             "controller": "You",
+            "subtype": "Human",
             "type": "Typed"
           },
           {

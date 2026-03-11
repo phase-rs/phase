@@ -13,13 +13,13 @@
         "Battlefield"
       ],
       "valid_source": {
-        "card_type": "Scout",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Pirate.YouCtrl,Rogue.YouCtrl"
           }
         ],
+        "subtype": "Scout",
         "type": "Typed"
       },
       "valid_target": {

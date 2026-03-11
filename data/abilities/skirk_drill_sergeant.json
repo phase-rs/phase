@@ -14,13 +14,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Goblin",
         "properties": [
           {
             "type": "Other",
             "value": "Other,Card.Self"
           }
         ],
+        "subtype": "Goblin",
         "type": "Typed"
       }
     }

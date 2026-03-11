@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "BG",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Black",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gains deathtouch until end of turn.",

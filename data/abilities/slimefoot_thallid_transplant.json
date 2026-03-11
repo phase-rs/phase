@@ -14,13 +14,13 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Forest",
         "properties": [
           {
             "type": "Other",
             "value": "YouCtrl,Swamp.YouCtrl"
           }
         ],
+        "subtype": "Forest",
         "type": "Typed"
       }
     }

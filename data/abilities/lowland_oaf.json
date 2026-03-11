@@ -9,8 +9,8 @@
       "effect": {
         "power": 1,
         "target": {
-          "card_type": "Goblin",
           "controller": "You",
+          "subtype": "Goblin",
           "type": "Typed"
         },
         "toughness": 0,

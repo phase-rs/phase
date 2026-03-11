@@ -3,8 +3,23 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Creature.Other>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "filters": [
+            {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            {
+              "filter": {
+                "type": "SelfRef"
+              },
+              "type": "Not"
+            }
+          ],
+          "type": "And"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME gains indestructible until end of turn. Tap it.",
       "effect": {
@@ -20,7 +35,15 @@
     },
     {
       "cost": {
-        "cost": "3 G G",
+        "cost": {
+          "Cost": {
+            "generic": 3,
+            "shards": [
+              "Green",
+              "Green"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Creatures you control get +X/+X until end of turn, where X is the greatest power among creatures you control.",

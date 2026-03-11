@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "2 C",
+        "cost": {
+          "Cost": {
+            "generic": 2,
+            "shards": [
+              "Colorless"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Exile another target creature, then return it to the battlefield tapped under its owner's control. ({C} represents colorless mana.)",

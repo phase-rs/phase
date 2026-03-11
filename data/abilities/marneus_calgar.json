@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Create two 2/2 white Astartes Warrior creature tokens with vigilance.",

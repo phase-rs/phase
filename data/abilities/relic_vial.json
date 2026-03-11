@@ -5,7 +5,12 @@
       "cost": {
         "costs": [
           {
-            "cost": "2",
+            "cost": {
+              "Cost": {
+                "generic": 2,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
@@ -38,8 +43,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Cleric",
           "controller": "You",
+          "subtype": "Cleric",
           "type": "Typed"
         },
         "type": "IsPresent"

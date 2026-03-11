@@ -14,8 +14,8 @@
             "Battlefield"
           ],
           "valid_source": {
-            "card_type": "Spell",
             "controller": "You",
+            "subtype": "Spell",
             "type": "Typed"
           }
         }
@@ -27,12 +27,18 @@
           "cost": {
             "costs": [
               {
-                "cost": "1",
+                "cost": {
+                  "Cost": {
+                    "generic": 1,
+                    "shards": []
+                  }
+                },
                 "type": "Mana"
               },
               {
-                "cost": "SubCounter<1/FLAME>",
-                "type": "Mana"
+                "count": 1,
+                "counter_type": "FLAME",
+                "type": "RemoveCounter"
               }
             ],
             "type": "Composite"
@@ -57,8 +63,8 @@
             "Battlefield"
           ],
           "valid_source": {
-            "card_type": "Spell",
             "controller": "You",
+            "subtype": "Spell",
             "type": "Typed"
           }
         }

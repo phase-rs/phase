@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<3/Cleric>",
-        "type": "Mana"
+        "count": 3,
+        "filter": {
+          "subtype": "Cleric",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "Return CARDNAME from your graveyard to your hand.",
       "effect": {

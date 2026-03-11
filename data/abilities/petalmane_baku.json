@@ -5,12 +5,18 @@
       "cost": {
         "costs": [
           {
-            "cost": "1",
+            "cost": {
+              "Cost": {
+                "generic": 1,
+                "shards": []
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "SubCounter<X/KI>",
-            "type": "Mana"
+            "count": 0,
+            "counter_type": "KI",
+            "type": "RemoveCounter"
           }
         ],
         "type": "Composite"
@@ -36,7 +42,6 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Spirit,Arcane",
         "type": "Typed"
       }
     }

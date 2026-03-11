@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "R",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Until end of turn, another target Goblin you control gains flying and \"When this creature deals combat damage, sacrifice it.\"",
@@ -12,8 +19,8 @@
         "target": {
           "filters": [
             {
-              "card_type": "Goblin",
               "controller": "You",
+              "subtype": "Goblin",
               "type": "Typed"
             },
             {
@@ -41,8 +48,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Goblin",
             "controller": "You",
+            "subtype": "Goblin",
             "type": "Typed"
           },
           {

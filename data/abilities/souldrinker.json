@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "PayLife<3>",
-        "type": "Mana"
+        "amount": 3,
+        "type": "PayLife"
       },
       "description": "Put a +1/+1 counter on CARDNAME.",
       "effect": {

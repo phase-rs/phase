@@ -13,7 +13,7 @@
     },
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "While voting, you may vote an additional time.",

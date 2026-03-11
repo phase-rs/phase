@@ -3,7 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "6",
+        "cost": {
+          "Cost": {
+            "generic": 6,
+            "shards": []
+          }
+        },
         "type": "Mana"
       },
       "description": "Put two +1/+1 counters on this creature, then earthbend 2. (Target land you control becomes a 0/0 creature with haste that's still a land. Put two +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped. Activate each exhaust ability only once.)",

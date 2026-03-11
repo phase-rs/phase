@@ -6,7 +6,7 @@
       "description": "Exile all cards from target player's hand and graveyard.",
       "effect": {
         "destination": "Exile",
-        "origin": "Hand,Graveyard",
+        "origin": "Hand",
         "target": {
           "type": "Player"
         },

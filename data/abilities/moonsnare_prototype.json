@@ -8,8 +8,21 @@
             "type": "Tap"
           },
           {
-            "cost": "tapXType<1/Artifact;Creature/artifact or creature>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "filters": [
+                {
+                  "card_type": "Artifact",
+                  "type": "Typed"
+                },
+                {
+                  "card_type": "Creature",
+                  "type": "Typed"
+                }
+              ],
+              "type": "Or"
+            },
+            "type": "TapCreatures"
           }
         ],
         "type": "Composite"
@@ -26,12 +39,22 @@
       "cost": {
         "costs": [
           {
-            "cost": "4 U",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Blue"
+                ]
+              }
+            },
             "type": "Mana"
           },
           {
-            "cost": "Discard<1/CARDNAME>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "type": "SelfRef"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

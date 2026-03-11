@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "4 U R",
+        "cost": {
+          "Cost": {
+            "generic": 4,
+            "shards": [
+              "Blue",
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Draw a card, then discard a card.",

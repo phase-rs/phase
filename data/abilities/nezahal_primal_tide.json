@@ -3,8 +3,8 @@
   "abilities": [
     {
       "cost": {
-        "cost": "Discard<3/Card>",
-        "type": "Mana"
+        "count": 3,
+        "type": "Discard"
       },
       "description": "Exile CARDNAME. Return it to the battlefield tapped under its owner's control at the beginning of the next end step.",
       "effect": {
@@ -32,7 +32,7 @@
   "statics": [
     {
       "affected": {
-        "card_type": "You",
+        "subtype": "You",
         "type": "Typed"
       },
       "description": "You have no maximum hand size.",

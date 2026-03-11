@@ -23,8 +23,8 @@
           "value": 6
         },
         {
-          "core_type": "Ooze",
-          "type": "AddType"
+          "subtype": "Ooze",
+          "type": "AddSubtype"
         }
       ]
     }

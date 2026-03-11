@@ -3,7 +3,15 @@
   "abilities": [
     {
       "cost": {
-        "cost": "G W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "Green",
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "Target creature you control with a +1/+1 counter on it gains trample and lifelink until end of turn.",

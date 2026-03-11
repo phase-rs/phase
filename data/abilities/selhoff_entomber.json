@@ -8,8 +8,12 @@
             "type": "Tap"
           },
           {
-            "cost": "Discard<1/Creature/creature>",
-            "type": "Mana"
+            "count": 1,
+            "filter": {
+              "card_type": "Creature",
+              "type": "Typed"
+            },
+            "type": "Discard"
           }
         ],
         "type": "Composite"

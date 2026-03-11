@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "5 R",
+        "cost": {
+          "Cost": {
+            "generic": 5,
+            "shards": [
+              "Red"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets +2/+2 until end of turn. This ability costs {1} less to activate for each basic land type among lands you control. Activate only once each turn.",

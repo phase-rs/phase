@@ -3,8 +3,12 @@
   "abilities": [
     {
       "cost": {
-        "cost": "tapXType<1/Swamp>",
-        "type": "Mana"
+        "count": 1,
+        "filter": {
+          "subtype": "Swamp",
+          "type": "Typed"
+        },
+        "type": "TapCreatures"
       },
       "description": "CARDNAME deals 1 damage to any target.",
       "effect": {

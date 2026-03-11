@@ -6,8 +6,8 @@
   "statics": [
     {
       "affected": {
-        "card_type": "Equipment",
         "controller": "You",
+        "subtype": "Equipment",
         "type": "Typed"
       },
       "description": "Equipment you control have equip Knight {0}.",

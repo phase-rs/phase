@@ -3,7 +3,14 @@
   "abilities": [
     {
       "cost": {
-        "cost": "W",
+        "cost": {
+          "Cost": {
+            "generic": 0,
+            "shards": [
+              "White"
+            ]
+          }
+        },
         "type": "Mana"
       },
       "description": "CARDNAME gets lifelink until end of turn.",
@@ -28,8 +35,8 @@
       },
       "condition": {
         "filter": {
-          "card_type": "Plains",
           "controller": "You",
+          "subtype": "Plains",
           "type": "Typed"
         },
         "type": "IsPresent"

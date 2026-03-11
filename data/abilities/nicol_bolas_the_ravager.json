@@ -6,7 +6,16 @@
       "abilities": [
         {
           "cost": {
-            "cost": "4 U B R",
+            "cost": {
+              "Cost": {
+                "generic": 4,
+                "shards": [
+                  "Blue",
+                  "Black",
+                  "Red"
+                ]
+              }
+            },
             "type": "Mana"
           },
           "description": "Exile CARDNAME, then return him to the battlefield transformed under his owner's control. Activate only as a sorcery.",
@@ -64,7 +73,7 @@
               "value": 10
             },
             "target": {
-              "card_type": "Creature,Planeswalker",
+              "card_type": "Creature",
               "type": "Typed"
             },
             "type": "DealDamage"
@@ -83,7 +92,7 @@
             "destination": "Battlefield",
             "origin": "Graveyard",
             "target": {
-              "card_type": "Creature,Planeswalker",
+              "card_type": "Creature",
               "type": "Typed"
             },
             "type": "ChangeZone"

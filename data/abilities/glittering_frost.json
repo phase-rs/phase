@@ -18,8 +18,8 @@
       "mode": "Continuous",
       "modifications": [
         {
-          "core_type": "Snow",
-          "type": "AddType"
+          "subtype": "Snow",
+          "type": "AddSubtype"
         }
       ]
     }

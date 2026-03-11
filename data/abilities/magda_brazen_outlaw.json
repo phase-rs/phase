@@ -28,8 +28,8 @@
       "affected": {
         "filters": [
           {
-            "card_type": "Dwarf",
             "controller": "You",
+            "subtype": "Dwarf",
             "type": "Typed"
           },
           {
@@ -59,8 +59,8 @@
         "Battlefield"
       ],
       "valid_card": {
-        "card_type": "Dwarf",
         "controller": "You",
+        "subtype": "Dwarf",
         "type": "Typed"
       }
     }
