@@ -75,6 +75,8 @@ pub enum WaitingFor {
     DeclareAttackers {
         player: PlayerId,
         valid_attacker_ids: Vec<ObjectId>,
+        #[serde(default)]
+        valid_attack_targets: Vec<crate::game::combat::AttackTarget>,
     },
     DeclareBlockers {
         player: PlayerId,
@@ -196,6 +198,10 @@ pub struct GameState {
     #[serde(default)]
     pub exile_links: Vec<ExileLink>,
 
+    // Commander support
+    #[serde(default)]
+    pub commander_cast_count: HashMap<ObjectId, u32>,
+
     // N-player support
     #[serde(default)]
     pub seat_order: Vec<PlayerId>,
@@ -255,6 +261,7 @@ impl GameState {
             spells_cast_this_turn: 0,
             pending_trigger: None,
             exile_links: Vec::new(),
+            commander_cast_count: HashMap::new(),
             seat_order,
             format_config: config,
             eliminated_players: Vec::new(),
@@ -308,6 +315,7 @@ impl PartialEq for GameState {
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.pending_trigger == other.pending_trigger
             && self.exile_links == other.exile_links
+            && self.commander_cast_count == other.commander_cast_count
             && self.seat_order == other.seat_order
             && self.format_config == other.format_config
             && self.eliminated_players == other.eliminated_players
@@ -432,6 +440,7 @@ mod tests {
             WaitingFor::DeclareAttackers {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
+                valid_attack_targets: vec![],
             },
             WaitingFor::DeclareBlockers {
                 player: PlayerId(0),

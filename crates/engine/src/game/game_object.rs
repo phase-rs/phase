@@ -106,6 +106,10 @@ pub struct GameObject {
     // Planeswalker: whether a loyalty ability has been activated this turn
     #[serde(skip_deserializing, default)]
     pub loyalty_activated_this_turn: bool,
+
+    // Commander: whether this object is a commander card
+    #[serde(default)]
+    pub is_commander: bool,
 }
 
 impl GameObject {
@@ -148,6 +152,7 @@ impl GameObject {
             has_summoning_sickness: false,
             devotion: None,
             loyalty_activated_this_turn: false,
+            is_commander: false,
         }
     }
 

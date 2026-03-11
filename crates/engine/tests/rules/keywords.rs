@@ -12,10 +12,13 @@ fn run_combat(
         engine::types::identifiers::ObjectId,
     )>,
 ) {
+    use engine::game::combat::AttackTarget;
+    use engine::types::player::PlayerId;
     runner.pass_both_players();
+    let attacks: Vec<_> = attacker_ids.iter().map(|&id| (id, AttackTarget::Player(PlayerId(1)))).collect();
     runner
         .act(GameAction::DeclareAttackers {
-            attacker_ids: attacker_ids.clone(),
+            attacks,
         })
         .expect("DeclareAttackers should succeed");
     runner
@@ -138,10 +141,12 @@ fn flying_cannot_be_blocked_by_ground_creature() {
     let mut runner = scenario.build();
 
     // Advance to DeclareAttackers
+    use engine::game::combat::AttackTarget;
+    use engine::types::player::PlayerId;
     runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
-            attacker_ids: vec![attacker_id],
+            attacks: vec![(attacker_id, AttackTarget::Player(PlayerId(1)))],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -253,7 +258,7 @@ fn vigilance_attacker_does_not_tap() {
     runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
-            attacker_ids: vec![attacker_id],
+            attacks: vec![(attacker_id, engine::game::combat::AttackTarget::Player(engine::types::player::PlayerId(1)))],
         })
         .expect("Vigilance creature should be able to attack");
 
