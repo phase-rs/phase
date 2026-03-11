@@ -1,0 +1,52 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "DamageAll",
+          "amount": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "Typed",
+            "card_type": null,
+            "subtype": null,
+            "controller": "Opponent",
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "combat_damage": false,
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": null
+    }
+  ],
+  "statics": [],
+  "replacements": []
+}

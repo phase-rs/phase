@@ -1,0 +1,130 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "count": 1,
+        "destination": null
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": {
+        "kind": "Activated",
+        "effect": {
+          "type": "Unimplemented",
+          "name": "you",
+          "description": "You may put that card on the bottom of that player's library"
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false
+      },
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "sorcery_speed": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": 3
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": {
+        "kind": "Activated",
+        "effect": {
+          "type": "Unimplemented",
+          "name": "put",
+          "description": "put two cards from your hand on top of your library in any order"
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false
+      },
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "sorcery_speed": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Bounce",
+        "target": {
+          "type": "Typed",
+          "card_type": "Creature",
+          "subtype": null,
+          "controller": null,
+          "properties": []
+        },
+        "destination": null
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "sorcery_speed": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": null,
+        "destination": "Exile",
+        "target": {
+          "type": "Typed",
+          "card_type": "Card",
+          "subtype": null,
+          "controller": null,
+          "properties": []
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -12
+      },
+      "sub_ability": {
+        "kind": "Activated",
+        "effect": {
+          "type": "Unimplemented",
+          "name": "that",
+          "description": "that player shuffles their hand into their library"
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false
+      },
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "sorcery_speed": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": []
+}

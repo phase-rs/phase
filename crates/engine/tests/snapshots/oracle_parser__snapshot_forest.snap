@@ -1,0 +1,10 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [],
+  "triggers": [],
+  "statics": [],
+  "replacements": []
+}

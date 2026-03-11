@@ -1,0 +1,30 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Destroy",
+        "target": {
+          "type": "Typed",
+          "card_type": "Creature",
+          "subtype": null,
+          "controller": null,
+          "properties": []
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "sorcery_speed": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": []
+}
