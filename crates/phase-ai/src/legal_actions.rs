@@ -125,12 +125,15 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
         }
     }
 
-    // Activatable abilities from battlefield permanents
+    // Activatable abilities from battlefield permanents (excluding mana abilities,
+    // which are handled separately via TapLandForMana and resolve without the stack)
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
             if obj.controller == player {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
-                    if ability_def.kind == engine::types::ability::AbilityKind::Activated {
+                    if ability_def.kind == engine::types::ability::AbilityKind::Activated
+                        && !engine::game::mana_abilities::is_mana_ability(ability_def)
+                    {
                         actions.push(GameAction::ActivateAbility {
                             source_id: obj_id,
                             ability_index: i,
@@ -969,5 +972,45 @@ mod tests {
         let actions = get_legal_actions(&state);
         // Should have creature targets + 2 player targets
         assert!(actions.len() >= 3);
+    }
+
+    #[test]
+    fn mana_abilities_excluded_from_priority_actions() {
+        // Regression: mana abilities on lands were included as ActivateAbility,
+        // preventing auto-pass from ever triggering (legal actions always had
+        // more than just PassPriority).
+        let mut state = make_state();
+        let land_id = add_land_to_battlefield(&mut state, PlayerId(0), "Forest", "Forest");
+        // Add the mana ability that json_loader synthesizes for basic lands
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .abilities
+            .push(engine::types::ability::AbilityDefinition {
+                kind: engine::types::ability::AbilityKind::Activated,
+                effect: engine::types::ability::Effect::Mana {
+                    produced: vec![engine::types::mana::ManaColor::Green],
+                },
+                cost: Some(engine::types::ability::AbilityCost::Tap),
+                sub_ability: None,
+                target_prompt: None,
+                description: None,
+                duration: None,
+                sorcery_speed: false,
+            });
+
+        let actions = get_legal_actions(&state);
+
+        // Should only have PassPriority and TapLandForMana — no ActivateAbility
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, GameAction::ActivateAbility { .. })),
+            "Mana abilities should not appear as ActivateAbility: {:?}",
+            actions
+        );
+        // PassPriority should be present
+        assert!(actions.contains(&GameAction::PassPriority));
     }
 }

@@ -480,9 +480,24 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             });
         }
 
-        // Process triggers after action + SBA + exile return events
+        // Process triggers after action + SBA + exile return events.
+        // Filter out PhaseChanged events for phases that were auto-advanced past.
+        // Without this filter, triggers like "at the beginning of combat" fire
+        // even when combat was skipped, causing phantom stack entries.
+        let current_phase = state.phase;
+        let filtered_events: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                if let GameEvent::PhaseChanged { phase } = e {
+                    *phase == current_phase
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
         let stack_before = state.stack.len();
-        triggers::process_triggers(state, &events);
+        triggers::process_triggers(state, &filtered_events);
 
         // Check if a trigger needs target selection from the player
         if let Some(trigger) = state.pending_trigger.as_ref() {
