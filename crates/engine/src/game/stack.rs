@@ -29,31 +29,28 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // Run fizzle check if the ability has targets
     if !ability.targets.is_empty() {
-        if let Some(valid_tgts) = ability.params.get("ValidTgts") {
-            let legal = targeting::validate_targets(
-                state,
-                &ability.targets,
-                valid_tgts,
-                ability.controller,
-                ability.source_id,
-            );
-            if targeting::check_fizzle(&ability.targets, &legal) {
-                // Fizzle: all targets illegal -- move card to graveyard without executing
-                if is_spell {
-                    zones::move_to_zone(state, entry.id, Zone::Graveyard, events);
-                }
-                events.push(GameEvent::StackResolved {
-                    object_id: entry.id,
-                });
-                return;
+        let valid_tgts = extract_target_filter_string(&ability.effect);
+        let legal = targeting::validate_targets(
+            state,
+            &ability.targets,
+            &valid_tgts,
+            ability.controller,
+            ability.source_id,
+        );
+        if targeting::check_fizzle(&ability.targets, &legal) {
+            // Fizzle: all targets illegal -- move card to graveyard without executing
+            if is_spell {
+                zones::move_to_zone(state, entry.id, Zone::Graveyard, events);
             }
-            // Update ability with only still-legal targets
-            let mut ability = ability;
-            ability.targets = legal;
-            execute_effect(state, &ability, events);
-        } else {
-            execute_effect(state, &ability, events);
+            events.push(GameEvent::StackResolved {
+                object_id: entry.id,
+            });
+            return;
         }
+        // Update ability with only still-legal targets
+        let mut ability = ability;
+        ability.targets = legal;
+        execute_effect(state, &ability, events);
     } else {
         execute_effect(state, &ability, events);
     }
@@ -79,11 +76,9 @@ fn execute_effect(
     ability: &crate::types::ability::ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) {
-    if matches!(
-        ability.effect,
-        crate::types::ability::Effect::Other { ref api_type, .. } if api_type.is_empty()
-    ) {
-        return; // No-op ability (used in tests with empty api_type)
+    // Skip unimplemented effects (logged elsewhere as warnings)
+    if matches!(ability.effect, crate::types::ability::Effect::Unimplemented { .. }) {
+        return;
     }
     // Use resolve_ability_chain to support SubAbility/Execute chaining
     let _ = effects::resolve_ability_chain(state, ability, events, 0);
@@ -91,6 +86,52 @@ fn execute_effect(
 
 pub fn stack_is_empty(state: &GameState) -> bool {
     state.stack.is_empty()
+}
+
+/// Extract a string-based target filter from a typed Effect for fizzle validation.
+/// Bridges the typed TargetFilter to the string-based targeting system.
+fn extract_target_filter_string(effect: &crate::types::ability::Effect) -> String {
+    use crate::types::ability::{Effect, TargetFilter};
+    let target = match effect {
+        Effect::DealDamage { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::Destroy { target, .. }
+        | Effect::Counter { target, .. }
+        | Effect::Tap { target, .. }
+        | Effect::Untap { target, .. }
+        | Effect::Sacrifice { target, .. }
+        | Effect::GainControl { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::Fight { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::CopySpell { target, .. } => target,
+        _ => return "Any".to_string(),
+    };
+    match target {
+        TargetFilter::Any => "Any".to_string(),
+        TargetFilter::Player => "Player".to_string(),
+        TargetFilter::Controller => "Player.You".to_string(),
+        TargetFilter::Typed {
+            card_type,
+            controller,
+            ..
+        } => {
+            let type_str = match card_type {
+                Some(crate::types::ability::TypeFilter::Creature) => "Creature",
+                Some(crate::types::ability::TypeFilter::Land) => "Land",
+                Some(crate::types::ability::TypeFilter::Artifact) => "Artifact",
+                Some(crate::types::ability::TypeFilter::Enchantment) => "Enchantment",
+                _ => "Any",
+            };
+            let ctrl_str = match controller {
+                Some(crate::types::ability::ControllerRef::You) => ".YouCtrl",
+                Some(crate::types::ability::ControllerRef::Opponent) => ".OppCtrl",
+                None => "",
+            };
+            format!("{}{}", type_str, ctrl_str)
+        }
+        _ => "Any".to_string(),
+    }
 }
 
 fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {

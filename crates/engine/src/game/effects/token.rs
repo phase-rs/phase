@@ -221,7 +221,7 @@ fn format_display_name(subtypes: &[String]) -> String {
 ///
 /// Parses Forge token script names (e.g. `w_1_1_soldier_flying`) to extract
 /// card types, colors, keywords, and a human-readable display name.
-/// Falls back to raw `Name`/`Power`/`Toughness` params for non-script names.
+/// Falls back to raw `Name`/`Power`/`Toughness` from the typed Effect fields.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -234,16 +234,7 @@ pub fn resolve(
             toughness,
             ..
         } => (name.clone(), Some(*power), Some(*toughness)),
-        _ => {
-            let n = ability
-                .params
-                .get("Name")
-                .cloned()
-                .unwrap_or_else(|| "Token".to_string());
-            let p = ability.params.get("Power").and_then(|v| v.parse().ok());
-            let t = ability.params.get("Toughness").and_then(|v| v.parse().ok());
-            (n, p, t)
-        }
+        _ => ("Token".to_string(), None, None),
     };
 
     let parsed = parse_token_script(&script_name);
@@ -338,7 +329,6 @@ mod tests {
     use super::*;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     // ── Parser unit tests ───────────────────────────────────────────────
 
@@ -437,8 +427,8 @@ mod tests {
     // ── Integration tests ───────────────────────────────────────────────
 
     fn token_ability(script: &str) -> ResolvedAbility {
-        ResolvedAbility {
-            effect: Effect::Token {
+        ResolvedAbility::new(
+            Effect::Token {
                 name: script.to_string(),
                 power: 0,
                 toughness: 0,
@@ -446,13 +436,10 @@ mod tests {
                 colors: vec![],
                 keywords: vec![],
             },
-            params: HashMap::new(),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        }
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
     }
 
     fn resolve_token(script: &str) -> (GameState, Vec<GameEvent>) {
@@ -501,22 +488,19 @@ mod tests {
     #[test]
     fn fallback_for_plain_name() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: Effect::Other {
-                api_type: "Token".to_string(),
-                params: HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Soldier".to_string(),
+                power: 1,
+                toughness: 1,
+                types: vec![],
+                colors: vec![],
+                keywords: vec![],
             },
-            params: HashMap::from([
-                ("Name".to_string(), "Soldier".to_string()),
-                ("Power".to_string(), "1".to_string()),
-                ("Toughness".to_string(), "1".to_string()),
-            ]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 

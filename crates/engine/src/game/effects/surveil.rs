@@ -12,11 +12,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let surveil_num: usize = match &ability.effect {
         Effect::Surveil { count } => *count as usize,
-        _ => ability
-            .params
-            .get("SurveilNum")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1),
+        _ => 1,
     };
 
     let player = state
@@ -56,12 +52,10 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_surveil_ability(surveil_num: u32) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            "Surveil",
-            HashMap::from([("SurveilNum".to_string(), surveil_num.to_string())]),
+        ResolvedAbility::new(
+            Effect::Surveil { count: surveil_num },
             vec![],
             ObjectId(100),
             PlayerId(0),

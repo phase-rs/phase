@@ -1,12 +1,12 @@
-use crate::game::filter::object_matches_filter_controlled;
+use crate::game::filter;
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
+    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// Temporarily pump target creatures' power and toughness.
-/// Reads power/toughness from `Effect::Pump`, with fallback to `NumAtt`/`NumDef` params.
+/// Reads power/toughness from `Effect::Pump`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -16,19 +16,7 @@ pub fn resolve(
         Effect::Pump {
             power, toughness, ..
         } => (*power, *toughness),
-        _ => {
-            let att = ability
-                .params
-                .get("NumAtt")
-                .map(|v| v.parse().unwrap_or(0))
-                .unwrap_or(0);
-            let def = ability
-                .params
-                .get("NumDef")
-                .map(|v| v.parse().unwrap_or(0))
-                .unwrap_or(0);
-            (att, def)
-        }
+        _ => (0, 0),
     };
 
     for target in &ability.targets {
@@ -54,59 +42,31 @@ pub fn resolve(
     Ok(())
 }
 
-/// Pump all creatures matching the `Valid` filter on the battlefield.
-/// Reads power/toughness/filter from `Effect::PumpAll`, with fallback to params.
+/// Pump all creatures matching the typed TargetFilter on the battlefield.
+/// Reads power/toughness/filter from `Effect::PumpAll`.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_att, num_def, filter_owned) = match &ability.effect {
+    let (num_att, num_def, target_filter) = match &ability.effect {
         Effect::PumpAll {
             power,
             toughness,
             target,
-        } => {
-            let f = match target {
-                TargetSpec::All { filter } if !filter.is_empty() => filter.clone(),
-                _ => ability
-                    .params
-                    .get("Valid")
-                    .cloned()
-                    .unwrap_or_else(|| "Creature".to_string()),
-            };
-            (*power, *toughness, f)
-        }
-        _ => {
-            let att = ability
-                .params
-                .get("NumAtt")
-                .map(|v| v.parse().unwrap_or(0))
-                .unwrap_or(0);
-            let def = ability
-                .params
-                .get("NumDef")
-                .map(|v| v.parse().unwrap_or(0))
-                .unwrap_or(0);
-            let f = ability
-                .params
-                .get("Valid")
-                .cloned()
-                .unwrap_or_else(|| "Creature".to_string());
-            (att, def, f)
-        }
+        } => (*power, *toughness, target.clone()),
+        _ => (0, 0, TargetFilter::None),
     };
-    let filter = filter_owned.as_str();
 
     // Collect matching object IDs first to avoid borrow conflicts
     let matching: Vec<_> = state
         .battlefield
         .iter()
         .filter(|id| {
-            object_matches_filter_controlled(
+            filter::matches_target_filter_controlled(
                 state,
                 **id,
-                filter,
+                &target_filter,
                 ability.source_id,
                 ability.controller,
             )
@@ -137,11 +97,11 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TargetFilter;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     #[test]
     fn pump_increases_power_and_toughness() {
@@ -156,21 +116,16 @@ mod tests {
         state.objects.get_mut(&obj_id).unwrap().power = Some(2);
         state.objects.get_mut(&obj_id).unwrap().toughness = Some(2);
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Pump".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: 3,
+                toughness: 3,
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([
-                ("NumAtt".to_string(), "3".to_string()),
-                ("NumDef".to_string(), "3".to_string()),
-            ]),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -192,21 +147,16 @@ mod tests {
         state.objects.get_mut(&obj_id).unwrap().power = Some(3);
         state.objects.get_mut(&obj_id).unwrap().toughness = Some(3);
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Pump".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: -2,
+                toughness: -2,
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([
-                ("NumAtt".to_string(), "-2".to_string()),
-                ("NumDef".to_string(), "-2".to_string()),
-            ]),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -271,22 +221,21 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "PumpAll".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::PumpAll {
+                power: 1,
+                toughness: 1,
+                target: TargetFilter::Typed {
+                    card_type: Some(crate::types::ability::TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    properties: vec![],
+                },
             },
-            params: HashMap::from([
-                ("NumAtt".to_string(), "1".to_string()),
-                ("NumDef".to_string(), "1".to_string()),
-                ("Valid".to_string(), "Creature.YouCtrl".to_string()),
-            ]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_all(&mut state, &ability, &mut events).unwrap();

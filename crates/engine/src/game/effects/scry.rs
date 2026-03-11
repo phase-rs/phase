@@ -13,11 +13,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let scry_num: usize = match &ability.effect {
         Effect::Scry { count } => *count as usize,
-        _ => ability
-            .params
-            .get("ScryNum")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1),
+        _ => 1,
     };
 
     let player = state
@@ -58,12 +54,10 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_scry_ability(scry_num: u32) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            "Scry",
-            HashMap::from([("ScryNum".to_string(), scry_num.to_string())]),
+        ResolvedAbility::new(
+            Effect::Scry { count: scry_num },
             vec![],
             ObjectId(100),
             PlayerId(0),

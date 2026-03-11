@@ -1,32 +1,24 @@
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, StaticDefinition, TargetRef,
+    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// Effect effect: creates a temporary game effect (emblem-like).
-/// In Forge, this creates an ephemeral card with static abilities, triggers, etc.
-/// Simplified implementation: applies referenced StaticAbilities directly to
-/// remembered/targeted objects for the current turn.
+/// Reads typed GenericEffect { static_abilities, duration } fields.
+/// Applies referenced static abilities directly to targeted objects.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Read StaticAbilities from the typed Effect's inner params when available
-    let params_source = match &ability.effect {
-        Effect::GenericEffect { params } | Effect::Cleanup { params } => params,
-        _ => &ability.params,
-    };
-    if let Some(static_keys) = params_source.get("StaticAbilities") {
-        for key in static_keys.split(',') {
-            let key = key.trim();
-            if let Some(svar_val) = ability.svars.get(key) {
-                // Parse the static ability definition and apply to targets
-                if let Ok(static_def) = crate::parser::ability::parse_static(svar_val) {
-                    apply_static_to_targets(state, ability, static_def);
-                }
-            }
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &ability.effect
+    {
+        // Apply each static ability definition to targets
+        for static_def in static_abilities {
+            apply_static_to_targets(state, ability, static_def.clone());
         }
     }
 
@@ -41,7 +33,7 @@ pub fn resolve(
 fn apply_static_to_targets(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    static_def: StaticDefinition,
+    static_def: crate::types::ability::StaticDefinition,
 ) {
     // Apply to targeted objects
     for target in &ability.targets {

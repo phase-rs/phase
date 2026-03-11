@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
+    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -22,21 +22,9 @@ pub fn resolve(
         } => (
             power.unwrap_or(0),
             toughness.unwrap_or(0),
-            Some(types.as_slice()),
+            types.as_slice(),
         ),
-        _ => {
-            let p = ability
-                .params
-                .get("Power")
-                .map(|v| v.parse().unwrap_or(0))
-                .unwrap_or(0);
-            let t = ability
-                .params
-                .get("Toughness")
-                .map(|v| v.parse().unwrap_or(0))
-                .unwrap_or(0);
-            (p, t, None)
-        }
+        _ => (0, 0, [].as_slice()),
     };
 
     let targets = resolve_animate_targets(ability);
@@ -52,28 +40,15 @@ pub fn resolve(
         obj.base_power = Some(power);
         obj.base_toughness = Some(toughness);
 
-        // Add types from typed Effect field, or fall back to params
-        if let Some(types) = types_list {
-            for t in types {
-                let t = t.trim();
-                if let Ok(core) = CoreType::from_str(t) {
-                    if !obj.card_types.core_types.contains(&core) {
-                        obj.card_types.core_types.push(core);
-                    }
-                } else if !obj.card_types.subtypes.contains(&t.to_string()) {
-                    obj.card_types.subtypes.push(t.to_string());
+        // Add types from typed Effect field
+        for t in types_list {
+            let t = t.trim();
+            if let Ok(core) = CoreType::from_str(t) {
+                if !obj.card_types.core_types.contains(&core) {
+                    obj.card_types.core_types.push(core);
                 }
-            }
-        } else if let Some(types_str) = ability.params.get("Types") {
-            for t in types_str.split(',') {
-                let t = t.trim();
-                if let Ok(core) = CoreType::from_str(t) {
-                    if !obj.card_types.core_types.contains(&core) {
-                        obj.card_types.core_types.push(core);
-                    }
-                } else if !obj.card_types.subtypes.contains(&t.to_string()) {
-                    obj.card_types.subtypes.push(t.to_string());
-                }
+            } else if !obj.card_types.subtypes.contains(&t.to_string()) {
+                obj.card_types.subtypes.push(t.to_string());
             }
         }
 
@@ -90,11 +65,7 @@ pub fn resolve(
 
 fn resolve_animate_targets(ability: &ResolvedAbility) -> Vec<crate::types::identifiers::ObjectId> {
     if let Effect::Animate { target, .. } = &ability.effect {
-        if matches!(target, TargetSpec::None) {
-            return vec![ability.source_id];
-        }
-    } else if let Some(defined) = ability.params.get("Defined") {
-        if defined == "Self" {
+        if matches!(target, TargetFilter::None) {
             return vec![ability.source_id];
         }
     }
@@ -118,7 +89,6 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     #[test]
     fn animate_sets_power_toughness_and_creature_type() {
@@ -131,23 +101,17 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Animate".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Animate {
+                power: Some(7),
+                toughness: Some(7),
+                types: vec!["Creature".to_string(), "Beast".to_string()],
+                target: TargetFilter::None,
             },
-            params: HashMap::from([
-                ("Power".to_string(), "7".to_string()),
-                ("Toughness".to_string(), "7".to_string()),
-                ("Types".to_string(), "Creature,Beast".to_string()),
-                ("Defined".to_string(), "Self".to_string()),
-            ]),
-            targets: vec![],
-            source_id: obj_id,
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();

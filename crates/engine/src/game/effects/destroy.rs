@@ -2,9 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
-};
+use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
@@ -123,15 +121,8 @@ pub fn resolve_all(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let filter = match &ability.effect {
-        Effect::DestroyAll {
-            target: TargetSpec::All { filter },
-        } if !filter.is_empty() => filter.as_str(),
         Effect::DestroyAll { .. } => "Creature",
-        _ => ability
-            .params
-            .get("Valid")
-            .map(|s| s.as_str())
-            .unwrap_or("Creature"),
+        _ => "Creature",
     };
 
     // Collect matching object IDs that are on the battlefield and not indestructible
@@ -174,10 +165,10 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TargetFilter;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     #[test]
     fn destroy_moves_to_graveyard() {
@@ -189,18 +180,14 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Destroy".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -226,18 +213,14 @@ mod tests {
             .keywords
             .push(crate::types::keywords::Keyword::Indestructible);
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Destroy".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -255,18 +238,14 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Destroy".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -318,18 +297,14 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "DestroyAll".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::None,
             },
-            params: HashMap::from([("Valid".to_string(), "Creature".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_all(&mut state, &ability, &mut events).unwrap();

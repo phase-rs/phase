@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::game_object::CounterType;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
+    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -36,19 +36,7 @@ pub fn resolve_add(
             count,
             ..
         } => (counter_type.clone(), *count as u32),
-        _ => {
-            let ct = ability
-                .params
-                .get("CounterType")
-                .cloned()
-                .unwrap_or_else(|| "P1P1".to_string());
-            let num = ability
-                .params
-                .get("CounterNum")
-                .map(|v| v.parse().unwrap_or(1))
-                .unwrap_or(1);
-            (ct, num)
-        }
+        _ => ("P1P1".to_string(), 1),
     };
 
     for target in &ability.targets {
@@ -126,22 +114,10 @@ pub fn resolve_multiply(
             multiplier,
             ..
         } => (counter_type.clone(), *multiplier as u32),
-        _ => {
-            let ct = ability
-                .params
-                .get("CounterType")
-                .cloned()
-                .unwrap_or_else(|| "P1P1".to_string());
-            let mult = ability
-                .params
-                .get("Multiplier")
-                .map(|v| v.parse().unwrap_or(2))
-                .unwrap_or(2);
-            (ct, mult)
-        }
+        _ => ("P1P1".to_string(), 2),
     };
 
-    let targets = resolve_defined_or_targets(ability, state);
+    let targets = resolve_defined_or_targets(ability);
     for obj_id in targets {
         let ct = parse_counter_type(&counter_type_str);
         let obj = state
@@ -174,10 +150,9 @@ pub fn resolve_multiply(
     Ok(())
 }
 
-/// Resolve targeting to object IDs using the typed TargetSpec, falling back to params.
+/// Resolve targeting to object IDs using the typed TargetFilter.
 fn resolve_defined_or_targets(
     ability: &ResolvedAbility,
-    _state: &GameState,
 ) -> Vec<crate::types::identifiers::ObjectId> {
     let target_spec = match &ability.effect {
         Effect::MultiplyCounter { target, .. }
@@ -187,17 +162,13 @@ fn resolve_defined_or_targets(
         _ => None,
     };
 
-    if let Some(TargetSpec::None) = target_spec {
+    if let Some(TargetFilter::None) = target_spec {
         return vec![ability.source_id];
     }
 
-    // Fall back to legacy Defined$ param check
-    if target_spec.is_none() {
-        if let Some(defined) = ability.params.get("Defined") {
-            if defined == "Self" {
-                return vec![ability.source_id];
-            }
-        }
+    // If the filter is SelfRef, target the source
+    if let Some(TargetFilter::SelfRef) = target_spec {
+        return vec![ability.source_id];
     }
 
     ability
@@ -225,19 +196,7 @@ pub fn resolve_remove(
             count,
             ..
         } => (counter_type.clone(), *count as u32),
-        _ => {
-            let ct = ability
-                .params
-                .get("CounterType")
-                .cloned()
-                .unwrap_or_else(|| "P1P1".to_string());
-            let num = ability
-                .params
-                .get("CounterNum")
-                .map(|v| v.parse().unwrap_or(1))
-                .unwrap_or(1);
-            (ct, num)
-        }
+        _ => ("P1P1".to_string(), 1),
     };
 
     for target in &ability.targets {
@@ -306,23 +265,17 @@ pub fn resolve_remove(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TargetFilter;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_counter_ability(
-        api_type: &str,
-        ct: &str,
-        num: u32,
+        effect: Effect,
         target: ObjectId,
     ) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            api_type,
-            HashMap::from([
-                ("CounterType".to_string(), ct.to_string()),
-                ("CounterNum".to_string(), num.to_string()),
-            ]),
+        ResolvedAbility::new(
+            effect,
             vec![TargetRef::Object(target)],
             ObjectId(100),
             PlayerId(0),
@@ -343,7 +296,14 @@ mod tests {
 
         resolve_add(
             &mut state,
-            &make_counter_ability("AddCounter", "P1P1", 2, obj_id),
+            &make_counter_ability(
+                Effect::AddCounter {
+                    counter_type: "P1P1".to_string(),
+                    count: 2,
+                    target: TargetFilter::Any,
+                },
+                obj_id,
+            ),
             &mut events,
         )
         .unwrap();
@@ -371,7 +331,14 @@ mod tests {
 
         resolve_remove(
             &mut state,
-            &make_counter_ability("RemoveCounter", "P1P1", 3, obj_id),
+            &make_counter_ability(
+                Effect::RemoveCounter {
+                    counter_type: "P1P1".to_string(),
+                    count: 3,
+                    target: TargetFilter::Any,
+                },
+                obj_id,
+            ),
             &mut events,
         )
         .unwrap();
@@ -393,7 +360,14 @@ mod tests {
 
         resolve_add(
             &mut state,
-            &make_counter_ability("AddCounter", "charge", 3, obj_id),
+            &make_counter_ability(
+                Effect::AddCounter {
+                    counter_type: "charge".to_string(),
+                    count: 3,
+                    target: TargetFilter::Any,
+                },
+                obj_id,
+            ),
             &mut events,
         )
         .unwrap();
@@ -418,7 +392,14 @@ mod tests {
 
         resolve_add(
             &mut state,
-            &make_counter_ability("AddCounter", "P1P1", 1, obj_id),
+            &make_counter_ability(
+                Effect::AddCounter {
+                    counter_type: "P1P1".to_string(),
+                    count: 1,
+                    target: TargetFilter::Any,
+                },
+                obj_id,
+            ),
             &mut events,
         )
         .unwrap();

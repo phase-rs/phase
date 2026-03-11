@@ -17,11 +17,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let num_cards: u32 = match &ability.effect {
         Effect::DiscardCard { count, .. } | Effect::Discard { count, .. } => *count,
-        _ => ability
-            .params
-            .get("NumCards")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1),
+        _ => 1,
     };
 
     // Check if targets specify specific cards to discard
@@ -163,9 +159,9 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TargetFilter;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     #[test]
     fn discard_moves_card_from_hand_to_graveyard() {
@@ -177,18 +173,15 @@ mod tests {
             "Card".to_string(),
             Zone::Hand,
         );
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "DiscardCard".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -214,18 +207,15 @@ mod tests {
             "Discard".to_string(),
             Zone::Hand,
         );
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "DiscardCard".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(c2)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(c2)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -244,18 +234,15 @@ mod tests {
             "Card".to_string(),
             Zone::Hand,
         );
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "DiscardCard".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([("NumCards".to_string(), "1".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();

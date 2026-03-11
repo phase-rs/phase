@@ -14,12 +14,7 @@ pub fn resolve_gain(
 ) -> Result<(), EffectError> {
     let amount: i32 = match &ability.effect {
         Effect::GainLife { amount } => *amount,
-        _ => ability
-            .params
-            .get("LifeAmount")
-            .ok_or_else(|| EffectError::MissingParam("LifeAmount".to_string()))?
-            .parse()
-            .map_err(|_| EffectError::InvalidParam("LifeAmount must be a number".to_string()))?,
+        _ => return Err(EffectError::MissingParam("GainLife amount".to_string())),
     };
 
     let proposed = ProposedEvent::LifeGain {
@@ -80,12 +75,7 @@ pub fn resolve_lose(
 ) -> Result<(), EffectError> {
     let amount: i32 = match &ability.effect {
         Effect::LoseLife { amount } => *amount,
-        _ => ability
-            .params
-            .get("LifeAmount")
-            .ok_or_else(|| EffectError::MissingParam("LifeAmount".to_string()))?
-            .parse()
-            .map_err(|_| EffectError::InvalidParam("LifeAmount must be a number".to_string()))?,
+        _ => return Err(EffectError::MissingParam("LoseLife amount".to_string())),
     };
 
     // Determine target player: use first player target or fall back to controller
@@ -157,23 +147,16 @@ mod tests {
     use crate::types::ability::TargetRef;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     #[test]
     fn gain_life_increases_controller_life() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "GainLife".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::from([("LifeAmount".to_string(), "5".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = ResolvedAbility::new(
+            Effect::GainLife { amount: 5 },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_gain(&mut state, &ability, &mut events).unwrap();
@@ -184,18 +167,12 @@ mod tests {
     #[test]
     fn lose_life_decreases_target_life() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "LoseLife".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::from([("LifeAmount".to_string(), "3".to_string())]),
-            targets: vec![TargetRef::Player(PlayerId(1))],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife { amount: 3 },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_lose(&mut state, &ability, &mut events).unwrap();
@@ -206,18 +183,12 @@ mod tests {
     #[test]
     fn gain_life_emits_positive_life_changed() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "GainLife".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::from([("LifeAmount".to_string(), "4".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = ResolvedAbility::new(
+            Effect::GainLife { amount: 4 },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_gain(&mut state, &ability, &mut events).unwrap();
@@ -230,18 +201,12 @@ mod tests {
     #[test]
     fn lose_life_emits_negative_life_changed() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "LoseLife".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::from([("LifeAmount".to_string(), "2".to_string())]),
-            targets: vec![TargetRef::Player(PlayerId(0))],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife { amount: 2 },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_lose(&mut state, &ability, &mut events).unwrap();

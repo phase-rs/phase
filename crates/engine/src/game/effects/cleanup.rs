@@ -1,33 +1,41 @@
-use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility};
+use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// Cleanup effect: clears transient card state after complex ability chains.
 ///
-/// In Forge Java, this clears remembered objects, chosen colors/types/players,
-/// imprinted cards, coin flip results, and delayed triggers. It is almost always
-/// the final SubAbility in a chain (e.g., `SubAbility$ DBCleanup`).
+/// Reads typed bool fields from Effect::Cleanup:
+///   - `clear_remembered` — clear remembered objects
+///   - `clear_chosen_player` — clear chosen player
+///   - `clear_chosen_color` — clear chosen color(s)
+///   - `clear_chosen_type` — clear chosen type(s)
+///   - `clear_chosen_card` — clear chosen card(s)
+///   - `clear_imprinted` — clear imprinted cards
+///   - `clear_triggers` — clear delayed triggers
+///   - `clear_coin_flips` — clear coin flip results
 ///
-/// Supported params (all optional, currently no-ops until transient state tracking
-/// is implemented):
-///   - `ClearRemembered` — clear remembered objects
-///   - `ForgetDefined` — selectively remove entities from remembered
-///   - `ClearImprinted` — clear imprinted cards
-///   - `ClearTriggered` — clear delayed triggers
-///   - `ClearCoinFlips` — clear coin flip results
-///   - `ClearChosenCard` — clear chosen card(s)
-///   - `ClearChosenPlayer` — clear chosen player
-///   - `ClearChosenType` — clear chosen type(s)
-///   - `ClearChosenColor` — clear chosen color(s)
-///   - `ClearNamedCard` — clear named card(s)
+/// Currently all are no-ops until transient state tracking is added to GameState.
 pub fn resolve(
     _state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Cleanup is a state-clearing utility. When transient state tracking
-    // (remembered, chosen, imprinted) is added to GameState/GameObject,
-    // this handler will clear those fields based on the params above.
+    // Read typed fields for future implementation
+    if let Effect::Cleanup {
+        clear_remembered: _,
+        clear_chosen_player: _,
+        clear_chosen_color: _,
+        clear_chosen_type: _,
+        clear_chosen_card: _,
+        clear_imprinted: _,
+        clear_triggers: _,
+        clear_coin_flips: _,
+    } = &ability.effect
+    {
+        // When transient state tracking (remembered, chosen, imprinted) is added
+        // to GameState/GameObject, this handler will clear those fields based
+        // on the typed booleans above.
+    }
 
     events.push(GameEvent::EffectResolved {
         api_type: effect_variant_name(&ability.effect).to_string(),
@@ -42,23 +50,25 @@ mod tests {
     use super::*;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     #[test]
     fn cleanup_emits_effect_resolved() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Cleanup".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Cleanup {
+                clear_remembered: true,
+                clear_chosen_player: false,
+                clear_chosen_color: false,
+                clear_chosen_type: false,
+                clear_chosen_card: false,
+                clear_imprinted: false,
+                clear_triggers: false,
+                clear_coin_flips: false,
             },
-            params: HashMap::from([("ClearRemembered".to_string(), "True".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -69,44 +79,46 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_succeeds_with_no_params() {
+    fn cleanup_succeeds_with_no_flags_set() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Cleanup".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Cleanup {
+                clear_remembered: false,
+                clear_chosen_player: false,
+                clear_chosen_color: false,
+                clear_chosen_type: false,
+                clear_chosen_card: false,
+                clear_imprinted: false,
+                clear_triggers: false,
+                clear_coin_flips: false,
             },
-            params: HashMap::new(),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         assert!(resolve(&mut state, &ability, &mut events).is_ok());
     }
 
     #[test]
-    fn cleanup_succeeds_with_multiple_clear_params() {
+    fn cleanup_succeeds_with_multiple_flags() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Cleanup".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Cleanup {
+                clear_remembered: true,
+                clear_chosen_player: true,
+                clear_chosen_color: false,
+                clear_chosen_type: false,
+                clear_chosen_card: true,
+                clear_imprinted: false,
+                clear_triggers: false,
+                clear_coin_flips: false,
             },
-            params: HashMap::from([
-                ("ClearRemembered".to_string(), "True".to_string()),
-                ("ClearChosenPlayer".to_string(), "True".to_string()),
-                ("ClearChosenCard".to_string(), "True".to_string()),
-            ]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         assert!(resolve(&mut state, &ability, &mut events).is_ok());

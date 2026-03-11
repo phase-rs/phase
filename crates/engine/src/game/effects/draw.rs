@@ -16,11 +16,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let num_cards = match &ability.effect {
         Effect::Draw { count } => *count,
-        _ => ability
-            .params
-            .get("NumCards")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1),
+        _ => 1,
     };
 
     let proposed = ProposedEvent::Draw {
@@ -88,12 +84,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     fn make_ability(num_cards: u32) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            "Draw",
-            HashMap::from([("NumCards".to_string(), num_cards.to_string())]),
+        ResolvedAbility::new(
+            Effect::Draw { count: num_cards },
             vec![],
             ObjectId(100),
             PlayerId(0),

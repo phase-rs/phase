@@ -30,16 +30,16 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetRef;
+    use crate::types::ability::{Effect, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_gain_control_ability(target: ObjectId) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            "GainControl",
-            HashMap::new(),
+        ResolvedAbility::new(
+            Effect::GainControl {
+                target: TargetFilter::Any,
+            },
             vec![TargetRef::Object(target)],
             ObjectId(100),
             PlayerId(0),

@@ -47,34 +47,25 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
 /// - If the card is not a land: the player chooses to put it in hand or graveyard
 ///   (reuses WaitingFor::DigChoice with keep_count=1).
 ///
-/// Reads `Defined` param for the exploring creature (default: Self = source_id).
+/// The exploring creature defaults to the ability's source_id.
+/// If the ability has a targeted object, that creature explores instead.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // Determine the exploring creature
-    let defined = ability
-        .params
-        .get("Defined")
-        .map(|s| s.as_str())
-        .unwrap_or("Self");
-
-    let explorer_id = if defined == "Targeted" {
-        ability
-            .targets
-            .iter()
-            .find_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(ability.source_id)
-    } else {
-        ability.source_id
-    };
+    let explorer_id = ability
+        .targets
+        .iter()
+        .find_map(|t| {
+            if let TargetRef::Object(id) = t {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(ability.source_id);
 
     let controller = ability.controller;
 
@@ -138,13 +129,13 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::Effect;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_explore_ability(source_id: ObjectId) -> ResolvedAbility {
-        ResolvedAbility::from_raw("Explore", HashMap::new(), vec![], source_id, PlayerId(0))
+        ResolvedAbility::new(Effect::Explore, vec![], source_id, PlayerId(0))
     }
 
     #[test]

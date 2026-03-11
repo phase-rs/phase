@@ -14,11 +14,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let num_cards: usize = match &ability.effect {
         Effect::Mill { count, .. } => *count as usize,
-        _ => ability
-            .params
-            .get("NumCards")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1),
+        _ => 1,
     };
 
     // Find target player: first TargetRef::Player, or opponent of controller
@@ -64,16 +60,17 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetRef;
+    use crate::types::ability::TargetFilter;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_mill_ability(num_cards: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            "Mill",
-            HashMap::from([("NumCards".to_string(), num_cards.to_string())]),
+        ResolvedAbility::new(
+            Effect::Mill {
+                count: num_cards,
+                target: TargetFilter::Any,
+            },
             targets,
             ObjectId(100),
             PlayerId(0),

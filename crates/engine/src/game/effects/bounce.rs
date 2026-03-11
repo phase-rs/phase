@@ -1,6 +1,6 @@
 use crate::game::zones;
 use crate::types::ability::{
-    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
+    effect_variant_name, Effect, EffectError, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -12,17 +12,10 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Determine targets using typed Effect::Bounce target field, falling back to params
+    // Determine targets using typed Effect::Bounce target field
     let use_self = match &ability.effect {
-        Effect::Bounce { target, .. } => matches!(target, TargetSpec::None),
-        _ => {
-            ability
-                .params
-                .get("Defined")
-                .map(|s| s.as_str())
-                .unwrap_or("Targeted")
-                == "Self"
-        }
+        Effect::Bounce { target, .. } => matches!(target, TargetFilter::None),
+        _ => false,
     };
 
     let targets: Vec<_> = if use_self {
@@ -68,7 +61,6 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     #[test]
     fn test_bounce_moves_permanent_to_hand() {
@@ -81,18 +73,15 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Bounce".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -112,18 +101,15 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Bounce".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::None,
+                destination: None,
             },
-            params: HashMap::from([("Defined".to_string(), "Self".to_string())]),
-            targets: vec![],
-            source_id: obj_id,
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -143,18 +129,15 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Bounce".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();

@@ -1,15 +1,17 @@
 use std::collections::HashSet;
 
+use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    effect_variant_name, DamageAmount, Effect, EffectError, ResolvedAbility, TargetRef, TargetSpec,
+    effect_variant_name, DamageAmount, Effect, EffectError, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 
 /// Deal damage to each target.
-/// Reads amount from `Effect::DealDamage { amount }`, with fallback to `NumDmg` param.
+/// Reads amount from `Effect::DealDamage { amount }`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -23,17 +25,8 @@ pub fn resolve(
         Effect::DealDamage {
             amount: DamageAmount::Variable(_),
             ..
-        } => ability
-            .params
-            .get("NumDmg")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
-        _ => ability
-            .params
-            .get("NumDmg")
-            .ok_or_else(|| EffectError::MissingParam("NumDmg".to_string()))?
-            .parse()
-            .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?,
+        } => 0,
+        _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
     };
 
     for target in &ability.targets {
@@ -113,59 +106,33 @@ pub fn resolve(
     Ok(())
 }
 
-/// Deal damage to all permanents (and optionally players) matching the `Valid` filter.
-/// Reads amount and filter from `Effect::DamageAll { amount, target }`, with fallback to params.
+/// Deal damage to all permanents (and optionally players) matching the filter.
+/// Reads amount and filter from `Effect::DamageAll { amount, target }`.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_dmg, filter_owned): (u32, String) = match &ability.effect {
+    let (num_dmg, target_filter): (u32, TargetFilter) = match &ability.effect {
         Effect::DamageAll { amount, target } => {
             let dmg = match amount {
                 DamageAmount::Fixed(n) => *n as u32,
-                DamageAmount::Variable(_) => ability
-                    .params
-                    .get("NumDmg")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
+                DamageAmount::Variable(_) => 0,
             };
-            let f = match target {
-                TargetSpec::All { filter } if !filter.is_empty() => filter.clone(),
-                _ => ability
-                    .params
-                    .get("Valid")
-                    .cloned()
-                    .unwrap_or_else(|| "Creature".to_string()),
-            };
-            (dmg, f)
+            (dmg, target.clone())
         }
-        _ => {
-            let dmg = ability
-                .params
-                .get("NumDmg")
-                .ok_or_else(|| EffectError::MissingParam("NumDmg".to_string()))?
-                .parse()
-                .map_err(|_| EffectError::InvalidParam("NumDmg must be a number".to_string()))?;
-            let f = ability
-                .params
-                .get("Valid")
-                .cloned()
-                .unwrap_or_else(|| "Creature".to_string());
-            (dmg, f)
-        }
+        _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
     };
-    let filter = filter_owned.as_str();
 
     // Collect matching object IDs
     let matching: Vec<_> = state
         .battlefield
         .iter()
         .filter(|id| {
-            crate::game::filter::object_matches_filter_controlled(
+            filter::matches_target_filter_controlled(
                 state,
                 **id,
-                filter,
+                &target_filter,
                 ability.source_id,
                 ability.controller,
             )
@@ -196,16 +163,18 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TargetFilter;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_ability(num_dmg: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            "DealDamage",
-            HashMap::from([("NumDmg".to_string(), num_dmg.to_string())]),
+        ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(num_dmg as i32),
+                target: TargetFilter::Any,
+            },
             targets,
             ObjectId(100),
             PlayerId(0),
@@ -258,21 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_num_dmg_returns_error() {
-        let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility::from_raw(
-            "DealDamage",
-            HashMap::new(),
-            vec![TargetRef::Player(PlayerId(0))],
-            ObjectId(1),
-            PlayerId(0),
-        );
-        let mut events = Vec::new();
-        let result = resolve(&mut state, &ability, &mut events);
-        assert!(matches!(result, Err(EffectError::MissingParam(_))));
-    }
-
-    #[test]
     fn damage_all_creatures() {
         let mut state = GameState::new_two_player(42);
         let bear1 = create_object(
@@ -305,12 +259,16 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let ability = ResolvedAbility::from_raw(
-            "DamageAll",
-            HashMap::from([
-                ("NumDmg".to_string(), "2".to_string()),
-                ("Valid".to_string(), "Creature".to_string()),
-            ]),
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: DamageAmount::Fixed(2),
+                target: TargetFilter::Typed {
+                    card_type: Some(crate::types::ability::TypeFilter::Creature),
+                    subtype: None,
+                    controller: None,
+                    properties: vec![],
+                },
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),
