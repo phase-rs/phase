@@ -164,9 +164,14 @@ export function GameProvider({
         wsMode === "join" ? joinCode : undefined,
       );
 
-      if (onWsEventRef.current) {
-        wsUnsubscribe = wsAdapter.onEvent(onWsEventRef.current);
-      }
+      wsUnsubscribe = wsAdapter.onEvent((event) => {
+        if (event.type === "stateChanged") {
+          const store = useGameStore.getState();
+          store.setGameState(event.state);
+          store.setWaitingFor(event.state.waiting_for);
+        }
+        onWsEventRef.current?.(event);
+      });
 
       if (isReconnect) {
         wsAdapter.tryReconnect();

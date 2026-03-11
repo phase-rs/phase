@@ -27,6 +27,8 @@ interface GameStoreActions {
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
   undo: () => void;
   reset: () => void;
+  setGameState: (state: GameState) => void;
+  setWaitingFor: (waitingFor: WaitingFor | null) => void;
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
@@ -186,6 +188,14 @@ export const useGameStore = create<GameStore>()(
         adapter.dispose();
       }
       set(initialState);
+    },
+
+    setGameState: (state) => {
+      set({ gameState: state });
+    },
+
+    setWaitingFor: (waitingFor) => {
+      set({ waitingFor });
     },
   })),
 );

@@ -6,6 +6,7 @@ import type {
   PlayerId,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
@@ -23,7 +24,8 @@ export type WsAdapterEvent =
   | { type: "error"; message: string }
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
-  | { type: "reconnectFailed" };
+  | { type: "reconnectFailed" }
+  | { type: "stateChanged"; state: GameState; events: GameEvent[] };
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -162,6 +164,10 @@ export class WebSocketAdapter implements EngineAdapter {
     return this.gameState;
   }
 
+  getAiAction(_difficulty: string): GameAction | null {
+    return null;
+  }
+
   async getLegalActions(): Promise<GameAction[]> {
     // In multiplayer, legal actions would need server-side support.
     // For now, return empty — auto-pass and highlights are WASM-only features.
@@ -271,9 +277,11 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state: GameState; your_player: PlayerId };
+        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string };
         this.gameState = data.state;
         this._playerId = data.your_player;
+        useMultiplayerStore.getState().setActivePlayerId(data.your_player);
+        useMultiplayerStore.getState().setOpponentDisplayName(data.opponent_name ?? null);
         if (this.initResolve) {
           this.initResolve();
           this.initResolve = null;
@@ -289,6 +297,8 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pendingResolve(data.events);
           this.pendingResolve = null;
           this.pendingReject = null;
+        } else {
+          this.emit({ type: "stateChanged", state: data.state, events: data.events });
         }
         break;
       }

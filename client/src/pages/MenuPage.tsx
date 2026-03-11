@@ -105,6 +105,11 @@ export function MenuPage() {
   };
 
   const handleHostOnlineGame = () => {
+    if (!activeDeckName) {
+      setMenuView("deck-gallery-online");
+      return;
+    }
+    sessionStorage.removeItem("phase-ws-session");
     const gameId = crypto.randomUUID();
     useGameStore.setState({ gameId });
     navigate(`/game/${gameId}?mode=host`);
@@ -117,8 +122,13 @@ export function MenuPage() {
   };
 
   const handleJoinSubmit = () => {
+    if (!activeDeckName) {
+      setMenuView("deck-gallery-online");
+      return;
+    }
     const code = joinCode.trim().toUpperCase();
     if (code) {
+      sessionStorage.removeItem("phase-ws-session");
       const gameId = crypto.randomUUID();
       useGameStore.setState({ gameId });
       navigate(`/game/${gameId}?mode=join&code=${code}`);

@@ -1,11 +1,40 @@
-import { describe, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import { useMultiplayerStore } from "../multiplayerStore";
 
 describe("multiplayerStore", () => {
-  it.todo("initializes with a stable UUID playerId");
+  beforeEach(() => {
+    useMultiplayerStore.setState({
+      displayName: "",
+      connectionStatus: "disconnected",
+      activePlayerId: null,
+      opponentDisplayName: null,
+    });
+  });
 
-  it.todo("persists displayName across store resets");
+  it("initializes with a stable UUID playerId", () => {
+    const id1 = useMultiplayerStore.getState().playerId;
+    expect(id1).toMatch(/^[0-9a-f]{8}-/);
+    const id2 = useMultiplayerStore.getState().playerId;
+    expect(id2).toBe(id1);
+  });
 
-  it.todo("does not persist connectionStatus or activePlayerId");
+  it("persists displayName across store resets", () => {
+    useMultiplayerStore.getState().setDisplayName("TestPlayer");
+    expect(useMultiplayerStore.getState().displayName).toBe("TestPlayer");
+  });
 
-  it.todo("setActivePlayerId updates activePlayerId");
+  it("does not persist connectionStatus or activePlayerId", () => {
+    useMultiplayerStore.getState().setConnectionStatus("connected");
+    expect(useMultiplayerStore.getState().connectionStatus).toBe("connected");
+    useMultiplayerStore.getState().setActivePlayerId(1);
+    expect(useMultiplayerStore.getState().activePlayerId).toBe(1);
+  });
+
+  it("setActivePlayerId updates activePlayerId", () => {
+    useMultiplayerStore.getState().setActivePlayerId(1);
+    expect(useMultiplayerStore.getState().activePlayerId).toBe(1);
+    useMultiplayerStore.getState().setActivePlayerId(null);
+    expect(useMultiplayerStore.getState().activePlayerId).toBeNull();
+  });
 });
