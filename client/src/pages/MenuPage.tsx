@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { initAudioOnInteraction } from "../audio/AudioManager";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { CardCoverageDashboard } from "../components/controls/CardCoverageDashboard";
+import { HostSetup } from "../components/lobby/HostSetup";
+import { LobbyView } from "../components/lobby/LobbyView";
+import { WaitingScreen } from "../components/lobby/WaitingScreen";
 import { DeckGallery } from "../components/menu/DeckGallery";
 import { MenuLogo } from "../components/menu/MenuLogo";
 import { MenuParticles } from "../components/menu/MenuParticles";
@@ -11,6 +14,7 @@ import { menuButtonClass } from "../components/menu/buttonStyles";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import type { ParsedDeck } from "../services/deckParser";
+import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   loadActiveGame,
   clearActiveGame,
@@ -19,6 +23,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
+import type { HostSettings } from "../components/lobby/HostSetup";
 
 /** Scan localStorage for saved deck names. */
 function listSavedDeckNames(): string[] {
@@ -40,28 +45,46 @@ function seedStarterDecks(): void {
   }
 }
 
+function loadActiveDeck(): ParsedDeck | null {
+  const activeName = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!activeName) return null;
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + activeName);
+  if (!raw) return null;
+  return JSON.parse(raw) as ParsedDeck;
+}
+
 type MenuView =
   | "mode-select"
   | "deck-gallery-ai"
   | "deck-gallery-online"
-  | "online-host-join"
+  | "lobby"
+  | "host-setup"
+  | "waiting"
   | "join-code";
 
 const BACK_TARGETS: Partial<Record<MenuView, MenuView>> = {
   "deck-gallery-ai": "mode-select",
   "deck-gallery-online": "mode-select",
-  "online-host-join": "deck-gallery-online",
-  "join-code": "online-host-join",
+  "lobby": "deck-gallery-online",
+  "host-setup": "lobby",
+  "waiting": "lobby",
+  "join-code": "lobby",
 };
 
 export function MenuPage() {
   const navigate = useNavigate();
   const [showCoverage, setShowCoverage] = useState(false);
   const [menuView, setMenuView] = useState<MenuView>("mode-select");
-  const [joinCode, setJoinCode] = useState("");
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
   const [difficulty, setDifficulty] = useState("Medium");
+
+  // Host/waiting state
+  const [hostGameCode, setHostGameCode] = useState<string | null>(null);
+  const [hostIsPublic, setHostIsPublic] = useState(true);
+  const hostWsRef = useRef<WebSocket | null>(null);
+
+  const serverAddress = useMultiplayerStore((s) => s.serverAddress);
 
   // Warm up AudioContext on first user interaction
   useEffect(() => {
@@ -104,39 +127,129 @@ export function MenuPage() {
     navigate(`/game/${gameId}?mode=ai&difficulty=${difficulty}`);
   };
 
-  const handleHostOnlineGame = () => {
-    if (!activeDeckName) {
-      setMenuView("deck-gallery-online");
-      return;
-    }
-    sessionStorage.removeItem("phase-ws-session");
-    const gameId = crypto.randomUUID();
-    useGameStore.setState({ gameId });
-    navigate(`/game/${gameId}?mode=host`);
-  };
-
   const handleResumeGame = () => {
     if (!activeGame) return;
     useGameStore.setState({ gameId: activeGame.id });
     navigate(`/game/${activeGame.id}?mode=${activeGame.mode}&difficulty=${activeGame.difficulty}`);
   };
 
-  const handleJoinSubmit = () => {
-    if (!activeDeckName) {
-      setMenuView("deck-gallery-online");
-      return;
-    }
-    const code = joinCode.trim().toUpperCase();
-    if (code) {
+  const handleHostWithSettings = useCallback(
+    (settings: HostSettings) => {
+      if (!activeDeckName) {
+        setMenuView("deck-gallery-online");
+        return;
+      }
+
+      sessionStorage.removeItem("phase-ws-session");
+      setHostIsPublic(settings.public);
+
+      const deck = loadActiveDeck();
+      if (!deck) {
+        setMenuView("deck-gallery-online");
+        return;
+      }
+
+      // Build deck data
+      const mainDeck: string[] = [];
+      for (const entry of deck.main) {
+        for (let i = 0; i < entry.count; i++) {
+          mainDeck.push(entry.name);
+        }
+      }
+      const sideboard: string[] = [];
+      for (const entry of deck.sideboard) {
+        for (let i = 0; i < entry.count; i++) {
+          sideboard.push(entry.name);
+        }
+      }
+
+      const ws = new WebSocket(serverAddress);
+      hostWsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(
+          JSON.stringify({
+            type: "CreateGameWithSettings",
+            data: {
+              deck: { main_deck: mainDeck, sideboard },
+              display_name: settings.displayName,
+              public: settings.public,
+              password: settings.password || null,
+              timer_seconds: settings.timerSeconds,
+            },
+          }),
+        );
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
+
+        if (msg.type === "GameCreated") {
+          const data = msg.data as { game_code: string; player_token: string };
+          setHostGameCode(data.game_code);
+          // Persist session for reconnect
+          sessionStorage.setItem(
+            "phase-ws-session",
+            JSON.stringify({ gameCode: data.game_code, playerToken: data.player_token }),
+          );
+          setMenuView("waiting");
+        } else if (msg.type === "GameStarted") {
+          // Game is ready — navigate to game page
+          const gameId = crypto.randomUUID();
+          useGameStore.setState({ gameId });
+          navigate(`/game/${gameId}?mode=host`);
+        } else if (msg.type === "Error") {
+          const data = msg.data as { message: string };
+          console.error("Host error:", data.message);
+        }
+      };
+
+      ws.onerror = () => {
+        console.error("Failed to connect to server");
+      };
+    },
+    [activeDeckName, serverAddress, navigate],
+  );
+
+  const handleJoinWithPassword = useCallback(
+    (code: string, password?: string) => {
+      if (!activeDeckName) {
+        setMenuView("deck-gallery-online");
+        return;
+      }
       sessionStorage.removeItem("phase-ws-session");
       const gameId = crypto.randomUUID();
       useGameStore.setState({ gameId });
-      navigate(`/game/${gameId}?mode=join&code=${code}`);
+      const params = new URLSearchParams({ mode: "join", code });
+      if (password) {
+        params.set("password", password);
+      }
+      navigate(`/game/${gameId}?${params.toString()}`);
+    },
+    [activeDeckName, navigate],
+  );
+
+  const handleCancelHost = useCallback(() => {
+    if (hostWsRef.current) {
+      hostWsRef.current.close();
+      hostWsRef.current = null;
     }
-  };
+    setHostGameCode(null);
+    sessionStorage.removeItem("phase-ws-session");
+    setMenuView("lobby");
+  }, []);
 
   const backTarget = BACK_TARGETS[menuView];
-  const handleBack = backTarget ? () => setMenuView(backTarget) : undefined;
+  const handleBack = backTarget
+    ? () => {
+        // Clean up host connection when navigating away from waiting
+        if (menuView === "waiting") {
+          handleCancelHost();
+          return;
+        }
+        setMenuView(backTarget);
+      }
+    : undefined;
   const hasSavedGame = activeGame !== null;
 
   return (
@@ -211,54 +324,33 @@ export function MenuPage() {
             mode="online"
             difficulty={difficulty}
             onDifficultyChange={setDifficulty}
-            onStartGame={() => setMenuView("online-host-join")}
+            onStartGame={() => setMenuView("lobby")}
           />
         </div>
       )}
 
-      {menuView === "online-host-join" && (
-        <div className="relative z-10 flex flex-col items-center gap-4">
-          <p className="text-lg font-medium text-gray-300">Multiplayer</p>
-
-          <button
-            onClick={handleHostOnlineGame}
-            className={menuButtonClass({ tone: "emerald", size: "md" })}
-          >
-            Host Game
-          </button>
-
-          <button
-            onClick={() => setMenuView("join-code")}
-            className={menuButtonClass({ tone: "cyan", size: "md" })}
-          >
-            Join Game
-          </button>
-        </div>
+      {menuView === "lobby" && (
+        <LobbyView
+          onHostGame={() => setMenuView("host-setup")}
+          onJoinGame={handleJoinWithPassword}
+          activeDeckName={activeDeckName}
+          onChangeDeck={() => setMenuView("deck-gallery-online")}
+        />
       )}
 
-      {menuView === "join-code" && (
-        <div className="relative z-10 flex flex-col items-center gap-3">
-          <p className="text-sm font-medium text-gray-300">Enter Game Code</p>
+      {menuView === "host-setup" && (
+        <HostSetup
+          onHost={handleHostWithSettings}
+          onBack={() => setMenuView("lobby")}
+        />
+      )}
 
-          <input
-            type="text"
-            value={joinCode}
-            onChange={(e) => setJoinCode(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleJoinSubmit()}
-            placeholder="e.g. ABC123"
-            maxLength={10}
-            className="w-48 rounded-lg bg-gray-800 px-4 py-2 text-center font-mono text-lg tracking-widest text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
-            autoFocus
-          />
-
-          <button
-            onClick={handleJoinSubmit}
-            disabled={!joinCode.trim()}
-            className={menuButtonClass({ tone: "cyan", size: "md", disabled: !joinCode.trim() })}
-          >
-            Join
-          </button>
-        </div>
+      {menuView === "waiting" && hostGameCode && (
+        <WaitingScreen
+          gameCode={hostGameCode}
+          isPublic={hostIsPublic}
+          onCancel={handleCancelHost}
+        />
       )}
 
       {showCoverage && (

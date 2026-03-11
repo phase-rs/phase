@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import type { AnimationSpeed, VfxQuality } from "../../animation/types.ts";
 import type {
   CardSizePreference,
@@ -42,6 +44,13 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
   const setMusicMuted = usePreferencesStore((s) => s.setMusicMuted);
   const setAnimationSpeed = usePreferencesStore((s) => s.setAnimationSpeed);
 
+  // Multiplayer settings
+  const displayName = useMultiplayerStore((s) => s.displayName);
+  const serverAddress = useMultiplayerStore((s) => s.serverAddress);
+  const setDisplayName = useMultiplayerStore((s) => s.setDisplayName);
+  const setServerAddress = useMultiplayerStore((s) => s.setServerAddress);
+  const [connTest, setConnTest] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+
   return (
     <AnimatePresence>
       <motion.div
@@ -56,7 +65,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
 
         {/* Modal content */}
         <motion.div
-          className="relative z-10 w-full max-w-sm rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700"
+          className="relative z-10 max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700"
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
@@ -177,6 +186,63 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                 />
                 <span className="w-10 text-right text-xs text-gray-400">{musicVolume}%</span>
               </div>
+            </SettingGroup>
+
+            {/* Multiplayer divider */}
+            <div className="border-t border-gray-700 pt-4">
+              <SettingGroup label="Display Name">
+                <input
+                  type="text"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="Enter your name"
+                  maxLength={20}
+                  className="w-full rounded bg-gray-800 px-3 py-1.5 text-sm text-gray-200 ring-1 ring-gray-700 focus:outline-none focus:ring-cyan-500"
+                />
+              </SettingGroup>
+            </div>
+
+            <SettingGroup label="Server Address">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={serverAddress}
+                  onChange={(e) => setServerAddress(e.target.value)}
+                  placeholder="ws://localhost:8080/ws"
+                  className="flex-1 rounded bg-gray-800 px-3 py-1.5 text-sm text-gray-200 ring-1 ring-gray-700 focus:outline-none focus:ring-cyan-500"
+                />
+                <button
+                  onClick={() => {
+                    setConnTest("testing");
+                    const ws = new WebSocket(serverAddress);
+                    const timeout = setTimeout(() => {
+                      ws.close();
+                      setConnTest("fail");
+                    }, 3000);
+                    ws.onopen = () => {
+                      clearTimeout(timeout);
+                      ws.close();
+                      setConnTest("ok");
+                    };
+                    ws.onerror = () => {
+                      clearTimeout(timeout);
+                      setConnTest("fail");
+                    };
+                  }}
+                  className="rounded bg-gray-700 px-2 py-1 text-xs text-gray-300 transition-colors hover:bg-gray-600"
+                >
+                  Test
+                </button>
+              </div>
+              {connTest === "ok" && (
+                <p className="mt-1 text-xs text-emerald-400">Connected</p>
+              )}
+              {connTest === "fail" && (
+                <p className="mt-1 text-xs text-red-400">Connection failed</p>
+              )}
+              {connTest === "testing" && (
+                <p className="mt-1 text-xs text-gray-400">Testing...</p>
+              )}
             </SettingGroup>
           </div>
         </motion.div>
