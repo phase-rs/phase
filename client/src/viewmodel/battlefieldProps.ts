@@ -1,4 +1,4 @@
-import type { GameObject, ObjectId } from "../adapter/types";
+import type { AttackerInfo, CombatState, GameObject, ObjectId, PlayerId } from "../adapter/types";
 import { toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
 
@@ -33,43 +33,53 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
   return { creatures, lands, other };
 }
 
-function canGroup(obj: GameObject): boolean {
-  return obj.attachments.length === 0 && Object.keys(obj.counters).length === 0;
-}
-
-function groupKey(obj: GameObject): string {
-  return `${obj.name}::${obj.tapped}`;
-}
-
 export function groupByName(objects: GameObject[]): GroupedPermanent[] {
-  const groups = new Map<string, GameObject[]>();
+  return objects.map((obj) => ({
+    name: obj.name,
+    ids: [obj.id],
+    count: 1,
+    representative: toCardProps(obj),
+  }));
+}
 
-  for (const obj of objects) {
-    if (!canGroup(obj)) {
-      // Ungroupable objects get their own entry with a unique key
-      groups.set(`__solo_${obj.id}`, [obj]);
-      continue;
-    }
+/** Group attackers by their defending player target. */
+export function groupAttackersByTarget(
+  combat: CombatState | null,
+): Map<PlayerId, AttackerInfo[]> {
+  const groups = new Map<PlayerId, AttackerInfo[]>();
+  if (!combat) return groups;
 
-    const key = groupKey(obj);
-    const existing = groups.get(key);
-    if (existing) {
-      existing.push(obj);
+  for (const attacker of combat.attackers) {
+    const group = groups.get(attacker.defending_player);
+    if (group) {
+      group.push(attacker);
     } else {
-      groups.set(key, [obj]);
+      groups.set(attacker.defending_player, [attacker]);
     }
   }
 
-  const result: GroupedPermanent[] = [];
+  return groups;
+}
 
-  for (const members of groups.values()) {
-    result.push({
-      name: members[0].name,
-      ids: members.map((m) => m.id),
-      count: members.length,
-      representative: toCardProps(members[0]),
-    });
-  }
+/** Get attacker IDs targeting a specific defending player. */
+export function getAttackersTargeting(
+  combat: CombatState | null,
+  defendingPlayer: PlayerId,
+): ObjectId[] {
+  if (!combat) return [];
+  return combat.attackers
+    .filter((a) => a.defending_player === defendingPlayer)
+    .map((a) => a.object_id);
+}
 
-  return result;
+/** Check if an attacker is targeting the given defending player. */
+export function isAttackerTargetingPlayer(
+  combat: CombatState | null,
+  attackerId: ObjectId,
+  defendingPlayer: PlayerId,
+): boolean {
+  if (!combat) return false;
+  return combat.attackers.some(
+    (a) => a.object_id === attackerId && a.defending_player === defendingPlayer,
+  );
 }

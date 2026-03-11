@@ -4,7 +4,9 @@ import { createPortal } from "react-dom";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import type { ObjectId } from "../../adapter/types.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import type { ObjectId, PlayerId } from "../../adapter/types.ts";
+import { isAttackerTargetingPlayer } from "../../viewmodel/battlefieldProps.ts";
 
 interface LinePosition {
   from: { x: number; y: number };
@@ -17,6 +19,7 @@ export function BlockAssignmentLines() {
   const combatMode = useUiStore((s) => s.combatMode);
   const combat = useGameStore((s) => s.gameState?.combat ?? null);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
+  const myId = usePlayerId();
 
   // Merge UI blocker assignments with confirmed engine assignments
   const pairs = useMergedPairs(blockerAssignments, combat?.blocker_to_attacker ?? null);
@@ -44,21 +47,27 @@ export function BlockAssignmentLines() {
           </filter>
         </defs>
       )}
-      {Array.from(positions.entries()).map(([blockerId, pos]) => (
-        <g key={blockerId}>
-          <line
-            x1={pos.from.x}
-            y1={pos.from.y}
-            x2={pos.to.x}
-            y2={pos.to.y}
-            stroke="rgba(249,115,22,0.7)"
-            strokeWidth={isMinimal ? 1.5 : 2.5}
-            strokeDasharray={isMinimal ? undefined : "8 4"}
-            filter={isMinimal ? undefined : "url(#block-line-glow)"}
-          />
-          {!isMinimal && <PulseDot from={pos.from} to={pos.to} length={pos.length} />}
-        </g>
-      ))}
+      {Array.from(positions.entries()).map(([blockerId, pos]) => {
+        const attackerId = pairs.get(blockerId);
+        const targetsMe = attackerId != null && isAttackerTargetingPlayer(combat, attackerId, myId);
+        // In multi-defender combat, dim lines for attackers not targeting the current player
+        const lineOpacity = targetsMe || combat === null ? 0.7 : 0.25;
+        return (
+          <g key={blockerId} opacity={targetsMe || combat === null ? 1 : 0.4}>
+            <line
+              x1={pos.from.x}
+              y1={pos.from.y}
+              x2={pos.to.x}
+              y2={pos.to.y}
+              stroke={`rgba(249,115,22,${lineOpacity})`}
+              strokeWidth={isMinimal ? 1.5 : 2.5}
+              strokeDasharray={isMinimal ? undefined : "8 4"}
+              filter={isMinimal ? undefined : "url(#block-line-glow)"}
+            />
+            {!isMinimal && targetsMe && <PulseDot from={pos.from} to={pos.to} length={pos.length} />}
+          </g>
+        );
+      })}
     </svg>,
     document.body,
   );
