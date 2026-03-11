@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::game::filter::{object_matches_filter, player_matches_filter};
+use crate::game::filter::matches_target_filter;
+use crate::types::ability::TargetFilter;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -9,10 +10,8 @@ use crate::types::statics::StaticMode;
 /// Describes what a static ability does (returned by handlers).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaticEffect {
-    /// Continuous effect -- evaluated through layers.rs, details in params.
-    Continuous {
-        layer_params: HashMap<String, String>,
-    },
+    /// Continuous effect -- evaluated through layers.rs, details in typed modifications.
+    Continuous,
     /// Rule modification -- checked at specific game points.
     RuleModification { mode: String },
 }
@@ -142,15 +141,13 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry
 }
 
-/// Handler for the Continuous mode -- returns parsed layer effects from params.
+/// Handler for the Continuous mode -- layers.rs handles the actual evaluation.
 fn handle_continuous(
     _state: &GameState,
-    params: &HashMap<String, String>,
+    _params: &HashMap<String, String>,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
-    vec![StaticEffect::Continuous {
-        layer_params: params.clone(),
-    }]
+    vec![StaticEffect::Continuous]
 }
 
 /// Handler for rule-modification modes -- returns the mode as a RuleModification effect.
@@ -159,8 +156,6 @@ fn handle_rule_mod(
     params: &HashMap<String, String>,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
-    // The mode is embedded in params or inferred from the registry key.
-    // For rule mods, we return the effect so callers can check applicability.
     let mode = params.get("Mode").cloned().unwrap_or_default();
     vec![StaticEffect::RuleModification { mode }]
 }
@@ -177,7 +172,6 @@ pub fn handle_cant_be_blocked(
 }
 
 /// Handler for Ward -- opponent must pay additional cost or spell/ability is countered.
-/// Cost enforcement is deferred to mana payment UI; this marks the static as active.
 pub fn handle_ward(
     _state: &GameState,
     params: &HashMap<String, String>,
@@ -203,8 +197,6 @@ pub fn handle_protection(
 }
 
 /// Handler for Indestructible -- prevents destruction by lethal damage and destroy effects.
-/// SBA integration: sba.rs already checks has_keyword(Indestructible). This static handler
-/// enables static-granted Indestructible (e.g., "Creatures you control are indestructible").
 fn handle_indestructible(
     _state: &GameState,
     _params: &HashMap<String, String>,
@@ -362,8 +354,8 @@ pub fn check_static_ability(state: &GameState, mode: &str, context: &StaticCheck
                 continue;
             }
 
-            // Check affected filter if present
-            if let Some(affected) = def.params.get("Affected") {
+            // Check affected filter if present (typed TargetFilter)
+            if let Some(ref affected) = def.affected {
                 if !static_filter_matches(state, context, affected, id) {
                     continue;
                 }
@@ -380,16 +372,39 @@ pub fn check_static_ability(state: &GameState, mode: &str, context: &StaticCheck
 fn static_filter_matches(
     state: &GameState,
     context: &StaticCheckContext,
-    filter: &str,
+    filter: &TargetFilter,
     source_id: ObjectId,
 ) -> bool {
     if let Some(target_id) = context.target_id {
-        return object_matches_filter(state, target_id, filter, source_id);
+        return matches_target_filter(state, target_id, filter, source_id);
     }
 
     if let Some(player_id) = context.player_id {
+        // For player-targeted checks, we still use the string-based player filter.
+        // TargetFilter::Player variant just returns false for object matching,
+        // so we need to check if this is a player-affecting filter.
         let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-        return player_matches_filter(player_id, filter, source_controller);
+        match filter {
+            TargetFilter::Any => return true,
+            TargetFilter::Player => {
+                // All players match
+                return true;
+            }
+            TargetFilter::Typed { controller, .. } => {
+                if let Some(ctrl) = controller {
+                    return match ctrl {
+                        crate::types::ability::ControllerRef::You => {
+                            source_controller == Some(player_id)
+                        }
+                        crate::types::ability::ControllerRef::Opponent => {
+                            source_controller.is_some() && source_controller != Some(player_id)
+                        }
+                    };
+                }
+                return true;
+            }
+            _ => return true,
+        }
     }
 
     // No specific target -- matches by default
@@ -400,7 +415,9 @@ fn static_filter_matches(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::StaticDefinition;
+    use crate::types::ability::{
+        ControllerRef, StaticDefinition, TargetFilter, TypeFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::statics::StaticMode;
@@ -446,9 +463,13 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        // Add CantAttack static targeting the creature
-        let mut params = HashMap::new();
-        params.insert("Affected".to_string(), "Creature.OppCtrl".to_string());
+        // Add CantAttack static targeting opponent's creatures
+        let affected = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        };
         state
             .objects
             .get_mut(&source)
@@ -456,7 +477,13 @@ mod tests {
             .static_definitions
             .push(StaticDefinition {
                 mode: StaticMode::CantAttack,
-                params,
+                affected: Some(affected),
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
             });
 
         let ctx = StaticCheckContext {
@@ -523,20 +550,10 @@ mod tests {
     #[test]
     fn test_continuous_mode_returns_effects() {
         let state = setup();
-        let mut params = HashMap::new();
-        params.insert("Affected".to_string(), "Creature.YouCtrl".to_string());
-        params.insert("AddPower".to_string(), "1".to_string());
-        params.insert("AddToughness".to_string(), "1".to_string());
-
+        let params = HashMap::new();
         let effects = handle_continuous(&state, &params, ObjectId(1));
         assert_eq!(effects.len(), 1);
-        match &effects[0] {
-            StaticEffect::Continuous { layer_params } => {
-                assert_eq!(layer_params.get("AddPower").unwrap(), "1");
-                assert_eq!(layer_params.get("AddToughness").unwrap(), "1");
-            }
-            _ => panic!("Expected Continuous effect"),
-        }
+        assert_eq!(effects[0], StaticEffect::Continuous);
     }
 
     #[test]

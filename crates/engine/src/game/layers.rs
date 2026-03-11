@@ -1,16 +1,13 @@
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
-use std::collections::HashMap;
 
 use crate::game::devotion::count_devotion;
-use crate::game::filter::object_matches_filter;
+use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
-use crate::types::card_type::CoreType;
+use crate::types::ability::{ContinuousModification, StaticCondition, TargetFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
-use crate::types::mana::ManaColor;
 use crate::types::statics::StaticMode;
 
 /// Evaluate all continuous effects through the seven-layer system.
@@ -104,34 +101,44 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                 continue;
             }
 
-            // Evaluate devotion-based conditions (Theros gods pattern):
-            // CheckSVar + SVarCompare on a self-targeting static → devotion check
-            // using the card's own base colors.
-            if def.params.contains_key("CheckSVar") {
-                if let Some(compare) = def.params.get("SVarCompare") {
-                    if !obj.base_color.is_empty() {
-                        let devotion = count_devotion(state, obj.controller, &obj.base_color);
-                        if !evaluate_compare(compare, devotion) {
-                            continue; // Condition not met, skip this effect
+            // Evaluate condition if present
+            if let Some(ref condition) = def.condition {
+                match condition {
+                    StaticCondition::DevotionGE { colors, threshold } => {
+                        let devotion = count_devotion(state, obj.controller, colors);
+                        if devotion < *threshold {
+                            continue;
                         }
                     }
+                    StaticCondition::IsPresent { .. } => {
+                        // TODO: evaluate presence check
+                    }
+                    StaticCondition::CheckSVar { compare, .. } => {
+                        // Legacy path: evaluate compare string against devotion if colors available
+                        if !obj.base_color.is_empty() {
+                            let devotion =
+                                count_devotion(state, obj.controller, &obj.base_color);
+                            if !evaluate_compare(compare, devotion) {
+                                continue;
+                            }
+                        }
+                    }
+                    StaticCondition::None => {}
                 }
             }
 
-            let affected = def.params.get("Affected").cloned().unwrap_or_default();
+            let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
 
-            // Determine which layer(s) this effect targets based on params
-            let layers = determine_layers_from_params(&def.params);
-
-            for layer in layers {
+            // Each modification becomes its own ActiveContinuousEffect with the correct layer
+            for modification in &def.modifications {
                 effects.push(ActiveContinuousEffect {
                     source_id: id,
                     def_index: def_idx,
-                    layer,
+                    layer: modification.layer(),
                     timestamp: obj.timestamp,
-                    params: def.params.clone(),
-                    affected_filter: affected.clone(),
-                    mode: def.mode.to_string(),
+                    modification: modification.clone(),
+                    affected_filter: affected_filter.clone(),
+                    mode: def.mode.clone(),
                 });
             }
         }
@@ -159,36 +166,6 @@ fn evaluate_compare(compare_str: &str, count: u32) -> bool {
         "LT" => count < threshold,
         _ => true,
     }
-}
-
-/// Determine which layer(s) a continuous effect targets based on its params.
-fn determine_layers_from_params(params: &HashMap<String, String>) -> Vec<Layer> {
-    let mut layers = Vec::new();
-
-    if params.contains_key("AddPower") || params.contains_key("AddToughness") {
-        layers.push(Layer::ModifyPT);
-    }
-    if params.contains_key("SetPower") || params.contains_key("SetToughness") {
-        layers.push(Layer::SetPT);
-    }
-    if params.contains_key("AddKeyword") || params.contains_key("RemoveKeyword") {
-        layers.push(Layer::Ability);
-    }
-    if params.contains_key("AddType") || params.contains_key("RemoveType") {
-        layers.push(Layer::Type);
-    }
-    if params.contains_key("SetColor") || params.contains_key("AddColor") {
-        layers.push(Layer::Color);
-    }
-    if params.contains_key("AddAbility") || params.contains_key("RemoveAllAbilities") {
-        layers.push(Layer::Ability);
-    }
-
-    // Deduplicate
-    layers.sort();
-    layers.dedup();
-
-    layers
 }
 
 /// Order effects using dependency-aware topological sort.
@@ -235,33 +212,53 @@ fn order_with_dependencies(
 /// Check if effect `a` depends on effect `b`.
 /// If `b` changes types and `a`'s filter is type-based, `a` depends on `b`.
 fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
-    // If b changes types (layer Type) and a's filter references a type
-    if b.params.contains_key("AddType") || b.params.contains_key("RemoveType") {
-        let type_keywords = [
-            "Creature",
-            "Artifact",
-            "Enchantment",
-            "Land",
-            "Planeswalker",
-            "Instant",
-            "Sorcery",
-            "Tribal",
-        ];
-        for kw in &type_keywords {
-            if a.affected_filter.contains(kw) {
-                return true;
-            }
-        }
+    // If b changes types (AddType/RemoveType) and a's filter references a type
+    let b_changes_types = matches!(
+        &b.modification,
+        ContinuousModification::AddType { .. } | ContinuousModification::RemoveType { .. }
+    );
+
+    if b_changes_types && filter_references_type(&a.affected_filter) {
+        return true;
     }
 
-    // If b adds/removes abilities and a checks for abilities
-    if (b.params.contains_key("AddAbility") || b.params.contains_key("RemoveAllAbilities"))
-        && a.affected_filter.contains("withAbility")
-    {
+    // If b adds/removes abilities and a's filter checks for abilities
+    let b_changes_abilities = matches!(
+        &b.modification,
+        ContinuousModification::AddAbility { .. } | ContinuousModification::RemoveAllAbilities
+    );
+
+    if b_changes_abilities && filter_references_ability(&a.affected_filter) {
         return true;
     }
 
     false
+}
+
+/// Check if a TargetFilter references a card type (used for dependency ordering).
+fn filter_references_type(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed { card_type, .. } => card_type.is_some(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_type)
+        }
+        TargetFilter::Not { filter } => filter_references_type(filter),
+        _ => false,
+    }
+}
+
+/// Check if a TargetFilter references abilities/keywords (used for dependency ordering).
+fn filter_references_ability(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed { properties, .. } => properties
+            .iter()
+            .any(|p| matches!(p, crate::types::ability::FilterProp::WithKeyword { .. })),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_ability)
+        }
+        TargetFilter::Not { filter } => filter_references_ability(filter),
+        _ => false,
+    }
 }
 
 /// Order effects by timestamp (deterministic fallback).
@@ -272,15 +269,12 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
 }
 
 /// Apply a single continuous effect to all affected objects.
-///
-/// Only applies the params relevant to `effect.layer` to avoid double-application
-/// when a single static definition spans multiple layers.
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     // Find affected objects
     let bf_ids: Vec<ObjectId> = state.battlefield.clone();
     let affected_ids: Vec<ObjectId> = bf_ids
         .iter()
-        .filter(|&&id| object_matches_filter(state, id, &effect.affected_filter, effect.source_id))
+        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, effect.source_id))
         .copied()
         .collect();
 
@@ -290,103 +284,53 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             None => continue,
         };
 
-        match effect.layer {
-            Layer::ModifyPT => {
-                if let Some(val) = effect.params.get("AddPower") {
-                    if let Ok(n) = val.parse::<i32>() {
-                        if let Some(ref mut p) = obj.power {
-                            *p += n;
-                        }
-                    }
-                }
-                if let Some(val) = effect.params.get("AddToughness") {
-                    if let Ok(n) = val.parse::<i32>() {
-                        if let Some(ref mut t) = obj.toughness {
-                            *t += n;
-                        }
-                    }
+        match &effect.modification {
+            ContinuousModification::AddPower { value } => {
+                if let Some(ref mut p) = obj.power {
+                    *p += value;
                 }
             }
-            Layer::SetPT => {
-                if let Some(val) = effect.params.get("SetPower") {
-                    if let Ok(n) = val.parse::<i32>() {
-                        obj.power = Some(n);
-                    }
-                }
-                if let Some(val) = effect.params.get("SetToughness") {
-                    if let Ok(n) = val.parse::<i32>() {
-                        obj.toughness = Some(n);
-                    }
+            ContinuousModification::AddToughness { value } => {
+                if let Some(ref mut t) = obj.toughness {
+                    *t += value;
                 }
             }
-            Layer::Ability => {
-                if let Some(val) = effect.params.get("AddKeyword") {
-                    let kw: Keyword = val.parse().unwrap();
-                    if !obj.has_keyword(&kw) {
-                        obj.keywords.push(kw);
-                    }
-                }
-                if let Some(val) = effect.params.get("RemoveKeyword") {
-                    let kw: Keyword = val.parse().unwrap();
-                    obj.keywords
-                        .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&kw));
-                }
-                if effect.params.contains_key("RemoveAllAbilities") {
-                    obj.abilities.clear();
-                    obj.keywords.clear();
+            ContinuousModification::SetPower { value } => {
+                obj.power = Some(*value);
+            }
+            ContinuousModification::SetToughness { value } => {
+                obj.toughness = Some(*value);
+            }
+            ContinuousModification::AddKeyword { keyword } => {
+                if !obj.has_keyword(keyword) {
+                    obj.keywords.push(keyword.clone());
                 }
             }
-            Layer::Type => {
-                if let Some(val) = effect.params.get("AddType") {
-                    if let Ok(ct) = val.parse::<CoreType>() {
-                        if !obj.card_types.core_types.contains(&ct) {
-                            obj.card_types.core_types.push(ct);
-                        }
-                    }
-                }
-                if let Some(val) = effect.params.get("RemoveType") {
-                    if let Ok(ct) = val.parse::<CoreType>() {
-                        obj.card_types.core_types.retain(|t| t != &ct);
-                    }
+            ContinuousModification::RemoveKeyword { keyword } => {
+                obj.keywords
+                    .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(keyword));
+            }
+            ContinuousModification::RemoveAllAbilities => {
+                obj.abilities.clear();
+                obj.keywords.clear();
+            }
+            ContinuousModification::AddType { core_type } => {
+                if !obj.card_types.core_types.contains(core_type) {
+                    obj.card_types.core_types.push(core_type.clone());
                 }
             }
-            Layer::Color => {
-                if let Some(val) = effect.params.get("SetColor") {
-                    let colors: Vec<ManaColor> = val
-                        .split(',')
-                        .filter_map(|s| match s.trim() {
-                            "White" => Some(ManaColor::White),
-                            "Blue" => Some(ManaColor::Blue),
-                            "Black" => Some(ManaColor::Black),
-                            "Red" => Some(ManaColor::Red),
-                            "Green" => Some(ManaColor::Green),
-                            _ => None,
-                        })
-                        .collect();
-                    obj.color = colors;
-                }
-                if let Some(val) = effect.params.get("AddColor") {
-                    let color = match val.as_str() {
-                        "White" => Some(ManaColor::White),
-                        "Blue" => Some(ManaColor::Blue),
-                        "Black" => Some(ManaColor::Black),
-                        "Red" => Some(ManaColor::Red),
-                        "Green" => Some(ManaColor::Green),
-                        _ => None,
-                    };
-                    if let Some(c) = color {
-                        if !obj.color.contains(&c) {
-                            obj.color.push(c);
-                        }
-                    }
+            ContinuousModification::RemoveType { core_type } => {
+                obj.card_types.core_types.retain(|t| t != core_type);
+            }
+            ContinuousModification::SetColor { colors } => {
+                obj.color = colors.clone();
+            }
+            ContinuousModification::AddColor { color } => {
+                if !obj.color.contains(color) {
+                    obj.color.push(color.clone());
                 }
             }
-            Layer::CounterPT // Handled separately in evaluate_layers
-            | Layer::Copy
-            | Layer::Control
-            | Layer::Text
-            | Layer::CharDef
-            | Layer::SwitchPT => {}
+            ContinuousModification::AddAbility { .. } => { /* TODO: future */ }
         }
     }
 }
@@ -395,9 +339,13 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::StaticDefinition;
+    use crate::types::ability::{
+        ControllerRef, ContinuousModification, FilterProp, StaticDefinition, TargetFilter,
+        TypeFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -430,20 +378,37 @@ mod tests {
         id
     }
 
+    /// Helper: creatures you control filter
+    fn creature_you_ctrl() -> TargetFilter {
+        TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        }
+    }
+
     fn add_lord_static(
         state: &mut GameState,
         lord_id: ObjectId,
-        filter: &str,
+        filter: TargetFilter,
         add_power: i32,
         add_toughness: i32,
     ) {
-        let mut params = HashMap::new();
-        params.insert("Affected".to_string(), filter.to_string());
-        params.insert("AddPower".to_string(), add_power.to_string());
-        params.insert("AddToughness".to_string(), add_toughness.to_string());
         let def = StaticDefinition {
             mode: StaticMode::Continuous,
-            params,
+            affected: Some(filter),
+            modifications: vec![
+                ContinuousModification::AddPower { value: add_power },
+                ContinuousModification::AddToughness {
+                    value: add_toughness,
+                },
+            ],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: None,
         };
         state
             .objects
@@ -459,7 +424,7 @@ mod tests {
         let lord = make_creature(&mut state, "Lord", 2, 2, PlayerId(0));
         let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
 
-        add_lord_static(&mut state, lord, "Creature.YouCtrl", 1, 1);
+        add_lord_static(&mut state, lord, creature_you_ctrl(), 1, 1);
 
         evaluate_layers(&mut state);
 
@@ -508,12 +473,23 @@ mod tests {
         // Effect that makes artifacts into creatures (layer 4 - Type)
         let animator = make_creature(&mut state, "Animator", 1, 1, PlayerId(0));
         {
-            let mut params = HashMap::new();
-            params.insert("Affected".to_string(), "Artifact.YouCtrl".to_string());
-            params.insert("AddType".to_string(), "Creature".to_string());
+            let artifact_you_ctrl = TargetFilter::Typed {
+                card_type: Some(TypeFilter::Artifact),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            };
             let def = StaticDefinition {
                 mode: StaticMode::Continuous,
-                params,
+                affected: Some(artifact_you_ctrl),
+                modifications: vec![ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                }],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
             };
             state
                 .objects
@@ -525,7 +501,7 @@ mod tests {
 
         // Effect that buffs creatures (layer 7c - ModifyPT)
         let lord = make_creature(&mut state, "Lord", 2, 2, PlayerId(0));
-        add_lord_static(&mut state, lord, "Creature.YouCtrl", 1, 1);
+        add_lord_static(&mut state, lord, creature_you_ctrl(), 1, 1);
 
         evaluate_layers(&mut state);
 
@@ -543,10 +519,10 @@ mod tests {
 
         // Two lords with different timestamps, both +1/+1
         let lord1 = make_creature(&mut state, "Lord1", 2, 2, PlayerId(0));
-        add_lord_static(&mut state, lord1, "Creature.YouCtrl", 1, 1);
+        add_lord_static(&mut state, lord1, creature_you_ctrl(), 1, 1);
 
         let lord2 = make_creature(&mut state, "Lord2", 2, 2, PlayerId(0));
-        add_lord_static(&mut state, lord2, "Creature.YouCtrl", 1, 1);
+        add_lord_static(&mut state, lord2, creature_you_ctrl(), 1, 1);
 
         evaluate_layers(&mut state);
 
@@ -585,7 +561,7 @@ mod tests {
             let obj = state.objects.get_mut(&lord).unwrap();
             obj.timestamp = 5;
         }
-        add_lord_static(&mut state, lord, "Creature.YouCtrl", 2, 2);
+        add_lord_static(&mut state, lord, creature_you_ctrl(), 2, 2);
 
         // Effect B: Adds creature type to artifacts, timestamp 10 (created later, newer)
         let animator = make_creature(&mut state, "Animator", 1, 1, PlayerId(0));
@@ -594,12 +570,23 @@ mod tests {
             obj.timestamp = 10;
         }
         {
-            let mut params = HashMap::new();
-            params.insert("Affected".to_string(), "Artifact.YouCtrl".to_string());
-            params.insert("AddType".to_string(), "Creature".to_string());
+            let artifact_you_ctrl = TargetFilter::Typed {
+                card_type: Some(TypeFilter::Artifact),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            };
             let def = StaticDefinition {
                 mode: StaticMode::Continuous,
-                params,
+                affected: Some(artifact_you_ctrl),
+                modifications: vec![ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                }],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
             };
             state
                 .objects
@@ -670,13 +657,27 @@ mod tests {
                 .push(crate::types::card_type::CoreType::Enchantment);
             obj.attached_to = Some(bear_a);
             obj.timestamp = ts;
-            let mut params = HashMap::new();
-            params.insert("Affected".to_string(), "Creature.EnchantedBy".to_string());
-            params.insert("AddPower".to_string(), "2".to_string());
-            params.insert("AddKeyword".to_string(), "Trample".to_string());
+
+            let enchanted_creature = TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::EnchantedBy],
+            };
             obj.static_definitions.push(StaticDefinition {
                 mode: StaticMode::Continuous,
-                params,
+                affected: Some(enchanted_creature),
+                modifications: vec![
+                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    },
+                ],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
             });
         }
         state
@@ -715,19 +716,27 @@ mod tests {
         // Create a static with both AddPower and AddKeyword
         let source = make_creature(&mut state, "Source", 1, 1, PlayerId(0));
         {
-            let mut params = HashMap::new();
-            params.insert("Affected".to_string(), "Creature.YouCtrl".to_string());
-            params.insert("AddPower".to_string(), "2".to_string());
-            params.insert("AddKeyword".to_string(), "Trample".to_string());
+            let def = StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(creature_you_ctrl()),
+                modifications: vec![
+                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    },
+                ],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
+            };
             state
                 .objects
                 .get_mut(&source)
                 .unwrap()
                 .static_definitions
-                .push(StaticDefinition {
-                    mode: StaticMode::Continuous,
-                    params,
-                });
+                .push(def);
         }
 
         evaluate_layers(&mut state);
@@ -747,7 +756,7 @@ mod tests {
         let lord = make_creature(&mut state, "Lord", 2, 2, PlayerId(0));
         let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
 
-        add_lord_static(&mut state, lord, "Creature.YouCtrl", 1, 1);
+        add_lord_static(&mut state, lord, creature_you_ctrl(), 1, 1);
 
         evaluate_layers(&mut state);
         assert_eq!(state.objects.get(&bear).unwrap().power, Some(3));
