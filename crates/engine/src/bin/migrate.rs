@@ -284,8 +284,11 @@ fn check_oracle_heuristic(
         "flash",
     ];
 
-    let parsed_keywords_lower: Vec<String> =
-        face.keywords.iter().map(|k| k.to_lowercase()).collect();
+    let parsed_keywords_lower: Vec<String> = face
+        .keywords
+        .iter()
+        .map(|k| format!("{k:?}").to_lowercase())
+        .collect();
 
     for kw in &common_keywords {
         // Check if the oracle text starts with or contains the keyword as a distinct word

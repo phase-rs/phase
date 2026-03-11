@@ -239,18 +239,59 @@ fn parse_params(raw: &str) -> HashMap<String, String> {
     params
 }
 
-/// Parse a TargetSpec from the ValidTgts parameter value.
+/// Parse a Forge ValidTgts filter string into a TargetFilter.
+/// Full filter parsing (e.g. "Creature.YouCtrl") is a best-effort mapping;
+/// unrecognized filter strings fall back to TargetFilter::Any.
 #[cfg(feature = "forge-compat")]
-fn parse_target_spec(value: &str) -> TargetSpec {
+fn parse_target_filter(value: &str) -> TargetFilter {
     match value {
         "Any" => TargetFilter::Any,
-        "Player" => TargetFilter::Player,
+        "Player" | "Player.Opponent" => TargetFilter::Player,
         "Player.You" => TargetFilter::Controller,
         "" => TargetFilter::None,
-        filter => TargetSpec::Filtered {
-            filter: filter.to_string(),
-        },
+        _ => TargetFilter::Any,
     }
+}
+
+/// Parse a Forge zone string to a Zone enum.
+#[cfg(feature = "forge-compat")]
+fn parse_zone(s: &str) -> Option<crate::types::zones::Zone> {
+    use crate::types::zones::Zone;
+    match s {
+        "Hand" => Some(Zone::Hand),
+        "Library" => Some(Zone::Library),
+        "Battlefield" => Some(Zone::Battlefield),
+        "Graveyard" => Some(Zone::Graveyard),
+        "Exile" => Some(Zone::Exile),
+        "Stack" => Some(Zone::Stack),
+        "Command" => Some(Zone::Command),
+        _ => None,
+    }
+}
+
+/// Parse a comma-separated Forge color string to Vec<ManaColor>.
+#[cfg(feature = "forge-compat")]
+fn parse_token_colors(s: &str) -> Vec<crate::types::mana::ManaColor> {
+    use crate::types::mana::ManaColor;
+    s.split(',')
+        .filter_map(|c| match c.trim() {
+            "White" | "W" => Some(ManaColor::White),
+            "Blue" | "U" => Some(ManaColor::Blue),
+            "Black" | "B" => Some(ManaColor::Black),
+            "Red" | "R" => Some(ManaColor::Red),
+            "Green" | "G" => Some(ManaColor::Green),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Parse a comma-separated Forge keyword string to Vec<Keyword>.
+#[cfg(feature = "forge-compat")]
+fn parse_token_keywords(s: &str) -> Vec<crate::types::keywords::Keyword> {
+    use std::str::FromStr;
+    s.split(',')
+        .map(|k| crate::types::keywords::Keyword::from_str(k.trim()).unwrap())
+        .collect()
 }
 
 /// Convert an api_type string and params into a typed Effect enum.
@@ -268,7 +309,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(DamageAmount::Fixed(0));
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::DealDamage { amount, target }
         }
@@ -290,7 +331,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(0);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Pump {
                 power,
@@ -301,14 +342,14 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
         "Destroy" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Destroy { target }
         }
         "Counter" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Counter { target }
         }
@@ -328,11 +369,11 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or_default();
             let colors = params
                 .remove("TokenColors")
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+                .map(|v| parse_token_colors(&v))
                 .unwrap_or_default();
             let keywords = params
                 .remove("TokenKeywords")
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+                .map(|v| parse_token_keywords(&v))
                 .unwrap_or_default();
             Effect::Token {
                 name,
@@ -360,14 +401,14 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
         "Tap" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Tap { target }
         }
         "Untap" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Untap { target }
         }
@@ -379,7 +420,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(1);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             if api_type == "PutCounter" {
                 Effect::PutCounter {
@@ -403,7 +444,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(1);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::RemoveCounter {
                 counter_type,
@@ -414,7 +455,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
         "Sacrifice" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Sacrifice { target }
         }
@@ -425,7 +466,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(1);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::DiscardCard { count, target }
         }
@@ -436,7 +477,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(1);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Discard { count, target }
         }
@@ -447,7 +488,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(1);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Mill { count, target }
         }
@@ -469,10 +510,8 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(0);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| TargetSpec::All { filter: v })
-                .unwrap_or(TargetSpec::All {
-                    filter: String::new(),
-                });
+                .map(|v| parse_target_filter(&v))
+                .unwrap_or(TargetFilter::None);
             Effect::PumpAll {
                 power,
                 toughness,
@@ -490,27 +529,26 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(DamageAmount::Fixed(0));
             let target = params
                 .remove("ValidTgts")
-                .map(|v| TargetSpec::All { filter: v })
-                .unwrap_or(TargetSpec::All {
-                    filter: String::new(),
-                });
+                .map(|v| parse_target_filter(&v))
+                .unwrap_or(TargetFilter::None);
             Effect::DamageAll { amount, target }
         }
         "DestroyAll" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| TargetSpec::All { filter: v })
-                .unwrap_or(TargetSpec::All {
-                    filter: String::new(),
-                });
+                .map(|v| parse_target_filter(&v))
+                .unwrap_or(TargetFilter::None);
             Effect::DestroyAll { target }
         }
         "ChangeZone" => {
-            let origin = params.remove("Origin").unwrap_or_default();
-            let destination = params.remove("Destination").unwrap_or_default();
+            let origin = params.remove("Origin").and_then(|v| parse_zone(&v));
+            let destination = params
+                .remove("Destination")
+                .and_then(|v| parse_zone(&v))
+                .unwrap_or(crate::types::zones::Zone::Exile);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::ChangeZone {
                 origin,
@@ -519,14 +557,15 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             }
         }
         "ChangeZoneAll" => {
-            let origin = params.remove("Origin").unwrap_or_default();
-            let destination = params.remove("Destination").unwrap_or_default();
+            let origin = params.remove("Origin").and_then(|v| parse_zone(&v));
+            let destination = params
+                .remove("Destination")
+                .and_then(|v| parse_zone(&v))
+                .unwrap_or(crate::types::zones::Zone::Exile);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| TargetSpec::All { filter: v })
-                .unwrap_or(TargetSpec::All {
-                    filter: String::new(),
-                });
+                .map(|v| parse_target_filter(&v))
+                .unwrap_or(TargetFilter::None);
             Effect::ChangeZoneAll {
                 origin,
                 destination,
@@ -538,20 +577,20 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .remove("DigNum")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1);
-            let destination = params.remove("DestinationZone").unwrap_or_default();
+            let destination = params.remove("DestinationZone").and_then(|v| parse_zone(&v));
             Effect::Dig { count, destination }
         }
         "GainControl" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::GainControl { target }
         }
         "Attach" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Attach { target }
         }
@@ -566,16 +605,16 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
         "Fight" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Fight { target }
         }
         "Bounce" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
-            let destination = params.remove("Destination").unwrap_or_default();
+            let destination = params.remove("Destination").and_then(|v| parse_zone(&v));
             Effect::Bounce {
                 target,
                 destination,
@@ -586,7 +625,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
         "CopySpell" => {
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::CopySpell { target }
         }
@@ -597,7 +636,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or_default();
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::ChooseCard { choices, target }
         }
@@ -609,7 +648,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or(2);
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::MultiplyCounter {
                 counter_type,
@@ -626,7 +665,7 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
                 .unwrap_or_default();
             let target = params
                 .remove("ValidTgts")
-                .map(|v| parse_target_spec(&v))
+                .map(|v| parse_target_filter(&v))
                 .unwrap_or(TargetFilter::Any);
             Effect::Animate {
                 power,
@@ -636,26 +675,30 @@ fn params_to_effect(api_type: &str, params: &mut HashMap<String, String>) -> Eff
             }
         }
         "Effect" => Effect::GenericEffect {
-            params: params.clone(),
+            static_abilities: vec![],
+            duration: None,
         },
         "Cleanup" => Effect::Cleanup {
-            params: params.clone(),
+            clear_remembered: false,
+            clear_chosen_player: false,
+            clear_chosen_color: false,
+            clear_chosen_type: false,
+            clear_chosen_card: false,
+            clear_imprinted: false,
+            clear_triggers: false,
+            clear_coin_flips: false,
         },
         "Mana" => {
-            let produced = params.remove("Produced").unwrap_or_default();
-            Effect::Mana {
-                produced,
-                params: params.clone(),
-            }
+            let produced = params
+                .remove("Produced")
+                .map(|v| parse_token_colors(&v))
+                .unwrap_or_default();
+            Effect::Mana { produced }
         }
-        // PermanentNoncreature is a synthetic type used by casting.rs for vanilla permanents
-        "PermanentNoncreature" => Effect::Other {
-            api_type: "PermanentNoncreature".to_string(),
-            params: params.clone(),
-        },
-        _ => Effect::Other {
-            api_type: api_type.to_string(),
-            params: params.clone(),
+        // PermanentNoncreature and any unrecognized api_type map to Unimplemented
+        _ => Effect::Unimplemented {
+            name: api_type.to_string(),
+            description: None,
         },
     }
 }
@@ -685,19 +728,17 @@ pub fn parse_ability(raw: &str) -> Result<AbilityDefinition, ParseError> {
         .remove("Cost")
         .and_then(|cost_str| parse_cost(&cost_str));
 
-    // Convert known params into a typed Effect; remaining params stay in the HashMap
     let effect = params_to_effect(&api_type, &mut params);
-
-    // Whatever params_to_effect didn't consume are stored as remaining_params
-    // (SubAbility, Execute, SpellDescription, Defined, ConditionCompare, etc.)
-    let remaining_params = params;
 
     Ok(AbilityDefinition {
         kind,
         effect,
         cost,
         sub_ability: None,
-        remaining_params,
+        duration: None,
+        description: None,
+        target_prompt: None,
+        sorcery_speed: false,
     })
 }
 
@@ -708,7 +749,21 @@ pub fn parse_trigger(raw: &str) -> Result<TriggerDefinition, ParseError> {
         .remove("Mode")
         .ok_or_else(|| ParseError::MissingField("Mode".to_string()))?;
     let mode = TriggerMode::from_str(&mode_str).unwrap_or(TriggerMode::Unknown(mode_str));
-    Ok(TriggerDefinition { mode, params })
+    Ok(TriggerDefinition {
+        mode,
+        execute: None,
+        valid_card: None,
+        origin: None,
+        destination: None,
+        trigger_zones: vec![],
+        phase: None,
+        optional: false,
+        combat_damage: false,
+        secondary: false,
+        valid_target: None,
+        valid_source: None,
+        description: None,
+    })
 }
 
 #[cfg(feature = "forge-compat")]
@@ -718,7 +773,16 @@ pub fn parse_static(raw: &str) -> Result<StaticDefinition, ParseError> {
         .remove("Mode")
         .ok_or_else(|| ParseError::MissingField("Mode".to_string()))?;
     let mode = StaticMode::from_str(&mode_str).unwrap_or(StaticMode::Other(mode_str));
-    Ok(StaticDefinition { mode, params })
+    Ok(StaticDefinition {
+        mode,
+        affected: None,
+        modifications: vec![],
+        condition: None,
+        affected_zone: None,
+        effect_zone: None,
+        characteristic_defining: false,
+        description: None,
+    })
 }
 
 #[cfg(feature = "forge-compat")]
@@ -729,7 +793,12 @@ pub fn parse_replacement(raw: &str) -> Result<ReplacementDefinition, ParseError>
         .ok_or_else(|| ParseError::MissingField("Event".to_string()))?;
     let event =
         ReplacementEvent::from_str(&event_str).unwrap_or(ReplacementEvent::Other(event_str));
-    Ok(ReplacementDefinition { event, params })
+    Ok(ReplacementDefinition {
+        event,
+        execute: None,
+        valid_card: None,
+        description: None,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

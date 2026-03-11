@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::str::FromStr;
 
 use crate::types::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, PtValue, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::CardType;
+use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 
 use super::ability::{parse_ability, parse_replacement, parse_static, parse_trigger};
@@ -27,7 +28,6 @@ struct CardFaceBuilder {
     triggers: Vec<TriggerDefinition>,
     static_abilities: Vec<StaticDefinition>,
     replacements: Vec<ReplacementDefinition>,
-    svars: HashMap<String, String>,
 }
 
 impl CardFaceBuilder {
@@ -49,7 +49,6 @@ impl CardFaceBuilder {
             triggers: Vec::new(),
             static_abilities: Vec::new(),
             replacements: Vec::new(),
-            svars: HashMap::new(),
         }
     }
 
@@ -57,26 +56,39 @@ impl CardFaceBuilder {
         let name = self
             .name
             .ok_or_else(|| ParseError::MissingField("name".to_string()))?;
+        let power = self.power.map(|s| pt_value_from_str(&s));
+        let toughness = self.toughness.map(|s| pt_value_from_str(&s));
+        let keywords = self
+            .keywords
+            .into_iter()
+            .map(|s| Keyword::from_str(&s).unwrap_or(Keyword::Unknown(s)))
+            .collect();
         Ok(CardFace {
             name,
             mana_cost: self.mana_cost.unwrap_or_default(),
             card_type: self.card_type.unwrap_or_default(),
-            power: self.power,
-            toughness: self.toughness,
+            power,
+            toughness,
             loyalty: self.loyalty,
             defense: self.defense,
             oracle_text: self.oracle_text,
             non_ability_text: self.non_ability_text,
             flavor_name: self.flavor_name,
             color_override: self.color_override,
-            keywords: self.keywords,
+            keywords,
             abilities: self.abilities,
             triggers: self.triggers,
             static_abilities: self.static_abilities,
             replacements: self.replacements,
-            svars: self.svars,
             scryfall_oracle_id: None,
         })
+    }
+}
+
+fn pt_value_from_str(s: &str) -> PtValue {
+    match s.parse::<i32>() {
+        Ok(n) => PtValue::Fixed(n),
+        Err(_) => PtValue::Variable(s.to_string()),
     }
 }
 
@@ -227,12 +239,7 @@ fn parse_line(line: &str, faces: &mut [CardFaceBuilder; 2], state: &mut ParseSta
                     face.static_abilities.push(def);
                 }
             }
-            "SVar" => {
-                if let Some((var_name, var_value)) = value.split_once(':') {
-                    face.svars
-                        .insert(var_name.to_string(), var_value.to_string());
-                }
-            }
+            "SVar" => {} // SVars are Forge internals not needed at runtime
             _ => {}
         },
         Some(b'T') => match key {
@@ -273,8 +280,7 @@ Name:Lightning Bolt
 ManaCost:R
 Types:Instant
 A:SP$ DealDamage | Cost$ R | NumDmg$ 3 | ValidTgts$ Any
-Oracle:Lightning Bolt deals 3 damage to any target.
-SVar:Picture:https://example.com/bolt.jpg";
+Oracle:Lightning Bolt deals 3 damage to any target.";
 
         let rules = parse_card_file(input).unwrap();
         match &rules.layout {
@@ -293,10 +299,6 @@ SVar:Picture:https://example.com/bolt.jpg";
                 assert_eq!(
                     face.oracle_text.as_deref(),
                     Some("Lightning Bolt deals 3 damage to any target.")
-                );
-                assert_eq!(
-                    face.svars.get("Picture").map(|s| s.as_str()),
-                    Some("https://example.com/bolt.jpg")
                 );
             }
             _ => panic!("Expected Single layout"),
@@ -320,9 +322,9 @@ Oracle:Haste\\nWhenever Goblin Guide attacks, defending player reveals the top c
         match &rules.layout {
             CardLayout::Single(face) => {
                 assert_eq!(face.name, "Goblin Guide");
-                assert_eq!(face.power.as_deref(), Some("2"));
-                assert_eq!(face.toughness.as_deref(), Some("2"));
-                assert_eq!(face.keywords, vec!["Haste"]);
+                assert_eq!(face.power, Some(PtValue::Fixed(2)));
+                assert_eq!(face.toughness, Some(PtValue::Fixed(2)));
+                assert_eq!(face.keywords, vec![Keyword::Haste]);
                 assert_eq!(face.triggers.len(), 1);
             }
             _ => panic!("Expected Single layout"),
@@ -350,8 +352,8 @@ Oracle:Deal 2 damage to any target. Damage can't be prevented this turn.";
         match &rules.layout {
             CardLayout::Adventure(main, adv) => {
                 assert_eq!(main.name, "Bonecrusher Giant");
-                assert_eq!(main.power.as_deref(), Some("4"));
-                assert_eq!(main.toughness.as_deref(), Some("3"));
+                assert_eq!(main.power, Some(PtValue::Fixed(4)));
+                assert_eq!(main.toughness, Some(PtValue::Fixed(3)));
                 assert_eq!(adv.name, "Stomp");
                 assert_eq!(adv.card_type.core_types, vec![CoreType::Instant]);
             }
@@ -529,6 +531,7 @@ Oracle:Test oracle text.";
 
     #[test]
     fn parse_svar_double_colon() {
+        // SVars are Forge-internal metadata; they are silently ignored during parsing
         let input = "\
 Name:Svar Test
 ManaCost:0
@@ -539,14 +542,7 @@ SVar:Picture:http://example.com/pic.jpg";
         let rules = parse_card_file(input).unwrap();
         match &rules.layout {
             CardLayout::Single(face) => {
-                assert_eq!(
-                    face.svars.get("RemAIDeck").map(|s| s.as_str()),
-                    Some("True")
-                );
-                assert_eq!(
-                    face.svars.get("Picture").map(|s| s.as_str()),
-                    Some("http://example.com/pic.jpg")
-                );
+                assert_eq!(face.name, "Svar Test");
             }
             _ => panic!("Expected Single layout"),
         }
@@ -589,8 +585,11 @@ Oracle:Tarmogoyf's power is equal to the number of card types among cards in all
         let rules = parse_card_file(input).unwrap();
         match &rules.layout {
             CardLayout::Single(face) => {
-                assert_eq!(face.power.as_deref(), Some("*"));
-                assert_eq!(face.toughness.as_deref(), Some("*+1"));
+                assert_eq!(face.power, Some(PtValue::Variable("*".to_string())));
+                assert_eq!(
+                    face.toughness,
+                    Some(PtValue::Variable("*+1".to_string()))
+                );
             }
             _ => panic!("Expected Single layout"),
         }
@@ -609,7 +608,10 @@ Oracle:Vigilance, deathtouch, haste";
         let rules = parse_card_file(input).unwrap();
         match &rules.layout {
             CardLayout::Single(face) => {
-                assert_eq!(face.keywords, vec!["Vigilance", "Deathtouch", "Haste"]);
+                assert_eq!(
+                    face.keywords,
+                    vec![Keyword::Vigilance, Keyword::Deathtouch, Keyword::Haste]
+                );
             }
             _ => panic!("Expected Single layout"),
         }
