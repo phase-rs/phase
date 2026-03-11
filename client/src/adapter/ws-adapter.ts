@@ -20,6 +20,12 @@ export type WsAdapterEvent =
   | { type: "waitingForOpponent" }
   | { type: "opponentDisconnected"; graceSeconds: number }
   | { type: "opponentReconnected" }
+  | { type: "playerDisconnected"; playerId: PlayerId; graceSeconds: number }
+  | { type: "playerReconnected"; playerId: PlayerId }
+  | { type: "gamePaused"; disconnectedPlayer: PlayerId; timeoutSeconds: number }
+  | { type: "gameResumed" }
+  | { type: "playerEliminated"; playerId: PlayerId }
+  | { type: "spectatorJoined"; name: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
   | { type: "error"; message: string }
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
@@ -194,6 +200,18 @@ export class WebSocketAdapter implements EngineAdapter {
 
   sendEmote(emote: string): void {
     this.send({ type: "Emote", data: { emote } });
+  }
+
+  sendReadyToggle(): void {
+    this.send({ type: "ReadyToggle" });
+  }
+
+  sendSpectatorJoin(gameCode: string): void {
+    this.send({ type: "SpectatorJoin", data: { game_code: gameCode } });
+  }
+
+  sendStartGame(): void {
+    this.send({ type: "StartGame" });
   }
 
   dispose(): void {
@@ -382,6 +400,54 @@ export class WebSocketAdapter implements EngineAdapter {
           player: data.player,
           remainingSeconds: data.remaining_seconds,
         });
+        break;
+      }
+
+      case "PlayerDisconnected": {
+        const data = msg.data as { player_id: PlayerId; grace_seconds: number };
+        this.emit({
+          type: "playerDisconnected",
+          playerId: data.player_id,
+          graceSeconds: data.grace_seconds,
+        });
+        break;
+      }
+
+      case "PlayerReconnected": {
+        const data = msg.data as { player_id: PlayerId };
+        this.emit({ type: "playerReconnected", playerId: data.player_id });
+        break;
+      }
+
+      case "GamePaused": {
+        const data = msg.data as { disconnected_player: PlayerId; timeout_seconds: number };
+        this.emit({
+          type: "gamePaused",
+          disconnectedPlayer: data.disconnected_player,
+          timeoutSeconds: data.timeout_seconds,
+        });
+        break;
+      }
+
+      case "GameResumed": {
+        this.emit({ type: "gameResumed" });
+        break;
+      }
+
+      case "PlayerEliminated": {
+        const data = msg.data as { player_id: PlayerId };
+        this.emit({ type: "playerEliminated", playerId: data.player_id });
+        // Auto-transition to spectator if the eliminated player is us
+        if (data.player_id === this._playerId) {
+          useMultiplayerStore.getState().setIsSpectator(true);
+          useMultiplayerStore.getState().showToast("You have been eliminated. Now spectating.");
+        }
+        break;
+      }
+
+      case "SpectatorJoined": {
+        const data = msg.data as { name: string };
+        this.emit({ type: "spectatorJoined", name: data.name });
         break;
       }
 

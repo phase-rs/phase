@@ -85,7 +85,15 @@ export class P2PHostAdapter implements EngineAdapter {
   constructor(
     private readonly deckData: unknown,
     private readonly session: PeerSession,
+    playerCount = 2,
   ) {
+    if (playerCount > 2) {
+      throw new AdapterError(
+        "P2P_PLAYER_LIMIT",
+        "P2P is only available for 2-player games. Use server mode for multiplayer.",
+        false,
+      );
+    }
     this.guestDeckPromise = new Promise<unknown>((resolve) => {
       this.guestDeckResolve = resolve;
     });

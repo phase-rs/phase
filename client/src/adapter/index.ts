@@ -1,3 +1,5 @@
+import type { EngineAdapter } from "./types";
+import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 
 export { WasmAdapter } from "./wasm-adapter";
@@ -11,6 +13,23 @@ export type { P2PAdapterEvent } from "./p2p-adapter";
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
+  }
+}
+
+/**
+ * Validates that the adapter type is allowed for the given player count.
+ * P2P is only available for 2-player games; 3+ player games require WebSocket.
+ */
+export function validateAdapterForPlayerCount(
+  adapterType: "p2p" | "websocket" | "wasm",
+  playerCount: number,
+): void {
+  if (adapterType === "p2p" && playerCount > 2) {
+    throw new AdapterError(
+      "P2P_PLAYER_LIMIT",
+      "P2P is only available for 2-player games. Use server mode for multiplayer.",
+      false,
+    );
   }
 }
 

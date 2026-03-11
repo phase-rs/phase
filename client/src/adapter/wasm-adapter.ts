@@ -88,11 +88,24 @@ export class WasmAdapter implements EngineAdapter {
     });
   }
 
-  getAiAction(difficulty: string): GameAction | null {
+  getAiAction(difficulty: string, playerId = 1): GameAction | null {
     this.assertInitialized();
-    const result = get_ai_action(difficulty);
+    const result = get_ai_action(difficulty, playerId);
     if (result == null) return null;
     return result as GameAction;
+  }
+
+  /**
+   * Get AI actions for multiple AI seats with per-seat difficulty.
+   * Returns the action for the AI player whose turn it currently is, or null.
+   */
+  getAiActionForSeats(
+    aiSeats: { playerId: number; difficulty: string }[],
+    activePlayer: number,
+  ): GameAction | null {
+    const seat = aiSeats.find((s) => s.playerId === activePlayer);
+    if (!seat) return null;
+    return this.getAiAction(seat.difficulty, seat.playerId);
   }
 
   restoreState(state: GameState): void {

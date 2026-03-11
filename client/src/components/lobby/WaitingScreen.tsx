@@ -1,14 +1,57 @@
 import { motion } from "framer-motion";
 
+import type { PlayerSlot } from "../../stores/multiplayerStore";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { ReadyRoom } from "./ReadyRoom";
+import type { ChatMessage } from "./ReadyRoom";
 
 interface WaitingScreenProps {
   gameCode: string;
   isPublic: boolean;
   onCancel: () => void;
+  /** When provided, shows the ReadyRoom instead of the simple waiting screen. */
+  playerSlots?: PlayerSlot[];
+  currentPlayerId?: string;
+  isHost?: boolean;
+  minPlayers?: number;
+  onToggleReady?: () => void;
+  onStartGame?: () => void;
+  onSendChat?: (message: string) => void;
+  chatMessages?: ChatMessage[];
 }
 
-export function WaitingScreen({ gameCode, isPublic, onCancel }: WaitingScreenProps) {
+export function WaitingScreen({
+  gameCode,
+  isPublic,
+  onCancel,
+  playerSlots,
+  currentPlayerId,
+  isHost,
+  minPlayers,
+  onToggleReady,
+  onStartGame,
+  onSendChat,
+  chatMessages,
+}: WaitingScreenProps) {
+  // Use ReadyRoom when player slots are available (multiplayer with ready-up)
+  if (playerSlots && currentPlayerId && onToggleReady && onStartGame && onSendChat) {
+    return (
+      <ReadyRoom
+        gameCode={gameCode}
+        playerSlots={playerSlots}
+        currentPlayerId={currentPlayerId}
+        isHost={isHost ?? false}
+        minPlayers={minPlayers ?? 2}
+        onToggleReady={onToggleReady}
+        onStartGame={onStartGame}
+        onCancel={onCancel}
+        onSendChat={onSendChat}
+        chatMessages={chatMessages ?? []}
+      />
+    );
+  }
+
+  // Simple waiting screen for 2-player P2P games
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/80" />
