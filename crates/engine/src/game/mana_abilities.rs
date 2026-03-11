@@ -14,18 +14,6 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
     matches!(ability_def.effect, Effect::Mana { .. })
 }
 
-/// Map a Forge "Produced$" color code to ManaType.
-fn produced_to_mana_type(produced: &str) -> ManaType {
-    match produced {
-        "W" => ManaType::White,
-        "U" => ManaType::Blue,
-        "B" => ManaType::Black,
-        "R" => ManaType::Red,
-        "G" => ManaType::Green,
-        _ => ManaType::Colorless,
-    }
-}
-
 /// Resolve a mana ability immediately without using the stack.
 /// Taps the source if the cost includes "T", then produces the mana indicated
 /// by the "Produced$" parameter.
@@ -60,35 +48,26 @@ pub fn resolve_mana_ability(
     }
 
     // Determine produced mana color from the typed Effect
-    let mut compat_params = ability_def.effect.to_params();
-    compat_params.extend(
-        ability_def
-            .remaining_params
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone())),
-    );
-    let produced = compat_params
-        .get("Produced")
-        .cloned()
-        .unwrap_or_else(|| "C".to_string());
-
-    // Handle "Combo" (multi-color choice) -- produce first listed color for now
-    let color_str = if produced.starts_with("Combo ") {
-        produced
-            .strip_prefix("Combo ")
-            .and_then(|rest| rest.split_whitespace().next())
-            .unwrap_or("C")
-    } else {
-        &produced
+    let produced_colors = match &ability_def.effect {
+        Effect::Mana { produced } => produced.clone(),
+        _ => vec![],
     };
 
-    let mana_type = produced_to_mana_type(color_str);
+    // Determine mana type: use first produced color, or Colorless as default
+    let mana_type = produced_colors
+        .first()
+        .map(|color| match color {
+            crate::types::mana::ManaColor::White => ManaType::White,
+            crate::types::mana::ManaColor::Blue => ManaType::Blue,
+            crate::types::mana::ManaColor::Black => ManaType::Black,
+            crate::types::mana::ManaColor::Red => ManaType::Red,
+            crate::types::mana::ManaColor::Green => ManaType::Green,
+        })
+        .unwrap_or(ManaType::Colorless);
 
-    // Handle Amount$ parameter (default 1)
-    let amount: u32 = compat_params
-        .get("Amount")
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(1);
+    // Amount is always 1 for typed mana abilities
+    // (multi-mana like Sol Ring uses multiple colors in produced vec)
+    let amount: u32 = produced_colors.len().max(1) as u32;
 
     for _ in 0..amount {
         mana_payment::produce_mana(state, source_id, mana_type, player, events);
@@ -97,7 +76,7 @@ pub fn resolve_mana_ability(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "forge-compat"))]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;

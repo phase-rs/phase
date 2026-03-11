@@ -277,13 +277,16 @@ mod tests {
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Beast".to_string()],
         };
-        obj.keywords = vec![Keyword::Morph("3".to_string()), Keyword::Trample];
+        obj.keywords = vec![Keyword::Morph(crate::types::mana::ManaCost::Cost { generic: 3, shards: vec![] }), Keyword::Trample];
         obj.abilities = vec![AbilityDefinition {
             kind: crate::types::ability::AbilityKind::Activated,
             effect: crate::types::ability::Effect::Draw { count: 1 },
             cost: None,
             sub_ability: None,
-            remaining_params: std::collections::HashMap::new(),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         }];
         obj.color = vec![ManaColor::Green];
         id
@@ -328,7 +331,7 @@ mod tests {
         assert_eq!(obj.toughness, Some(5));
         assert!(obj.card_types.subtypes.contains(&"Beast".to_string()));
         assert!(obj.keywords.contains(&Keyword::Trample));
-        assert!(obj.keywords.contains(&Keyword::Morph("3".to_string())));
+        assert!(obj.keywords.contains(&Keyword::Morph(crate::types::mana::ManaCost::Cost { generic: 3, shards: vec![] })));
         assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
     }

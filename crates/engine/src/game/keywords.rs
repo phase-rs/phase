@@ -54,6 +54,7 @@ pub fn parse_keywords(keyword_strings: &[String]) -> Vec<Keyword> {
 mod tests {
     use super::*;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -78,10 +79,25 @@ mod tests {
     #[test]
     fn has_keyword_discriminant_matching() {
         let mut obj = make_obj();
-        obj.keywords.push(Keyword::Kicker("1G".to_string()));
+        obj.keywords.push(Keyword::Kicker(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        }));
         // Discriminant match -- doesn't care about the param value
-        assert!(has_keyword(&obj, &Keyword::Kicker("X".to_string())));
-        assert!(!has_keyword(&obj, &Keyword::Cycling("2".to_string())));
+        assert!(has_keyword(
+            &obj,
+            &Keyword::Kicker(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Red],
+            })
+        ));
+        assert!(!has_keyword(
+            &obj,
+            &Keyword::Cycling(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })
+        ));
     }
 
     #[test]
@@ -120,8 +136,20 @@ mod tests {
     fn parse_keywords_parameterized() {
         let strings = vec!["Kicker:1G".to_string(), "Ward:2".to_string()];
         let parsed = parse_keywords(&strings);
-        assert_eq!(parsed[0], Keyword::Kicker("1G".to_string()));
-        assert_eq!(parsed[1], Keyword::Ward("2".to_string()));
+        assert_eq!(
+            parsed[0],
+            Keyword::Kicker(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+        );
+        assert_eq!(
+            parsed[1],
+            Keyword::Ward(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })
+        );
     }
 
     #[test]

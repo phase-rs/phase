@@ -77,19 +77,13 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::Effect;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_proliferate_ability() -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            "Proliferate",
-            HashMap::new(),
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        )
+        ResolvedAbility::new(Effect::Proliferate, vec![], ObjectId(100), PlayerId(0))
     }
 
     #[test]

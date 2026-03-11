@@ -56,7 +56,6 @@ fn mana_color_to_type(color: &ManaColor) -> ManaType {
         ManaColor::Black => ManaType::Black,
         ManaColor::Red => ManaType::Red,
         ManaColor::Green => ManaType::Green,
-        ManaColor::Colorless => ManaType::Colorless,
     }
 }
 
@@ -107,21 +106,18 @@ mod tests {
     }
 
     #[test]
-    fn produce_colorless() {
+    fn produce_empty_is_noop() {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
         resolve(
             &mut state,
-            &make_mana_ability(vec![ManaColor::Colorless, ManaColor::Colorless]),
+            &make_mana_ability(vec![]),
             &mut events,
         )
         .unwrap();
 
-        assert_eq!(
-            state.players[0].mana_pool.count_color(ManaType::Colorless),
-            2
-        );
+        assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
     #[test]

@@ -108,15 +108,27 @@ pub fn resolve_untap(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, TargetFilter};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
-    fn make_ability(api_type: &str, target: ObjectId) -> ResolvedAbility {
-        ResolvedAbility::from_raw(
-            api_type,
-            HashMap::new(),
+    fn make_tap_ability(target: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn make_untap_ability(target: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Untap {
+                target: TargetFilter::Any,
+            },
             vec![TargetRef::Object(target)],
             ObjectId(100),
             PlayerId(0),
@@ -135,7 +147,7 @@ mod tests {
         );
         let mut events = Vec::new();
 
-        resolve_tap(&mut state, &make_ability("Tap", obj_id), &mut events).unwrap();
+        resolve_tap(&mut state, &make_tap_ability(obj_id), &mut events).unwrap();
 
         assert!(state.objects[&obj_id].tapped);
         assert!(events
@@ -156,7 +168,7 @@ mod tests {
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
         let mut events = Vec::new();
 
-        resolve_untap(&mut state, &make_ability("Untap", obj_id), &mut events).unwrap();
+        resolve_untap(&mut state, &make_untap_ability(obj_id), &mut events).unwrap();
 
         assert!(!state.objects[&obj_id].tapped);
         assert!(events

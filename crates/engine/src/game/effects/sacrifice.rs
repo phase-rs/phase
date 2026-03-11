@@ -87,9 +87,20 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, TargetFilter};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
+
+    fn make_sacrifice_ability(target: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
 
     #[test]
     fn sacrifice_moves_to_graveyard() {
@@ -101,18 +112,7 @@ mod tests {
             "Creature".to_string(),
             Zone::Battlefield,
         );
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Sacrifice".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = make_sacrifice_ability(obj_id);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -131,18 +131,7 @@ mod tests {
             "Creature".to_string(),
             Zone::Battlefield,
         );
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Sacrifice".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = make_sacrifice_ability(obj_id);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();

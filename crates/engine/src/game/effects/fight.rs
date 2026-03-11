@@ -84,11 +84,11 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, TargetFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     fn make_creature(
         state: &mut GameState,
@@ -113,24 +113,24 @@ mod tests {
         id
     }
 
+    fn make_fight_ability(source: ObjectId, target: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        )
+    }
+
     #[test]
     fn test_fight_mutual_damage() {
         let mut state = GameState::new_two_player(42);
         let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
         let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Fight".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(wolf)],
-            source_id: bear,
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = make_fight_ability(bear, wolf);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -147,18 +147,7 @@ mod tests {
         let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
         let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Fight".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(wolf)],
-            source_id: bear,
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = make_fight_ability(bear, wolf);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -177,18 +166,7 @@ mod tests {
         let wall = make_creature(&mut state, PlayerId(0), "Wall", 0, 5);
         let bear = make_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Fight".to_string(),
-                params: std::collections::HashMap::new(),
-            },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(bear)],
-            source_id: wall,
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+        let ability = make_fight_ability(wall, bear);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();

@@ -48,8 +48,7 @@ mod tests {
     use super::*;
     use crate::types::ability::ResolvedAbility;
     use crate::types::game_state::StackEntry;
-    use crate::types::identifiers::{CardId, ObjectId};
-    use std::collections::HashMap;
+    use crate::types::identifiers::CardId;
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -97,29 +96,6 @@ mod tests {
         state.priority_pass_count = 1;
         state.priority_player = PlayerId(1);
 
-        // Add a stack entry
-        let obj_id = ObjectId(99);
-        state.stack.push(StackEntry {
-            id: obj_id,
-            source_id: obj_id,
-            controller: PlayerId(0),
-            kind: crate::types::game_state::StackEntryKind::Spell {
-                card_id: CardId(1),
-                ability: ResolvedAbility {
-                    effect: crate::types::ability::Effect::Other {
-                        api_type: String::new(),
-                        params: std::collections::HashMap::new(),
-                    },
-                    params: HashMap::new(),
-                    targets: vec![],
-                    source_id: obj_id,
-                    controller: PlayerId(0),
-                    sub_ability: None,
-                    svars: HashMap::new(),
-                },
-            },
-        });
-
         // Create the object in state so resolve_top can find it
         use crate::game::zones::create_object;
         use crate::types::zones::Zone;
@@ -131,26 +107,22 @@ mod tests {
             Zone::Stack,
         );
 
-        // Update the stack entry to match the created object id
-        state.stack.clear();
+        // Add a stack entry matching the created object
         state.stack.push(StackEntry {
             id: created_id,
             source_id: created_id,
             controller: PlayerId(0),
             kind: crate::types::game_state::StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: ResolvedAbility {
-                    effect: crate::types::ability::Effect::Other {
-                        api_type: String::new(),
-                        params: std::collections::HashMap::new(),
+                ability: ResolvedAbility::new(
+                    crate::types::ability::Effect::Unimplemented {
+                        name: "Dummy".to_string(),
+                        description: None,
                     },
-                    params: HashMap::new(),
-                    targets: vec![],
-                    source_id: created_id,
-                    controller: PlayerId(0),
-                    sub_ability: None,
-                    svars: HashMap::new(),
-                },
+                    vec![],
+                    created_id,
+                    PlayerId(0),
+                ),
             },
         });
 

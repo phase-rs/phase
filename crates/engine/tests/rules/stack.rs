@@ -3,7 +3,7 @@ use super::*;
 
 use std::collections::HashMap;
 
-use engine::types::ability::{DamageAmount, Effect, TargetRef, TargetSpec};
+use engine::types::ability::{DamageAmount, Effect, TargetFilter, TargetRef};
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::{CardId, ObjectId};
 

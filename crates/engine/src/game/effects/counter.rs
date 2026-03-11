@@ -67,10 +67,22 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, TargetFilter};
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
+
+    fn make_dummy_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "Dummy".to_string(),
+                description: None,
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+    }
 
     #[test]
     fn counter_removes_from_stack_and_moves_to_graveyard() {
@@ -88,33 +100,18 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: ResolvedAbility {
-                    effect: crate::types::ability::Effect::Other {
-                        api_type: String::new(),
-                        params: std::collections::HashMap::new(),
-                    },
-                    params: HashMap::new(),
-                    targets: vec![],
-                    source_id: obj_id,
-                    controller: PlayerId(1),
-                    sub_ability: None,
-                    svars: HashMap::new(),
-                },
+                ability: make_dummy_ability(obj_id, PlayerId(1)),
             },
         });
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Counter".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -147,7 +144,13 @@ mod tests {
             .static_definitions
             .push(StaticDefinition {
                 mode: StaticMode::Other("CantBeCountered".to_string()),
-                params: HashMap::new(),
+                affected: None,
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
             });
         state.stack.push(StackEntry {
             id: obj_id,
@@ -155,33 +158,18 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: ResolvedAbility {
-                    effect: crate::types::ability::Effect::Other {
-                        api_type: String::new(),
-                        params: std::collections::HashMap::new(),
-                    },
-                    params: HashMap::new(),
-                    targets: vec![],
-                    source_id: obj_id,
-                    controller: PlayerId(1),
-                    sub_ability: None,
-                    svars: HashMap::new(),
-                },
+                ability: make_dummy_ability(obj_id, PlayerId(1)),
             },
         });
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "Counter".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![TargetRef::Object(obj_id)],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();

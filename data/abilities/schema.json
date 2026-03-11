@@ -60,7 +60,7 @@
           "type": "object",
           "properties": {
             "cost": {
-              "type": "string"
+              "$ref": "#/$defs/ManaCost"
             },
             "type": {
               "type": "string",
@@ -105,7 +105,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec"
+              "$ref": "#/$defs/TargetFilter"
             },
             "type": {
               "type": "string",
@@ -115,6 +115,104 @@
           "required": [
             "type",
             "target"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "PayLife"
+            }
+          },
+          "required": [
+            "type",
+            "amount"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "filter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TargetFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "Discard"
+            }
+          },
+          "required": [
+            "type",
+            "count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "filter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TargetFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "Exile"
+            }
+          },
+          "required": [
+            "type",
+            "count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "filter": {
+              "$ref": "#/$defs/TargetFilter"
+            },
+            "type": {
+              "type": "string",
+              "const": "TapCreatures"
+            }
+          },
+          "required": [
+            "type",
+            "count",
+            "filter"
           ]
         },
         {
@@ -139,7 +237,7 @@
       ]
     },
     "AbilityDefinition": {
-      "description": "Parsed ability definition with typed effect.",
+      "description": "Parsed ability definition with typed effect. Zero remaining_params.",
       "type": "object",
       "properties": {
         "cost": {
@@ -153,19 +251,33 @@
           ],
           "default": null
         },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "effect": {
           "$ref": "#/$defs/Effect"
         },
         "kind": {
           "$ref": "#/$defs/AbilityKind"
         },
-        "remaining_params": {
-          "description": "Parameters not consumed by the typed Effect during parsing.\nContains metadata like SubAbility, Execute, SpellDescription, Defined,\nConditionCompare, etc. Used by the compat params() method.",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {}
+        "sorcery_speed": {
+          "type": "boolean",
+          "default": false
         },
         "sub_ability": {
           "anyOf": [
@@ -175,6 +287,13 @@
             {
               "type": "null"
             }
+          ],
+          "default": null
+        },
+        "target_prompt": {
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         }
@@ -190,6 +309,230 @@
         "Spell",
         "Activated",
         "Database"
+      ]
+    },
+    "ContinuousModification": {
+      "description": "What modification a continuous effect applies to an object.\nEach variant knows its own layer implicitly.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "AddPower"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "AddToughness"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "SetPower"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "SetToughness"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "keyword": {
+              "$ref": "#/$defs/Keyword"
+            },
+            "type": {
+              "type": "string",
+              "const": "AddKeyword"
+            }
+          },
+          "required": [
+            "type",
+            "keyword"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "keyword": {
+              "$ref": "#/$defs/Keyword"
+            },
+            "type": {
+              "type": "string",
+              "const": "RemoveKeyword"
+            }
+          },
+          "required": [
+            "type",
+            "keyword"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ability": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "AddAbility"
+            }
+          },
+          "required": [
+            "type",
+            "ability"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "RemoveAllAbilities"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "core_type": {
+              "$ref": "#/$defs/CoreType"
+            },
+            "type": {
+              "type": "string",
+              "const": "AddType"
+            }
+          },
+          "required": [
+            "type",
+            "core_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "core_type": {
+              "$ref": "#/$defs/CoreType"
+            },
+            "type": {
+              "type": "string",
+              "const": "RemoveType"
+            }
+          },
+          "required": [
+            "type",
+            "core_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "colors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ManaColor"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "SetColor"
+            }
+          },
+          "required": [
+            "type",
+            "colors"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "color": {
+              "$ref": "#/$defs/ManaColor"
+            },
+            "type": {
+              "type": "string",
+              "const": "AddColor"
+            }
+          },
+          "required": [
+            "type",
+            "color"
+          ]
+        }
+      ]
+    },
+    "ControllerRef": {
+      "description": "Controller reference for filter matching.",
+      "type": "string",
+      "enum": [
+        "You",
+        "Opponent"
+      ]
+    },
+    "CoreType": {
+      "type": "string",
+      "enum": [
+        "Artifact",
+        "Creature",
+        "Enchantment",
+        "Instant",
+        "Land",
+        "Planeswalker",
+        "Sorcery",
+        "Tribal",
+        "Battle",
+        "Kindred",
+        "Dungeon"
       ]
     },
     "DamageAmount": {
@@ -230,8 +573,18 @@
         }
       ]
     },
+    "Duration": {
+      "description": "Duration for temporary effects.",
+      "type": "string",
+      "enum": [
+        "UntilEndOfTurn",
+        "UntilYourNextTurn",
+        "UntilHostLeavesPlay",
+        "Permanent"
+      ]
+    },
     "Effect": {
-      "description": "The typed effect enum replacing `api_type: String` + `params: HashMap`.\nEach variant corresponds to an entry in the effect handler registry.",
+      "description": "The typed effect enum. Each variant corresponds to an effect handler.\nZero HashMap<String, String> fields.",
       "oneOf": [
         {
           "type": "object",
@@ -240,7 +593,7 @@
               "$ref": "#/$defs/DamageAmount"
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -282,7 +635,7 @@
               "default": 0
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -305,7 +658,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -323,7 +676,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -344,14 +697,14 @@
               "type": "array",
               "default": [],
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/ManaColor"
               }
             },
             "keywords": {
               "type": "array",
               "default": [],
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/Keyword"
               }
             },
             "name": {
@@ -422,7 +775,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -440,7 +793,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -466,7 +819,7 @@
               "type": "string"
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -493,7 +846,7 @@
               "type": "string"
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -512,7 +865,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -536,7 +889,7 @@
               "minimum": 0
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -560,7 +913,7 @@
               "minimum": 0
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -601,10 +954,9 @@
               "default": 0
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
-                "filter": "",
-                "type": "All"
+                "type": "None"
               }
             },
             "toughness": {
@@ -628,10 +980,9 @@
               "$ref": "#/$defs/DamageAmount"
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
-                "filter": "",
-                "type": "All"
+                "type": "None"
               }
             },
             "type": {
@@ -648,10 +999,9 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
-                "filter": "",
-                "type": "All"
+                "type": "None"
               }
             },
             "type": {
@@ -667,14 +1017,21 @@
           "type": "object",
           "properties": {
             "destination": {
-              "type": "string"
+              "$ref": "#/$defs/Zone"
             },
             "origin": {
-              "type": "string",
-              "default": ""
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Zone"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -693,17 +1050,23 @@
           "type": "object",
           "properties": {
             "destination": {
-              "type": "string"
+              "$ref": "#/$defs/Zone"
             },
             "origin": {
-              "type": "string",
-              "default": ""
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Zone"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
-                "filter": "",
-                "type": "All"
+                "type": "None"
               }
             },
             "type": {
@@ -726,8 +1089,15 @@
               "minimum": 0
             },
             "destination": {
-              "type": "string",
-              "default": ""
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Zone"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "type": {
               "type": "string",
@@ -742,7 +1112,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -760,7 +1130,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -796,7 +1166,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -814,11 +1184,18 @@
           "type": "object",
           "properties": {
             "destination": {
-              "type": "string",
-              "default": ""
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Zone"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -860,7 +1237,7 @@
           "type": "object",
           "properties": {
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -885,7 +1262,7 @@
               }
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -911,7 +1288,7 @@
               "type": "string"
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -938,7 +1315,7 @@
               "default": 2
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -965,7 +1342,7 @@
               "default": null
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -995,15 +1372,26 @@
           ]
         },
         {
-          "description": "Generic \"Effect\" handler (creates continuous effects at resolution).",
+          "description": "Generic continuous effect application at resolution.",
           "type": "object",
           "properties": {
-            "params": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {}
+            "duration": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Duration"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "static_abilities": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/StaticDefinition"
+              }
             },
             "type": {
               "type": "string",
@@ -1017,12 +1405,37 @@
         {
           "type": "object",
           "properties": {
-            "params": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {}
+            "clear_chosen_card": {
+              "type": "boolean",
+              "default": false
+            },
+            "clear_chosen_color": {
+              "type": "boolean",
+              "default": false
+            },
+            "clear_chosen_player": {
+              "type": "boolean",
+              "default": false
+            },
+            "clear_chosen_type": {
+              "type": "boolean",
+              "default": false
+            },
+            "clear_coin_flips": {
+              "type": "boolean",
+              "default": false
+            },
+            "clear_imprinted": {
+              "type": "boolean",
+              "default": false
+            },
+            "clear_remembered": {
+              "type": "boolean",
+              "default": false
+            },
+            "clear_triggers": {
+              "type": "boolean",
+              "default": false
             },
             "type": {
               "type": "string",
@@ -1036,16 +1449,12 @@
         {
           "type": "object",
           "properties": {
-            "params": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {}
-            },
             "produced": {
-              "type": "string",
-              "default": ""
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ManaColor"
+              }
             },
             "type": {
               "type": "string",
@@ -1066,7 +1475,7 @@
               "minimum": 0
             },
             "target": {
-              "$ref": "#/$defs/TargetSpec",
+              "$ref": "#/$defs/TargetFilter",
               "default": {
                 "type": "Any"
               }
@@ -1081,27 +1490,27 @@
           ]
         },
         {
-          "description": "Fallback for unrecognized effect types during parsing.",
+          "description": "Semantic marker for effects the engine has not yet implemented a handler for.\nCarries zero HashMap -- architecturally distinct from the removed Effect::Other.",
           "type": "object",
           "properties": {
-            "api_type": {
-              "type": "string"
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
             },
-            "params": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {}
+            "name": {
+              "type": "string"
             },
             "type": {
               "type": "string",
-              "const": "Other"
+              "const": "Unimplemented"
             }
           },
           "required": [
             "type",
-            "api_type"
+            "name"
           ]
         }
       ]
@@ -1144,20 +1553,1280 @@
         }
       }
     },
+    "FilterProp": {
+      "description": "Individual filter properties that can be combined in a Typed filter.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Token"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Attacking"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Tapped"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "NonType"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "WithKeyword"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "counter_type": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "CountersGE"
+            }
+          },
+          "required": [
+            "type",
+            "counter_type",
+            "count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "CmcGE"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "InZone"
+            },
+            "zone": {
+              "$ref": "#/$defs/Zone"
+            }
+          },
+          "required": [
+            "type",
+            "zone"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "controller": {
+              "$ref": "#/$defs/ControllerRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "Owned"
+            }
+          },
+          "required": [
+            "type",
+            "controller"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "EnchantedBy"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "EquippedBy"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "Other"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "Keyword": {
+      "description": "All MTG keywords as typed enum variants.\nSimple (unit) variants for keywords with no parameters.\nParameterized variants carry associated data (ManaCost for costs, amounts, etc.).\nUnknown captures any unrecognized keyword string for forward compatibility.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Flying",
+            "FirstStrike",
+            "DoubleStrike",
+            "Trample",
+            "Deathtouch",
+            "Lifelink",
+            "Vigilance",
+            "Haste",
+            "Reach",
+            "Defender",
+            "Menace",
+            "Indestructible",
+            "Hexproof",
+            "Shroud",
+            "Flash",
+            "Fear",
+            "Intimidate",
+            "Skulk",
+            "Shadow",
+            "Horsemanship",
+            "Wither",
+            "Infect",
+            "Afflict",
+            "Prowess",
+            "Undying",
+            "Persist",
+            "Cascade",
+            "Exalted",
+            "Flanking",
+            "Evolve",
+            "Extort",
+            "Exploit",
+            "Explore",
+            "Ascend",
+            "Soulbond",
+            "Convoke",
+            "Delve",
+            "Devoid",
+            "Changeling",
+            "Phasing",
+            "Battlecry",
+            "Decayed",
+            "Unleash",
+            "Riot",
+            "LivingWeapon",
+            "TotemArmor",
+            "Banding",
+            "Cumulative",
+            "Epic",
+            "Fuse",
+            "Gravestorm",
+            "Haunt",
+            "Hideaway",
+            "Improvise",
+            "Ingest",
+            "Melee",
+            "Mentor",
+            "Myriad",
+            "Provoke",
+            "Rebound",
+            "Retrace",
+            "Ripple",
+            "SplitSecond",
+            "Storm",
+            "Suspend",
+            "Totem",
+            "Warp",
+            "Gift",
+            "Ravenous",
+            "Daybound",
+            "Nightbound",
+            "Enlist",
+            "ReadAhead",
+            "Compleated",
+            "Conspire",
+            "Demonstrate",
+            "Dethrone",
+            "DoubleTeam",
+            "LivingMetal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Dredge": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Dredge"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Modular": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Modular"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Renown": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Renown"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Fabricate": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Fabricate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Annihilator": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Annihilator"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Bushido": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Bushido"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Tribute": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Tribute"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Unearth": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Unearth"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Afterlife": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Afterlife"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Enchant": {
+              "$ref": "#/$defs/TargetFilter"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Enchant"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "EtbCounter": {
+              "type": "object",
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "counter_type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "counter_type",
+                "count"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "EtbCounter"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Reconfigure": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Reconfigure"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Bestow": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Bestow"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Embalm": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Embalm"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Eternalize": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Eternalize"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Fading": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Fading"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Vanishing": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Vanishing"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Protection": {
+              "$ref": "#/$defs/ProtectionTarget"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Protection"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Kicker": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Kicker"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Cycling": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Cycling"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Flashback": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Flashback"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Ward": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Ward"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Equip": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Equip"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Landwalk": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Landwalk"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Rampage": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Rampage"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Absorb": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Absorb"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Crew": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Crew"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Partner": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Partner"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Companion": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Companion"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Ninjutsu": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Ninjutsu"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Prowl": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Prowl"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Morph": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Morph"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Megamorph": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Megamorph"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Madness": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Madness"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Dash": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Dash"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Emerge": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Emerge"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Escape": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Escape"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Evoke": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Evoke"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Foretell": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Foretell"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Mutate": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Mutate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Disturb": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Disturb"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Disguise": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Disguise"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Blitz": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Blitz"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Overload": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Overload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Spectacle": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Spectacle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Surge": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Surge"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Encore": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Encore"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Buyback": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Buyback"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Echo": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Echo"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Outlast": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Outlast"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Scavenge": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Scavenge"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Fortify": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Fortify"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Prototype": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Prototype"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Plot": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Plot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Craft": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Craft"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Offspring": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Offspring"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Impending": {
+              "$ref": "#/$defs/ManaCost"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Impending"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Poisonous": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Poisonous"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Bloodthirst": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Bloodthirst"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Amplify": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Amplify"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Graft": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Graft"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Devour": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Devour"
+          ]
+        },
+        {
+          "description": "Fallback for unrecognized keywords.",
+          "type": "object",
+          "properties": {
+            "Unknown": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Unknown"
+          ]
+        }
+      ]
+    },
+    "ManaColor": {
+      "type": "string",
+      "enum": [
+        "White",
+        "Blue",
+        "Black",
+        "Red",
+        "Green"
+      ]
+    },
+    "ManaCost": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "NoCost"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Cost": {
+              "type": "object",
+              "properties": {
+                "generic": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "shards": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/ManaCostShard"
+                  }
+                }
+              },
+              "required": [
+                "shards",
+                "generic"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Cost"
+          ]
+        }
+      ]
+    },
+    "ManaCostShard": {
+      "type": "string",
+      "enum": [
+        "White",
+        "Blue",
+        "Black",
+        "Red",
+        "Green",
+        "Colorless",
+        "Snow",
+        "X",
+        "WhiteBlue",
+        "WhiteBlack",
+        "BlueBlack",
+        "BlueRed",
+        "BlackRed",
+        "BlackGreen",
+        "RedWhite",
+        "RedGreen",
+        "GreenWhite",
+        "GreenBlue",
+        "TwoWhite",
+        "TwoBlue",
+        "TwoBlack",
+        "TwoRed",
+        "TwoGreen",
+        "PhyrexianWhite",
+        "PhyrexianBlue",
+        "PhyrexianBlack",
+        "PhyrexianRed",
+        "PhyrexianGreen",
+        "PhyrexianWhiteBlue",
+        "PhyrexianWhiteBlack",
+        "PhyrexianBlueBlack",
+        "PhyrexianBlueRed",
+        "PhyrexianBlackRed",
+        "PhyrexianBlackGreen",
+        "PhyrexianRedWhite",
+        "PhyrexianRedGreen",
+        "PhyrexianGreenWhite",
+        "PhyrexianGreenBlue",
+        "ColorlessWhite",
+        "ColorlessBlue",
+        "ColorlessBlack",
+        "ColorlessRed",
+        "ColorlessGreen"
+      ]
+    },
+    "Phase": {
+      "type": "string",
+      "enum": [
+        "Untap",
+        "Upkeep",
+        "Draw",
+        "PreCombatMain",
+        "BeginCombat",
+        "DeclareAttackers",
+        "DeclareBlockers",
+        "CombatDamage",
+        "EndCombat",
+        "PostCombatMain",
+        "End",
+        "Cleanup"
+      ]
+    },
+    "ProtectionTarget": {
+      "description": "What a Protection keyword protects from.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Color": {
+              "$ref": "#/$defs/ManaColor"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Color"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "CardType": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "CardType"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Quality": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Quality"
+          ]
+        }
+      ]
+    },
     "ReplacementDefinition": {
-      "description": "Replacement effect definition with typed event.",
+      "description": "Replacement effect definition with typed fields. Zero params HashMap.",
       "type": "object",
       "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "event": {
           "$ref": "#/$defs/ReplacementEvent"
         },
-        "params": {
-          "description": "Parameters for the replacement effect (conditions, modifications, etc.)",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {}
+        "execute": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbilityDefinition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "valid_card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1197,20 +2866,159 @@
         }
       ]
     },
+    "StaticCondition": {
+      "description": "Condition for static ability applicability.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "colors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ManaColor"
+              }
+            },
+            "threshold": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "DevotionGE"
+            }
+          },
+          "required": [
+            "type",
+            "colors",
+            "threshold"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "filter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TargetFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "IsPresent"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "compare": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "CheckSVar"
+            },
+            "var": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "var",
+            "compare"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "None"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
     "StaticDefinition": {
-      "description": "Static ability definition with typed mode.",
+      "description": "Static ability definition with typed fields. Zero params HashMap.",
       "type": "object",
       "properties": {
+        "affected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "affected_zone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Zone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "characteristic_defining": {
+          "type": "boolean",
+          "default": false
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StaticCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "effect_zone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Zone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "mode": {
           "$ref": "#/$defs/StaticMode"
         },
-        "params": {
-          "description": "Parameters for the static ability (Affected, AddPower, AddToughness, etc.)",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {}
+        "modifications": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContinuousModification"
+          }
         }
       },
       "required": [
@@ -1256,8 +3064,8 @@
         }
       ]
     },
-    "TargetSpec": {
-      "description": "Targeting specification for an effect.",
+    "TargetFilter": {
+      "description": "Typed target filter replacing all Forge filter strings and TargetSpec.",
       "oneOf": [
         {
           "type": "object",
@@ -1281,22 +3089,6 @@
           },
           "required": [
             "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "filter": {
-              "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "const": "Filtered"
-            }
-          },
-          "required": [
-            "type",
-            "filter"
           ]
         },
         {
@@ -1326,35 +3118,228 @@
         {
           "type": "object",
           "properties": {
-            "filter": {
-              "type": "string"
+            "type": {
+              "type": "string",
+              "const": "SelfRef"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "card_type": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TypeFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "controller": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ControllerRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "properties": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FilterProp"
+              }
+            },
+            "subtype": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
             },
             "type": {
               "type": "string",
-              "const": "All"
+              "const": "Typed"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "filter": {
+              "$ref": "#/$defs/TargetFilter"
+            },
+            "type": {
+              "type": "string",
+              "const": "Not"
             }
           },
           "required": [
             "type",
             "filter"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "filters": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TargetFilter"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "Or"
+            }
+          },
+          "required": [
+            "type",
+            "filters"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "filters": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TargetFilter"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "And"
+            }
+          },
+          "required": [
+            "type",
+            "filters"
+          ]
         }
       ]
     },
     "TriggerDefinition": {
-      "description": "Trigger definition with typed mode and effect.",
+      "description": "Trigger definition with typed fields. Zero params HashMap.",
       "type": "object",
       "properties": {
+        "combat_damage": {
+          "type": "boolean",
+          "default": false
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Zone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "execute": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbilityDefinition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "mode": {
           "$ref": "#/$defs/TriggerMode"
         },
-        "params": {
-          "description": "Remaining trigger-specific parameters (Origin, Destination, ValidCard, Execute, etc.)\nthat are not part of the effect itself.",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {}
+        "optional": {
+          "type": "boolean",
+          "default": false
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Zone"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Phase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "secondary": {
+          "type": "boolean",
+          "default": false
+        },
+        "trigger_zones": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Zone"
+          }
+        },
+        "valid_card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "valid_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "valid_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1529,6 +3514,34 @@
             "Unknown"
           ]
         }
+      ]
+    },
+    "TypeFilter": {
+      "description": "Type filter for card type matching in filters.",
+      "type": "string",
+      "enum": [
+        "Creature",
+        "Land",
+        "Artifact",
+        "Enchantment",
+        "Instant",
+        "Sorcery",
+        "Planeswalker",
+        "Permanent",
+        "Card",
+        "Any"
+      ]
+    },
+    "Zone": {
+      "type": "string",
+      "enum": [
+        "Library",
+        "Hand",
+        "Battlefield",
+        "Graveyard",
+        "Stack",
+        "Exile",
+        "Command"
       ]
     }
   }

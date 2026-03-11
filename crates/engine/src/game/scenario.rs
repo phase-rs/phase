@@ -4,15 +4,13 @@
 //! `GameRunner` (step-by-step execution), and `GameSnapshot` (insta-compatible projections).
 //! Zero filesystem dependencies -- all cards are constructed inline.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::game::engine::{apply, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, DamageAmount, Effect, StaticDefinition, TargetSpec,
+    AbilityDefinition, AbilityKind, DamageAmount, Effect, StaticDefinition, TargetFilter,
     TriggerDefinition,
 };
 use crate::types::actions::GameAction;
@@ -143,22 +141,17 @@ impl GameScenario {
         obj.card_types.supertypes.push(Supertype::Basic);
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
         // Add mana ability
-        let mana_char = match color {
-            ManaColor::White => "W",
-            ManaColor::Blue => "U",
-            ManaColor::Black => "B",
-            ManaColor::Red => "R",
-            ManaColor::Green => "G",
-        };
         obj.abilities.push(AbilityDefinition {
             kind: AbilityKind::Activated,
             effect: Effect::Mana {
-                produced: mana_char.to_string(),
-                params: HashMap::new(),
+                produced: vec![color],
             },
             cost: Some(crate::types::ability::AbilityCost::Tap),
             sub_ability: None,
-            remaining_params: HashMap::new(),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         });
         id
     }
@@ -179,11 +172,14 @@ impl GameScenario {
             kind: AbilityKind::Spell,
             effect: Effect::DealDamage {
                 amount: DamageAmount::Fixed(3),
-                target: TargetSpec::Any,
+                target: TargetFilter::Any,
             },
             cost: None,
             sub_ability: None,
-            remaining_params: HashMap::new(),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         });
         id
     }
@@ -350,7 +346,10 @@ impl<'a> CardBuilder<'a> {
             effect,
             cost: None,
             sub_ability: None,
-            remaining_params: HashMap::new(),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         });
         self
     }
@@ -359,16 +358,31 @@ impl<'a> CardBuilder<'a> {
     pub fn with_static(&mut self, mode: StaticMode) -> &mut Self {
         self.obj().static_definitions.push(StaticDefinition {
             mode,
-            params: HashMap::new(),
+            affected: None,
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: None,
         });
         self
     }
 
-    /// Attach a continuous static with explicit params (for lord/pump effects).
-    pub fn with_continuous_static(&mut self, params: HashMap<String, String>) -> &mut Self {
+    /// Attach a continuous static with typed modifications.
+    pub fn with_continuous_static(
+        &mut self,
+        modifications: Vec<crate::types::ability::ContinuousModification>,
+    ) -> &mut Self {
         self.obj().static_definitions.push(StaticDefinition {
             mode: StaticMode::Continuous,
-            params,
+            affected: None,
+            modifications,
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: None,
         });
         self
     }
@@ -377,7 +391,18 @@ impl<'a> CardBuilder<'a> {
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
         self.obj().trigger_definitions.push(TriggerDefinition {
             mode,
-            params: HashMap::new(),
+            execute: None,
+            valid_card: None,
+            origin: None,
+            destination: None,
+            trigger_zones: vec![],
+            phase: None,
+            optional: false,
+            combat_damage: false,
+            secondary: false,
+            valid_target: None,
+            valid_source: None,
+            description: None,
         });
         self
     }

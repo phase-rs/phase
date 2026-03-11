@@ -120,9 +120,21 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let filter = match &ability.effect {
-        Effect::DestroyAll { .. } => "Creature",
-        _ => "Creature",
+    let target_filter = match &ability.effect {
+        Effect::DestroyAll { target } => target.clone(),
+        _ => crate::types::ability::TargetFilter::Any,
+    };
+
+    // Use a creature filter as default if the effect's target is None
+    let effective_filter = if matches!(target_filter, crate::types::ability::TargetFilter::None) {
+        crate::types::ability::TargetFilter::Typed {
+            card_type: Some(crate::types::ability::TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        }
+    } else {
+        target_filter
     };
 
     // Collect matching object IDs that are on the battlefield and not indestructible
@@ -136,10 +148,10 @@ pub fn resolve_all(
                 .map(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Indestructible))
                 .unwrap_or(false);
             !is_indestructible
-                && crate::game::filter::object_matches_filter_controlled(
+                && crate::game::filter::matches_target_filter_controlled(
                     state,
                     **id,
-                    filter,
+                    &effective_filter,
                     ability.source_id,
                     ability.controller,
                 )

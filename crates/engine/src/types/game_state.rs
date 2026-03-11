@@ -413,25 +413,21 @@ mod tests {
     #[test]
     fn stack_entry_kind_spell() {
         use crate::types::ability::ResolvedAbility;
-        use std::collections::HashMap;
         let entry = StackEntry {
             id: ObjectId(1),
             source_id: ObjectId(2),
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: ResolvedAbility {
-                    effect: crate::types::ability::Effect::Other {
-                        api_type: String::new(),
-                        params: std::collections::HashMap::new(),
+                ability: ResolvedAbility::new(
+                    crate::types::ability::Effect::Unimplemented {
+                        name: "Dummy".to_string(),
+                        description: None,
                     },
-                    params: HashMap::new(),
-                    targets: vec![],
-                    source_id: ObjectId(2),
-                    controller: PlayerId(0),
-                    sub_ability: None,
-                    svars: HashMap::new(),
-                },
+                    vec![],
+                    ObjectId(2),
+                    PlayerId(0),
+                ),
             },
         };
         assert_eq!(entry.id, ObjectId(1));

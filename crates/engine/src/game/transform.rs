@@ -127,13 +127,16 @@ mod tests {
         obj.base_keywords = vec![Keyword::Vigilance];
         obj.abilities = vec![crate::types::ability::AbilityDefinition {
             kind: crate::types::ability::AbilityKind::Spell,
-            effect: crate::types::ability::Effect::Other {
-                api_type: "FrontAbility".to_string(),
-                params: std::collections::HashMap::new(),
+            effect: crate::types::ability::Effect::Unimplemented {
+                name: "FrontAbility".to_string(),
+                description: None,
             },
             cost: None,
             sub_ability: None,
-            remaining_params: std::collections::HashMap::new(),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         }];
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
@@ -150,13 +153,16 @@ mod tests {
             keywords: vec![Keyword::Trample],
             abilities: vec![crate::types::ability::AbilityDefinition {
                 kind: crate::types::ability::AbilityKind::Spell,
-                effect: crate::types::ability::Effect::Other {
-                    api_type: "BackAbility".to_string(),
-                    params: std::collections::HashMap::new(),
+                effect: crate::types::ability::Effect::Unimplemented {
+                    name: "BackAbility".to_string(),
+                    description: None,
                 },
                 cost: None,
                 sub_ability: None,
-                remaining_params: std::collections::HashMap::new(),
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
             }],
             color: vec![ManaColor::Green, ManaColor::Red],
         });

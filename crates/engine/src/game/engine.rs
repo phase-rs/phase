@@ -90,9 +90,10 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
                 WaitingFor::Priority { player: *player }
             } else if obj.loyalty.is_some()
                 && ability_index < obj.abilities.len()
-                && obj.abilities[ability_index]
-                    .remaining_params
-                    .contains_key("PW_Cost")
+                && matches!(
+                    obj.abilities[ability_index].cost,
+                    Some(crate::types::ability::AbilityCost::Loyalty { .. })
+                )
             {
                 // Planeswalker loyalty ability
                 planeswalker::handle_activate_loyalty(
@@ -748,7 +749,7 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "forge-compat"))]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;

@@ -53,7 +53,7 @@ pub fn generate_schema() -> schemars::Schema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, DamageAmount, Effect, TargetSpec};
+    use crate::types::ability::{AbilityKind, DamageAmount, Effect, TargetFilter};
 
     #[test]
     fn generate_ability_schema_and_write_file() {
@@ -87,7 +87,7 @@ mod tests {
         match &file.abilities[0].effect {
             Effect::DealDamage { amount, target } => {
                 assert_eq!(*amount, DamageAmount::Fixed(3));
-                assert_eq!(*target, TargetSpec::Any);
+                assert_eq!(*target, TargetFilter::Any);
             }
             other => panic!("Expected DealDamage, got {:?}", other),
         }
@@ -148,7 +148,6 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: std::collections::HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };

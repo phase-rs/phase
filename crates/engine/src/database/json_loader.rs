@@ -7,9 +7,10 @@ use crate::database::card_db::CardDatabase;
 use crate::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::deck_loading::derive_colors_from_mana_cost;
 use crate::schema::{AbilityFile, FaceAbilities};
-use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect};
+use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect, PtValue};
 use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::{CardType, CoreType, Supertype};
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
 /// Internal layout classification from MTGJSON layout strings.
@@ -70,6 +71,14 @@ fn map_mtgjson_color(code: &str) -> Option<ManaColor> {
     }
 }
 
+/// Parse a power/toughness string into a PtValue.
+fn parse_pt_value(s: &str) -> PtValue {
+    match s.parse::<i32>() {
+        Ok(n) => PtValue::Fixed(n),
+        Err(_) => PtValue::Variable(s.to_string()),
+    }
+}
+
 /// Build a CardFace by merging MTGJSON metadata with parsed ability data.
 fn build_card_face(
     mtgjson: &AtomicCard,
@@ -104,19 +113,22 @@ fn build_card_face(
         name: face_name,
         mana_cost,
         card_type: build_card_type(mtgjson),
-        power: mtgjson.power.clone(),
-        toughness: mtgjson.toughness.clone(),
+        power: mtgjson.power.as_ref().map(|s| parse_pt_value(s)),
+        toughness: mtgjson.toughness.as_ref().map(|s| parse_pt_value(s)),
         loyalty: mtgjson.loyalty.clone(),
         defense: mtgjson.defense.clone(),
         oracle_text: mtgjson.text.clone(),
         non_ability_text: None,
         flavor_name: None,
-        keywords: mtgjson.keywords.clone().unwrap_or_default(),
+        keywords: mtgjson
+            .keywords
+            .as_ref()
+            .map(|kws| kws.iter().map(|s| s.parse::<Keyword>().unwrap()).collect())
+            .unwrap_or_default(),
         abilities: abilities.abilities.clone(),
         triggers: abilities.triggers.clone(),
         static_abilities: abilities.statics.clone(),
         replacements: abilities.replacements.clone(),
-        svars: HashMap::new(),
         color_override,
         scryfall_oracle_id: oracle_id,
     }
@@ -135,55 +147,58 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
 
     for (subtype, mana_char) in land_mana {
         if face.card_type.subtypes.iter().any(|s| s == subtype) {
+            let color = match mana_char {
+                "W" => crate::types::mana::ManaColor::White,
+                "U" => crate::types::mana::ManaColor::Blue,
+                "B" => crate::types::mana::ManaColor::Black,
+                "R" => crate::types::mana::ManaColor::Red,
+                "G" => crate::types::mana::ManaColor::Green,
+                _ => continue,
+            };
             face.abilities.push(AbilityDefinition {
                 kind: AbilityKind::Activated,
                 effect: Effect::Mana {
-                    produced: mana_char.to_string(),
-                    params: HashMap::new(),
+                    produced: vec![color],
                 },
                 cost: Some(AbilityCost::Tap),
                 sub_ability: None,
-                remaining_params: HashMap::new(),
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
             });
         }
     }
 }
 
 /// Synthesize Equip activated ability from keywords per CR 702.6.
-/// Parses "Equip:{cost}" or "Equip:{mana}" keywords into activated abilities.
+/// Extracts `Keyword::Equip(cost)` and creates an activated Attach ability.
 fn synthesize_equip(face: &mut CardFace) {
     let equip_abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
         .filter_map(|kw| {
-            if !kw.starts_with("Equip") {
-                return None;
-            }
-            // Extract cost after "Equip:" or "Equip "
-            let cost_str = if let Some(rest) = kw.strip_prefix("Equip:") {
-                rest.trim().to_string()
-            } else if kw == "Equip" {
-                // Bare "Equip" without cost -- skip synthesis
-                return None;
-            } else {
-                return None;
-            };
-
-            if cost_str.is_empty() {
-                return None;
-            }
-
-            Some(AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Attach {
-                    target: crate::types::ability::TargetSpec::Filtered {
-                        filter: "Creature.YouCtrl".to_string(),
+            if let Keyword::Equip(cost) = kw {
+                Some(AbilityDefinition {
+                    kind: AbilityKind::Activated,
+                    effect: Effect::Attach {
+                        target: crate::types::ability::TargetFilter::Typed {
+                            card_type: Some(crate::types::ability::TypeFilter::Creature),
+                            subtype: None,
+                            controller: Some(crate::types::ability::ControllerRef::You),
+                            properties: vec![],
+                        },
                     },
-                },
-                cost: Some(AbilityCost::Mana { cost: cost_str }),
-                sub_ability: None,
-                remaining_params: HashMap::new(),
-            })
+                    cost: Some(AbilityCost::Mana { cost: cost.clone() }),
+                    sub_ability: None,
+                    duration: None,
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                })
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -471,8 +486,8 @@ mod tests {
                 shards: vec![ManaCostShard::Green],
             }
         );
-        assert_eq!(face.power.as_deref(), Some("2"));
-        assert_eq!(face.toughness.as_deref(), Some("2"));
+        assert_eq!(face.power, Some(PtValue::Fixed(2)));
+        assert_eq!(face.toughness, Some(PtValue::Fixed(2)));
         assert_eq!(face.oracle_text.as_deref(), Some("Test creature."));
         assert!(face.card_type.core_types.contains(&CoreType::Creature));
         assert_eq!(face.card_type.subtypes, vec!["Bear".to_string()]);
@@ -555,7 +570,6 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };
@@ -565,7 +579,7 @@ mod tests {
         assert_eq!(face.abilities.len(), 1);
         assert_eq!(face.abilities[0].kind, AbilityKind::Activated);
         match &face.abilities[0].effect {
-            Effect::Mana { produced, .. } => assert_eq!(produced, "G"),
+            Effect::Mana { produced } => assert_eq!(*produced, vec![ManaColor::Green]),
             other => panic!("Expected Mana effect, got {:?}", other),
         }
         assert_eq!(face.abilities[0].cost, Some(AbilityCost::Tap));
@@ -593,7 +607,6 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };
@@ -602,7 +615,7 @@ mod tests {
 
         assert_eq!(face.abilities.len(), 1);
         match &face.abilities[0].effect {
-            Effect::Mana { produced, .. } => assert_eq!(produced, "W"),
+            Effect::Mana { produced } => assert_eq!(*produced, vec![ManaColor::White]),
             other => panic!("Expected Mana effect, got {:?}", other),
         }
     }
@@ -629,7 +642,6 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };
@@ -637,16 +649,16 @@ mod tests {
         synthesize_basic_land_mana(&mut face);
 
         assert_eq!(face.abilities.len(), 2);
-        let produced: Vec<&str> = face
+        let produced: Vec<&Vec<ManaColor>> = face
             .abilities
             .iter()
             .filter_map(|a| match &a.effect {
-                Effect::Mana { produced, .. } => Some(produced.as_str()),
+                Effect::Mana { produced } => Some(produced),
                 _ => None,
             })
             .collect();
-        assert!(produced.contains(&"W"));
-        assert!(produced.contains(&"U"));
+        assert!(produced.contains(&&vec![ManaColor::White]));
+        assert!(produced.contains(&&vec![ManaColor::Blue]));
     }
 
     #[test]
@@ -671,7 +683,6 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };
@@ -700,12 +711,14 @@ mod tests {
             oracle_text: None,
             non_ability_text: None,
             flavor_name: None,
-            keywords: vec!["Equip:1".to_string()],
+            keywords: vec![Keyword::Equip(ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            })],
             abilities: vec![],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };
@@ -717,7 +730,10 @@ mod tests {
         assert_eq!(
             face.abilities[0].cost,
             Some(AbilityCost::Mana {
-                cost: "1".to_string()
+                cost: ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                }
             })
         );
         match &face.abilities[0].effect {
@@ -739,12 +755,11 @@ mod tests {
             oracle_text: None,
             non_ability_text: None,
             flavor_name: None,
-            keywords: vec!["Flying".to_string()],
+            keywords: vec![Keyword::Flying],
             abilities: vec![],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };
@@ -766,12 +781,14 @@ mod tests {
             oracle_text: None,
             non_ability_text: None,
             flavor_name: None,
-            keywords: vec!["Equip:{1}{W}".to_string()],
+            keywords: vec![Keyword::Equip(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::White],
+            })],
             abilities: vec![],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
-            svars: HashMap::new(),
             color_override: None,
             scryfall_oracle_id: None,
         };
@@ -782,7 +799,10 @@ mod tests {
         assert_eq!(
             face.abilities[0].cost,
             Some(AbilityCost::Mana {
-                cost: "{1}{W}".to_string()
+                cost: ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::White],
+                }
             })
         );
     }
@@ -884,7 +904,8 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json");
 
         let db = load_json(&fixture_path, &abilities_dir).unwrap();
-        assert_eq!(db.card_count(), 1);
+        // card_count() returns max(cards, faces); Delver has 2 faces so face_index=2
+        assert_eq!(db.card_count(), 2);
 
         let delver = db.get_by_name("Delver of Secrets").unwrap();
         match &delver.layout {

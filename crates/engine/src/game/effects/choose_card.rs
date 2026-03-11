@@ -1,32 +1,33 @@
-use crate::types::ability::{effect_variant_name, EffectError, ResolvedAbility};
+use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
 /// ChooseCard: generic "choose a card" effect that presents cards from a zone
 /// for the player to select from.
 ///
-/// Reads `Origin` param for the zone to choose from (default: Graveyard).
-/// Reads `ChangeNum` param for how many cards to choose (default: 1).
+/// Uses typed Effect::ChooseCard { choices } to determine the zone/count.
 /// Sets WaitingFor::DigChoice for the player to make their selection.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let origin = ability
-        .params
-        .get("Origin")
-        .map(|s| s.as_str())
-        .unwrap_or("Graveyard");
-
-    let change_num: usize = ability
-        .params
-        .get("ChangeNum")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
+    // Extract origin and change_num from choices or default
+    let (origin_zone, change_num) = match &ability.effect {
+        Effect::ChooseCard { choices, .. } => {
+            // Choices can encode origin and count, e.g. ["Graveyard", "2"]
+            let origin = choices.first().map(|s| s.as_str()).unwrap_or("Graveyard");
+            let count: usize = choices
+                .get(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            (origin, count)
+        }
+        _ => ("Graveyard", 1),
+    };
 
     // Collect cards from the specified zone belonging to the controller
-    let cards: Vec<_> = match origin {
+    let cards: Vec<_> = match origin_zone {
         "Graveyard" => state
             .players
             .iter()
@@ -100,10 +101,10 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TargetFilter;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
-    use std::collections::HashMap;
 
     #[test]
     fn test_choose_card_from_graveyard() {
@@ -123,18 +124,15 @@ mod tests {
             Zone::Graveyard,
         );
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "ChooseCard".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::ChooseCard {
+                choices: vec!["Graveyard".to_string()],
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([("Origin".to_string(), "Graveyard".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -160,18 +158,15 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         assert!(state.players[0].graveyard.is_empty());
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "ChooseCard".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::ChooseCard {
+                choices: vec!["Graveyard".to_string()],
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([("Origin".to_string(), "Graveyard".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -193,21 +188,15 @@ mod tests {
             );
         }
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "ChooseCard".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::ChooseCard {
+                choices: vec!["Graveyard".to_string(), "2".to_string()],
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([
-                ("Origin".to_string(), "Graveyard".to_string()),
-                ("ChangeNum".to_string(), "2".to_string()),
-            ]),
-            targets: vec![],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();

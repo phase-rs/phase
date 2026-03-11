@@ -44,28 +44,25 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{DamageAmount, Effect, TargetFilter};
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use std::collections::HashMap;
 
     #[test]
     fn test_copy_spell_duplicates_stack_entry() {
         let mut state = GameState::new_two_player(42);
 
         // Put a spell on the stack
-        let original_ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "DealDamage".to_string(),
-                params: std::collections::HashMap::new(),
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any,
             },
-            params: HashMap::from([("NumDmg".to_string(), "3".to_string())]),
-            targets: vec![],
-            source_id: ObjectId(10),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
 
         state.stack.push(StackEntry {
             id: ObjectId(10),
@@ -77,18 +74,14 @@ mod tests {
             },
         });
 
-        let copy_ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "CopySpell".to_string(),
-                params: std::collections::HashMap::new(),
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![],
-            source_id: ObjectId(20),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &copy_ability, &mut events).unwrap();
@@ -124,18 +117,14 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         assert!(state.stack.is_empty());
 
-        let ability = ResolvedAbility {
-            effect: crate::types::ability::Effect::Other {
-                api_type: "CopySpell".to_string(),
-                params: std::collections::HashMap::new(),
+        let ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
             },
-            params: HashMap::new(),
-            targets: vec![],
-            source_id: ObjectId(20),
-            controller: PlayerId(0),
-            sub_ability: None,
-            svars: HashMap::new(),
-        };
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         let result = resolve(&mut state, &ability, &mut events);

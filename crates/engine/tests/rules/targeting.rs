@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::*;
 
-use engine::types::ability::{DamageAmount, Effect, TargetRef, TargetSpec};
+use engine::types::ability::{DamageAmount, Effect, TargetFilter, TargetRef};
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::{CardId, ObjectId};
 
@@ -130,13 +130,19 @@ fn no_legal_targets_prevents_casting() {
             .push(engine::types::ability::AbilityDefinition {
                 kind: engine::types::ability::AbilityKind::Spell,
                 effect: Effect::Destroy {
-                    target: TargetSpec::Filtered {
-                        filter: "Creature".to_string(),
+                    target: TargetFilter::Typed {
+                        card_type: Some(engine::types::ability::TypeFilter::Creature),
+                        subtype: None,
+                        controller: None,
+                        properties: vec![],
                     },
                 },
                 cost: None,
                 sub_ability: None,
-                remaining_params: std::collections::HashMap::new(),
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
             });
     }
 

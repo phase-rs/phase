@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::types::ability::{
     AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TriggerDefinition,
 };
@@ -1305,9 +1307,9 @@ fn match_unimplemented(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::game::filter::object_matches_filter;
+    use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityKind, TriggerDefinition};
+    use crate::types::ability::{AbilityKind, ControllerRef, TargetFilter, TriggerDefinition, TypeFilter};
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
@@ -1549,10 +1551,21 @@ pub mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        assert!(object_matches_filter(&state, id, "Creature", ObjectId(99)));
-        assert!(!object_matches_filter(&state, id, "Land", ObjectId(99)));
-        assert!(object_matches_filter(&state, id, "Card", ObjectId(99)));
-        assert!(object_matches_filter(&state, id, "Any", ObjectId(99)));
+        let creature_filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        };
+        let land_filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Land),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        };
+        assert!(matches_target_filter(&state, id, &creature_filter, ObjectId(99)));
+        assert!(!matches_target_filter(&state, id, &land_filter, ObjectId(99)));
+        assert!(matches_target_filter(&state, id, &TargetFilter::Any, ObjectId(99)));
     }
 
     #[test]
@@ -1594,18 +1607,14 @@ pub mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        assert!(object_matches_filter(
-            &state,
-            target,
-            "Creature.YouCtrl",
-            source
-        ));
-        assert!(!object_matches_filter(
-            &state,
-            opp_target,
-            "Creature.YouCtrl",
-            source
-        ));
+        let creature_you_ctrl = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        };
+        assert!(matches_target_filter(&state, target, &creature_you_ctrl, source));
+        assert!(!matches_target_filter(&state, opp_target, &creature_you_ctrl, source));
     }
 
     #[test]
@@ -1618,7 +1627,7 @@ pub mod tests {
             "Card".to_string(),
             Zone::Battlefield,
         );
-        assert!(object_matches_filter(&state, obj, "Card.Self", obj));
+        assert!(matches_target_filter(&state, obj, &TargetFilter::SelfRef, obj));
         let other = create_object(
             &mut state,
             CardId(2),
@@ -1626,7 +1635,7 @@ pub mod tests {
             "Other".to_string(),
             Zone::Battlefield,
         );
-        assert!(!object_matches_filter(&state, obj, "Card.Self", other));
+        assert!(!matches_target_filter(&state, obj, &TargetFilter::SelfRef, other));
     }
 
     #[test]
@@ -2371,19 +2380,23 @@ pub mod tests {
 
     #[test]
     fn target_filter_self_ref() {
-        let state = setup();
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Self Card".to_string(),
+            Zone::Battlefield,
+        );
         let filter = TargetFilter::SelfRef;
-        assert!(target_filter_matches_object(
-            &state,
-            ObjectId(5),
-            &filter,
-            ObjectId(5)
-        ));
+        // SelfRef matches when object_id == source_id
+        assert!(target_filter_matches_object(&state, obj_id, &filter, obj_id));
+        // Does not match when source is different
         assert!(!target_filter_matches_object(
             &state,
-            ObjectId(5),
+            obj_id,
             &filter,
-            ObjectId(6)
+            ObjectId(999)
         ));
     }
 }

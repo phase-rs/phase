@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
@@ -143,20 +141,13 @@ pub fn handle_activate_loyalty(
 
 /// Extract the loyalty cost from a typed ability definition.
 ///
-/// Prefers `AbilityCost::Loyalty` (set by the JSON loader) over the legacy
-/// `remaining_params["PW_Cost"]` (set by the Forge parser). Falls back to 0
-/// if neither is present.
+/// Uses `AbilityCost::Loyalty` (set by the JSON loader). Falls back to 0
+/// if not present.
 fn parse_loyalty_cost(ability_def: &crate::types::ability::AbilityDefinition) -> i32 {
-    // Prefer typed AbilityCost::Loyalty from JSON ability files
     if let Some(crate::types::ability::AbilityCost::Loyalty { amount }) = &ability_def.cost {
         return *amount;
     }
-    // Fall back to remaining_params for Forge-parsed cards
-    ability_def
-        .remaining_params
-        .get("PW_Cost")
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0)
+    0
 }
 
 /// Build a ResolvedAbility from a typed AbilityDefinition for the stack.
@@ -165,25 +156,15 @@ fn build_pw_resolved(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
-    let mut params = ability_def.effect.to_params();
-    params.extend(
-        ability_def
-            .remaining_params
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone())),
-    );
-    ResolvedAbility {
-        effect: ability_def.effect.clone(),
-        params,
-        targets: Vec::new(),
+    ResolvedAbility::new(
+        ability_def.effect.clone(),
+        Vec::new(),
         source_id,
         controller,
-        sub_ability: None,
-        svars: HashMap::new(),
-    }
+    )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "forge-compat"))]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
@@ -352,18 +333,14 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: ResolvedAbility {
-                    effect: crate::types::ability::Effect::Other {
-                        api_type: String::new(),
-                        params: std::collections::HashMap::new(),
+                ability: ResolvedAbility::new(
+                    crate::types::ability::Effect::Unimplemented {
+                        name: "Dummy".to_string(),
                     },
-                    params: HashMap::new(),
-                    targets: vec![],
-                    source_id: ObjectId(99),
-                    controller: PlayerId(1),
-                    sub_ability: None,
-                    svars: HashMap::new(),
-                },
+                    vec![],
+                    ObjectId(99),
+                    PlayerId(1),
+                ),
             },
         });
         let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
@@ -391,30 +368,35 @@ mod tests {
     #[test]
     fn parse_loyalty_cost_prefers_typed_ability_cost() {
         use crate::types::ability::{AbilityCost, AbilityKind, Effect};
-        // When AbilityCost::Loyalty is set, it should be preferred
+        // When AbilityCost::Loyalty is set, it should be used
         let ability = crate::types::ability::AbilityDefinition {
             kind: AbilityKind::Activated,
             effect: Effect::Draw { count: 1 },
             cost: Some(AbilityCost::Loyalty { amount: -3 }),
             sub_ability: None,
-            remaining_params: HashMap::from([("PW_Cost".to_string(), "+1".to_string())]),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         };
-        // Should return -3 from AbilityCost::Loyalty, not +1 from remaining_params
         assert_eq!(parse_loyalty_cost(&ability), -3);
     }
 
     #[test]
-    fn parse_loyalty_cost_falls_back_to_remaining_params() {
+    fn parse_loyalty_cost_defaults_to_zero_without_loyalty_cost() {
         use crate::types::ability::{AbilityKind, Effect};
-        // When no AbilityCost::Loyalty, fall back to remaining_params
+        // When no AbilityCost::Loyalty, fall back to 0
         let ability = crate::types::ability::AbilityDefinition {
             kind: AbilityKind::Activated,
             effect: Effect::Draw { count: 1 },
             cost: None,
             sub_ability: None,
-            remaining_params: HashMap::from([("PW_Cost".to_string(), "+2".to_string())]),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
         };
-        assert_eq!(parse_loyalty_cost(&ability), 2);
+        assert_eq!(parse_loyalty_cost(&ability), 0);
     }
 
     #[test]

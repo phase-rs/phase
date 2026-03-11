@@ -1,26 +1,27 @@
 #![allow(unused_imports)]
 use super::*;
 
-use std::collections::HashMap;
-
 use engine::game::scenario::GameRunner;
+use engine::types::ability::ContinuousModification;
 
-/// Helper: build a lord's continuous static params map.
-fn lord_params(filter: &str, add_power: i32, add_toughness: i32) -> HashMap<String, String> {
-    let mut params = HashMap::new();
-    params.insert("Affected".to_string(), filter.to_string());
-    params.insert("AddPower".to_string(), add_power.to_string());
-    params.insert("AddToughness".to_string(), add_toughness.to_string());
-    params
+/// Helper: build a lord's continuous static modifications (+P/+T).
+fn lord_mods(add_power: i32, add_toughness: i32) -> Vec<ContinuousModification> {
+    vec![
+        ContinuousModification::AddPower { value: add_power },
+        ContinuousModification::AddToughness {
+            value: add_toughness,
+        },
+    ]
 }
 
-/// Helper: build a set-P/T continuous static params map.
-fn set_pt_params(filter: &str, set_power: i32, set_toughness: i32) -> HashMap<String, String> {
-    let mut params = HashMap::new();
-    params.insert("Affected".to_string(), filter.to_string());
-    params.insert("SetPower".to_string(), set_power.to_string());
-    params.insert("SetToughness".to_string(), set_toughness.to_string());
-    params
+/// Helper: build a set-P/T continuous static modifications.
+fn set_pt_mods(set_power: i32, set_toughness: i32) -> Vec<ContinuousModification> {
+    vec![
+        ContinuousModification::SetPower { value: set_power },
+        ContinuousModification::SetToughness {
+            value: set_toughness,
+        },
+    ]
 }
 
 /// CR 613.1: Continuous effects applied in layer order -- set (7b) before modify (7c)
@@ -38,13 +39,13 @@ fn layer_order_set_before_modify() {
     // Lord that gives +1/+1 to all creatures you control (Layer 7c)
     {
         let mut b = scenario.add_creature(P0, "Lord", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 1, 1));
+        b.with_continuous_static(lord_mods(1, 1));
     }
 
     // Enchantment-like effect that sets P/T to 1/1 (Layer 7b)
     {
         let mut b = scenario.add_creature(P0, "Setter", 1, 1);
-        b.with_continuous_static(set_pt_params("Creature.Other+YouCtrl", 1, 1));
+        b.with_continuous_static(set_pt_mods(1, 1));
     }
 
     // Trigger layer evaluation by passing priority (SBAs run, layers evaluated)
@@ -80,13 +81,13 @@ fn multiple_lords_stack_modifications() {
     // Lord A: +1/+1 to creatures you control
     {
         let mut b = scenario.add_creature(P0, "Lord A", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 1, 1));
+        b.with_continuous_static(lord_mods(1, 1));
     }
 
     // Lord B: +2/+2 to creatures you control
     {
         let mut b = scenario.add_creature(P0, "Lord B", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 2, 2));
+        b.with_continuous_static(lord_mods(2, 2));
     }
 
     let mut runner = scenario.build();
@@ -175,7 +176,7 @@ fn lord_and_counters_stack_correctly() {
     // Lord: +1/+1 to creatures you control
     {
         let mut b = scenario.add_creature(P0, "Captain", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 1, 1));
+        b.with_continuous_static(lord_mods(1, 1));
     }
 
     let mut runner = scenario.build();
@@ -208,11 +209,11 @@ fn timestamp_ordering_both_lords_apply() {
     // Both give +1/+1 to creatures -- additive effects both apply regardless of timestamp
     {
         let mut b = scenario.add_creature(P0, "First Lord", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 1, 1));
+        b.with_continuous_static(lord_mods(1, 1));
     }
     {
         let mut b = scenario.add_creature(P0, "Second Lord", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 1, 1));
+        b.with_continuous_static(lord_mods(1, 1));
     }
 
     let mut runner = scenario.build();
@@ -245,7 +246,7 @@ fn lord_effect_stops_when_lord_removed() {
     let bear_id = scenario.add_creature(P0, "Bear", 2, 2).id();
     {
         let mut b = scenario.add_creature(P0, "Lord", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 1, 1));
+        b.with_continuous_static(lord_mods(1, 1));
     };
 
     let mut runner = scenario.build();
@@ -278,7 +279,7 @@ fn layer_evaluation_resets_and_recomputes() {
     // Lord gives +2/+2
     {
         let mut b = scenario.add_creature(P0, "Big Lord", 3, 3);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 2, 2));
+        b.with_continuous_static(lord_mods(2, 2));
     }
 
     let mut runner = scenario.build();
@@ -318,17 +319,16 @@ fn type_change_before_pt_modification() {
 
     // Animator: makes all artifacts into creatures (Layer 4 - Type)
     {
-        let mut params = HashMap::new();
-        params.insert("Affected".to_string(), "Artifact.YouCtrl".to_string());
-        params.insert("AddType".to_string(), "Creature".to_string());
         let mut b = scenario.add_creature(P0, "Animator", 1, 1);
-        b.with_continuous_static(params);
+        b.with_continuous_static(vec![ContinuousModification::AddType {
+            core_type: engine::types::card_type::CoreType::Creature,
+        }]);
     }
 
     // Lord: gives +1/+1 to all creatures you control (Layer 7c - ModifyPT)
     {
         let mut b = scenario.add_creature(P0, "Lord", 2, 2);
-        b.with_continuous_static(lord_params("Creature.YouCtrl", 1, 1));
+        b.with_continuous_static(lord_mods(1, 1));
     }
 
     let mut runner = scenario.build();

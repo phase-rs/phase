@@ -75,18 +75,29 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (origin_zone, dest_zone, filter_str) = match &ability.effect {
+    let (origin_zone, dest_zone, target_filter) = match &ability.effect {
         Effect::ChangeZoneAll {
             origin,
             destination,
-            ..
+            target,
         } => {
             let origin_z = origin.unwrap_or(Zone::Battlefield);
-            (*destination, origin_z, "Permanent".to_string())
+            (origin_z, *destination, target.clone())
         }
         _ => return Err(EffectError::MissingParam("ChangeZoneAll".to_string())),
     };
-    let filter = filter_str.as_str();
+
+    // Use a permissive default filter if the effect's target is None
+    let effective_filter = if matches!(target_filter, crate::types::ability::TargetFilter::None) {
+        crate::types::ability::TargetFilter::Typed {
+            card_type: Some(crate::types::ability::TypeFilter::Permanent),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        }
+    } else {
+        target_filter
+    };
 
     // Collect matching object IDs from the origin zone
     let matching: Vec<_> = state
@@ -94,10 +105,10 @@ pub fn resolve_all(
         .iter()
         .filter(|(&id, obj)| {
             obj.zone == origin_zone
-                && crate::game::filter::object_matches_filter_controlled(
+                && crate::game::filter::matches_target_filter_controlled(
                     state,
                     id,
-                    filter,
+                    &effective_filter,
                     ability.source_id,
                     ability.controller,
                 )

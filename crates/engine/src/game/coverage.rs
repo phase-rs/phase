@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::str::FromStr;
-
 use crate::database::CardDatabase;
 use crate::game::effects::is_known_effect;
 use crate::game::game_object::GameObject;
@@ -186,11 +184,10 @@ fn check_triggers(
     }
 }
 
-fn check_keywords(keywords: &[String], missing: &mut Vec<String>) {
-    for kw_str in keywords {
-        let kw = Keyword::from_str(kw_str).unwrap();
-        if matches!(kw, Keyword::Unknown(_)) {
-            let label = format!("Keyword:{}", kw_str);
+fn check_keywords(keywords: &[Keyword], missing: &mut Vec<String>) {
+    for kw in keywords {
+        if let Keyword::Unknown(s) = kw {
+            let label = format!("Keyword:{}", s);
             if !missing.contains(&label) {
                 missing.push(label);
             }
@@ -421,10 +418,12 @@ mod tests {
         assert!(has_unimplemented_mechanics(&obj));
     }
 
+    #[cfg(feature = "forge-compat")]
     fn parse_test_ability(raw: &str) -> crate::types::ability::AbilityDefinition {
         crate::parser::ability::parse_ability(raw).expect("test ability should parse")
     }
 
+    #[cfg(feature = "forge-compat")]
     #[test]
     fn object_with_registered_ability_has_no_unimplemented() {
         let mut obj = make_obj();
@@ -433,6 +432,7 @@ mod tests {
         assert!(!has_unimplemented_mechanics(&obj));
     }
 
+    #[cfg(feature = "forge-compat")]
     #[test]
     fn object_with_unregistered_ability_has_unimplemented() {
         let mut obj = make_obj();

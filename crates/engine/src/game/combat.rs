@@ -820,7 +820,13 @@ mod tests {
             .static_definitions
             .push(StaticDefinition {
                 mode: StaticMode::Other("CantBeBlocked".to_string()),
-                params: std::collections::HashMap::new(),
+                affected: None,
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
             });
 
         let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);

@@ -1,5 +1,6 @@
 use crate::types::ability::TargetFilter;
 
+#[cfg(feature = "forge-compat")]
 use super::ParseError;
 
 // ─────────────────────────────────────────────────────────────────────────────

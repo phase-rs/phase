@@ -78,7 +78,7 @@ pub fn resolve_effect(
         Effect::Discard { .. } => discard::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
-            log::warn!("Unimplemented effect: {}", name);
+            eprintln!("Warning: Unimplemented effect: {}", name);
             Ok(())
         }
     }

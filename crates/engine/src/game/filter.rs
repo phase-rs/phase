@@ -147,7 +147,7 @@ fn matches_filter_prop(
     prop: &FilterProp,
     obj: &GameObject,
     object_id: ObjectId,
-    source_id: ObjectId,
+    _source_id: ObjectId,
     source_controller: Option<PlayerId>,
     source_attached_to: Option<ObjectId>,
 ) -> bool {
@@ -189,7 +189,7 @@ fn matches_filter_prop(
             let cmc = match &obj.mana_cost {
                 crate::types::mana::ManaCost::NoCost => 0u32,
                 crate::types::mana::ManaCost::Cost { shards, generic } => {
-                    *generic as u32 + shards.len() as u32
+                    *generic + shards.len() as u32
                 }
             };
             cmc >= *value
