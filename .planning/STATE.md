@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 29-08-PLAN.md
-last_updated: "2026-03-11T19:21:00.000Z"
-last_activity: 2026-03-11 — Phase 29 Plan 08 complete (N-Player Combat Attack/Block UI)
+stopped_at: Completed 29-10-PLAN.md
+last_updated: "2026-03-11T19:20:00.000Z"
+last_activity: 2026-03-11 — Phase 29 Plan 10 complete (Format-Aware Lobby and N-Player Networking)
 progress:
   total_phases: 9
   completed_phases: 7
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 Phase: 29 — Plan 10 of 16 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 08 complete (N-Player Combat Attack/Block UI)
+Last activity: 2026-03-11 — Phase 29 Plan 10 complete (Format-Aware Lobby and N-Player Networking)
 
 Progress: [████████████████░░░░] 42/47 plans (83%)
 
@@ -72,6 +72,7 @@ Progress: [████████████████░░░░] 42/47 p
 | Phase 29 P14 | 4min | 1 tasks | 1 files |
 | Phase 29 P07 | 9min | 3 tasks | 10 files |
 | Phase 29 P08 | 6min | 2 tasks | 6 files |
+| Phase 29 P10 | 5min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -216,6 +217,11 @@ Recent decisions affecting current work:
 - [29-08]: AttackTargetPicker modal with "Attack All" and "Split Attacks" modes; only shown for 2+ valid targets
 - [29-08]: BlockAssignmentLines dims lines for attackers not targeting current player (opacity 0.25 vs 0.7)
 - [29-08]: Engine valid_block_targets already restricts blocker assignments; no additional client-side filtering needed
+- [29-10]: FORMAT_DEFAULTS as const record with Standard/Commander/FFA/2HG presets
+- [29-10]: PlayerSlot model with playerId, name, isReady, isAi, aiDifficulty, deckName
+- [29-10]: WaitingScreen delegates to ReadyRoom when playerSlots provided; simple mode for P2P
+- [29-10]: P2P enforcement via constructor validation and validateAdapterForPlayerCount
+- [29-10]: Eliminated-to-spectator auto-transition via PlayerEliminated event in WebSocketAdapter
 
 ### Roadmap Evolution
 
@@ -233,6 +239,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T19:21:00.000Z
-Stopped at: Completed 29-08-PLAN.md
+Last session: 2026-03-11T19:20:00.000Z
+Stopped at: Completed 29-10-PLAN.md
 Resume file: None
