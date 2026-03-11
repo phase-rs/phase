@@ -4,7 +4,6 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::phase::Phase;
-use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
@@ -307,6 +306,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);

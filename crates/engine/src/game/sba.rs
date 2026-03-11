@@ -61,20 +61,18 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 }
 
 fn check_player_life(state: &mut GameState, events: &mut Vec<GameEvent>, any_performed: &mut bool) {
-    for i in 0..state.players.len() {
-        if state.players[i].life <= 0 {
-            let loser = state.players[i].id;
-            let winner_id = PlayerId(1 - loser.0);
-            events.push(GameEvent::PlayerLost { player_id: loser });
-            events.push(GameEvent::GameOver {
-                winner: Some(winner_id),
-            });
-            state.waiting_for = WaitingFor::GameOver {
-                winner: Some(winner_id),
-            };
-            *any_performed = true;
-            return;
-        }
+    // Collect all players who should be eliminated (check all, not just first)
+    let to_eliminate: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|p| !p.is_eliminated && p.life <= 0)
+        .map(|p| p.id)
+        .collect();
+
+    for loser in to_eliminate {
+        events.push(GameEvent::PlayerLost { player_id: loser });
+        super::elimination::eliminate_player(state, loser, events);
+        *any_performed = true;
     }
 }
 
@@ -83,20 +81,17 @@ fn check_poison_counters(
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
 ) {
-    for i in 0..state.players.len() {
-        if state.players[i].poison_counters >= 10 {
-            let loser = state.players[i].id;
-            let winner_id = PlayerId(1 - loser.0);
-            events.push(GameEvent::PlayerLost { player_id: loser });
-            events.push(GameEvent::GameOver {
-                winner: Some(winner_id),
-            });
-            state.waiting_for = WaitingFor::GameOver {
-                winner: Some(winner_id),
-            };
-            *any_performed = true;
-            return;
-        }
+    let to_eliminate: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|p| !p.is_eliminated && p.poison_counters >= 10)
+        .map(|p| p.id)
+        .collect();
+
+    for loser in to_eliminate {
+        events.push(GameEvent::PlayerLost { player_id: loser });
+        super::elimination::eliminate_player(state, loser, events);
+        *any_performed = true;
     }
 }
 
@@ -329,6 +324,7 @@ fn is_valid_attachment_target(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
 
     fn setup() -> GameState {
@@ -351,6 +347,8 @@ mod tests {
         obj.entered_battlefield_turn = Some(state.turn_number);
         id
     }
+
+    // --- 2-player SBA tests (backward compatible) ---
 
     #[test]
     fn sba_zero_life_player_loses() {
@@ -692,5 +690,76 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.battlefield.contains(&pw));
+    }
+
+    // --- N-player SBA tests ---
+
+    #[test]
+    fn sba_three_player_one_dies_game_continues() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.players[1].life = 0;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // P1 eliminated but game continues
+        assert!(state.players[1].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_three_player_two_die_simultaneously_ends_game() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.players[1].life = 0;
+        state.players[2].life = -3;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // Both eliminated, P0 wins
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_eliminated_player_not_re_checked() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        // P1 already eliminated with 0 life
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+        state.players[1].life = 0;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // No new events for already-eliminated player
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerLost { player_id: PlayerId(1) }
+        )));
+    }
+
+    #[test]
+    fn sba_2hg_team_dies_together() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.players[0].life = 0; // Team A player dies
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // Both team A members eliminated
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        // Team B wins
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: Some(_) }
+        ));
     }
 }

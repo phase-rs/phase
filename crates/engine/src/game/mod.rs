@@ -32,7 +32,10 @@ pub mod triggers;
 pub mod turns;
 pub mod zones;
 
-pub use deck_loading::{load_deck_into_state, resolve_deck_list, DeckEntry, DeckList, DeckPayload};
+pub use deck_loading::{
+    create_commander_from_card_face, load_deck_into_state, resolve_deck_list, DeckEntry, DeckList,
+    DeckPayload,
+};
 pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineError};
 pub use game_object::{BackFaceData, CounterType, GameObject};
 pub use keywords::parse_keywords;

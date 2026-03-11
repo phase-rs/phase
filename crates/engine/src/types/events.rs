@@ -142,6 +142,9 @@ pub enum GameEvent {
         player: PlayerId,
         card_names: Vec<String>,
     },
+    PlayerEliminated {
+        player_id: PlayerId,
+    },
 }
 
 #[cfg(test)]
