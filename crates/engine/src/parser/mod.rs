@@ -4,6 +4,7 @@ pub mod oracle_target;
 pub mod oracle_cost;
 pub mod oracle_effect;
 pub mod oracle_trigger;
+pub mod oracle_static;
 #[cfg(feature = "forge-compat")]
 pub mod card_parser;
 #[cfg(feature = "forge-compat")]
