@@ -41,15 +41,15 @@ Requirements for multiplayer polish phase. Maps to Phase 26.
 
 ### Bug Fixes
 
-- [ ] **MP-BUG-A**: Starting a new online game clears stale session data, preventing reconnect to dead sessions
-- [ ] **MP-BUG-B**: Deck selection is validated before entering an online game (same guard as AI path)
-- [ ] **MP-BUG-C**: Opponent actions are visible in real-time — StateUpdate without pendingResolve updates game store directly
-- [ ] **MP-BUG-D**: WebSocketAdapter.getAiAction() returns null instead of throwing in multiplayer
-- [ ] **MP-BUG-E**: Player ID is dynamic from server's GameStarted message, not hardcoded to 0
+- [x] **MP-BUG-A**: Starting a new online game clears stale session data, preventing reconnect to dead sessions
+- [x] **MP-BUG-B**: Deck selection is validated before entering an online game (same guard as AI path)
+- [x] **MP-BUG-C**: Opponent actions are visible in real-time — StateUpdate without pendingResolve updates game store directly
+- [x] **MP-BUG-D**: WebSocketAdapter.getAiAction() returns null instead of throwing in multiplayer
+- [x] **MP-BUG-E**: Player ID is dynamic from server's GameStarted message, not hardcoded to 0
 
 ### Player Identity
 
-- [ ] **MP-IDENT**: Player has a persistent UUID identity and display name stored in localStorage, with a Zustand multiplayerStore
+- [x] **MP-IDENT**: Player has a persistent UUID identity and display name stored in localStorage, with a Zustand multiplayerStore
 
 ### Server Lobby
 
