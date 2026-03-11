@@ -4,8 +4,8 @@ use super::oracle_static::parse_continuous_modifications;
 use super::oracle_target::parse_target;
 use super::oracle_util::{parse_mana_production, parse_number, strip_reminder_text};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, DamageAmount, Duration, Effect,
-    StaticDefinition, TargetFilter, TypeFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount, Duration, Effect,
+    PtValue, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -27,13 +27,13 @@ struct SubjectApplication {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TokenDescription {
     name: String,
-    power: Option<i32>,
-    toughness: Option<i32>,
+    power: Option<PtValue>,
+    toughness: Option<PtValue>,
     types: Vec<String>,
     colors: Vec<ManaColor>,
     keywords: Vec<Keyword>,
     tapped: bool,
-    count: u32,
+    count: CountValue,
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -780,8 +780,8 @@ fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
     let token = parse_token_description(after)?;
     Some(Effect::Token {
         name: token.name,
-        power: token.power.unwrap_or(0),
-        toughness: token.toughness.unwrap_or(0),
+        power: token.power.unwrap_or(PtValue::Fixed(0)),
+        toughness: token.toughness.unwrap_or(PtValue::Fixed(0)),
         types: token.types,
         colors: token.colors,
         keywords: token.keywords,
@@ -843,14 +843,14 @@ fn parse_token_description(text: &str) -> Option<TokenDescription> {
         return None;
     }
 
-    let (count, leading_name, mut rest) = if let Some((count, rest)) = parse_fixed_token_count(text)
-    {
-        (count, None, rest)
-    } else if let Some((name, rest)) = parse_named_token_preamble(text) {
-        (1, Some(name), rest)
-    } else {
-        return None;
-    };
+    let (mut count, leading_name, mut rest) =
+        if let Some((count, rest)) = parse_token_count_prefix(text) {
+            (count, None, rest)
+        } else if let Some((name, rest)) = parse_named_token_preamble(text) {
+            (CountValue::Fixed(1), Some(name), rest)
+        } else {
+            return None;
+        };
     let mut tapped = false;
 
     loop {
@@ -869,7 +869,7 @@ fn parse_token_description(text: &str) -> Option<TokenDescription> {
 
     rest = strip_token_supertypes(rest);
 
-    let (power, toughness, rest) =
+    let (mut power, mut toughness, rest) =
         if let Some((power, toughness, rest)) = parse_token_pt_prefix(rest) {
             (Some(power), Some(toughness), rest)
         } else {
@@ -890,12 +890,33 @@ fn parse_token_description(text: &str) -> Option<TokenDescription> {
         name = name_override;
     }
 
-    let is_creature = types.iter().any(|token_type| token_type == "Creature");
-    if is_creature && (power.is_none() || toughness.is_none()) {
-        return None;
+    if let Some(where_expression) = extract_token_where_x_expression(suffix) {
+        if matches!(&count, CountValue::Variable(alias) if alias == "X") {
+            count = CountValue::Variable(where_expression.clone());
+        }
+        if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
+            power = Some(PtValue::Variable(where_expression.clone()));
+        }
+        if matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X") {
+            toughness = Some(PtValue::Variable(where_expression));
+        }
     }
 
-    if is_creature && power == Some(0) && toughness == Some(0) && suffix.contains('"') {
+    if let Some(count_expression) = extract_token_count_expression(suffix) {
+        if matches!(&count, CountValue::Variable(alias) if alias == "count") {
+            count = CountValue::Variable(count_expression);
+        }
+    }
+
+    if power.is_none() || toughness.is_none() {
+        if let Some(pt_expression) = extract_token_pt_expression(suffix) {
+            power = Some(PtValue::Variable(pt_expression.clone()));
+            toughness = Some(PtValue::Variable(pt_expression));
+        }
+    }
+
+    let is_creature = types.iter().any(|token_type| token_type == "Creature");
+    if is_creature && (power.is_none() || toughness.is_none()) {
         return None;
     }
 
@@ -911,17 +932,26 @@ fn parse_token_description(text: &str) -> Option<TokenDescription> {
     })
 }
 
-fn parse_fixed_token_count(text: &str) -> Option<(u32, &str)> {
+fn parse_token_count_prefix(text: &str) -> Option<(CountValue, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
-    if lower.starts_with('x') || lower.starts_with("that many") {
-        return None;
+    if let Some(rest) = trimmed.strip_prefix("X ") {
+        return Some((CountValue::Variable("X".to_string()), rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("x ") {
+        return Some((CountValue::Variable("X".to_string()), rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("that many ") {
+        return Some((CountValue::Variable("that many".to_string()), rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("a number of ") {
+        return Some((CountValue::Variable("count".to_string()), rest));
     }
     let (count, rest) = parse_number(trimmed)?;
     if count == 0 && lower.starts_with('x') {
         return None;
     }
-    Some((count, rest))
+    Some((CountValue::Fixed(count), rest))
 }
 
 fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
@@ -938,19 +968,23 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
     Some((name.to_string(), rest))
 }
 
-fn parse_token_pt_prefix(text: &str) -> Option<(i32, i32, &str)> {
+fn parse_token_pt_prefix(text: &str) -> Option<(PtValue, PtValue, &str)> {
     let text = text.trim_start();
     let word_end = text.find(char::is_whitespace).unwrap_or(text.len());
     let token = &text[..word_end];
     let slash = token.find('/')?;
     let power = token[..slash].trim();
     let toughness = token[slash + 1..].trim();
-    if power.eq_ignore_ascii_case("x") || toughness.eq_ignore_ascii_case("x") {
-        return None;
-    }
-    let power = power.parse::<i32>().ok()?;
-    let toughness = toughness.parse::<i32>().ok()?;
+    let power = parse_token_pt_component(power)?;
+    let toughness = parse_token_pt_component(toughness)?;
     Some((power, toughness, text[word_end..].trim_start()))
+}
+
+fn parse_token_pt_component(text: &str) -> Option<PtValue> {
+    if text.eq_ignore_ascii_case("x") {
+        return Some(PtValue::Variable("X".to_string()));
+    }
+    text.parse::<i32>().ok().map(PtValue::Fixed)
 }
 
 fn strip_token_supertypes(mut text: &str) -> &str {
@@ -1049,6 +1083,47 @@ fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
     }
 }
 
+fn extract_token_where_x_expression(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let pos = lower.find("where x is ")?;
+    Some(
+        text[pos + "where x is ".len()..]
+            .trim()
+            .trim_end_matches('.')
+            .to_string(),
+    )
+}
+
+fn extract_token_count_expression(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let pos = lower.find("equal to ")?;
+    Some(
+        text[pos + "equal to ".len()..]
+            .trim()
+            .trim_end_matches('.')
+            .to_string(),
+    )
+}
+
+fn extract_token_pt_expression(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    for needle in [
+        "power and toughness are each equal to ",
+        "power and toughness is each equal to ",
+    ] {
+        if let Some(pos) = lower.find(needle) {
+            return Some(
+                text[pos + needle.len()..]
+                    .trim()
+                    .trim_matches('"')
+                    .trim_end_matches('.')
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
 fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
     let mut core_types = Vec::new();
     let mut subtypes = Vec::new();
@@ -1118,7 +1193,9 @@ fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
         .next()
         .unwrap_or(after_with)
         .trim()
-        .trim_end_matches('.');
+        .trim_end_matches('.')
+        .trim_end_matches(" and")
+        .trim();
 
     split_token_keyword_list(raw_clause)
         .into_iter()
@@ -1515,9 +1592,9 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Token {
-                power: 1,
-                toughness: 1,
-                count: 1,
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                count: CountValue::Fixed(1),
                 ..
             }
         ));
@@ -1531,9 +1608,9 @@ mod tests {
             Effect::Token {
                 ref name,
                 ref types,
-                power: 0,
-                toughness: 0,
-                count: 1,
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                count: CountValue::Fixed(1),
                 ..
             } if name == "Treasure" && types == &vec!["Artifact".to_string(), "Treasure".to_string()]
         ));
@@ -1559,8 +1636,8 @@ mod tests {
             e,
             Effect::Token {
                 ref name,
-                power: 2,
-                toughness: 1,
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(1),
                 ref colors,
                 ref keywords,
                 ..
@@ -1601,8 +1678,8 @@ mod tests {
             e,
             Effect::Token {
                 ref name,
-                power: 2,
-                toughness: 2,
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
                 ref colors,
                 ref types,
                 ..
@@ -1624,6 +1701,89 @@ mod tests {
                 ref types,
                 ..
             } if name == "Tamiyo's Notebook" && types == &vec!["Artifact".to_string()]
+        ));
+    }
+
+    #[test]
+    fn effect_create_variable_count_fixed_pt_token() {
+        let e = parse_effect("Create X 1/1 white Soldier creature tokens");
+        assert!(matches!(
+            e,
+            Effect::Token {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                count: CountValue::Variable(ref value),
+                ..
+            } if value == "X"
+        ));
+    }
+
+    #[test]
+    fn effect_create_variable_pt_token_from_where_clause() {
+        let e = parse_effect(
+            "Create an X/X green Ooze creature token, where X is the greatest power among creatures you control",
+        );
+        assert!(matches!(
+            e,
+            Effect::Token {
+                power: PtValue::Variable(ref value),
+                toughness: PtValue::Variable(ref value2),
+                count: CountValue::Fixed(1),
+                ..
+            } if value == "the greatest power among creatures you control"
+                && value2 == "the greatest power among creatures you control"
+        ));
+    }
+
+    #[test]
+    fn effect_create_variable_named_artifact_tokens() {
+        let e = parse_effect(
+            "Create X Map tokens, where X is one plus the number of opponents who control an artifact",
+        );
+        assert!(matches!(
+            e,
+            Effect::Token {
+                ref name,
+                count: CountValue::Variable(ref value),
+                ref types,
+                ..
+            } if name == "Map"
+                && value == "one plus the number of opponents who control an artifact"
+                && types == &vec!["Artifact".to_string(), "Map".to_string()]
+        ));
+    }
+
+    #[test]
+    fn effect_create_number_of_tokens_equal_to_expression() {
+        let e = parse_effect(
+            "Create a number of 1/1 red Goblin creature tokens equal to two plus the number of cards named Goblin Gathering in your graveyard",
+        );
+        assert!(matches!(
+            e,
+            Effect::Token {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                count: CountValue::Variable(ref value),
+                ..
+            } if value == "two plus the number of cards named Goblin Gathering in your graveyard"
+        ));
+    }
+
+    #[test]
+    fn effect_create_token_with_quoted_variable_pt() {
+        let e = parse_effect(
+            "Create a red Elemental creature token with trample and \"This token's power and toughness are each equal to the number of instant and sorcery cards in your graveyard\"",
+        );
+        assert!(matches!(
+            e,
+            Effect::Token {
+                power: PtValue::Variable(ref value),
+                toughness: PtValue::Variable(ref value2),
+                ref keywords,
+                ..
+            } if value == "the number of instant and sorcery cards in your graveyard"
+                && value2 == "the number of instant and sorcery cards in your graveyard"
+                && keywords == &vec![Keyword::Trample]
         ));
     }
 

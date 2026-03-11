@@ -3,7 +3,9 @@ use std::str::FromStr;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{
+    effect_variant_name, CountValue, Effect, EffectError, PtValue, ResolvedAbility,
+};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -286,22 +288,31 @@ pub fn resolve(
             count,
         } => (
             name.clone(),
-            *power,
-            *toughness,
+            power.clone(),
+            toughness.clone(),
             types.clone(),
             colors.clone(),
             keywords.clone(),
             *tapped,
-            *count,
+            resolve_count_value(count),
         ),
-        _ => ("Token".to_string(), 0, 0, vec![], vec![], vec![], false, 1),
+        _ => (
+            "Token".to_string(),
+            PtValue::Fixed(0),
+            PtValue::Fixed(0),
+            vec![],
+            vec![],
+            vec![],
+            false,
+            1,
+        ),
     };
 
     let parsed = parse_token_script(&script_name).or_else(|| {
         build_token_attrs_from_effect(
             &script_name,
-            fallback_power,
-            fallback_toughness,
+            &fallback_power,
+            &fallback_toughness,
             &fallback_types,
             &fallback_colors,
             &fallback_keywords,
@@ -352,11 +363,13 @@ pub fn resolve(
                             obj.keywords = attrs.keywords.clone();
                             obj.base_keywords = attrs.keywords.clone();
                         } else {
-                            if fallback_power != 0 || fallback_toughness != 0 {
-                                obj.power = Some(fallback_power);
-                                obj.toughness = Some(fallback_toughness);
-                                obj.base_power = Some(fallback_power);
-                                obj.base_toughness = Some(fallback_toughness);
+                            let resolved_power = resolve_pt_value(&fallback_power);
+                            let resolved_toughness = resolve_pt_value(&fallback_toughness);
+                            if resolved_power != 0 || resolved_toughness != 0 {
+                                obj.power = Some(resolved_power);
+                                obj.toughness = Some(resolved_toughness);
+                                obj.base_power = Some(resolved_power);
+                                obj.base_toughness = Some(resolved_toughness);
                                 obj.card_types.core_types.push(CoreType::Creature);
                             }
                         }
@@ -400,13 +413,17 @@ pub fn resolve(
 
 fn build_token_attrs_from_effect(
     name: &str,
-    power: i32,
-    toughness: i32,
+    power: &PtValue,
+    toughness: &PtValue,
     types: &[String],
     colors: &[ManaColor],
     keywords: &[Keyword],
 ) -> Option<TokenAttrs> {
-    if types.is_empty() && colors.is_empty() && keywords.is_empty() && power == 0 && toughness == 0
+    if types.is_empty()
+        && colors.is_empty()
+        && keywords.is_empty()
+        && matches!(power, PtValue::Fixed(0))
+        && matches!(toughness, PtValue::Fixed(0))
     {
         return None;
     }
@@ -425,21 +442,40 @@ fn build_token_attrs_from_effect(
         }
     }
 
-    if core_types.is_empty() && (power != 0 || toughness != 0) {
+    let resolved_power = resolve_pt_value(power);
+    let resolved_toughness = resolve_pt_value(toughness);
+    if core_types.is_empty() && (resolved_power != 0 || resolved_toughness != 0) {
         core_types.push(CoreType::Creature);
     }
 
-    let has_power_toughness = power != 0 || toughness != 0;
+    let has_power_toughness = resolved_power != 0 || resolved_toughness != 0;
+    let has_explicit_pt =
+        !matches!(power, PtValue::Fixed(0)) || !matches!(toughness, PtValue::Fixed(0));
     let is_creature = core_types.contains(&CoreType::Creature);
     Some(TokenAttrs {
         display_name: name.to_string(),
-        power: (is_creature || has_power_toughness).then_some(power),
-        toughness: (is_creature || has_power_toughness).then_some(toughness),
+        power: (is_creature || has_explicit_pt || has_power_toughness).then_some(resolved_power),
+        toughness: (is_creature || has_explicit_pt || has_power_toughness)
+            .then_some(resolved_toughness),
         core_types,
         subtypes,
         colors: colors.to_vec(),
         keywords: keywords.to_vec(),
     })
+}
+
+fn resolve_pt_value(value: &PtValue) -> i32 {
+    match value {
+        PtValue::Fixed(n) => *n,
+        PtValue::Variable(_) => 0,
+    }
+}
+
+fn resolve_count_value(value: &CountValue) -> u32 {
+    match value {
+        CountValue::Fixed(n) => *n,
+        CountValue::Variable(_) => 0,
+    }
 }
 
 #[cfg(test)]
@@ -548,13 +584,13 @@ mod tests {
         ResolvedAbility::new(
             Effect::Token {
                 name: script.to_string(),
-                power: 0,
-                toughness: 0,
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: 1,
+                count: CountValue::Fixed(1),
             },
             vec![],
             ObjectId(100),
@@ -611,13 +647,13 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Token {
                 name: "Soldier".to_string(),
-                power: 1,
-                toughness: 1,
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: 1,
+                count: CountValue::Fixed(1),
             },
             vec![],
             ObjectId(100),
@@ -656,13 +692,13 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Token {
                 name: "w_1_1_soldier".to_string(),
-                power: 0,
-                toughness: 0,
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
                 types: vec![],
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: 2,
+                count: CountValue::Fixed(2),
             },
             vec![],
             ObjectId(100),
@@ -695,13 +731,13 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Token {
                 name: "Treasure".to_string(),
-                power: 0,
-                toughness: 0,
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
                 types: vec!["Artifact".to_string(), "Treasure".to_string()],
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: 1,
+                count: CountValue::Fixed(1),
             },
             vec![],
             ObjectId(100),
@@ -724,13 +760,13 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Token {
                 name: "Powerstone".to_string(),
-                power: 0,
-                toughness: 0,
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
                 types: vec!["Artifact".to_string(), "Powerstone".to_string()],
                 colors: vec![],
                 keywords: vec![],
                 tapped: true,
-                count: 1,
+                count: CountValue::Fixed(1),
             },
             vec![],
             ObjectId(100),

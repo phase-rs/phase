@@ -73,6 +73,47 @@ impl<'de> serde::Deserialize<'de> for PtValue {
     }
 }
 
+/// Token count value -- either a fixed integer or a variable reference (e.g. "X").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "type", content = "value")]
+pub enum CountValue {
+    Fixed(u32),
+    Variable(String),
+}
+
+impl<'de> serde::Deserialize<'de> for CountValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(s) => match s.parse::<u32>() {
+                Ok(n) => Ok(CountValue::Fixed(n)),
+                Err(_) => Ok(CountValue::Variable(s.clone())),
+            },
+            serde_json::Value::Number(n) => Ok(CountValue::Fixed(n.as_u64().unwrap_or(0) as u32)),
+            serde_json::Value::Object(_) => {
+                #[derive(serde::Deserialize)]
+                #[serde(tag = "type", content = "value")]
+                enum CountValueHelper {
+                    Fixed(u32),
+                    Variable(String),
+                }
+                let helper: CountValueHelper =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                match helper {
+                    CountValueHelper::Fixed(n) => Ok(CountValue::Fixed(n)),
+                    CountValueHelper::Variable(s) => Ok(CountValue::Variable(s)),
+                }
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected string, number, or object for CountValue",
+            )),
+        }
+    }
+}
+
 /// Duration for temporary effects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Duration {
@@ -280,10 +321,10 @@ pub enum Effect {
     },
     Token {
         name: String,
-        #[serde(default)]
-        power: i32,
-        #[serde(default)]
-        toughness: i32,
+        #[serde(default = "default_pt_value_zero")]
+        power: PtValue,
+        #[serde(default = "default_pt_value_zero")]
+        toughness: PtValue,
         #[serde(default)]
         types: Vec<String>,
         #[serde(default)]
@@ -292,8 +333,8 @@ pub enum Effect {
         keywords: Vec<Keyword>,
         #[serde(default)]
         tapped: bool,
-        #[serde(default = "default_one")]
-        count: u32,
+        #[serde(default = "default_count_value_one")]
+        count: CountValue,
     },
     GainLife {
         amount: i32,
@@ -490,6 +531,14 @@ fn default_one() -> u32 {
 
 fn default_one_i32() -> i32 {
     1
+}
+
+fn default_pt_value_zero() -> PtValue {
+    PtValue::Fixed(0)
+}
+
+fn default_count_value_one() -> CountValue {
+    CountValue::Fixed(1)
 }
 
 fn default_two_i32() -> i32 {
@@ -1174,6 +1223,35 @@ mod tests {
         let json = serde_json::to_string(&values).unwrap();
         let deserialized: Vec<PtValue> = serde_json::from_str(&json).unwrap();
         assert_eq!(values, deserialized);
+    }
+
+    #[test]
+    fn count_value_roundtrip() {
+        let values = vec![
+            CountValue::Fixed(3),
+            CountValue::Variable("X".to_string()),
+            CountValue::Variable("the number of creatures you control".to_string()),
+        ];
+        let json = serde_json::to_string(&values).unwrap();
+        let deserialized: Vec<CountValue> = serde_json::from_str(&json).unwrap();
+        assert_eq!(values, deserialized);
+    }
+
+    #[test]
+    fn effect_token_roundtrip() {
+        let effect = Effect::Token {
+            name: "Soldier".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Variable("X".to_string()),
+            types: vec!["Creature".to_string(), "Soldier".to_string()],
+            colors: vec![ManaColor::White],
+            keywords: vec![Keyword::Vigilance],
+            tapped: true,
+            count: CountValue::Variable("the number of creatures you control".to_string()),
+        };
+        let json = serde_json::to_string(&effect).unwrap();
+        let deserialized: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(effect, deserialized);
     }
 
     #[test]
