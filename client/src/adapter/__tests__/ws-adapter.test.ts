@@ -56,7 +56,7 @@ describe("WebSocketAdapter", () => {
 
   beforeEach(() => {
     adapter = new WebSocketAdapter(
-      "ws://localhost:8080/ws",
+      "ws://localhost:9374/ws",
       "host",
       { main_deck: [], sideboard: [] },
     );
@@ -116,7 +116,7 @@ describe("WebSocketAdapter", () => {
 
       // Create fresh adapter to trigger GameStarted again
       const adapter2 = new WebSocketAdapter(
-        "ws://localhost:8080/ws",
+        "ws://localhost:9374/ws",
         "join",
         { main_deck: [], sideboard: [] },
         "ABC123",

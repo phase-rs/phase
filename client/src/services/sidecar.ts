@@ -21,9 +21,9 @@ let activeSidecar: SidecarHandle | null = null;
 
 /**
  * Spawn the phase-server sidecar binary on an available port.
- * Scans ports 8080-8089 and performs a health check before returning.
+ * Scans ports 9374-9383 and performs a health check before returning.
  */
-export async function spawnSidecar(port = 8080): Promise<SidecarHandle> {
+export async function spawnSidecar(port = 9374): Promise<SidecarHandle> {
   if (!isTauri()) {
     throw new Error("Sidecar is only available in Tauri desktop builds");
   }

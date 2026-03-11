@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { parseJoinCode } from "../../services/serverDetection";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { GameListItem } from "./GameListItem";
@@ -91,10 +92,15 @@ export function LobbyView({
   );
 
   const handleJoinByCode = useCallback(() => {
-    const code = joinCode.trim().toUpperCase();
-    if (code) {
-      onJoinGame(code);
+    const raw = joinCode.trim().toUpperCase();
+    if (!raw) return;
+
+    const parsed = parseJoinCode(raw);
+    if (parsed.serverAddress) {
+      // CODE@IP:PORT format -- update server address and join
+      useMultiplayerStore.getState().setServerAddress(parsed.serverAddress);
     }
+    onJoinGame(parsed.code);
   }, [joinCode, onJoinGame]);
 
   const handlePasswordSubmit = useCallback(() => {
@@ -159,8 +165,8 @@ export function LobbyView({
           value={joinCode}
           onChange={(e) => setJoinCode(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
-          placeholder="Enter game code"
-          maxLength={10}
+          placeholder="Enter code or CODE@IP:PORT"
+          maxLength={50}
           className="flex-1 rounded-lg bg-gray-800 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
         />
         <button

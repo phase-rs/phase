@@ -35,7 +35,7 @@ struct SocketIdentity {
 
 #[tokio::main]
 async fn main() {
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "9374".to_string());
     let data_root = std::env::var("PHASE_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let data_path = Path::new(&data_root);
     let card_db = CardDatabase::load_json(

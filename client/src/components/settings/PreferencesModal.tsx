@@ -208,7 +208,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                   type="text"
                   value={serverAddress}
                   onChange={(e) => setServerAddress(e.target.value)}
-                  placeholder="ws://localhost:8080/ws"
+                  placeholder="ws://localhost:9374/ws"
                   className="flex-1 rounded bg-gray-800 px-3 py-1.5 text-sm text-gray-200 ring-1 ring-gray-700 focus:outline-none focus:ring-cyan-500"
                 />
                 <button

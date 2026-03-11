@@ -14,12 +14,12 @@ import { dispatchAction } from "../game/dispatch";
 import { hostRoom, joinRoom } from "../network/connection";
 import { createPeerSession } from "../network/peer";
 import type { ParsedDeck } from "../services/deckParser";
+import { detectServerUrl } from "../services/serverDetection";
 import { useGameStore, loadGame } from "../stores/gameStore";
-
-const DEFAULT_WS_URL = "ws://localhost:8080/ws";
+import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 function getWsUrl(): string {
-  return import.meta.env.VITE_WS_URL ?? DEFAULT_WS_URL;
+  return import.meta.env.VITE_WS_URL ?? useMultiplayerStore.getState().serverAddress;
 }
 
 function loadActiveDeck(): ParsedDeck | null {
@@ -249,36 +249,64 @@ export function GameProvider({
         ? parsedDeckToDeckData(parsedDeck)
         : { main_deck: [], sideboard: [] };
 
+      const mpStore = useMultiplayerStore.getState();
+      mpStore.setConnectionStatus("connecting");
+
       const wsMode = joinCode ? "join" : "host";
-      const wsAdapter = new WebSocketAdapter(
-        getWsUrl(),
-        wsMode,
-        deck,
-        wsMode === "join" ? joinCode : undefined,
-      );
 
-      wsUnsubscribe = wsAdapter.onEvent((event) => {
-        if (event.type === "stateChanged") {
-          const store = useGameStore.getState();
-          store.setGameState(event.state);
-          store.setWaitingFor(event.state.waiting_for);
-        }
-        onWsEventRef.current?.(event);
-      });
+      // Use smart server detection for initial connection
+      const setupWs = async () => {
+        if (cancelled) return;
+        const serverUrl = import.meta.env.VITE_WS_URL ?? await detectServerUrl();
 
-      if (isReconnect) {
-        wsAdapter.tryReconnect();
-      } else {
-        initGame(gameId, wsAdapter).then(() => {
-          if (cancelled) return;
-          onReadyRef.current?.();
-          audioManager.startMusic();
+        const wsAdapter = new WebSocketAdapter(
+          serverUrl,
+          wsMode,
+          deck,
+          wsMode === "join" ? joinCode : undefined,
+        );
+
+        wsUnsubscribe = wsAdapter.onEvent((event) => {
+          if (event.type === "stateChanged") {
+            const store = useGameStore.getState();
+            store.setGameState(event.state);
+            store.setWaitingFor(event.state.waiting_for);
+            useMultiplayerStore.getState().setConnectionStatus("connected");
+          }
+          if (event.type === "error" || event.type === "reconnectFailed") {
+            useMultiplayerStore.getState().setConnectionStatus("disconnected");
+            useMultiplayerStore.getState().showToast("Connection failed. Retry or change server in Settings.");
+          }
+          if (event.type === "reconnecting") {
+            useMultiplayerStore.getState().setConnectionStatus("connecting");
+          }
+          if (event.type === "reconnected") {
+            useMultiplayerStore.getState().setConnectionStatus("connected");
+          }
+          onWsEventRef.current?.(event);
         });
-      }
+
+        if (isReconnect) {
+          wsAdapter.tryReconnect();
+        } else {
+          initGame(gameId, wsAdapter).then(() => {
+            if (cancelled) return;
+            useMultiplayerStore.getState().setConnectionStatus("connected");
+            onReadyRef.current?.();
+            audioManager.startMusic();
+          }).catch(() => {
+            useMultiplayerStore.getState().setConnectionStatus("disconnected");
+            useMultiplayerStore.getState().showToast("Connection failed. Retry or change server in Settings.");
+          });
+        }
+      };
+
+      setupWs();
 
       return () => {
         cancelled = true;
         if (wsUnsubscribe) wsUnsubscribe();
+        useMultiplayerStore.getState().setConnectionStatus("disconnected");
         audioManager.stopMusic(0);
         reset();
       };

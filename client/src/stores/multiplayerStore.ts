@@ -12,6 +12,7 @@ interface MultiplayerState {
   connectionStatus: ConnectionStatus;
   activePlayerId: PlayerId | null;
   opponentDisplayName: string | null;
+  toastMessage: string | null;
 }
 
 interface MultiplayerActions {
@@ -20,6 +21,8 @@ interface MultiplayerActions {
   setConnectionStatus: (status: ConnectionStatus) => void;
   setActivePlayerId: (id: PlayerId | null) => void;
   setOpponentDisplayName: (name: string | null) => void;
+  showToast: (message: string) => void;
+  clearToast: () => void;
 }
 
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(
@@ -27,16 +30,19 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     (set) => ({
       playerId: crypto.randomUUID(),
       displayName: "",
-      serverAddress: "ws://localhost:8080/ws",
+      serverAddress: "ws://localhost:9374/ws",
       connectionStatus: "disconnected",
       activePlayerId: null,
       opponentDisplayName: null,
+      toastMessage: null,
 
       setDisplayName: (name) => set({ displayName: name }),
       setServerAddress: (address) => set({ serverAddress: address }),
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setActivePlayerId: (id) => set({ activePlayerId: id }),
       setOpponentDisplayName: (name) => set({ opponentDisplayName: name }),
+      showToast: (message) => set({ toastMessage: message }),
+      clearToast: () => set({ toastMessage: null }),
     }),
     {
       name: "phase-multiplayer",

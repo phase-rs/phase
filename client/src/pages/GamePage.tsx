@@ -32,6 +32,8 @@ import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
+import { ConnectionDot } from "../components/multiplayer/ConnectionDot.tsx";
+import { ConnectionToast } from "../components/multiplayer/ConnectionToast.tsx";
 import { EmoteOverlay } from "../components/multiplayer/EmoteOverlay.tsx";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
@@ -398,6 +400,17 @@ function GamePageContent({
         onSettingsClick={() => setShowPreferences(true)}
         onConcede={onShowConcedeDialog}
       />
+
+      {/* Connection status dot — top-right, visible during multiplayer */}
+      {isOnlineMode && <ConnectionDot />}
+
+      {/* Connection failure toast */}
+      {isOnlineMode && (
+        <ConnectionToast
+          onRetry={() => window.location.reload()}
+          onSettings={() => setShowPreferences(true)}
+        />
+      )}
 
       {/* Host game: show game code while waiting */}
       {waitingForOpponent && hostGameCode && (
